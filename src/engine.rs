@@ -1,0 +1,1135 @@
+//! The DeliTracker core: owns the emulated machine and the loaded players,
+//! identifies modules, drives the player call sequence and renders audio.
+
+use crate::deli::{self, dtg, tag, Player};
+use crate::eagle;
+use crate::machine::Machine;
+use crate::bus::FRAME;
+use crate::paulaout::Filter;
+use crate::protracker::ProTracker;
+use anyhow::{anyhow, bail, Result};
+use m68k::CpuType;
+use std::path::{Path, PathBuf};
+
+pub const SCOPE_LEN: usize = 512;
+
+/// The NotePlayer genie played through when none was chosen: DeliTracker's default.
+/// Players with more voices than it has are left to the built-in renderer (the
+/// genies with more mix in software, which takes a 68000 far too long).
+const DEFAULT_NOTE_GENIE: &str = "4Voices-NotePlayer";
+/// Colour clocks per E-clock tick.
+const ECLOCK_DIV: u64 = 5;
+/// How long ProTracker waits between turning a channel's DMA off and on again
+/// for a new note (its DMA wait loop, about 7 lines on an A500).
+const PT_DMA_WAIT: u64 = 7 * crate::paula::LINE;
+/// Players of formats from the PC, played without the Amiga's output filters.
+const PC_FORMATS: &[&str] =
+    &["669", "adpcm", "aiff", "wav", "riff", "mpeg", "mp3", "fasttracker", "screamtracker", "ps3m", "taketracker"];
+
+pub enum Backend {
+    /// index into `players` (custom modules are appended there too)
+    Deli(usize),
+    Native(Box<ProTracker>),
+}
+
+pub struct Playing {
+    pub backend: Backend,
+    pub module_name: String,
+    pub format: String,
+    pub author: String,
+    pub sub_min: u16,
+    pub sub_max: u16,
+    pub sub: u16,
+    pub frames: u64,
+    custom_player: bool,
+}
+
+#[derive(Clone)]
+pub struct Settings {
+    pub volume: f32,       // 0..1
+    pub separation: f32,   // 0 = mono, 1 = full Amiga hard panning
+    pub a500_filter: bool, // fixed 4.4 kHz RC low-pass
+    pub led_filter: bool,  // honour the LED filter
+    pub mono: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { volume: 0.8, separation: 0.7, a500_filter: true, led_filter: true, mono: false }
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: [f32; 2],
+    z2: [f32; 2],
+}
+
+impl Biquad {
+    fn lowpass(rate: f64, fc: f64, q: f64) -> Self {
+        let w = 2.0 * std::f64::consts::PI * fc / rate;
+        let (s, c) = w.sin_cos();
+        let alpha = s / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        Biquad {
+            b0: ((1.0 - c) / 2.0 / a0) as f32,
+            b1: ((1.0 - c) / a0) as f32,
+            b2: ((1.0 - c) / 2.0 / a0) as f32,
+            a1: (-2.0 * c / a0) as f32,
+            a2: ((1.0 - alpha) / a0) as f32,
+            ..Default::default()
+        }
+    }
+    fn run(&mut self, ch: usize, x: f32) -> f32 {
+        let y = self.b0 * x + self.z1[ch];
+        self.z1[ch] = self.b1 * x - self.a1 * y + self.z2[ch];
+        self.z2[ch] = self.b2 * x - self.a2 * y;
+        y
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct OnePole {
+    a: f32,
+    y: [f32; 2],
+}
+
+impl OnePole {
+    fn new(rate: f64, fc: f64) -> Self {
+        OnePole { a: (1.0 - (-2.0 * std::f64::consts::PI * fc / rate).exp()) as f32, y: [0.0; 2] }
+    }
+    fn run(&mut self, ch: usize, x: f32) -> f32 {
+        self.y[ch] += self.a * (x - self.y[ch]);
+        self.y[ch]
+    }
+}
+
+pub struct Engine {
+    pub m: Machine,
+    pub players: Vec<Player>,
+    pub playing: Option<Playing>,
+    pub rate: f64,
+    pub settings: Settings,
+    pub paused: bool,
+    pub last_error: Option<String>,
+    scope_ring: Vec<Vec<f32>>,
+    scope_pos: usize,
+    a500: OnePole,
+    led: Biquad,
+    /// When the next vertical blank, DeliTracker timer interrupt and DMA restart
+    /// of the built-in ProTracker are due (colour clocks).
+    next_vblank: u64,
+    next_timer: Option<u64>,
+    pt_dma_at: Option<u64>,
+    /// E-clock ticks the CIAs have been run to.
+    e_ticks: u64,
+    /// Number of players found in the players directories (custom modules
+    /// are appended after them and removed again).
+    builtin_players: usize,
+    /// Only this player (by name) is tried, and the built-in ProTracker is not.
+    pub only_player: Option<String>,
+    /// Where the players from `load_eagleplayers` begin.
+    eagle_from: Option<usize>,
+    /// DeliGenies (`load_genies`): external code that is not a player.
+    pub genies: Vec<Player>,
+    /// The NotePlayer genie chosen to play `_note` players (`use_genie`); without one
+    /// the built-in renderer does.
+    note_genie: Option<usize>,
+    /// No NotePlayer genie was chosen: `note_genie` is the default one for modules
+    /// with no more voices than it has, and none for the others.
+    note_genie_auto: bool,
+    /// The other genies chosen, told about each module (DTP_InitPlayer/DTP_EndPlayer).
+    active_genies: Vec<usize>,
+    /// The genies playing or told about the current module.
+    running_genies: Vec<usize>,
+    /// Guest memory for the NoteStruct a NotePlayer genie reads (0: not allocated yet).
+    genie_mem: u32,
+    /// INTREQ and INTENA as `audio_irqs` last left them.
+    irq_seen: (u16, u16),
+}
+
+impl Engine {
+    pub fn new(rate: f64) -> Self {
+        let mut m = Machine::new(CpuType::M68020);
+        deli::init_globals(&mut m);
+        Engine {
+            m,
+            players: Vec::new(),
+            playing: None,
+            rate,
+            settings: Settings::default(),
+            paused: false,
+            last_error: None,
+            scope_ring: Vec::new(),
+            scope_pos: 0,
+            a500: OnePole::new(rate, 4420.0),
+            led: Biquad::lowpass(rate, 3275.0, 0.707),
+            next_vblank: FRAME,
+            next_timer: None,
+            pt_dma_at: None,
+            e_ticks: 0,
+            builtin_players: 0,
+            only_player: None,
+            eagle_from: None,
+            genies: Vec::new(),
+            note_genie: None,
+            note_genie_auto: false,
+            active_genies: Vec::new(),
+            running_genies: Vec::new(),
+            genie_mem: 0,
+            irq_seen: (0, 0),
+        }
+    }
+
+    /// Departs from the Amiga where UADE does, to compare with it: 312 lines a
+    /// frame, Paula's volume 64 as 63 and periods below 16 as 16, hard panning
+    /// and full volume.
+    pub fn set_uade_compat(&mut self) {
+        self.m.bus.frame = 312 * crate::paula::LINE;
+        self.m.bus.paula.set_uade_quirks(true);
+        self.settings.separation = 1.0;
+        self.settings.volume = 1.0;
+    }
+
+    /// Loads the DeliGenies under `dir`. Like Eagleplayers they go to the top of the
+    /// heap, so that loading them does not move the memory players and modules get.
+    pub fn load_genies(&mut self, dir: &Path) -> usize {
+        let mut files = Vec::new();
+        collect_files(dir, &mut files, 2);
+        files.sort();
+        self.m.alloc_top = true;
+        for f in files {
+            let Ok(data) = std::fs::read(&f) else { continue };
+            if !crate::hunk::is_hunk_file(&data) {
+                continue;
+            }
+            match deli::load_player(&mut self.m, &data, &f) {
+                Ok(g) if !g.is_player() => {
+                    log::info!("genie: {} v{}.{} ({})", g.name, g.version >> 16, g.version & 0xFFFF, f.display());
+                    if let Some(pp) = deli::PlayerProc::new(&g.tags) {
+                        self.m.deli.procs.push(pp);
+                    }
+                    self.genies.push(g);
+                }
+                Ok(p) => log::debug!("{}: a player, not a genie", p.name),
+                Err(e) => log::debug!("{}: {e}", f.display()),
+            }
+        }
+        self.m.alloc_top = false;
+        if self.note_genie.is_none() {
+            // DeliTracker's default NotePlayer, which plays the notes on Paula
+            self.note_genie = self.default_note_genie(0);
+            self.note_genie_auto = self.note_genie.is_some();
+        }
+        self.genies.len()
+    }
+
+    /// Chooses a genie by name: a NotePlayer genie plays `_note` players from now on, any
+    /// other is told about each module. `builtin` has the built-in renderer play them.
+    pub fn use_genie(&mut self, name: &str) -> Result<()> {
+        if name.eq_ignore_ascii_case("builtin") {
+            (self.note_genie, self.note_genie_auto) = (None, false);
+            return Ok(());
+        }
+        let Some(i) = self.genies.iter().position(|g| g.name.eq_ignore_ascii_case(name)) else {
+            let names: Vec<&str> = self.genies.iter().map(|g| g.name.as_str()).collect();
+            bail!("no genie \"{name}\" (loaded: {})", names.join(", "));
+        };
+        if self.genies[i].has(tag::NOTE_PLAYER) {
+            (self.note_genie, self.note_genie_auto) = (Some(i), false);
+        } else if !self.active_genies.contains(&i) {
+            self.active_genies.push(i);
+        }
+        Ok(())
+    }
+
+    /// `DEFAULT_NOTE_GENIE`, if it is installed and has at least `voices` voices.
+    fn default_note_genie(&self, voices: u32) -> Option<usize> {
+        let i = self.genies.iter().position(|g| g.name.eq_ignore_ascii_case(DEFAULT_NOTE_GENIE))?;
+        let r = self.genies[i].tag(tag::NOTE_PLAYER).filter(|&r| r != 0)?;
+        (self.m.bus.r16(r) as u32 + self.m.bus.r16(r + 2) as u32 >= voices).then_some(i)
+    }
+
+    /// Calls one of a running genie's functions; a genie that fails is dropped.
+    fn genie_call(&mut self, i: usize, t: u32) {
+        let Some(f) = self.genies[i].tag(t) else { return };
+        if let Err(e) = deli::call_fn(&mut self.m, self.genies[i].globals, f, None) {
+            log::warn!("genie {} failed: {e}", self.genies[i].name);
+            self.running_genies.retain(|&g| g != i);
+            if self.note_genie == Some(i) {
+                self.m.deli.note_signal = 0;
+        self.m.deli.genie_notes = None;
+            }
+        }
+    }
+
+    /// The module started (after the player's InitPlayer): the genies hear of it. A
+    /// NotePlayer genie gets the player's NoteStruct and takes over its notes.
+    fn start_genies(&mut self) {
+        self.running_genies.clear();
+        self.m.deli.note_signal = 0;
+        let ns = self.m.deli.note_struct;
+        if self.note_genie_auto && ns != 0 {
+            let mut voices = 0;
+            let mut ch = self.m.bus.r32(ns);
+            while ch != 0 && voices < crate::notes::GENIE_CHANNELS as u32 {
+                voices += 1;
+                ch = self.m.bus.r32(ch);
+            }
+            self.note_genie = self.default_note_genie(voices);
+        }
+        if let (Some(i), ns) = (self.note_genie, ns) {
+            if ns != 0 {
+                if self.genie_mem == 0 {
+                    self.m.alloc_top = true;
+                    self.genie_mem = self.m.alloc(crate::notes::GENIE_NOTES_SIZE);
+                    self.m.alloc_top = false;
+                }
+                let g = &self.genies[i];
+                let record = g.tag(tag::NOTE_PLAYER).unwrap_or(0);
+                if self.genie_mem != 0 && record != 0 {
+                    let gn = crate::notes::GenieNotes::new(&mut self.m.bus, self.genie_mem, record, ns);
+                    if let Some(info) = g.tag(tag::NOTE_INFO) {
+                        self.m.bus.w32(info, gn.ns);
+                    }
+                    self.m.deli.genie_notes = Some(gn);
+                }
+                let (f, globals) = (g.tag(tag::INIT_PLAYER), g.globals);
+                let ok = match f {
+                    Some(f) => match deli::call_fn(&mut self.m, globals, f, None) {
+                        Ok(r) => r[0] == 0,
+                        Err(e) => {
+                            log::warn!("genie {}: {e}", self.genies[i].name);
+                            false
+                        }
+                    },
+                    None => true,
+                };
+                if ok {
+                    self.m.deli.note_signal = self.genies[i].tag(tag::NOTE_SIGNAL).unwrap_or(0);
+                    self.running_genies.push(i);
+                    log::info!("notes played by genie {}", self.genies[i].name);
+                } else {
+                    log::warn!("genie {} refused the module; the built-in renderer plays it", self.genies[i].name);
+                }
+            }
+        }
+        for i in self.active_genies.clone() {
+            self.running_genies.push(i);
+            self.genie_call(i, tag::INIT_PLAYER);
+        }
+    }
+
+    /// Loads every DeliPlayer found (recursively) under `dir`.
+    pub fn load_players(&mut self, dir: &Path) -> usize {
+        self.m.os.progdir = dir.parent().unwrap_or(dir).to_path_buf();
+        self.load_dir(dir)
+    }
+
+    /// Loads every Eagleplayer found under `dir`. They are tried last, after the
+    /// players loaded before them and the SoundTracker heuristic, so call this
+    /// after `load_players`.
+    pub fn load_eagleplayers(&mut self, dir: &Path) -> usize {
+        self.eagle_from.get_or_insert(self.players.len());
+        self.m.alloc_top = true;
+        let n = self.load_dir(dir);
+        self.m.alloc_top = false;
+        n
+    }
+
+    fn load_dir(&mut self, dir: &Path) -> usize {
+        let first = self.players.len();
+        let mut files = Vec::new();
+        collect_files(dir, &mut files, 2);
+        files.sort();
+        let mut n = 0;
+        for f in files {
+            let Ok(data) = std::fs::read(&f) else { continue };
+            if !crate::hunk::is_hunk_file(&data) {
+                continue;
+            }
+            match deli::load_player(&mut self.m, &data, &f) {
+                Ok(p) if p.is_player() => {
+                    let kind = if p.eagle { "eagleplayer" } else { "player" };
+                    log::info!("{kind}: {} v{}.{} ({})", p.name, p.version >> 16, p.version & 0xFFFF, f.display());
+                    if let Some(pp) = deli::PlayerProc::new(&p.tags) {
+                        self.m.deli.procs.push(pp);
+                    }
+                    self.players.push(p);
+                    n += 1;
+                }
+                Ok(p) => log::debug!("skipping genie {}", p.name),
+                Err(e) => log::debug!("{}: {e}", f.display()),
+            }
+        }
+        // a later version of the same player (from the same directory)
+        // replaces the earlier one
+        let mut keep: Vec<Player> = Vec::new();
+        for p in self.players.drain(first..) {
+            if let Some(o) = keep.iter_mut().find(|o| o.name == p.name) {
+                if p.version > o.version {
+                    *o = p;
+                }
+            } else {
+                keep.push(p);
+            }
+        }
+        self.players.extend(keep);
+        self.builtin_players = self.players.len();
+        n
+    }
+
+    fn configure(&mut self, idx: usize) -> Result<()> {
+        if self.players[idx].configured {
+            return Ok(());
+        }
+        self.players[idx].configured = true;
+        if let Some(cfg) = self.players[idx].tag(tag::CONFIG) {
+            let r = deli::call_fn(&mut self.m, self.players[idx].globals, cfg, None).map_err(|e| anyhow!(e))?;
+            // Eagleplayer ignores the result: SoundMon's Config returns the
+            // counter its copy loop leaves in D0
+            if r[0] != 0 && !self.players[idx].eagle {
+                bail!("Config of {} failed", self.players[idx].name);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn stop(&mut self) {
+        let Some(p) = self.playing.take() else { return };
+        if let Backend::Deli(i) = p.backend {
+            let pl = &self.players[i];
+            let (stop_int, end_sound, end_player) =
+                (pl.tag(tag::STOP_INT), pl.tag(tag::END_SOUND), pl.tag(tag::END_PLAYER));
+            let (has_int, g) = (pl.timer_driven(), pl.globals);
+            if !has_int {
+                if let Some(f) = stop_int {
+                    let _ = deli::call_fn(&mut self.m, g, f, None);
+                }
+            }
+            self.m.deli.timer_running = false;
+            for f in [end_sound, end_player].into_iter().flatten() {
+                let _ = deli::call_fn(&mut self.m, g, f, None);
+            }
+            for i in std::mem::take(&mut self.running_genies) {
+                let ts: &[u32] = if Some(i) == self.note_genie {
+                    &[tag::STOP_INT, tag::END_SOUND, tag::END_PLAYER]
+                } else {
+                    &[tag::END_PLAYER]
+                };
+                self.running_genies.push(i);
+                for &t in ts {
+                    self.genie_call(i, t);
+                }
+                self.running_genies.retain(|&g| g != i);
+            }
+            self.m.deli.note_signal = 0;
+            if p.custom_player {
+                self.players.truncate(self.builtin_players);
+            }
+        }
+        self.m.bus.paula.write_dmacon(0x000F);
+        self.m.bus.paula.write_intena(0x0780);
+        (self.next_timer, self.pt_dma_at) = (None, None);
+        self.m.os.audio = Default::default();
+        self.m.os.audio_alloc = Default::default();
+        self.m.deli.voices.reset();
+        self.m.deli.note_struct = 0;
+        eagle::stop(&mut self.m);
+        for (a, _) in std::mem::take(&mut self.m.deli.list) {
+            self.m.heap.free(a);
+        }
+        self.m.os.int_vectors = [0; 16];
+        self.m.os.int_servers = Default::default();
+        self.m.os.icr_vectors = [[0; 5]; 2];
+        self.m.bus.ciab = Default::default();
+    }
+
+    /// Loads and starts playing a module file.
+    pub fn play_file(&mut self, path: &Path) -> Result<()> {
+        let data = std::fs::read(path)?;
+        self.play_data(path, data)
+    }
+
+    /// Play a module already in memory. `path` still matters: its directory is where
+    /// players look for companion files, and its name is what name-based checks see.
+    pub fn play_data(&mut self, path: &Path, data: Vec<u8>) -> Result<()> {
+        let r = self.start_module(path, data);
+        self.song_starts();
+        r
+    }
+
+    /// The song starts now: the time its player took to get ready (its precalculation
+    /// takes seconds on a 68000) passed while it loaded, not while it played.
+    fn song_starts(&mut self) {
+        self.m.bus.paula.sync(self.m.bus.clock, &self.m.bus.ram);
+        self.m.bus.paula.samples.clear();
+    }
+
+    fn start_module(&mut self, path: &Path, data: Vec<u8>) -> Result<()> {
+        self.stop();
+        self.last_error = None;
+        self.m.deli.songend = false;
+        let data = crate::decrunch::decrunch(data);
+        if data.is_empty() {
+            bail!("empty file");
+        }
+        // module into guest memory (padded so 1k checks never read garbage)
+        let size = data.len() as u32;
+        let addr = self.m.alloc(size.max(1024) + 1024);
+        if addr == 0 {
+            bail!("module too large");
+        }
+        self.m.bus.write_bytes(addr, &data);
+        log::debug!("module at ${addr:06x}, {size} bytes");
+        self.m.deli.list = vec![(addr, size)];
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let mut dir_s = dir.to_string_lossy().to_string();
+        if !dir_s.is_empty() && !dir_s.ends_with('/') {
+            dir_s.push('/');
+        }
+        let file_s = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        let (db, fb, pb) = (self.m.deli.dir_buf, self.m.deli.file_buf, self.m.deli.path_buf);
+        self.m.bus.write_cstr(db, &dir_s);
+        self.m.bus.write_cstr(fb, &file_s);
+        self.m.bus.write_cstr(pb, "");
+        self.m.deli.module_dir = dir;
+        for g in [self.m.deli.globals, self.m.deli.eagle.globals] {
+            if g != 0 {
+                self.m.bus.w32(g + dtg::CHK_DATA, addr);
+                self.m.bus.w32(g + dtg::CHK_SIZE, size);
+                self.m.bus.w16(g + dtg::SND_NUM, 0);
+                self.m.bus.w16(g + dtg::TIMER, deli::DEFAULT_TIMER);
+            }
+        }
+
+        if let Some(want) = self.only_player.clone() {
+            let found = (0..self.builtin_players).find(|&i| self.players[i].name.eq_ignore_ascii_case(&want));
+            if let Some(idx) = found {
+                if self.check_player(idx)? {
+                    return self.start_deli(idx, path, false);
+                }
+            }
+            self.m.deli.list.clear();
+            self.m.heap.free(addr);
+            match found {
+                Some(_) => bail!("{want} does not recognise this module"),
+                None => bail!("no player named {want}"),
+            }
+        }
+        // 1. the built-in ProTracker for 31-instrument modules
+        if let Some(fmt) = ProTracker::detect(&data).filter(|f| *f != "SoundTracker") {
+            return self.start_native(path, &data, addr, fmt);
+        }
+        // 2. a custom module carries its own player
+        if crate::hunk::is_hunk_file(&data) {
+            if let Ok(p) = deli::load_player(&mut self.m, &data, path) {
+                if p.is_custom() {
+                    self.players.push(p);
+                    let idx = self.players.len() - 1;
+                    return self.start_deli(idx, path, true);
+                }
+            }
+        }
+        // 3. external players
+        let eagle_from = self.eagle_from.unwrap_or(self.builtin_players);
+        for idx in 0..eagle_from {
+            if self.check_player(idx)? {
+                log::info!("{} recognised by {}", path.display(), self.players[idx].name);
+                return self.start_deli(idx, path, false);
+            }
+        }
+        // 4. the 15-instrument SoundTracker heuristic
+        if ProTracker::detect(&data) == Some("SoundTracker") {
+            return self.start_native(path, &data, addr, "SoundTracker");
+        }
+        // 5. last resort: the Eagleplayers, whose checks are often looser
+        for idx in eagle_from..self.builtin_players {
+            if self.check_player(idx)? {
+                log::info!("{} recognised by {}", path.display(), self.players[idx].name);
+                return self.start_deli(idx, path, false);
+            }
+        }
+        self.m.deli.list.clear();
+        self.m.heap.free(addr);
+        bail!("unknown module format")
+    }
+
+    fn check_player(&mut self, idx: usize) -> Result<bool> {
+        if let Err(e) = self.configure(idx) {
+            log::debug!("{e}");
+            return Ok(false);
+        }
+        let Some(chk) = self.players[idx].check() else { return Ok(false) };
+        match deli::call_fn(&mut self.m, self.players[idx].globals, chk, None) {
+            Ok(r) => Ok(r[0] == 0),
+            Err(e) => {
+                // a player whose check crashes is not asked again
+                log::info!("check of {} crashed, disabling it: {e}", self.players[idx].name);
+                for t in [tag::CHECK1, tag::CHECK2, eagle::tag::CHECK3, eagle::tag::CHECK5] {
+                    self.players[idx].tags.remove(&t);
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn start_native(&mut self, path: &Path, data: &[u8], addr: u32, fmt: &str) -> Result<()> {
+        let pt = ProTracker::new(data, addr).ok_or_else(|| anyhow!("bad module"))?;
+        pt.clear_loop_words(&mut self.m.bus.ram);
+        self.m.bus.paula.reset();
+        self.irq_seen = (0, 0);
+        (self.next_timer, self.pt_dma_at) = (None, None);
+        let name = if pt.title.is_empty() { file_name(path) } else { pt.title.clone() };
+        self.playing = Some(Playing {
+            backend: Backend::Native(Box::new(pt)),
+            module_name: name,
+            format: fmt.to_string(),
+            author: String::new(),
+            sub_min: 0,
+            sub_max: 0,
+            sub: 0,
+            frames: 0,
+            custom_player: false,
+        });
+        Ok(())
+    }
+
+    fn start_deli(&mut self, idx: usize, path: &Path, custom: bool) -> Result<()> {
+        if custom {
+            self.configure(idx)?;
+        }
+        self.m.bus.paula.reset();
+        self.irq_seen = (0, 0);
+        (self.next_timer, self.pt_dma_at) = (None, None);
+        self.m.deli.voices.reset();
+        let g = self.players[idx].globals;
+        let pl = &self.players[idx];
+        if pl.eagle {
+            let size = self.m.bus.r32(g + dtg::CHK_SIZE);
+            eagle::prepare(&mut self.m, pl.tag_list, size);
+        }
+        if let Some(f) = pl.tag(tag::EXT_LOAD) {
+            self.m.bus.write_cstr(self.m.deli.path_buf, "");
+            let r = deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
+            if r[0] != 0 {
+                bail!("{}: could not load additional files", self.players[idx].name);
+            }
+        }
+        // DeliTracker leaves the module's path here: IFF-8SVX opens it to stream the sample
+        let full = self.m.bus.read_cstr(self.m.deli.dir_buf) + &self.m.bus.read_cstr(self.m.deli.file_buf);
+        self.m.bus.write_cstr(self.m.deli.path_buf, &full);
+        let pl = &self.players[idx];
+        let init = pl.tag(tag::INIT_PLAYER);
+        let ssr = pl.tag(tag::SUBSONG_RANGE);
+        if let Some(f) = init {
+            let r = deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
+            if r[0] != 0 {
+                bail!("InitPlayer of {} failed", self.players[idx].name);
+            }
+        }
+        // the amplifier comes after InitPlayer (see score.s)
+        if let Some(f) = self.players[idx].tag(eagle::tag::INIT_AMPLIFIER) {
+            let r = deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
+            if r[0] != 0 {
+                log::warn!("InitAmplifier of {} failed ({})", self.players[idx].name, r[0] as i32);
+            } else {
+                eagle::amplifier_ready(&mut self.m, &self.players[idx].name);
+            }
+        }
+        let info = self.module_info(idx);
+        let mi = |m: &Machine, t| info.and_then(|l| eagle::find_tag(&m.bus, l, t));
+        // subsong range (InitPlayer usually fills the NewSubSongRange array)
+        let pl = &self.players[idx];
+        let mut ranged = pl.has(tag::SUBSONG_RANGE) || pl.has(tag::NEW_SUBSONG_RANGE);
+        let (def, lo, mut hi) = if let Some(f) = ssr {
+            let r = deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
+            (r[0] as u16, r[0] as u16, r[1] as u16)
+        } else if let Some(r) = pl.tag(tag::NEW_SUBSONG_RANGE) {
+            (self.m.bus.r16(r), self.m.bus.r16(r + 2), self.m.bus.r16(r + 4))
+        } else {
+            let n = self.m.bus.r16(g + dtg::SND_NUM);
+            // an Eagleplayer may give the count in EPG_SubSongs or MI_SubSongs
+            let (first, count) = if pl.eagle {
+                (self.m.bus.r16(g + eagle::epg::FIRST_SND), self.m.bus.r16(g + eagle::epg::SUB_SONGS))
+            } else {
+                (0xFFFF, 0xFFFF)
+            };
+            let count = Some(count).filter(|&c| c != 0xFFFF).or(mi(&self.m, eagle::mi::SUB_SONGS).map(|c| c as u16));
+            match count.filter(|&c| (2..0x8000).contains(&c)) {
+                Some(c) => {
+                    ranged = true;
+                    let first = if first == 0xFFFF { n } else { first };
+                    (first, first, first + c - 1)
+                }
+                None => (n, n, n),
+            }
+        };
+        if hi < lo {
+            hi = lo;
+        }
+        let pl = &self.players[idx];
+        if ranged {
+            self.m.bus.w16(g + dtg::SND_NUM, def);
+        }
+        if let Some(ns) = pl.tag(tag::NOTE_STRUCT) {
+            self.m.deli.note_struct = self.m.bus.r32(ns);
+        }
+        let init_note = pl.tag(tag::INIT_NOTE);
+        let s = |m: &Machine, t: Option<u32>| t.map(|a| m.bus.r32(a)).filter(|&a| a != 0).map(|a| m.bus.read_cstr(a));
+        let mi_s = |m: &Machine, t| mi(m, t).filter(|&a| a != 0).map(|a| m.bus.read_cstr(a)).filter(|s| !s.is_empty());
+        let module_name = s(&self.m, pl.tag(tag::MODULE_NAME))
+            .or_else(|| mi_s(&self.m, eagle::mi::SONG_NAME))
+            .unwrap_or_else(|| file_name(path));
+        let author =
+            s(&self.m, pl.tag(tag::AUTHOR_NAME)).or_else(|| mi_s(&self.m, eagle::mi::AUTHOR_NAME)).unwrap_or_default();
+        let format = if custom { "Custom".to_string() } else { pl.name.clone() };
+        if let Some(f) = init_note {
+            deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
+        }
+        self.start_genies();
+        self.playing = Some(Playing {
+            backend: Backend::Deli(idx),
+            module_name,
+            format,
+            author,
+            sub_min: lo,
+            sub_max: hi,
+            sub: def,
+            frames: 0,
+            custom_player: custom,
+        });
+        self.start_sound(idx)
+    }
+
+    /// An Eagleplayer's ModuleInfo tag list, once InitPlayer has filled it.
+    fn module_info(&mut self, idx: usize) -> Option<u32> {
+        let pl = &self.players[idx];
+        if let Some(l) = pl.tag(eagle::tag::NEW_MODULE_INFO) {
+            return Some(l);
+        }
+        let f = pl.tag(eagle::tag::GET_MODULE_INFO)?;
+        let r = deli::call_fn(&mut self.m, pl.globals, f, None).ok()?;
+        Some(r[8]).filter(|&a| a != 0)
+    }
+
+    fn start_sound(&mut self, idx: usize) -> Result<()> {
+        let g = self.players[idx].globals;
+        self.m.bus.w16(g + dtg::TIMER, deli::DEFAULT_TIMER);
+        let pl = &self.players[idx];
+        let (vol, bal, init_sound, start_int, has_int) = (
+            pl.tag(tag::VOLUME),
+            pl.tag(tag::BALANCE),
+            pl.tag(tag::INIT_SOUND),
+            pl.tag(tag::START_INT),
+            pl.timer_driven(),
+        );
+        for f in [vol, bal].into_iter().flatten() {
+            deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
+        }
+        if let Some(f) = init_sound {
+            deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
+        }
+        // the NotePlayer genie plays along
+        if let Some(i) = self.note_genie.filter(|i| self.running_genies.contains(i)) {
+            for t in [tag::VOLUME, tag::BALANCE, tag::INIT_SOUND, tag::START_INT] {
+                self.genie_call(i, t);
+            }
+        }
+        if has_int {
+            self.m.deli.timer_running = true;
+        } else if let Some(f) = start_int {
+            deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
+        }
+        Ok(())
+    }
+
+    fn stop_sound(&mut self, idx: usize) {
+        if let Some(i) = self.note_genie.filter(|i| self.running_genies.contains(i)) {
+            for t in [tag::STOP_INT, tag::END_SOUND] {
+                self.genie_call(i, t);
+            }
+        }
+        let pl = &self.players[idx];
+        let (stop_int, end_sound, has_int) = (pl.tag(tag::STOP_INT), pl.tag(tag::END_SOUND), pl.timer_driven());
+        if has_int {
+            self.m.deli.timer_running = false;
+        } else if let Some(f) = stop_int {
+            let _ = deli::call_fn(&mut self.m, self.players[idx].globals, f, None);
+        }
+        if let Some(f) = end_sound {
+            let _ = deli::call_fn(&mut self.m, self.players[idx].globals, f, None);
+        }
+        self.m.bus.paula.write_dmacon(0x000F);
+        self.m.deli.voices.reset();
+    }
+
+    /// Changes subsong by `delta` (-1/+1).
+    pub fn change_subsong(&mut self, delta: i32) -> Result<()> {
+        let Some(p) = &self.playing else { return Ok(()) };
+        let Backend::Deli(idx) = p.backend else {
+            if let Some(Playing { backend: Backend::Native(pt), .. }) = &mut self.playing {
+                pt.jump(delta);
+            }
+            return Ok(());
+        };
+        let (lo, hi, cur) = (p.sub_min, p.sub_max, p.sub);
+        let pl = &self.players[idx];
+        if lo == hi {
+            // no range known: use the player's own functions if any
+            let f = if delta > 0 { pl.tag(tag::NEXT_SONG) } else { pl.tag(tag::PREV_SONG) };
+            if let Some(f) = f {
+                deli::call_fn(&mut self.m, self.players[idx].globals, f, None).map_err(|e| anyhow!(e))?;
+            }
+            return Ok(());
+        }
+        let test = pl.tag(tag::SUBSONG_TEST);
+        let mut n = cur as i32;
+        loop {
+            n += delta;
+            if n < lo as i32 || n > hi as i32 {
+                return Ok(());
+            }
+            self.m.bus.w16(self.players[idx].globals + dtg::SND_NUM, n as u16);
+            match test {
+                Some(f) => {
+                    if deli::call_fn(&mut self.m, self.players[idx].globals, f, None).map_err(|e| anyhow!(e))?[0] == 0 {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        self.stop_sound(idx);
+        self.m.bus.w16(self.players[idx].globals + dtg::SND_NUM, n as u16);
+        if let Some(p) = &mut self.playing {
+            p.sub = n as u16;
+            p.frames = 0;
+        }
+        self.m.deli.songend = false;
+        let r = self.start_sound(idx);
+        self.song_starts();
+        r
+    }
+
+    pub fn pattern_step(&mut self, delta: i32) {
+        match &mut self.playing {
+            Some(Playing { backend: Backend::Native(pt), .. }) => pt.jump(delta),
+            Some(Playing { backend: Backend::Deli(idx), .. }) => {
+                let t = if delta > 0 { tag::NEXT_PATT } else { tag::PREV_PATT };
+                if let Some(f) = self.players[*idx].tag(t) {
+                    let _ = deli::call_fn(&mut self.m, self.players[*idx].globals, f, None);
+                }
+            }
+            None => {}
+        }
+    }
+
+    pub fn songend(&self) -> bool {
+        match &self.playing {
+            Some(Playing { backend: Backend::Native(pt), .. }) => pt.songend,
+            Some(_) => self.m.deli.songend,
+            None => false,
+        }
+    }
+
+    fn fail(&mut self, e: String) {
+        log::error!("player crashed: {e}");
+        self.last_error = Some(e);
+        self.m.deli.timer_running = false;
+        let p = self.playing.take();
+        if let Some(Playing { custom_player: true, .. }) = p {
+            self.players.truncate(self.builtin_players);
+        }
+        self.m.bus.paula.write_dmacon(0x000F);
+        self.m.deli.voices.reset();
+    }
+
+    /// Runs the machine to the next thing that happens: a timer or vertical blank
+    /// interrupt that is due, an audio interrupt, or the end of an output sample.
+    /// Interrupts that came due while guest code ran are taken late, at once.
+    fn advance(&mut self) {
+        let Some(p) = &mut self.playing else { return };
+        let now = self.m.bus.clock;
+        // the time guest code took since Paula last ran (its interrupts were requested
+        // then, and `audio_irqs` takes them)
+        self.m.bus.paula.sync(now, &self.m.bus.ram);
+        // DeliTracker's own timer (CIA-B timer A on the Amiga): its period is the
+        // latch + 1 E-clock ticks, and a new latch is loaded at the next underflow
+        let period = match &p.backend {
+            Backend::Native(pt) => Some(pt.tick_clocks()),
+            Backend::Deli(idx) => self
+                .m
+                .deli
+                .timer_running
+                .then(|| (deli::timer_value(&self.m, self.players[*idx].globals) as u64 + 1) * ECLOCK_DIV),
+        };
+        match period {
+            None => self.next_timer = None,
+            Some(n) if self.next_timer.is_none() => self.next_timer = Some(now + n),
+            _ => {}
+        }
+        let cias = [&self.m.bus.ciaa, &self.m.bus.ciab];
+        let cia_due = cias.iter().filter_map(|c| c.until_underflow()).min().map(|n| (self.e_ticks + n) * ECLOCK_DIV);
+        let paula = &self.m.bus.paula;
+        let mut t = paula.now() + paula.out.until_sample() as u64;
+        for d in [Some(self.next_vblank), self.next_timer, self.pt_dma_at, cia_due].into_iter().flatten() {
+            t = t.min(d);
+        }
+        if t > now {
+            self.m.bus.clock = self.m.bus.paula.sync_to_irq(t, &self.m.bus.ram);
+        }
+        let now = self.m.bus.clock;
+        // CIA timers (players with their own interrupt)
+        let ticks = now / ECLOCK_DIV - self.e_ticks;
+        self.e_ticks += ticks;
+        for cia in 0..2 {
+            let c = if cia == 0 { &mut self.m.bus.ciaa } else { &mut self.m.bus.ciab };
+            let fired = c.advance(ticks) & c.icr_mask;
+            for bit in 0..2 {
+                if fired & (1 << bit) != 0 {
+                    let is = self.m.os.icr_vectors[cia][bit];
+                    if is != 0 {
+                        let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));
+                        crate::os::call_int_code(&mut self.m, code, data, 0);
+                    }
+                }
+            }
+        }
+        if self.pt_dma_at.is_some_and(|d| d <= now) {
+            self.pt_dma_at = None;
+            if let Some(Playing { backend: Backend::Native(pt), .. }) = &mut self.playing {
+                pt.dma_on(&mut self.m.bus.paula);
+            }
+        }
+        if let (Some(d), Some(n)) = (self.next_timer, period) {
+            if d <= now {
+                self.next_timer = Some(d + n);
+                self.timer_interrupt();
+            }
+        }
+        if self.next_vblank <= now {
+            while self.next_vblank <= now {
+                self.next_vblank += self.m.bus.frame;
+            }
+            for is in self.m.os.int_servers[crate::os::INTB_VERTB].clone() {
+                let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));
+                crate::os::call_int_code(&mut self.m, code, data, 0);
+            }
+            let is = self.m.os.int_vectors[crate::os::INTB_VERTB];
+            if is != 0 {
+                let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));
+                crate::os::call_int_code(&mut self.m, code, data, 0);
+            }
+        }
+        if let Some(e) = self.m.crashed.take() {
+            self.fail(e);
+            return;
+        }
+        // audio.device writes that finished wake the processes waiting for them
+        crate::os::audio_service(&mut self.m);
+        if !self.m.deli.procs.is_empty() {
+            deli::run_procs(&mut self.m);
+        }
+        self.audio_irqs();
+    }
+
+    /// DeliTracker's timer interrupt: the player's DTP_Interrupt, or a tick of
+    /// the built-in ProTracker.
+    fn timer_interrupt(&mut self) {
+        let Some(p) = &mut self.playing else { return };
+        match &mut p.backend {
+            Backend::Native(pt) => {
+                pt.tick(&mut self.m.bus.paula);
+                if pt.dma_pending != 0 {
+                    self.pt_dma_at = Some(self.m.bus.clock + PT_DMA_WAIT);
+                }
+                // E0x / LED filter
+                if pt.filter {
+                    self.m.bus.ciaa.pra &= !2;
+                } else {
+                    self.m.bus.ciaa.pra |= 2;
+                }
+            }
+            Backend::Deli(idx) => {
+                let idx = *idx;
+                if let Some(f) = self.players[idx].tag(tag::INTERRUPT) {
+                    if let Err(e) = deli::call_fn(&mut self.m, self.players[idx].globals, f, None) {
+                        self.fail(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Runs the handlers of the audio interrupts requested since the last call (by Paula
+    /// or by guest code starting DMA), and of those already requested whose INTENA bit
+    /// was set since: an interrupt pending when it is enabled is taken at once.
+    fn audio_irqs(&mut self) {
+        let p = &self.m.bus.paula;
+        let raised = (p.intreq & !self.irq_seen.0 | p.intreq & p.intena & !self.irq_seen.1) & (0xF << 7);
+        self.irq_seen = (p.intreq, p.intena);
+        if raised == 0 || self.m.bus.paula.pending_audio_irqs() == 0 {
+            return;
+        }
+        for ch in 0..4 {
+            let bit = 0x80u16 << ch;
+            if raised & bit == 0 || self.m.bus.paula.intena & bit == 0 {
+                continue;
+            }
+            let is = self.m.os.int_vectors[crate::os::INTB_AUD0 + ch];
+            if is != 0 {
+                let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));
+                let active = (self.m.bus.paula.intena & self.m.bus.paula.intreq) as u32;
+                crate::os::call_int_code(&mut self.m, code, data, active);
+            }
+        }
+        self.irq_seen = (self.m.bus.paula.intreq, self.m.bus.paula.intena);
+        if let Some(e) = self.m.crashed.take() {
+            self.fail(e);
+        }
+    }
+
+    /// The output stage model for the module playing: an Amiga's, unless the
+    /// format comes from the PC (its music was not made for Paula's filters).
+    fn output_filter(&self) -> Filter {
+        let pc = self.playing.as_ref().is_some_and(|p| {
+            let f = p.format.to_ascii_lowercase();
+            PC_FORMATS.iter().any(|n| f.contains(n))
+        });
+        match (pc, self.settings.a500_filter) {
+            (true, _) => Filter::None,
+            (false, true) => Filter::A500,
+            (false, false) => Filter::A1200,
+        }
+    }
+
+    /// Fills `out` with interleaved stereo f32 frames.
+    pub fn render(&mut self, out: &mut [f32]) {
+        let sep = self.settings.separation.clamp(0.0, 1.0);
+        let vol = self.settings.volume;
+        let filter = self.output_filter();
+        self.m.bus.paula.out.set_filter(filter);
+        for frame in out.chunks_exact_mut(2) {
+            if self.playing.is_none() || self.paused {
+                frame[0] = 0.0;
+                frame[1] = 0.0;
+                continue;
+            }
+            self.m.bus.paula.out.led = filter != Filter::None && self.settings.led_filter && self.m.bus.led();
+            let (pl, pr) = loop {
+                if let Some(s) = self.m.bus.paula.samples.pop_front() {
+                    break s;
+                }
+                if self.playing.is_none() {
+                    break (0, 0);
+                }
+                self.advance();
+            };
+            let (hl, hr) = (pl as f32 / 32768.0, pr as f32 / 32768.0);
+            let mut l = hl * (0.5 + sep * 0.5) + hr * (0.5 - sep * 0.5);
+            let mut r = hr * (0.5 + sep * 0.5) + hl * (0.5 - sep * 0.5);
+            if self.m.deli.voices.in_use {
+                // the built-in NotePlayer renderer has its own filters
+                let (nl, nr) = self.m.deli.voices.render(&self.m.bus.ram, self.rate);
+                let mut vl = nl * (0.5 + sep * 0.5) + nr * (0.5 - sep * 0.5);
+                let mut vr = nr * (0.5 + sep * 0.5) + nl * (0.5 - sep * 0.5);
+                if self.settings.a500_filter {
+                    vl = self.a500.run(0, vl);
+                    vr = self.a500.run(1, vr);
+                }
+                if self.settings.led_filter && self.m.bus.led() {
+                    vl = self.led.run(0, vl);
+                    vr = self.led.run(1, vr);
+                }
+                l += vl * 0.5;
+                r += vr * 0.5;
+            }
+            if self.settings.mono {
+                let m = (l + r) * 0.5;
+                l = m;
+                r = m;
+            }
+            frame[0] = (l * vol).clamp(-1.0, 1.0);
+            frame[1] = (r * vol).clamp(-1.0, 1.0);
+            if let Some(p) = &mut self.playing {
+                p.frames += 1;
+            }
+            let paula = &self.m.bus.paula;
+            self.push_scopes([0, 1, 2, 3].map(|i| paula.output(i)));
+        }
+    }
+
+    fn push_scopes(&mut self, paula: [f32; 4]) {
+        let nv = if self.m.deli.voices.in_use { self.m.deli.voices.voices.len() } else { 0 };
+        let n = 4 + nv;
+        if self.scope_ring.len() != n {
+            self.scope_ring = vec![vec![0.0; SCOPE_LEN]; n];
+        }
+        let i = self.scope_pos;
+        for (k, v) in paula.iter().enumerate() {
+            self.scope_ring[k][i] = *v;
+        }
+        for k in 0..nv {
+            self.scope_ring[4 + k][i] = self.m.deli.voices.voices[k].scope;
+        }
+        self.scope_pos = (i + 1) % SCOPE_LEN;
+    }
+
+    /// Recent output of every channel (oldest first), for oscilloscopes.
+    /// Silent channels are left out.
+    pub fn scope_data(&self) -> Vec<Vec<f32>> {
+        let mut out = Vec::new();
+        let voices = self.scope_ring.len() > 4;
+        for (k, ring) in self.scope_ring.iter().enumerate() {
+            // Paula scopes always show, unless a NoteStruct player owns the
+            // sound; voice scopes only while they are making sound
+            let used = (k < 4 && !voices) || ring.iter().any(|&x| x != 0.0);
+            if !used {
+                continue;
+            }
+            let mut v = Vec::with_capacity(SCOPE_LEN);
+            v.extend_from_slice(&ring[self.scope_pos..]);
+            v.extend_from_slice(&ring[..self.scope_pos]);
+            out.push(v);
+        }
+        out
+    }
+
+    pub fn elapsed_secs(&self) -> f64 {
+        self.playing.as_ref().map(|p| p.frames as f64 / self.rate).unwrap_or(0.0)
+    }
+
+    pub fn native_position(&self) -> Option<(usize, usize, usize, u32)> {
+        match &self.playing {
+            Some(Playing { backend: Backend::Native(pt), .. }) => {
+                let (p, l, r) = pt.position();
+                Some((p, l, r, pt.bpm))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth > 0 {
+                collect_files(&p, out, depth - 1);
+            }
+        } else if !p.extension().is_some_and(|x| x == "info") {
+            out.push(p);
+        }
+    }
+}

@@ -1,0 +1,14 @@
+[package]
+name = "m68k-rc"
+description = "68000 decoder (and the 68020 subset 68020 players use), CPU state, ALU semantics and interpreter used by recompiled players. Vendored from m68k-recomp (crates/m68k, MIT)."
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[lib]
+name = "m68k"
+
+[dev-dependencies]
+# The reference the 68020 additions are tested against (tests/ref020.rs): the 68020 core the
+# player itself runs on. The same version as the main crate's.
+m68k_ref = { package = "m68k", version = "=0.14.7" }

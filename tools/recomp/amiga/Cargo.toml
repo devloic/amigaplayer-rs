@@ -1,0 +1,6 @@
+[package]
+name = "amiga"
+description = "AmigaDOS hunk executables, ADF disk images (OFS/FFS) and Rocket Ranger's KBlocks directory"
+edition.workspace = true
+version.workspace = true
+license.workspace = true

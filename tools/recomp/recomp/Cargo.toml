@@ -1,0 +1,16 @@
+[package]
+name = "recomp"
+description = "Static recompiler: Amiga 68000 hunk executables / raw images -> Rust"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+m68k = { package = "m68k-rc", path = "../../../crates/m68k-rc" }
+amiga = { path = "../amiga" }
+serde = { version = "1.0.219", features = ["derive"] }
+toml = "1.1"
+
+[[bin]]
+name = "m68k-recomp"
+path = "src/main.rs"

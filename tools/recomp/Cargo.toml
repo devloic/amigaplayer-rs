@@ -1,0 +1,21 @@
+# m68k-recomp, the static 68k-to-Rust recompiler tools/native-players.py runs, copied from
+# m68k-recomp (crates/recomp and crates/amiga, MIT) to be extended here with the 68010/68020
+# instructions some players use. It decodes with the repo's runtime crate (crates/m68k-rc), so
+# the generated code and the decoder it was generated with are always the same.
+#
+# A workspace of its own, built apart from the player: tools/recomp/build.sh.
+[workspace]
+resolver = "2"
+members = ["recomp", "amiga"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+debug = 1
+codegen-units = 16
+
+[profile.dev]
+opt-level = 1

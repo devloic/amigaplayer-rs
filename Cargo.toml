@@ -1,0 +1,28 @@
+[package]
+name = "deliplayer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+env_logger = "0.11.11"
+log = "0.4.34"
+m68k = "0.14.7"
+# The recompiled players and the 68000 runtime they were generated against.
+m68k_rc = { package = "m68k-rc", path = "crates/m68k-rc" }
+players-native = { path = "crates/players-native" }
+sdl3 = { version = "0.20", optional = true }
+
+[features]
+default = ["ui"]
+# The SDL3 player window. The library (engine only) builds without it.
+ui = ["dep:sdl3"]
+
+[lib]
+name = "deliplayer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "deliplayer"
+path = "src/main.rs"
+required-features = ["ui"]

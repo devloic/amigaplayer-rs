@@ -1,0 +1,5 @@
+target
+# recompiled players: derived from the user's own player files
+/crates/players-native/gen/
+/target-recomp
+__pycache__/

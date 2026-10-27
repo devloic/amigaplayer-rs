@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod pumatracker;
+pub mod sidmon2;
 
 use crate::bus::Bus;
 use crate::machine::Machine;
@@ -43,7 +44,7 @@ pub struct Open {
     pub new: fn(data: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>>,
 }
 
-pub const REPLAYERS: &[Open] = &[pumatracker::OPEN];
+pub const REPLAYERS: &[Open] = &[pumatracker::OPEN, sidmon2::OPEN];
 
 /// The audio registers, written through the bus as guest code writes them (so
 /// Paula runs to the moment of the write, and the write log sees it).

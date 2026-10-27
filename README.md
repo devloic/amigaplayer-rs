@@ -294,6 +294,7 @@ while the register writes are the same.
 | Format | Port of | Checked against | Result |
 |---|---|---|---|
 | PumaTracker | NostalgicPlayer PumaTracker | Pumatracker 1.0 (Eagleplayer 2.06) | 60 of 61 modules identical for 20 s; `puma.toki7` plays a note past the period table, where the original reads its own variables (period `$5060`, silent) and the port writes 0 (silent) |
+| SidMon 2.0 | NostalgicPlayer SidMon 2.0 | SIDMon 2.0 (Sidmon-II Eagleplayer V2.3, 22 Aug 97) | 109 of 109 modules identical for 20 s (the 110th file of the list is an XM); `Flipper - Title` plays note 80, past the period table, where the original reads its own pointers to the sample list, which the port keeps too |
 
 Not implemented:
 

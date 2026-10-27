@@ -20,6 +20,7 @@ pub mod iffsmus;
 pub mod hippel;
 pub mod jamcracker;
 pub mod pumatracker;
+pub mod ronklaren;
 pub mod sidmon1;
 pub mod sidmon2;
 pub mod soundcontrol;
@@ -96,6 +97,7 @@ pub const REPLAYERS: &[Open] = &[
     digitalmugician::OPEN2,
     artofnoise::OPEN4,
     artofnoise::OPEN8,
+    ronklaren::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

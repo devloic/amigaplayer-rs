@@ -13,6 +13,7 @@ pub mod deltamusic2;
 pub mod fred;
 pub mod futurecomposer;
 pub mod iffsmus;
+pub mod hippel;
 pub mod jamcracker;
 pub mod pumatracker;
 pub mod sidmon1;
@@ -81,6 +82,7 @@ pub const REPLAYERS: &[Open] = &[
     tfmx::OPEN_15,
     iffsmus::OPEN,
     bendaglish::OPEN,
+    hippel::OPEN_COSO,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

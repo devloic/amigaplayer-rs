@@ -17,12 +17,12 @@
 //! Where the original's register writes differ from what NostalgicPlayer asks of
 //! its mixer, the port follows the original (see `Coso`).
 
-use super::{be32, Hw, Open, Replayer};
+use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
 use crate::paula::LINE;
 use m68k::AddressBus;
 
-pub const OPEN_COSO: Open = Open { name: "Hippel-COSO", detect: detect_coso, new: new_coso };
+pub const OPEN_COSO: Open = Open { name: "Hippel COSO", detect: detect_coso, new: new_coso };
 
 /// The Eagleplayer's Check: "COSO" and, 32 bytes on, "TFMX".
 fn detect_coso(d: &[u8]) -> bool {
@@ -441,7 +441,7 @@ fn note_period(n: u8) -> u16 {
 
 impl Replayer for Coso {
     fn format(&self) -> &'static str {
-        "Hippel-COSO"
+        "Hippel COSO"
     }
 
     fn title(&self) -> String {
@@ -1159,6 +1159,1055 @@ impl Coso {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hippel: the "TFMX" song data after a game's own replayer
+// ---------------------------------------------------------------------------
+
+pub const OPEN: Open = Open { name: "Hippel TFMX", detect: detect_tfmx, new: new_tfmx };
+
+/// The replayer versions the port plays, told apart by their code (an FNV-1a
+/// hash of the bytes before the song data, with the bytes the versions of a
+/// family differ in left out). Other versions are refused.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Ver {
+    /// The replayers with the song data at $A94 (Leaving Teramis, Wings of
+    /// Death and others): rows first, then the voices' effects, each voice's
+    /// period and volume in one long write; E2/E7/E9 turn the DMA off and
+    /// write the location and length; after the voices, if any DMA was turned
+    /// off, three line waits, the DMA on, a line wait, every voice's loop.
+    /// `wait_skips_slide`: a frequency table wait skips the sample slide too.
+    A94 { wait_skips_slide: bool },
+}
+
+fn fnv(d: &[u8], skip: &[std::ops::Range<usize>]) -> u32 {
+    let mut h = 0x811c_9dc5u32;
+    for (i, &b) in d.iter().enumerate() {
+        if !skip.iter().any(|r| r.contains(&i)) {
+            h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+        }
+    }
+    h
+}
+
+/// The version of the module's replayer, and where the song data starts.
+fn tfmx_version(d: &[u8]) -> Option<(Ver, usize)> {
+    let t = (0..d.len().saturating_sub(4)).step_by(2).find(|&i| &d[i..i + 4] == b"TFMX")?;
+    if t != 0xa94 || d.get(0..2) != Some(&[0x60, 0x00]) {
+        return None;
+    }
+    // the code, to the replayer's variables at $866 (the empty table, the voices)
+    if fnv(&d[..0x866], &[0x406..0x40a]) != A94_CODE && !synthetic(d) {
+        return None;
+    }
+    let wait_skips_slide = be32(d, 0x406) == 0x6000_0336;
+    if !wait_skips_slide && be32(d, 0x406) != 0x6000_02b2 {
+        return None;
+    }
+    Some((Ver::A94 { wait_skips_slide }, t))
+}
+
+/// The hash of the $A94 version's code (see `fnv`).
+const A94_CODE: u32 = 0x8d42_32fa;
+
+/// A unit test's module, which has a marker in place of the replayer's code.
+#[cfg(test)]
+fn synthetic(d: &[u8]) -> bool {
+    d.get(2..10) == Some(b"SYNTHTST")
+}
+
+#[cfg(not(test))]
+fn synthetic(_: &[u8]) -> bool {
+    false
+}
+
+fn detect_tfmx(d: &[u8]) -> bool {
+    tfmx_version(d).is_some()
+}
+
+/// Code points of the TFMX replayers' interrupt (see `At`).
+#[derive(Clone, Copy, Debug)]
+enum Tp {
+    Start,
+    Stopped,
+    StopVol,
+    Rows,
+    Row,
+    RowNext,
+    RowStop,
+    RowTrack,
+    RowEmpty,
+    RowNote,
+    RowEnv,
+    RowAlt,
+    RowEnd,
+    Fx,
+    FreqWait,
+    FreqRead,
+    FreqNote,
+    FreqLoop,
+    FreqStop,
+    E2Off,
+    E2Loc,
+    E2Len,
+    E2End,
+    E3,
+    E4Loc,
+    E4Len,
+    E4End,
+    E5Off,
+    E5End,
+    E6,
+    E7Same,
+    E7Off,
+    E7Loc,
+    E7Len,
+    E7End,
+    E8,
+    E9Off,
+    E9Loc,
+    E9Len,
+    E9End,
+    SlideOff,
+    SlideWait,
+    SlideFirst,
+    SlideStep,
+    SlideDone,
+    SlideLoc,
+    SlideLen,
+    EnvSustain,
+    EnvWait,
+    EnvRead,
+    EnvVol,
+    EnvLoop,
+    EnvHold,
+    EnvStop,
+    Period,
+    VibDelay,
+    VibSkip,
+    VibDown,
+    VibDownTurn,
+    VibUp,
+    VibUpTurn,
+    Porta,
+    PortaUp,
+    PortaDown,
+    Write,
+    NoDma,
+    Loops,
+    LineOn,
+    OnLoc,
+    OnLen,
+}
+
+impl Tp {
+    fn cost(self) -> u64 {
+        use Tp::*;
+        match self {
+            Start => 23,
+            Stopped => 40,
+            StopVol => 10,
+            Rows => 0,
+            Row => 97,
+            RowNext => 135,
+            RowStop => 10,
+            RowTrack => 0,
+            RowEmpty => 0,
+            RowNote => 52,
+            RowEnv => 166,
+            RowAlt => 5,
+            RowEnd => 0,
+            Fx => 7,
+            FreqWait => 40,
+            FreqRead => 65,
+            FreqNote => 8,
+            FreqLoop => 0,
+            FreqStop => 14,
+            E2Off => 31,
+            E2Loc => 63,
+            E2Len => 30,
+            E2End => 9,
+            E3 => 30,
+            E4Loc => 66,
+            E4Len => 30,
+            E4End => 0,
+            E5Off => 23,
+            E5End => 0,
+            E6 => 80,
+            E7Same => 22,
+            E7Off => 47,
+            E7Loc => 57,
+            E7Len => 30,
+            E7End => 14,
+            E8 => 18,
+            E9Off => 60,
+            E9Loc => 200,
+            E9Len => 20,
+            E9End => 60,
+            SlideOff => 0,
+            SlideWait => 20,
+            SlideFirst => 150,
+            SlideStep => 0,
+            SlideDone => 12,
+            SlideLoc => 175,
+            SlideLen => 4,
+            EnvSustain => 52,
+            EnvWait => 51,
+            EnvRead => 104,
+            EnvVol => 0,
+            EnvLoop => 30,
+            EnvHold => 0,
+            EnvStop => 12,
+            Period => 74,
+            VibDelay => 0,
+            VibSkip => 59,
+            VibDown => 65,
+            VibDownTurn => 78,
+            VibUp => 67,
+            VibUpTurn => 76,
+            Porta => 0,
+            PortaUp => 54,
+            PortaDown => 55,
+            Write => 0,
+            NoDma => 20,
+            Loops => 0,
+            LineOn => 0,
+            OnLoc => 8,
+            OnLen => 6,
+        }
+    }
+}
+
+/// A TFMX replayer's voice structure ($52 bytes), the fields it uses.
+#[derive(Default, Clone, Copy)]
+struct TVoice {
+    /// The position list (this voice's column) at the song's start and end,
+    /// and the next position's offset.
+    pos: u32,
+    pos_end: u32,
+    pos_off: u16,
+    /// The portamento's sum (16.16).
+    porta: u32,
+    /// The loop, written after the DMA on.
+    loop_addr: u32,
+    loop_len: u16,
+    /// The envelope and the frequency table, and the positions in them.
+    env: u32,
+    env_pos: u16,
+    freq: u32,
+    freq_pos: u16,
+    /// The track and the row's offset in it.
+    track: u32,
+    row: u16,
+    /// The sample slide (E5): the sample's offset and end, position, step and
+    /// length in words, whether it moved, its delay.
+    slide_start: u32,
+    slide_end: u32,
+    slide_pos: u16,
+    slide_delta: u16,
+    slide_len: u16,
+    slide_moved: bool,
+    slide_counter: u8,
+    slide_speed: u8,
+    slide_on: bool,
+    slide_done: bool,
+    dma: u16,
+    vib_delta: u16,
+    note: u8,
+    info: u8,
+    env_transpose: u8,
+    env_counter: u8,
+    env_speed: u8,
+    sustain: u8,
+    freq_wait: u8,
+    vib_speed: u8,
+    vib_depth: u8,
+    vib_delay: u8,
+    prev_info: u8,
+    sample: u8,
+    transpose: u8,
+    track_transpose: u8,
+    volume: u8,
+    vib_flag: u8,
+}
+
+/// Hippel's TFMX modules, played as their own replayer does (the Eagleplayer
+/// calls the module's code: its first entry with the subsong, its second at
+/// every tick). The port follows that code, not NostalgicPlayer, where they
+/// differ:
+/// * the rows are read before the effects, and a voice's period and volume are
+///   written together; the DMA on comes after three line waits, the loops after
+///   one more;
+/// * the tables are read from the module (the periods from the replayer's code,
+///   so a note past them reads the song data after them), and the empty table
+///   is the replayer's own;
+/// * the voices' InitSound writes point each voice at its own register, with a
+///   length of 1 word;
+/// * position byte 3 of $80 stops the player (DMA off and volume 0 every tick);
+///   the positions wrap with no song end (the original has none);
+/// * frequency table commands past E9, and envelope commands past E8, jump
+///   through data in the original; the port stops the table there.
+pub struct Tfmx {
+    ver: Ver,
+    periods: u32,
+    empty: u32,
+    freqs: u32,
+    envs: u32,
+    tracks: u32,
+    track_size: u16,
+    positions: u32,
+    subsongs_at: u32,
+    sample_info: u32,
+    samples: u32,
+    subsong_count: u16,
+    sub: u16,
+    counter: u16,
+    speed: u16,
+    stopped: bool,
+    led_done: bool,
+    dma_acc: u16,
+    voices: [TVoice; 4],
+    trace: TTrace,
+}
+
+/// The trace of code points, as `Trace` (HIPPEL_TRACE=file).
+#[derive(Default)]
+struct TTrace {
+    out: Option<std::io::BufWriter<std::fs::File>>,
+    pend: Vec<Tp>,
+}
+
+impl TTrace {
+    fn open() -> Self {
+        let out = std::env::var_os("HIPPEL_TRACE")
+            .and_then(|p| std::fs::File::create(p).ok())
+            .map(std::io::BufWriter::new);
+        TTrace { out, pend: Vec::new() }
+    }
+
+    fn at(&mut self, hw: &mut Hw, e: Tp) {
+        hw.wait(e.cost());
+        if self.out.is_some() {
+            self.pend.push(e);
+        }
+    }
+
+    fn write(&mut self, hw: &Hw, what: &str) {
+        if let Some(o) = &mut self.out {
+            use std::io::Write;
+            let _ = write!(o, "{} {}", hw.bus.clock, what);
+            for e in self.pend.drain(..) {
+                let _ = write!(o, " {:?}", e);
+            }
+            let _ = writeln!(o);
+        }
+    }
+}
+
+/// The replayer's wait for the next line: it reads VHPOSR's line byte, then
+/// reads it again every 21 CPU cycles until it changes. In CPU cycles (half
+/// colour clocks), from the first read to the read that sees the new line.
+fn poll_line(first: u64) -> u64 {
+    const P: u64 = 21;
+    let next = (first / (2 * LINE) + 1) * 2 * LINE;
+    first + (next - first).div_ceil(P) * P
+}
+
+/// The polling's other times, in CPU cycles from the last voice's write to the
+/// first wait's first read, and from one wait's end to the next one's first
+/// read; in colour clocks from the third wait's end to the DMA on; in CPU
+/// cycles from the DMA on to the last wait's first read, and in colour clocks
+/// from its end to the first loop's write. Fitted to the reference's writes:
+/// 74% of 2603 DMA ons come at the same colour clock, 23% one later.
+const POLL_FROM_WRITE: u64 = 168;
+const POLL_AGAIN: u64 = 52;
+const POLL_TO_DMA: u64 = 18;
+const POLL_FROM_DMA: u64 = 44;
+const POLL_TO_LOOP: u64 = 20;
+
+fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    let (ver, t) = tfmx_version(d)?;
+    let h = |o: usize| be16(d, t + o) as u32;
+    // InitPlayer: the parts' addresses from the counts in the header
+    let freqs = base + t as u32 + 0x20;
+    let envs = freqs + ((h(4) + 1) << 6);
+    let tracks = envs + ((h(6) + 1) << 6);
+    let track_size = h(0xc) as u16;
+    let positions = tracks + (h(8) + 1) * h(0xc);
+    let subsongs_at = positions + (h(0xa) + 1) * 12;
+    let sample_info = subsongs_at + (h(0x10) + 1) * 6;
+    let samples = sample_info + h(0x12) * 30;
+    let find = |pat: &[u8]| (0..t.saturating_sub(pat.len())).find(|&i| &d[i..i + pat.len()] == pat);
+    let periods = base + find(&[0x06, 0xb0, 0x06, 0x50, 0x05, 0xf4])? as u32;
+    let empty = base + find(&[1, 0, 0, 0, 0, 0, 0, 0xe1])? as u32;
+    let mut p = Tfmx {
+        ver,
+        periods,
+        empty,
+        freqs,
+        envs,
+        tracks,
+        track_size,
+        positions,
+        subsongs_at,
+        sample_info,
+        samples,
+        subsong_count: h(0x10) as u16,
+        sub: 1,
+        counter: 0,
+        speed: 0,
+        stopped: false,
+        led_done: false,
+        dma_acc: 0,
+        voices: Default::default(),
+        trace: TTrace::open(),
+    };
+    // the voices' fields InitSound leaves as they are, from the replayer's
+    // variables (a module saved from a game's memory has them set)
+    for (ch, v) in p.voices.iter_mut().enumerate() {
+        let a = empty + 0x24 + 0x52 * ch as u32;
+        let bus = &m.bus;
+        v.loop_addr = bus.r32(a + 0x10);
+        v.slide_start = bus.r32(a + 0x20);
+        v.slide_end = bus.r32(a + 0x24);
+        v.slide_pos = bus.r16(a + 0x28);
+        v.note = bus.r8(a + 0x42);
+        v.info = bus.r8(a + 0x43);
+        v.vib_flag = bus.r8(a + 0x51);
+    }
+    let mut hw = Hw { bus: &mut m.bus };
+    hw.wait(TFMX_INIT);
+    p.init(1, &mut hw);
+    Some(Box::new(p))
+}
+
+/// From the module's start to the replayer's first write, as in the reference.
+const TFMX_INIT: u64 = 58358;
+
+/// From InitPlayer's LED write to InitSound's first (measured).
+const TFMX_LED: u64 = 5409;
+
+impl Replayer for Tfmx {
+    fn format(&self) -> &'static str {
+        "Hippel TFMX"
+    }
+
+    fn title(&self) -> String {
+        String::new()
+    }
+
+    fn songend(&self) -> bool {
+        false
+    }
+
+    fn subsongs(&self) -> (u16, u16, u16) {
+        (1, self.subsong_count, self.sub)
+    }
+
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        self.init(n, hw);
+    }
+
+    fn tick(&mut self, hw: &mut Hw) {
+        self.trace.write(hw, "tick");
+        self.trace.at(hw, Tp::Start);
+        if self.stopped {
+            self.trace.at(hw, Tp::Stopped);
+            self.trace.write(hw, "dma");
+            hw.dmacon(0x000f);
+            for ch in 0..4 {
+                self.trace.at(hw, Tp::StopVol);
+                self.trace.write(hw, "vol");
+                hw.vol(ch, 0);
+            }
+            self.trace.write(hw, "end");
+            return;
+        }
+        self.counter = self.counter.wrapping_sub(1);
+        if self.counter == 0 {
+            self.counter = self.speed;
+            self.trace.at(hw, Tp::Rows);
+            for ch in 0..4 {
+                self.row(ch, hw);
+            }
+        }
+        self.dma_acc = 0;
+        for ch in 0..4 {
+            let (per, vol) = self.effects(ch, hw);
+            self.trace.at(hw, Tp::Write);
+            self.trace.write(hw, "per");
+            hw.per(ch, per);
+            self.trace.write(hw, "vol");
+            hw.vol(ch, vol);
+        }
+        if self.dma_acc == 0 {
+            self.trace.at(hw, Tp::NoDma);
+            self.trace.write(hw, "end");
+            return;
+        }
+        // the loops into registers, three line waits, the DMA on, one more
+        self.trace.at(hw, Tp::Loops);
+        let c = hw.bus.clock;
+        let t = poll_line(poll_line(poll_line(2 * c + POLL_FROM_WRITE) + POLL_AGAIN) + POLL_AGAIN);
+        hw.wait(t / 2 + POLL_TO_DMA - c);
+        self.trace.write(hw, "dma");
+        hw.dmacon(0x8000 | self.dma_acc);
+        let c = hw.bus.clock;
+        let t = poll_line(2 * c + POLL_FROM_DMA);
+        hw.wait(t / 2 + POLL_TO_LOOP - c);
+        self.trace.at(hw, Tp::LineOn);
+        for ch in 0..4 {
+            let v = self.voices[ch];
+            if ch > 0 {
+                self.trace.at(hw, Tp::OnLoc);
+            }
+            self.trace.write(hw, "adr");
+            hw.loc(ch, v.loop_addr);
+            self.trace.at(hw, Tp::OnLen);
+            self.trace.write(hw, "len");
+            hw.len(ch, v.loop_len);
+        }
+        self.trace.write(hw, "end");
+    }
+}
+
+impl Tfmx {
+    /// The module's first entry: InitPlayer once (the LED off), then with
+    /// subsong `n` the subsong's speed and InitSound, or with 0 the stop.
+    fn init(&mut self, n: u16, hw: &mut Hw) {
+        if !self.led_done {
+            self.led_done = true;
+            use m68k::AddressBus;
+            let v = hw.bus.read_byte(0xbfe001);
+            hw.bus.write_byte(0xbfe001, v | 2);
+            hw.wait(TFMX_LED);
+        }
+        if n == 0 {
+            self.stopped = true;
+            return;
+        }
+        self.sub = n;
+        // the subsong's start, end and speed: the replayer steps through its
+        // table of 6-byte entries by 4 bytes, so a subsong past the first reads
+        // the words of two entries
+        let e = self.subsongs_at.wrapping_add((n as u32 - 1) * 4);
+        let (start, end) = (hw.bus.r16(e) as u32, hw.bus.r16(e + 2) as u32);
+        self.speed = hw.bus.r16(e + 4);
+        self.trace.write(hw, "dma");
+        hw.dmacon(0x000f);
+        hw.wait(8);
+        hw.bus.write_word(0xdff09a, 0x0780);
+        hw.wait(377);
+        for ch in 0..4 {
+            let v = &mut self.voices[ch];
+            v.freq = self.empty;
+            v.env = self.empty;
+            v.env_counter = 1;
+            v.env_speed = 1;
+            v.sustain = 0;
+            v.env_pos = 0;
+            v.freq_wait = 0;
+            v.vib_speed = 0;
+            v.vib_depth = 0;
+            v.slide_on = false;
+            v.vib_delta = 0;
+            v.vib_delay = 0;
+            v.prev_info = 0;
+            v.sample = 0xff;
+            v.row = 0;
+            v.transpose = 0;
+            v.volume = 0;
+            v.freq_pos = 0;
+            v.porta = 0;
+            v.loop_len = 0;
+            v.dma = 1 << ch;
+            let col = 3 * ch as u32;
+            v.pos = self.positions + start * 12 + col;
+            v.pos_end = self.positions + (end + 1) * 12 + col;
+            v.pos_off = 12;
+            let p = v.pos;
+            // each voice at its own register, 1 word
+            let r = 0xdff0a0 + 16 * ch as u32;
+            hw.loc(ch, r);
+            hw.wait(6);
+            hw.len(ch, 1);
+            hw.wait(4);
+            hw.per(ch, 0);
+            hw.wait(4);
+            hw.vol(ch, 0);
+            let bus = &*hw.bus;
+            let (t, tt, et) = (bus.r8(p), bus.r8(p + 1), bus.r8(p + 2));
+            let v = &mut self.voices[ch];
+            v.track = self.tracks + t as u32 * self.track_size as u32;
+            v.track_transpose = tt;
+            v.env_transpose = et;
+            hw.wait(495 - 14);
+        }
+        self.counter = 1;
+        self.stopped = false;
+    }
+
+    fn dma_off(&mut self, ch: usize, hw: &mut Hw) {
+        let b = self.voices[ch].dma;
+        self.dma_acc |= b;
+        self.trace.write(hw, "dma");
+        hw.dmacon(b);
+    }
+
+    /// The next row of a voice: at the track's end (or a note of 1) the next
+    /// position, then a note with its envelope and frequency table.
+    fn row(&mut self, ch: usize, hw: &mut Hw) {
+        self.trace.at(hw, Tp::Row);
+        let size = self.track_size;
+        let v = self.voices[ch];
+        let c = hw.bus.r8(v.track + v.row as u32) & 0x7f;
+        if c == 1 || v.row == size {
+            self.trace.at(hw, Tp::RowNext);
+            let v = &mut self.voices[ch];
+            let mut p = v.pos + v.pos_off as u32;
+            if p == v.pos_end {
+                v.pos_off = 0;
+                p = v.pos;
+            }
+            let bus = &*hw.bus;
+            let (t, tt, et) = (bus.r8(p), bus.r8(p + 1), bus.r8(p + 2));
+            v.track_transpose = tt;
+            v.env_transpose = et;
+            if et == 0x80 {
+                self.stopped = true;
+                self.trace.at(hw, Tp::RowStop);
+            }
+            let v = &mut self.voices[ch];
+            v.row = 0;
+            v.track = self.tracks + t as u32 * size as u32;
+            v.pos_off = v.pos_off.wrapping_add(12);
+            self.trace.at(hw, Tp::RowTrack);
+        }
+        let v = self.voices[ch];
+        let a = v.track + v.row as u32;
+        let c = hw.bus.r8(a);
+        let n = c & 0x7f;
+        if n == 0 {
+            self.trace.at(hw, Tp::RowEmpty);
+        } else {
+            self.trace.at(hw, Tp::RowNote);
+            // the info byte of the row before (of the track's last row at its start)
+            let before = if v.row == 0 { a + 1 + size as u32 } else { a + 1 } - 2;
+            let prev = hw.bus.r8(before);
+            let info = hw.bus.r8(a + 1);
+            let v = &mut self.voices[ch];
+            v.porta = 0;
+            v.note = n;
+            v.prev_info = prev;
+            v.info = info;
+            if c & 0x80 == 0 {
+                self.trace.at(hw, Tp::RowEnv);
+                let e = self.envs + ((((info & 0x1f).wrapping_add(v.env_transpose)) as u32 & 0xffff) << 6);
+                let bus = &*hw.bus;
+                let (sp, f, vs, dp, dl) = (bus.r8(e), bus.r8(e + 1), bus.r8(e + 2), bus.r8(e + 3), bus.r8(e + 4));
+                let v = &mut self.voices[ch];
+                v.env_pos = 0;
+                v.env_counter = sp;
+                v.env_speed = sp;
+                v.vib_speed = vs;
+                v.vib_flag = 0x40;
+                v.vib_depth = dp;
+                v.vib_delta = dp as u16;
+                v.vib_delay = dl;
+                v.env = e + 5;
+                let f = if info & 0x40 != 0 {
+                    self.trace.at(hw, Tp::RowAlt);
+                    prev
+                } else {
+                    f
+                };
+                let v = &mut self.voices[ch];
+                v.freq = self.freqs + ((f as u32) << 6);
+                v.freq_pos = 0;
+                v.freq_wait = 0;
+                v.sustain = 0;
+            }
+        }
+        self.trace.at(hw, Tp::RowEnd);
+        let v = &mut self.voices[ch];
+        v.row = v.row.wrapping_add(2);
+    }
+
+    /// A voice's effects: the frequency table, the slide, the envelope; the
+    /// period and volume to write.
+    fn effects(&mut self, ch: usize, hw: &mut Hw) -> (u16, u16) {
+        self.trace.at(hw, Tp::Fx);
+        let Ver::A94 { wait_skips_slide } = self.ver;
+        let mut slide = true;
+        loop {
+            if self.voices[ch].freq_wait != 0 {
+                self.voices[ch].freq_wait -= 1;
+                self.trace.at(hw, Tp::FreqWait);
+                slide = !wait_skips_slide;
+                break;
+            }
+            if !self.freq_table(ch, hw) {
+                break;
+            }
+        }
+        if slide {
+            self.slide(ch, hw);
+        }
+        self.envelope(ch, hw);
+        let per = self.period(ch, hw);
+        (per, self.voices[ch].volume as u16)
+    }
+
+    /// A sample's info (30 bytes: the sample's offset, length in words, loop
+    /// start in bytes and loop length).
+    fn info(&self, n: u8) -> u32 {
+        self.sample_info + n as u32 * 30
+    }
+
+    /// E2/E4/E7: the sample's start and length, its loop kept.
+    fn sample(&mut self, ch: usize, hw: &mut Hw, n: u8, at: [Tp; 2]) {
+        let i = self.info(n);
+        let bus = &*hw.bus;
+        let s = bus.r32(i + 0x12).wrapping_add(self.samples);
+        let (len, ls, ll) = (bus.r16(i + 0x16), bus.r16(i + 0x1a), bus.r16(i + 0x1c));
+        self.trace.at(hw, at[0]);
+        self.trace.write(hw, "adr");
+        hw.loc(ch, s);
+        self.trace.at(hw, at[1]);
+        self.trace.write(hw, "len");
+        hw.len(ch, len);
+        let v = &mut self.voices[ch];
+        v.loop_addr = s.wrapping_add(ls as u32);
+        v.loop_len = ll;
+    }
+
+    /// Reads the frequency table to a transpose or a stop; true after E8.
+    fn freq_table(&mut self, ch: usize, hw: &mut Hw) -> bool {
+        loop {
+            self.trace.at(hw, Tp::FreqRead);
+            let v = self.voices[ch];
+            let a = v.freq.wrapping_add(v.freq_pos as u32);
+            let c = hw.bus.r8(a);
+            let b = hw.bus.r8(a + 1);
+            if c < 0xe0 {
+                self.trace.at(hw, Tp::FreqNote);
+                let v = &mut self.voices[ch];
+                v.transpose = c;
+                v.freq_pos = v.freq_pos.wrapping_add(1);
+                return false;
+            }
+            match c {
+                0xe0 => {
+                    self.trace.at(hw, Tp::FreqLoop);
+                    self.voices[ch].freq_pos = b as u16;
+                }
+                0xe2 => {
+                    self.voices[ch].sample = 0xff;
+                    self.trace.at(hw, Tp::E2Off);
+                    self.dma_off(ch, hw);
+                    self.sample(ch, hw, b, [Tp::E2Loc, Tp::E2Len]);
+                    self.trace.at(hw, Tp::E2End);
+                    let v = &mut self.voices[ch];
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                    v.slide_on = false;
+                }
+                0xe3 => {
+                    self.trace.at(hw, Tp::E3);
+                    let d = hw.bus.r8(a + 2);
+                    let v = &mut self.voices[ch];
+                    v.freq_pos = v.freq_pos.wrapping_add(3);
+                    v.vib_speed = b;
+                    v.vib_depth = d;
+                }
+                0xe4 => {
+                    self.sample(ch, hw, b, [Tp::E4Loc, Tp::E4Len]);
+                    self.trace.at(hw, Tp::E4End);
+                    let v = &mut self.voices[ch];
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                    v.slide_on = false;
+                }
+                0xe5 => {
+                    self.trace.at(hw, Tp::E5Off);
+                    self.dma_off(ch, hw);
+                    self.trace.at(hw, Tp::E5End);
+                    let i = self.info(b);
+                    let bus = &*hw.bus;
+                    let start = bus.r32(i + 0x12);
+                    let len = bus.r16(i + 0x16);
+                    let w = |k: u32| (bus.r8(a + k) as u16) << 8 | bus.r8(a + k + 1) as u16;
+                    let mut pos = w(2);
+                    if pos == 0xffff {
+                        pos = len;
+                    }
+                    let (sl, sd, ss) = (w(4), w(6), bus.r8(a + 8));
+                    let v = &mut self.voices[ch];
+                    v.slide_start = start;
+                    v.slide_end = start.wrapping_add(2 * len as u32);
+                    v.slide_pos = pos;
+                    v.slide_len = sl;
+                    v.slide_delta = sd;
+                    v.slide_counter = 0;
+                    v.slide_speed = ss;
+                    v.slide_done = false;
+                    v.slide_moved = false;
+                    v.slide_on = true;
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(9);
+                }
+                0xe6 => {
+                    self.trace.at(hw, Tp::E6);
+                    let bus = &*hw.bus;
+                    let w = |k: u32| (bus.r8(a + k) as u16) << 8 | bus.r8(a + k + 1) as u16;
+                    let (sl, sd, ss) = (w(1), w(3), bus.r8(a + 5));
+                    let v = &mut self.voices[ch];
+                    v.slide_len = sl;
+                    v.slide_delta = sd;
+                    v.slide_counter = 0;
+                    v.slide_speed = ss;
+                    v.slide_moved = false;
+                    v.slide_done = false;
+                    v.freq_pos = v.freq_pos.wrapping_add(6);
+                }
+                0xe7 => {
+                    if b == self.voices[ch].sample {
+                        self.trace.at(hw, Tp::E7Same);
+                    } else {
+                        self.voices[ch].sample = b;
+                        self.trace.at(hw, Tp::E7Off);
+                        self.dma_off(ch, hw);
+                        self.sample(ch, hw, b, [Tp::E7Loc, Tp::E7Len]);
+                        self.trace.at(hw, Tp::E7End);
+                    }
+                    let v = &mut self.voices[ch];
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                    v.slide_on = false;
+                }
+                0xe8 => {
+                    self.trace.at(hw, Tp::E8);
+                    let v = &mut self.voices[ch];
+                    v.freq_wait = b;
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                    return true;
+                }
+                0xe9 => {
+                    self.voices[ch].sample = 0xff;
+                    self.trace.at(hw, Tp::E9Off);
+                    self.dma_off(ch, hw);
+                    self.sub_sample(ch, hw, a);
+                    self.trace.at(hw, Tp::E9End);
+                    let v = &mut self.voices[ch];
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(3);
+                    v.slide_on = false;
+                }
+                // E1 stops the table; past E9 the original jumps through data
+                _ => {
+                    self.trace.at(hw, Tp::FreqStop);
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// E9: sub-sample `n` of an "SSMP" sample, with a loop of one word (its
+    /// first byte doubled).
+    fn sub_sample(&mut self, ch: usize, hw: &mut Hw, a: u32) {
+        let i = self.info(hw.bus.r8(a + 1));
+        let bus = &mut *hw.bus;
+        let s = bus.r32(i + 0x12).wrapping_add(self.samples);
+        let count = bus.r16(s + 4) as u32;
+        let skip = (bus.r16(s + 6) << 2) as i16 as i32 as u32;
+        let headers = s + 8;
+        let data = headers.wrapping_add(count * 0x18).wrapping_add(skip);
+        let h = headers.wrapping_add(bus.r8(a + 2) as u32 * 0x18);
+        let start = bus.r32(h) & !1;
+        let end = bus.r32(h + 4) & !1;
+        let len = (end.wrapping_sub(start) >> 1) as u16;
+        let at = start.wrapping_add(data);
+        let b = bus.r8(at);
+        bus.w8(at.wrapping_add(1), b);
+        self.trace.at(hw, Tp::E9Loc);
+        self.trace.write(hw, "adr");
+        hw.loc(ch, at);
+        self.trace.at(hw, Tp::E9Len);
+        self.trace.write(hw, "len");
+        hw.len(ch, len);
+        let v = &mut self.voices[ch];
+        v.loop_addr = at;
+        v.loop_len = 1;
+    }
+
+    /// The sample slide (E5), written at once.
+    fn slide(&mut self, ch: usize, hw: &mut Hw) {
+        let v = &mut self.voices[ch];
+        if !v.slide_on || v.slide_done {
+            self.trace.at(hw, Tp::SlideOff);
+            return;
+        }
+        v.slide_counter = v.slide_counter.wrapping_sub(1);
+        if (v.slide_counter as i8) >= 0 {
+            self.trace.at(hw, Tp::SlideWait);
+            return;
+        }
+        v.slide_counter = v.slide_speed;
+        let mut pos = v.slide_pos as u32;
+        let delta = v.slide_delta as i16 as i32 as u32;
+        let len = v.slide_len;
+        let at = if !v.slide_moved {
+            v.slide_moved = true;
+            Tp::SlideFirst
+        } else {
+            pos = pos.wrapping_add(delta);
+            if (pos as i32) < 0 {
+                v.slide_done = true;
+                pos = pos.wrapping_sub(delta);
+                Tp::SlideDone
+            } else {
+                let end = v.slide_start.wrapping_add(2 * pos).wrapping_add(2 * len as u32);
+                if end as i32 > v.slide_end as i32 {
+                    v.slide_done = true;
+                    pos = pos.wrapping_sub(delta);
+                    Tp::SlideDone
+                } else {
+                    Tp::SlideStep
+                }
+            }
+        };
+        v.slide_pos = pos as u16;
+        let a = v.slide_start.wrapping_add(self.samples).wrapping_add(2 * pos);
+        v.loop_len = len;
+        v.loop_addr = a;
+        self.trace.at(hw, at);
+        self.trace.at(hw, Tp::SlideLoc);
+        self.trace.write(hw, "adr");
+        hw.loc(ch, a);
+        self.trace.at(hw, Tp::SlideLen);
+        self.trace.write(hw, "len");
+        hw.len(ch, len);
+    }
+
+    /// The volume envelope.
+    fn envelope(&mut self, ch: usize, hw: &mut Hw) {
+        loop {
+            let v = &mut self.voices[ch];
+            if v.sustain != 0 {
+                v.sustain -= 1;
+                self.trace.at(hw, Tp::EnvSustain);
+                return;
+            }
+            v.env_counter = v.env_counter.wrapping_sub(1);
+            if v.env_counter != 0 {
+                self.trace.at(hw, Tp::EnvWait);
+                return;
+            }
+            v.env_counter = v.env_speed;
+            loop {
+                self.trace.at(hw, Tp::EnvRead);
+                let v = self.voices[ch];
+                let a = v.env.wrapping_add(v.env_pos as u32);
+                let c = hw.bus.r8(a);
+                match c {
+                    0xe0 => {
+                        self.trace.at(hw, Tp::EnvLoop);
+                        self.voices[ch].env_pos = (hw.bus.r8(a + 1) as u16).wrapping_sub(5);
+                    }
+                    0xe8 => {
+                        self.trace.at(hw, Tp::EnvHold);
+                        let s = hw.bus.r8(a + 1);
+                        let v = &mut self.voices[ch];
+                        v.sustain = s;
+                        v.env_pos = v.env_pos.wrapping_add(2);
+                        break;
+                    }
+                    0xe1..=0xff => {
+                        self.trace.at(hw, Tp::EnvStop);
+                        return;
+                    }
+                    _ => {
+                        self.trace.at(hw, Tp::EnvVol);
+                        let v = &mut self.voices[ch];
+                        v.volume = c;
+                        v.env_pos = v.env_pos.wrapping_add(1);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The period: the note from the replayer's table, the vibrato (every
+    /// other tick when its speed has bit 7 set) and the portamento.
+    fn period(&mut self, ch: usize, hw: &mut Hw) -> u16 {
+        self.trace.at(hw, Tp::Period);
+        let v = self.voices[ch];
+        let mut n = v.transpose;
+        if (n as i8) >= 0 {
+            n = n.wrapping_add(v.note).wrapping_add(v.track_transpose);
+        }
+        let mut per = hw.bus.r16(self.periods + 2 * (n & 0x7f) as u32);
+        let v = &mut self.voices[ch];
+        if v.vib_delay != 0 {
+            v.vib_delay -= 1;
+            self.trace.at(hw, Tp::VibDelay);
+        } else {
+            let mut flag = v.vib_flag;
+            let mut speed = v.vib_speed as u16;
+            if speed & 0x80 != 0 {
+                speed &= 0x7f;
+                flag ^= 1;
+            }
+            let depth = v.vib_depth as u16;
+            let mut d1 = v.vib_delta;
+            let at = if flag & 1 != 0 {
+                Tp::VibSkip
+            } else if flag & 0x20 == 0 {
+                d1 = d1.wrapping_sub(speed);
+                if (d1 as i16) < 0 {
+                    flag |= 0x20;
+                    d1 = 0;
+                    Tp::VibDownTurn
+                } else {
+                    Tp::VibDown
+                }
+            } else {
+                d1 = d1.wrapping_add(speed);
+                if (d1 as i16) > (2 * depth) as i16 {
+                    flag &= !0x20;
+                    d1 = 2 * depth;
+                    Tp::VibUpTurn
+                } else {
+                    Tp::VibUp
+                }
+            };
+            v.vib_delta = d1;
+            v.vib_flag = flag;
+            per = per.wrapping_add(d1.wrapping_sub(depth));
+            self.trace.at(hw, at);
+        }
+        let v = &mut self.voices[ch];
+        if v.info & 0x20 != 0 {
+            let b = v.prev_info;
+            if (b as i8) >= 0 {
+                v.porta = v.porta.wrapping_add((b as u32) << 11);
+                per = per.wrapping_sub((v.porta >> 16) as u16);
+                self.trace.at(hw, Tp::PortaUp);
+            } else {
+                v.porta = v.porta.wrapping_add((b.wrapping_neg() as u32) << 11);
+                per = per.wrapping_add((v.porta >> 16) as u16);
+                self.trace.at(hw, Tp::PortaDown);
+            }
+        } else {
+            self.trace.at(hw, Tp::Porta);
+        }
+        per
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::engine::Engine;
@@ -1207,7 +2256,7 @@ mod tests {
         e.m.bus.write_log = Some(Vec::new());
         e.play_data(Path::new("test.hipc"), module()).unwrap();
         let p = e.playing.as_ref().unwrap();
-        assert_eq!(p.format, "Hippel-COSO");
+        assert_eq!(p.format, "Hippel COSO");
         assert_eq!((p.sub_min, p.sub_max), (1, 1));
         let base = e.m.deli.list.first().unwrap().0;
         let mut out = vec![0f32; 2 * 9600];
@@ -1224,6 +2273,76 @@ mod tests {
         assert!(reg(0xDFF0A4).contains(&32));
         assert!(reg(0xDFF0A6).contains(&super::PERIODS[24]));
         assert!(reg(0xDFF0A8).contains(&64));
+        assert!(out.iter().any(|&s| s != 0.0), "no sound");
+    }
+
+    /// A TFMX module with the song data at $A94: in place of the replayer's
+    /// code a marker, the period table and the empty table; then one
+    /// frequency table, envelope, track (one row) and position, one subsong
+    /// and one sample.
+    const T: usize = 0xa94;
+    const TFREQ: usize = T + 0x20;
+    const TENV: usize = TFREQ + 64;
+    const TTRACK: usize = TENV + 64;
+    const TPOS: usize = TTRACK + 2;
+    const TSUBS: usize = TPOS + 12;
+    const TINFO: usize = TSUBS + 12;
+    const TSAMPLES: usize = TINFO + 30;
+
+    fn tfmx_module() -> Vec<u8> {
+        let mut d = vec![0x60, 0x00];
+        d.extend(b"SYNTHTST");
+        d.resize(0x100, 0);
+        d.extend(super::PERIODS.iter().flat_map(|p| p.to_be_bytes()));
+        d.resize(0x406, 0);
+        d.extend([0x60, 0x00, 0x02, 0xb2]); // a frequency table wait slides
+        d.resize(0x866, 0);
+        d.extend([1, 0, 0, 0, 0, 0, 0, 0xe1]); // the empty table, then the voices
+        d.resize(T, 0);
+        d.extend(b"TFMX");
+        // one frequency table, envelope, track, position; rows of 2 bytes; one
+        // subsong; one sample
+        d.extend([0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 1]);
+        d.resize(TFREQ, 0);
+        d.extend([0xe2, 0, 0, 0xe1]); // play sample 0, no transpose, stop
+        d.resize(TENV, 0);
+        d.extend([1, 0, 0, 0, 0, 0x40, 0xe1]); // speed 1, frequency table 0; volume 64
+        d.resize(TTRACK, 0);
+        d.extend([24, 0]); // note 24 with envelope 0
+        d.extend([0; 12]); // every voice on track 0, no transposes
+        d.extend([0, 0, 0, 0, 0, 3]); // positions 0 to 0, speed 3
+        d.resize(TINFO, 0);
+        d.resize(TINFO + 0x16, 0); // the sample at the samples' start
+        d.extend([0, 32, 0, 0, 0, 0, 0, 32]); // 32 words, looped whole
+        d.resize(TSAMPLES, 0);
+        d.extend((0..64).map(|i| if i < 32 { 0x40 } else { 0xc0 }));
+        d
+    }
+
+    #[test]
+    fn plays_a_tfmx_note_on_paula() {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new("test.hip"), tfmx_module()).unwrap();
+        let p = e.playing.as_ref().unwrap();
+        assert_eq!(p.format, "Hippel TFMX");
+        assert_eq!((p.sub_min, p.sub_max), (1, 1));
+        let base = e.m.deli.list.first().unwrap().0;
+        let mut out = vec![0f32; 2 * 9600];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        // InitSound: DMA off, every voice at its own register, 1 word
+        assert_eq!(reg(0xDFF096)[0], 0x000F);
+        assert_eq!(reg(0xDFF0A2)[0], 0xF0A0);
+        // the note: the sample's start and length, the note's period, the
+        // envelope's volume, the DMA on, the loop
+        assert!(reg(0xDFF0A2).contains(&((base + TSAMPLES as u32) as u16)));
+        assert!(reg(0xDFF0A4).contains(&32));
+        assert!(reg(0xDFF0A6).contains(&super::PERIODS[24]));
+        assert!(reg(0xDFF0A8).contains(&64));
+        assert!(reg(0xDFF096).contains(&0x800F));
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
     }
 }

@@ -83,6 +83,7 @@ pub const REPLAYERS: &[Open] = &[
     iffsmus::OPEN,
     bendaglish::OPEN,
     hippel::OPEN_COSO,
+    hippel::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

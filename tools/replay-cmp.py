@@ -66,7 +66,10 @@ def load(path):
             continue
         if 0xDFF0A0 <= a < 0xDFF0E0 and (a - 0xDFF0A0) % 16 == 6:
             per[(a - 0xDFF0A0) // 16] = v
-        name = 'DMACON' if a == 0xDFF096 else f'{["LEN", "PER", "VOL", "DAT"][((a - 0xDFF0A0) % 16 - 4) // 2]}{(a - 0xDFF0A0) // 16}'
+        if a < 0xDFF0A0:  # DMACON, INTENA, INTREQ, ADKCON
+            name = {0xDFF096: 'DMACON', 0xDFF09A: 'INTENA', 0xDFF09C: 'INTREQ', 0xDFF09E: 'ADKCON'}.get(a, f'{a:06x}')
+        else:
+            name = f'{["LEN", "PER", "VOL", "DAT"][((a - 0xDFF0A0) % 16 - 4) // 2]}{(a - 0xDFF0A0) // 16}'
         ticks[-1].append((name, v))
     return ticks, gaps
 

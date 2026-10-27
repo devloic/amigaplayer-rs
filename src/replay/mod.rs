@@ -18,6 +18,7 @@ pub mod sidmon2;
 pub mod soundfx;
 pub mod sonicarranger;
 pub mod soundmon;
+pub mod tfmx;
 
 use crate::bus::Bus;
 use crate::machine::Machine;
@@ -67,6 +68,8 @@ pub const REPLAYERS: &[Open] = &[
     deltamusic1::OPEN,
     sonicarranger::OPEN,
     sidmon1::OPEN,
+    tfmx::OPEN_PRO,
+    tfmx::OPEN_15,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

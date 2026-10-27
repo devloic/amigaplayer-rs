@@ -7,6 +7,7 @@
 //! lives in guest memory: the module where it was loaded, and the player's own
 //! waveforms in memory allocated for them.
 
+pub mod actionamics;
 pub mod bendaglish;
 pub mod davidwhittaker;
 pub mod deltamusic1;
@@ -86,6 +87,7 @@ pub const REPLAYERS: &[Open] = &[
     hippel::OPEN_COSO,
     hippel::OPEN,
     davidwhittaker::OPEN,
+    actionamics::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

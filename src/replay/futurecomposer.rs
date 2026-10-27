@@ -40,6 +40,7 @@
 use super::{be32, Hw, Open, Replayer};
 use crate::bus::Bus;
 use crate::machine::Machine;
+use crate::paula::LINE;
 
 pub const OPEN13: Open = Open { name: "FutureComposer1.3", detect: detect13, new: new13 };
 pub const OPEN14: Open = Open { name: "FutureComposer1.4", detect: detect14, new: new14 };
@@ -63,6 +64,83 @@ const FC13_MEM: u32 = FC13_TABLE + 256 * 10;
 /// A sequence that loops without a step forward would hang the 68k player; the
 /// port gives up on it after this many commands in one tick.
 const MAX_COMMANDS: u32 = 256;
+
+/// The time the original's code takes between its writes, in colour clocks
+/// (measured on its write logs). Paula stops a playing voice only at the end of
+/// its word and restarts it only once stopped, so the time between a voice's DMA
+/// off and the DMA on decides whether its note is heard.
+struct Timing {
+    /// A voice's row: without a note; when its pattern ends; before and after the
+    /// DMA off of a note.
+    nn_empty: u64,
+    nn_pos: u64,
+    nn_pre: u64,
+    nn_post: u64,
+    /// A voice's effects: before its sequences, and after them up to the period.
+    fx_pre: u64,
+    fx_body: u64,
+    /// E2: DMA off to the address, address to length, length to the rest; E4's
+    /// time before its address.
+    dma_loc: u64,
+    loc_len: u64,
+    e2_tail: u64,
+    e4_pre: u64,
+    /// 1.3: from the effects to the period writes.
+    writes: u64,
+    /// Period to volume, for each voice; volume to the next voice, and the last
+    /// volume to the DMA on.
+    per_vol: [u64; 4],
+    vol_next: u64,
+    vol_dma: u64,
+    /// The DMA wait to the first loop, and more for each voice before it without
+    /// one; a loop's two writes, and the time after each voice's.
+    loops: u64,
+    loop_skip: u64,
+    loop_mid: u64,
+    loop_next: [u64; 4],
+}
+
+const FC14_TIMING: Timing = Timing {
+    nn_empty: 102,
+    nn_pos: 150,
+    nn_pre: 100,
+    nn_post: 302,
+    fx_pre: 54,
+    fx_body: 330,
+    dma_loc: 128,
+    loc_len: 94,
+    e2_tail: 150,
+    e4_pre: 40,
+    writes: 0,
+    per_vol: [179, 191, 202, 202],
+    vol_next: 156,
+    vol_dma: 218,
+    loops: 153,
+    loop_skip: 12,
+    loop_mid: 94,
+    loop_next: [150; 4],
+};
+
+const FC13_TIMING: Timing = Timing {
+    nn_empty: 102,
+    nn_pos: 150,
+    nn_pre: 100,
+    nn_post: 302,
+    fx_pre: 54,
+    fx_body: 318,
+    dma_loc: 175,
+    loc_len: 95,
+    e2_tail: 182,
+    e4_pre: 40,
+    writes: 129,
+    per_vol: [175, 187, 198, 198],
+    vol_next: 135,
+    vol_dma: 196,
+    loops: 162,
+    loop_skip: 20,
+    loop_mid: 95,
+    loop_next: [152; 4],
+};
 
 /// One voice: the fields of the original's voice structure (offset in the comment).
 #[derive(Default)]
@@ -251,6 +329,7 @@ impl Replayer for FutureComposer {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        let t = self.timing();
         self.speed_counter = self.speed_counter.wrapping_sub(1);
         if self.speed_counter == 0 {
             self.speed_counter = self.speed;
@@ -266,16 +345,26 @@ impl Replayer for FutureComposer {
             for i in 0..4 {
                 let (per, vol) = self.effect(i, hw);
                 hw.per(i, per);
+                hw.wait(t.per_vol[i]);
                 hw.vol(i, volume(vol));
+                hw.wait(if i < 3 { t.vol_next } else { t.vol_dma });
             }
         } else {
             let pv: Vec<(u16, u8)> = (0..4).map(|i| self.effect(i, hw)).collect();
+            hw.wait(t.writes);
             for (i, &(per, vol)) in pv.iter().enumerate() {
                 hw.per(i, per);
+                hw.wait(t.per_vol[i]);
                 hw.vol(i, volume(vol));
+                hw.wait(if i < 3 { t.vol_next } else { t.vol_dma });
             }
         }
         hw.dmacon(0x8000 | self.dma);
+        // the host's ENPP_DMAMask waits for the DMA as dtg_WaitAudioDMA does: to
+        // 10 lines past the current one
+        let now = hw.bus.clock;
+        hw.wait((now / LINE + 10) * LINE - now + t.loops);
+        let mut skipped = 0;
 
         // the loop of a sample started in the last tick
         for i in 0..4 {
@@ -288,20 +377,26 @@ impl Replayer for FutureComposer {
                 continue;
             }
             v.loop_wait = 0;
+            hw.wait(t.loop_skip * (i - skipped) as u64);
+            skipped = i + 1;
             if self.v14 {
                 hw.loc(i, add_w(v.sample, v.loop_start));
+                hw.wait(t.loop_mid);
                 hw.len(i, v.loop_len);
             } else {
                 // 1.3 writes the first voice's length first
                 let a = v.sample.wrapping_add(v.loop_start as u32);
                 if i == 0 {
                     hw.len(i, v.loop_len);
+                    hw.wait(t.loop_mid);
                     hw.loc(i, a);
                 } else {
                     hw.loc(i, a);
+                    hw.wait(t.loop_mid);
                     hw.len(i, v.loop_len);
                 }
             }
+            hw.wait(t.loop_next[i]);
         }
     }
 }
@@ -310,10 +405,16 @@ impl FutureComposer {
     /// The next row of voice `i`. `d1` is the low word of the 68k's d1, which 1.4
     /// tests for the portamento; returns what the voice leaves in it.
     fn new_note(&mut self, i: usize, mut d1: u16, hw: &mut Hw) -> u16 {
+        let t = self.timing();
+        let v = &self.voices[i];
+        let mut row = add_w(v.pattern, v.pattern_pos);
+        let next_pos = (self.v14 && hw.bus.r8(row) == 0x49) || v.pattern_pos == 0x40;
+        if next_pos {
+            hw.wait(t.nn_pos);
+        }
         let b: &Bus = hw.bus;
         let v = &mut self.voices[i];
-        let mut row = add_w(v.pattern, v.pattern_pos);
-        if (self.v14 && b.r8(row) == 0x49) || v.pattern_pos == 0x40 {
+        if next_pos {
             v.pattern_pos = 0;
             let mut pos = add_w(v.seq, v.seq_pos);
             if pos == v.seq_end {
@@ -362,7 +463,9 @@ impl FutureComposer {
             v.note = note;
             let bit = 1 << i;
             self.dma |= bit;
+            hw.wait(t.nn_pre);
             hw.dmacon(bit);
+            hw.wait(t.nn_post);
             let b: &Bus = hw.bus;
             let inst = (info & 0x3f).wrapping_add(v.sound_transpose) as u16;
             let vs = self.vol_seqs.wrapping_add((inst << 6) as u32);
@@ -381,9 +484,15 @@ impl FutureComposer {
             v.frq_pos = 0;
             v.vol_sustain = 0;
             v.frq_sustain = 0;
+        } else {
+            hw.wait(t.nn_empty);
         }
         v.pattern_pos = v.pattern_pos.wrapping_add(2);
         d1
+    }
+
+    fn timing(&self) -> &'static Timing {
+        if self.v14 { &FC14_TIMING } else { &FC13_TIMING }
     }
 
     /// A sample table entry: (address, length, loop start, loop length).
@@ -400,8 +509,11 @@ impl FutureComposer {
 
     /// Voice `i`'s frequency and volume sequences. Returns its period and volume.
     fn effect(&mut self, i: usize, hw: &mut Hw) -> (u16, u8) {
+        let t = self.timing();
+        hw.wait(t.fx_pre);
         self.frequency_sequence(i, hw);
         self.volume_sequence(i, hw.bus);
+        hw.wait(t.fx_body);
         let b: &Bus = hw.bus;
         let v = &mut self.voices[i];
 
@@ -505,6 +617,7 @@ impl FutureComposer {
                     0xe2 => {
                         self.dma |= bit;
                         hw.dmacon(bit);
+                        hw.wait(self.timing().dma_loc);
                         self.play_sample(i, arg1, hw);
                         let v = &mut self.voices[i];
                         v.vol_pos = 0;
@@ -513,6 +626,7 @@ impl FutureComposer {
                     }
                     // set loop
                     0xe4 => {
+                        hw.wait(self.timing().e4_pre);
                         self.play_sample(i, arg1, hw);
                         self.voices[i].frq_pos = self.voices[i].frq_pos.wrapping_add(2);
                     }
@@ -520,6 +634,8 @@ impl FutureComposer {
                     0xe9 if self.v14 => {
                         self.dma |= bit;
                         hw.dmacon(bit);
+                        let t = self.timing();
+                        hw.wait(t.dma_loc);
                         let (s, ..) = self.sample(hw.bus, arg1);
                         if hw.bus.r32(s) == u32::from_be_bytes(*b"SSMP") {
                             let e = s + 4 + 16 * arg2 as u32;
@@ -527,9 +643,12 @@ impl FutureComposer {
                             let addr = (s + 4 + 0x140).wrapping_add(b.r32(e));
                             let (len, start, loop_len) = (b.r16(e + 4), b.r16(e + 6), b.r16(e + 8));
                             hw.loc(i, addr);
+                            hw.wait(t.loc_len);
                             hw.len(i, len);
+                            hw.wait(t.loc_len);
                             // the original writes the loop start as the period here
                             hw.per(i, start);
+                            hw.wait(t.e2_tail);
                             let v = &mut self.voices[i];
                             v.sample = addr;
                             v.loop_start = start;
@@ -578,8 +697,11 @@ impl FutureComposer {
     /// `E2`/`E4`: sample `n` from its start; its loop follows in the next tick.
     fn play_sample(&mut self, i: usize, n: u8, hw: &mut Hw) {
         let (addr, len, start, loop_len) = self.sample(hw.bus, n);
+        let t = self.timing();
         hw.loc(i, addr);
+        hw.wait(t.loc_len);
         hw.len(i, len);
+        hw.wait(t.e2_tail);
         let v = &mut self.voices[i];
         v.sample = addr;
         v.loop_start = start;

@@ -1036,6 +1036,11 @@ impl Engine {
             if raised & bit == 0 || self.m.bus.paula.intena & bit == 0 {
                 continue;
             }
+            if let Some(Playing { backend: Backend::Replay(r), .. }) = &mut self.playing {
+                if r.audio_irq(&mut crate::replay::Hw { bus: &mut self.m.bus }) {
+                    continue;
+                }
+            }
             let is = self.m.os.int_vectors[crate::os::INTB_AUD0 + ch];
             if is != 0 {
                 let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));

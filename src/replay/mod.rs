@@ -7,6 +7,7 @@
 //! lives in guest memory: the module where it was loaded, and the player's own
 //! waveforms in memory allocated for them.
 
+pub mod bendaglish;
 pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod fred;
@@ -45,6 +46,13 @@ pub trait Replayer: Send {
     /// Restarts at subsong `n` (within `subsongs`), as the original player's
     /// InitSound does; all DMA is already off.
     fn set_subsong(&mut self, _n: u16, _hw: &mut Hw) {}
+    /// An audio interrupt, for a player whose original has a handler: called as
+    /// the 68k players' handlers are, when Paula raises an enabled one. Returns
+    /// whether it took it; if not, the handler in the interrupt vector runs (a
+    /// port may install a 68k one, as TFMX's does).
+    fn audio_irq(&mut self, _hw: &mut Hw) -> bool {
+        false
+    }
 }
 
 /// One open replayer: how to recognise its modules and start one.
@@ -72,6 +80,7 @@ pub const REPLAYERS: &[Open] = &[
     tfmx::OPEN_PRO,
     tfmx::OPEN_15,
     iffsmus::OPEN,
+    bendaglish::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -20,6 +20,7 @@ pub mod jamcracker;
 pub mod pumatracker;
 pub mod sidmon1;
 pub mod sidmon2;
+pub mod soundcontrol;
 pub mod soundfx;
 pub mod sonicarranger;
 pub mod soundmon;
@@ -88,6 +89,7 @@ pub const REPLAYERS: &[Open] = &[
     hippel::OPEN,
     davidwhittaker::OPEN,
     actionamics::OPEN,
+    soundcontrol::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

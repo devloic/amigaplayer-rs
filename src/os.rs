@@ -58,6 +58,8 @@ pub struct OsState {
     current_dir: u32,
     io_err: u32,
     pub progdir: PathBuf,
+    /// The current module's directory, where the `Instruments:` volume is.
+    pub module_dir: PathBuf,
     logged: HashSet<(usize, i32)>,
     pub console: String,
 }
@@ -1408,6 +1410,16 @@ impl OsState {
             return PathBuf::from(name);
         }
         if let Some((vol, rest)) = name.split_once(':') {
+            if vol.eq_ignore_ascii_case("Instruments") {
+                // as UADE maps it: the module's instruments folder (IFF-SMUS's
+                // instruments, Scott Johnston's samples), its names in any case as
+                // on the Amiga's file systems (songs name "BigBow" for BIGBOW.instr)
+                let mut d = any_case(&self.module_dir, "Instruments");
+                for part in rest.split('/').filter(|p| !p.is_empty()) {
+                    d = any_case(&d, part);
+                }
+                return d;
+            }
             // unknown Amiga volume: try the remainder relative to PROGDIR
             log::debug!("mapping volume {vol}: of {name} to PROGDIR");
             return self.progdir.join(rest);
@@ -1417,6 +1429,21 @@ impl OsState {
             None => PathBuf::from(name),
         }
     }
+}
+
+/// `dir/name`, or the entry of `dir` that is `name` in another case.
+fn any_case(dir: &Path, name: &str) -> PathBuf {
+    let p = dir.join(name);
+    if p.exists() {
+        return p;
+    }
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name))
+        .map(|e| e.path())
+        .unwrap_or(p)
 }
 
 fn bptr_alloc(m: &mut Machine, size: u32) -> u32 {

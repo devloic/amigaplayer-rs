@@ -11,6 +11,7 @@ pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod fred;
 pub mod futurecomposer;
+pub mod iffsmus;
 pub mod jamcracker;
 pub mod pumatracker;
 pub mod sidmon1;
@@ -70,6 +71,7 @@ pub const REPLAYERS: &[Open] = &[
     sidmon1::OPEN,
     tfmx::OPEN_PRO,
     tfmx::OPEN_15,
+    iffsmus::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

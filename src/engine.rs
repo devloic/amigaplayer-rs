@@ -503,6 +503,7 @@ impl Engine {
         self.m.bus.write_cstr(db, &dir_s);
         self.m.bus.write_cstr(fb, &file_s);
         self.m.bus.write_cstr(pb, "");
+        self.m.os.module_dir = dir.clone();
         self.m.deli.module_dir = dir;
         for g in [self.m.deli.globals, self.m.deli.eagle.globals] {
             if g != 0 {
@@ -649,7 +650,11 @@ impl Engine {
             eagle::prepare(&mut self.m, pl.tag_list, size);
         }
         if let Some(f) = pl.tag(tag::EXT_LOAD) {
-            self.m.bus.write_cstr(self.m.deli.path_buf, "");
+            // the module's path, as UADE's score leaves it (copy_module_name):
+            // IFF-SMUS opens the score through it; players that build a path
+            // clear it first, as CopyDir appends
+            let full = self.m.bus.read_cstr(self.m.deli.dir_buf) + &self.m.bus.read_cstr(self.m.deli.file_buf);
+            self.m.bus.write_cstr(self.m.deli.path_buf, &full);
             let r = deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
             if r[0] != 0 {
                 bail!("{}: could not load additional files", self.players[idx].name);

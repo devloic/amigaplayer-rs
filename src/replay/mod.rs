@@ -26,6 +26,13 @@ pub trait Replayer: Send {
         DT_TICK
     }
     fn songend(&self) -> bool;
+    /// The first, last and current subsong, in DeliTracker's numbering.
+    fn subsongs(&self) -> (u16, u16, u16) {
+        (0, 0, 0)
+    }
+    /// Restarts at subsong `n` (within `subsongs`), as the original player's
+    /// InitSound does; all DMA is already off.
+    fn set_subsong(&mut self, _n: u16, _hw: &mut Hw) {}
 }
 
 /// One open replayer: how to recognise its modules and start one.

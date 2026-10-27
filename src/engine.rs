@@ -617,14 +617,15 @@ impl Engine {
         self.intena_seen = 0;
         (self.next_timer, self.pt_dma_at) = (None, None);
         let title = r.title();
+        let (sub_min, sub_max, sub) = r.subsongs();
         self.playing = Some(Playing {
             module_name: if title.is_empty() { file_name(path) } else { title },
             format: r.format().to_string(),
             backend: Backend::Replay(r),
             author: String::new(),
-            sub_min: 0,
-            sub_max: 0,
-            sub: 0,
+            sub_min,
+            sub_max,
+            sub,
             frames: 0,
             custom_player: false,
         });
@@ -804,8 +805,20 @@ impl Engine {
     pub fn change_subsong(&mut self, delta: i32) -> Result<()> {
         let Some(p) = &self.playing else { return Ok(()) };
         let Backend::Deli(idx) = p.backend else {
-            if let Some(Playing { backend: Backend::Native(pt), .. }) = &mut self.playing {
-                pt.jump(delta);
+            match &mut self.playing {
+                Some(Playing { backend: Backend::Native(pt), .. }) => pt.jump(delta),
+                Some(Playing { backend: Backend::Replay(r), sub, frames, .. }) => {
+                    let (lo, hi, cur) = r.subsongs();
+                    let n = cur as i32 + delta;
+                    if n < lo as i32 || n > hi as i32 {
+                        return Ok(());
+                    }
+                    self.m.bus.paula.write_dmacon(0x000F);
+                    r.set_subsong(n as u16, &mut crate::replay::Hw { bus: &mut self.m.bus });
+                    (*sub, *frames) = (n as u16, 0);
+                    self.song_starts();
+                }
+                _ => {}
             }
             return Ok(());
         };

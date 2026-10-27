@@ -11,6 +11,7 @@ struct Args {
     genies: Option<PathBuf>,
     use_genies: Vec<String>,
     only_player: Option<String>,
+    open_replayers: bool,
     wav: Option<PathBuf>,
     seconds: f64,
     subsong: i32,
@@ -19,7 +20,7 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: deliplayer [--players DIR] [--eagleplayers DIR] [--player NAME]\n\
+        "usage: deliplayer [--players DIR] [--eagleplayers DIR] [--player NAME] [--open-replayers]\n\
          \x20                 [--genies DIR] [--genie NAME]... [--noteplayer NAME]\n\
          \x20                 [--wav OUT.wav [--seconds N] [--subsong N]] [FILES/DIRS...]\n\
          \n\
@@ -32,19 +33,22 @@ fn usage() -> ! {
          ~/.config/deliplayer/DeliGenies, ./DeliGenies); --genie NAME runs one, and a\n\
          NotePlayer genie (--noteplayer NAME) plays the notes of _note players\n\
          (default: 4Voices-NotePlayer when installed; --noteplayer builtin has the\n\
-         built-in renderer play them)."
+         built-in renderer play them). --open-replayers plays the formats the\n\
+         open replayers (Rust ports of NostalgicPlayer's players) know with them\n\
+         instead of the 68k players."
     );
     std::process::exit(2)
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { players: None, eagleplayers: None, genies: None, use_genies: Vec::new(), only_player: None, wav: None, seconds: 60.0, subsong: 0, files: Vec::new() };
+    let mut a = Args { players: None, eagleplayers: None, genies: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, files: Vec::new() };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
             "--players" => a.players = it.next().map(PathBuf::from),
             "--eagleplayers" => a.eagleplayers = it.next().map(PathBuf::from),
             "--player" => a.only_player = it.next(),
+            "--open-replayers" => a.open_replayers = true,
             "--genies" => a.genies = it.next().map(PathBuf::from),
             "--genie" | "--noteplayer" => a.use_genies.push(it.next().unwrap_or_else(|| usage())),
             "--wav" => a.wav = it.next().map(PathBuf::from),
@@ -99,6 +103,7 @@ fn render_wav(args: &Args) -> Result<()> {
         e.use_genie(g)?;
     }
     e.only_player = args.only_player.clone();
+    e.open_replayers = args.open_replayers;
     if std::env::var_os("DELI_UADE").is_some() {
         e.set_uade_compat();
     }
@@ -140,7 +145,10 @@ fn render_wav(args: &Args) -> Result<()> {
     let peak = out.iter().fold(0f32, |a, &b| a.max(b.abs()));
     eprintln!("{} frames written, peak {:.3}", done, peak);
     if let (Ok(p), Some(l)) = (std::env::var("DELI_WRITE_LOG"), &e.m.bus.write_log) {
-        let text: String = l.iter().map(|(a, v, t)| format!("{a:06x} {v:04x} {t}\n")).collect();
+        // where the module was loaded, so logs of runs that loaded it elsewhere compare
+        let head: String = e.m.deli.list.first().map(|(a, n)| format!("# module {a:06x} {n}\n")).unwrap_or_default();
+        let text: String =
+            head + &l.iter().map(|(a, v, t)| format!("{a:06x} {v:04x} {t}\n")).collect::<String>();
         std::fs::write(&p, text)?;
     }
     let n = e.m.native_stats;

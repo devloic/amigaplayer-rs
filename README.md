@@ -268,6 +268,33 @@ tables, not an A500's 68000.
 `src/paula.rs` and `src/paulaout.rs` follow UADE's `audio.c` and are derived
 from GPL-2 code.
 
+## Open replayers
+
+`src/replay/` holds Rust ports of NostalgicPlayer's players (MIT, Thomas
+Neumann: `LICENSE-NostalgicPlayer`), open-source stand-ins for the 68k players,
+whose licences forbid modifying them or shipping them in another project.
+`--open-replayers` plays the formats they know with them instead of the 68k
+players. They write Paula's registers as the original players do, and are
+checked against the Eagleplayers, not against NostalgicPlayer:
+
+```sh
+DELI_WRITE_LOG=ep.log deliplayer --player 'Pumatracker 1.0' --wav ep.wav MODULE
+DELI_WRITE_LOG=rs.log deliplayer --open-replayers --wav rs.wav MODULE
+python3 -I tools/replay-cmp.py ep.log rs.log   # tick by tick; first difference
+```
+
+`tools/replay-batch.py` does this for a list of modules and sorts them into
+identical, differing and refused.
+
+The write log's first line says where the module was loaded, so sample
+addresses compare as offsets in the module. Within a tick the ports write all
+at once where 68k code takes about a millisecond, so renders differ in phase
+while the register writes are the same.
+
+| Format | Port of | Checked against | Result |
+|---|---|---|---|
+| PumaTracker | NostalgicPlayer PumaTracker | Pumatracker 1.0 (Eagleplayer 2.06) | 60 of 61 modules identical for 20 s; `puma.toki7` plays a note past the period table, where the original reads its own variables (period `$5060`, silent) and the port writes 0 (silent) |
+
 Not implemented:
 
 * the Eagleplayer mixing amplifier (AudioStructs without `EPAMB_Direct`), and

@@ -30,6 +30,8 @@ pub enum Backend {
     /// index into `players` (custom modules are appended there too)
     Deli(usize),
     Native(Box<ProTracker>),
+    /// an open replayer (crate::replay)
+    Replay(Box<dyn crate::replay::Replayer>),
 }
 
 pub struct Playing {
@@ -133,6 +135,8 @@ pub struct Engine {
     builtin_players: usize,
     /// Only this player (by name) is tried, and the built-in ProTracker is not.
     pub only_player: Option<String>,
+    /// Play the formats the open replayers know with them, not the 68k players.
+    pub open_replayers: bool,
     /// Where the players from `load_eagleplayers` begin.
     eagle_from: Option<usize>,
     /// DeliGenies (`load_genies`): external code that is not a player.
@@ -175,6 +179,7 @@ impl Engine {
             e_ticks: 0,
             builtin_players: 0,
             only_player: None,
+            open_replayers: false,
             eagle_from: None,
             genies: Vec::new(),
             note_genie: None,
@@ -526,6 +531,13 @@ impl Engine {
         if let Some(fmt) = ProTracker::detect(&data).filter(|f| *f != "SoundTracker") {
             return self.start_native(path, &data, addr, fmt);
         }
+        if self.open_replayers {
+            if let Some(o) = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data)) {
+                if let Some(r) = (o.new)(&data, addr, &mut self.m) {
+                    return self.start_replay(r, path);
+                }
+            }
+        }
         // 2. a custom module carries its own player
         if crate::hunk::is_hunk_file(&data) {
             if let Ok(p) = deli::load_player(&mut self.m, &data, path) {
@@ -590,6 +602,25 @@ impl Engine {
             backend: Backend::Native(Box::new(pt)),
             module_name: name,
             format: fmt.to_string(),
+            author: String::new(),
+            sub_min: 0,
+            sub_max: 0,
+            sub: 0,
+            frames: 0,
+            custom_player: false,
+        });
+        Ok(())
+    }
+
+    fn start_replay(&mut self, r: Box<dyn crate::replay::Replayer>, path: &Path) -> Result<()> {
+        self.m.bus.paula.reset();
+        self.intena_seen = 0;
+        (self.next_timer, self.pt_dma_at) = (None, None);
+        let title = r.title();
+        self.playing = Some(Playing {
+            module_name: if title.is_empty() { file_name(path) } else { title },
+            format: r.format().to_string(),
+            backend: Backend::Replay(r),
             author: String::new(),
             sub_min: 0,
             sub_max: 0,
@@ -826,13 +857,14 @@ impl Engine {
                     let _ = deli::call_fn(&mut self.m, self.players[*idx].globals, f, None);
                 }
             }
-            None => {}
+            Some(Playing { backend: Backend::Replay(_), .. }) | None => {}
         }
     }
 
     pub fn songend(&self) -> bool {
         match &self.playing {
             Some(Playing { backend: Backend::Native(pt), .. }) => pt.songend,
+            Some(Playing { backend: Backend::Replay(r), .. }) => r.songend(),
             Some(_) => self.m.deli.songend,
             None => false,
         }
@@ -863,6 +895,7 @@ impl Engine {
         // latch + 1 E-clock ticks, and a new latch is loaded at the next underflow
         let period = match &p.backend {
             Backend::Native(pt) => Some(pt.tick_clocks()),
+            Backend::Replay(r) => Some(r.tick_clocks()),
             Backend::Deli(idx) => self
                 .m
                 .deli
@@ -944,6 +977,7 @@ impl Engine {
     fn timer_interrupt(&mut self) {
         let Some(p) = &mut self.playing else { return };
         match &mut p.backend {
+            Backend::Replay(r) => r.tick(&mut crate::replay::Hw { bus: &mut self.m.bus }),
             Backend::Native(pt) => {
                 pt.tick(&mut self.m.bus.paula);
                 if pt.dma_pending != 0 {

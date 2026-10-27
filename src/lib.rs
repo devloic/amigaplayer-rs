@@ -16,6 +16,7 @@ pub mod os;
 pub mod paula;
 pub mod paulaout;
 pub mod protracker;
+pub mod replay;
 
 use std::path::{Path, PathBuf};
 

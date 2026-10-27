@@ -10,6 +10,7 @@
 pub mod actionamics;
 pub mod bendaglish;
 pub mod davidwhittaker;
+pub mod digitalmugician;
 pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod fred;
@@ -90,6 +91,8 @@ pub const REPLAYERS: &[Open] = &[
     davidwhittaker::OPEN,
     actionamics::OPEN,
     soundcontrol::OPEN,
+    digitalmugician::OPEN1,
+    digitalmugician::OPEN2,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

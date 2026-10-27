@@ -271,9 +271,14 @@ impl Replayer for PumaTracker {
             }
         }
 
+        // Paula stops a playing voice only at the end of its word, and restarts it
+        // only once stopped: the time the original takes between a note's DMA off
+        // and the DMA on (measured: about 520 colour clocks for each running voice,
+        // 140 more to the masks) decides which notes retrigger
         let mut on = 0u16;
         for i in 0..4 {
             if self.voices[i].flags & VOICE_RUNNING != 0 {
+                hw.wait(520);
                 self.volume_commands(i);
                 self.frequency_commands(i);
                 if self.setup_hardware(i, hw) {
@@ -281,8 +286,10 @@ impl Replayer for PumaTracker {
                 }
             }
         }
+        hw.wait(140);
         // every voice that did not play this tick goes off, even one never started
         hw.dmacon(!on & 0xF);
+        hw.wait(8);
         hw.dmacon(0x8000 | on);
     }
 }
@@ -317,6 +324,7 @@ impl PumaTracker {
         let v = &mut self.voices[i];
         if row.note != 0 {
             hw.dmacon(1 << i);
+            hw.wait(192);
             v.transposed_note = row.note.wrapping_add(v.note_transpose as u8);
             let n = row.instrument as i32 + v.instrument_transpose as i32;
             v.instrument = (n >= 1 && (n as usize) <= num_instruments).then(|| n as usize - 1);

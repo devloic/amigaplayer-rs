@@ -15,6 +15,7 @@ pub mod jamcracker;
 pub mod pumatracker;
 pub mod sidmon2;
 pub mod soundfx;
+pub mod sonicarranger;
 pub mod soundmon;
 
 use crate::bus::Bus;
@@ -63,6 +64,7 @@ pub const REPLAYERS: &[Open] = &[
     soundfx::OPEN13,
     soundfx::OPEN20,
     deltamusic1::OPEN,
+    sonicarranger::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -484,6 +484,10 @@ pub fn host_call(m: &mut Machine, f: u16) {
             let (a, s) = m.deli.list.get(n).copied().unwrap_or((0, 0));
             m.cpu.dar[8] = a;
             m.set_d0(s);
+            // and the flags of a `move.l` of the size into d0, as UADE's score
+            // returns: SoundFX 2.0's InitSound tests them (beq) after the call
+            let ccr = m.cpu.get_ccr() & 0x10;
+            m.cpu.set_ccr(ccr | if s == 0 { 4 } else { 0 } | if s >> 31 != 0 { 8 } else { 0 });
         }
         1 => {
             // LoadFile(): load file named in path buffer

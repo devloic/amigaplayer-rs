@@ -149,8 +149,8 @@ pub struct Engine {
     running_genies: Vec<usize>,
     /// Guest memory for the NoteStruct a NotePlayer genie reads (0: not allocated yet).
     genie_mem: u32,
-    /// INTREQ and INTENA as `audio_irqs` last left them.
-    irq_seen: (u16, u16),
+    /// INTENA as `audio_irqs` last saw it.
+    intena_seen: u16,
 }
 
 impl Engine {
@@ -182,7 +182,7 @@ impl Engine {
             active_genies: Vec::new(),
             running_genies: Vec::new(),
             genie_mem: 0,
-            irq_seen: (0, 0),
+            intena_seen: 0,
         }
     }
 
@@ -583,7 +583,7 @@ impl Engine {
         let pt = ProTracker::new(data, addr).ok_or_else(|| anyhow!("bad module"))?;
         pt.clear_loop_words(&mut self.m.bus.ram);
         self.m.bus.paula.reset();
-        self.irq_seen = (0, 0);
+        self.intena_seen = 0;
         (self.next_timer, self.pt_dma_at) = (None, None);
         let name = if pt.title.is_empty() { file_name(path) } else { pt.title.clone() };
         self.playing = Some(Playing {
@@ -605,7 +605,7 @@ impl Engine {
             self.configure(idx)?;
         }
         self.m.bus.paula.reset();
-        self.irq_seen = (0, 0);
+        self.intena_seen = 0;
         (self.next_timer, self.pt_dma_at) = (None, None);
         self.m.deli.voices.reset();
         let g = self.players[idx].globals;
@@ -971,9 +971,9 @@ impl Engine {
     /// or by guest code starting DMA), and of those already requested whose INTENA bit
     /// was set since: an interrupt pending when it is enabled is taken at once.
     fn audio_irqs(&mut self) {
-        let p = &self.m.bus.paula;
-        let raised = (p.intreq & !self.irq_seen.0 | p.intreq & p.intena & !self.irq_seen.1) & (0xF << 7);
-        self.irq_seen = (p.intreq, p.intena);
+        let p = &mut self.m.bus.paula;
+        let raised = (std::mem::take(&mut p.raised) | p.intreq & p.intena & !self.intena_seen) & (0xF << 7);
+        self.intena_seen = p.intena;
         if raised == 0 || self.m.bus.paula.pending_audio_irqs() == 0 {
             return;
         }
@@ -989,7 +989,6 @@ impl Engine {
                 crate::os::call_int_code(&mut self.m, code, data, active);
             }
         }
-        self.irq_seen = (self.m.bus.paula.intreq, self.m.bus.paula.intena);
         if let Some(e) = self.m.crashed.take() {
             self.fail(e);
         }

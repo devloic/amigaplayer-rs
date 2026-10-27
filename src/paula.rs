@@ -60,6 +60,10 @@ pub struct Paula {
     pub dmacon: u16,
     pub intena: u16,
     pub intreq: u16,
+    /// INTREQ bits set since the owner last took them: a request raised while
+    /// the bit was already set, or set and cleared between two looks at INTREQ,
+    /// still counts.
+    pub raised: u16,
     pub adkcon: u16,
     pub out: OutputStage,
     /// Samples produced so far (left, right), for the owner to take.
@@ -105,6 +109,7 @@ impl Paula {
             dmacon: DMAF_MASTER,
             intena: INTF_INTEN,
             intreq: 0,
+            raised: 0,
             adkcon: 0,
             out: OutputStage::new(rate, filter),
             samples: Default::default(),
@@ -200,6 +205,9 @@ impl Paula {
 
     pub fn write_intreq(&mut self, v: u16) {
         setclr(&mut self.intreq, v);
+        if v & 0x8000 != 0 {
+            self.raised |= v & 0x7FFF;
+        }
     }
 
     pub fn write_adkcon(&mut self, v: u16) {
@@ -227,6 +235,7 @@ impl Paula {
                 if c.state == 0 && self.intreq & (INTF_AUD0 << n) == 0 {
                     c.state = 2;
                     self.intreq |= INTF_AUD0 << n;
+                    self.raised |= INTF_AUD0 << n;
                     c.evtime = c.per as u64;
                 }
             }
@@ -309,6 +318,7 @@ impl Paula {
                 c.evtime = LINE;
                 c.state = 5;
                 self.intreq |= bit;
+                self.raised |= bit;
                 if c.wlen != 1 {
                     c.wlen = c.wlen.wrapping_sub(1) & 0xFFFF;
                 }
@@ -332,6 +342,7 @@ impl Paula {
                 if audap {
                     if c.intreq2 && c.dmaen {
                         self.intreq |= bit;
+                        self.raised |= bit;
                     }
                     let c = &mut self.ch[nr];
                     c.intreq2 = false;
@@ -356,6 +367,7 @@ impl Paula {
                 c.state = 2;
                 if (c.intreq2 && c.dmaen && napnav) || (napnav && !c.dmaen) {
                     self.intreq |= bit;
+                    self.raised |= bit;
                 }
                 let c = &mut self.ch[nr];
                 c.intreq2 = false;

@@ -1,14 +1,18 @@
 """Compare the audio register writes of two runs of the same module, tick by tick.
 
-    python3 -I tools/replay-cmp.py REFERENCE.log PORT.log [--ticks N]
+    python3 -I tools/replay-cmp.py REFERENCE.log PORT.log [--ticks N] [--tick-gap CLOCKS]
 
 The logs are DELI_WRITE_LOG output. Sample addresses are made comparable: one
 inside the module becomes its offset in the module ("M+off", from the log's
 "# module" line), address 0 stays 0, and every other one (a player's own
 waveforms) must differ between the two runs by one constant, which is reported,
 or be the same in both (an address past the module's end, computed from it).
-Writes are grouped into ticks by the gaps between them; ticks are compared in
-order, and the first one that differs is printed with both sides.
+Writes are grouped into ticks by the gaps between them (more than --tick-gap
+colour clocks, 20000 by default, starts a tick); ticks are compared in order,
+and the first one that differs is printed with both sides. A player whose
+interrupts come closer than that (Art of Noise: three a tick, 23650 colour
+clocks apart at tempo 125, 14780 at 200) needs a smaller gap, or its writes
+group by chance.
 
 The time between a voice's DMA off and its DMA on is compared too: Paula stops
 a playing voice only at the end of its word, so with too short a gap a note does
@@ -26,7 +30,7 @@ DMA_SLACK = 300  # colour clocks: a port's timing is the original's only roughly
 DMA_BAD = 0.5  # measured: ports with no time there differ in 79-100%, timed ones in 0-29%
 
 
-def load(path):
+def load(path, tick_gap=TICK_GAP):
     base, size, ticks, last = 0, 0, [], None
     hi, gaps, off, per = {}, [], {}, [0] * 4
     for line in open(path):
@@ -38,7 +42,7 @@ def load(path):
         a, v, t = int(f[0], 16), int(f[1], 16), int(f[2])
         if not 0xDFF096 <= a <= 0xDFF0DF:
             continue
-        if last is None or t - last > TICK_GAP:
+        if last is None or t - last > tick_gap:
             ticks.append([])
             gaps.append({})
             off = {}
@@ -83,10 +87,12 @@ def show(w, xoff):
 
 def main():
     args = sys.argv[1:]
-    limit = None
+    limit, gap = None, TICK_GAP
     if '--ticks' in args:
         i = args.index('--ticks'); limit = int(args[i + 1]); del args[i:i + 2]
-    (ref, rgaps), (port, pgaps) = load(args[0]), load(args[1])
+    if '--tick-gap' in args:
+        i = args.index('--tick-gap'); gap = int(args[i + 1]); del args[i:i + 2]
+    (ref, rgaps), (port, pgaps) = load(args[0], gap), load(args[1], gap)
     n = min(len(ref), len(port)) if limit is None else min(limit, len(ref), len(port))
     xoff, same, first = None, 0, None
     for k in range(n):

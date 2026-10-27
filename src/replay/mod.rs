@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod actionamics;
+pub mod artofnoise;
 pub mod bendaglish;
 pub mod davidwhittaker;
 pub mod digitalmugician;
@@ -93,6 +94,7 @@ pub const REPLAYERS: &[Open] = &[
     soundcontrol::OPEN,
     digitalmugician::OPEN1,
     digitalmugician::OPEN2,
+    artofnoise::OPEN4,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

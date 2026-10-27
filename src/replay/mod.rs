@@ -13,6 +13,7 @@ pub mod fred;
 pub mod futurecomposer;
 pub mod jamcracker;
 pub mod pumatracker;
+pub mod sidmon1;
 pub mod sidmon2;
 pub mod soundfx;
 pub mod sonicarranger;
@@ -65,6 +66,7 @@ pub const REPLAYERS: &[Open] = &[
     soundfx::OPEN20,
     deltamusic1::OPEN,
     sonicarranger::OPEN,
+    sidmon1::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

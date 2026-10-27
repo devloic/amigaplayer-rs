@@ -533,6 +533,9 @@ impl Engine {
         }
         if self.open_replayers {
             if let Some(o) = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data)) {
+                // a replayer's InitSound may write Paula's registers, as the 68k
+                // players' do after start_deli's reset
+                self.m.bus.paula.reset();
                 if let Some(r) = (o.new)(&data, addr, &mut self.m) {
                     return self.start_replay(r, path);
                 }
@@ -613,7 +616,6 @@ impl Engine {
     }
 
     fn start_replay(&mut self, r: Box<dyn crate::replay::Replayer>, path: &Path) -> Result<()> {
-        self.m.bus.paula.reset();
         self.intena_seen = 0;
         (self.next_timer, self.pt_dma_at) = (None, None);
         let title = r.title();

@@ -5,7 +5,8 @@
 The logs are DELI_WRITE_LOG output. Sample addresses are made comparable: one
 inside the module becomes its offset in the module ("M+off", from the log's
 "# module" line), address 0 stays 0, and every other one (a player's own
-waveforms) must differ between the two runs by one constant, which is reported.
+waveforms) must differ between the two runs by one constant, which is reported,
+or be the same in both (an address past the module's end, computed from it).
 Writes are grouped into ticks by the gaps between them; ticks are compared in
 order, and the first one that differs is printed with both sides.
 
@@ -95,6 +96,8 @@ def main():
                 va, vb = wa[1], wb[1]
                 if isinstance(va, tuple) and isinstance(vb, tuple) and va[0] == vb[0] == 'X':
                     d = va[1] - vb[1]
+                    if d == 0:  # the same address in both: past the module's end
+                        continue
                     if xoff is None:
                         xoff = d
                     if d != xoff:

@@ -11,6 +11,7 @@ pub mod futurecomposer;
 pub mod jamcracker;
 pub mod pumatracker;
 pub mod sidmon2;
+pub mod soundmon;
 
 use crate::bus::Bus;
 use crate::machine::Machine;
@@ -52,6 +53,7 @@ pub const REPLAYERS: &[Open] = &[
     jamcracker::OPEN,
     futurecomposer::OPEN13,
     futurecomposer::OPEN14,
+    soundmon::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

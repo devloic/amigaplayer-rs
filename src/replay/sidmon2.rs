@@ -17,6 +17,7 @@
 use super::{Hw, Open, Replayer};
 use crate::bus::Bus;
 use crate::machine::Machine;
+use crate::paula::LINE;
 
 pub const OPEN: Open = Open { name: "SidMon 2.0", detect, new };
 
@@ -262,14 +263,26 @@ impl Replayer for SidMon2 {
                 }
             }
             hw.dmacon(mask & 0xf);
+            // Paula stops a playing voice only at the end of its word, and restarts
+            // it only once stopped, so the time the original takes from DMA off to
+            // on decides which notes retrigger. The waits are measured on its
+            // write logs (to within some 40 colour clocks: the negation varies).
+            hw.wait(7);
             for i in 0..4 {
                 self.play_voice(i, hw);
             }
             self.negate(hw.bus);
+            hw.wait(640);
             hw.dmacon(0x8000 | (mask & 0xf));
+            // the host's ENPP_DMAMask waits for the DMA as dtg_WaitAudioDMA does: to
+            // 10 lines past the current one
+            let now = hw.bus.clock;
+            hw.wait((now / LINE + 10) * LINE - now);
             for (i, v) in self.voices.iter().enumerate() {
                 hw.loc(i, v.loop_addr);
+                hw.wait(107);
                 hw.len(i, poke_len(v.loop_len));
+                hw.wait(106);
             }
             self.row = self.row.wrapping_add(1);
             if self.row == self.pattern_length {
@@ -343,6 +356,7 @@ impl SidMon2 {
         let v = &mut self.voices[i];
         v.pitch_bend = 0;
         if v.note == 0 {
+            hw.wait(41);
             return;
         }
         v.volume = 0;
@@ -351,6 +365,8 @@ impl SidMon2 {
         v.slide_speed = 0;
         v.envelope = ATTACK;
         v.sustain = 0;
+        // a note takes 497 colour clocks, 158 more when it sets the instrument
+        hw.wait(if v.instr != 0 { 458 } else { 300 });
         if v.instr != 0 {
             let n = (v.instr as u8).wrapping_sub(1).wrapping_add(v.instrument_transpose);
             v.instrument = self.instruments.wrapping_add(32 * n as u32);
@@ -362,8 +378,11 @@ impl SidMon2 {
         v.original_note = v.note.wrapping_add(first);
         v.period = period(&self.negated, v.original_note);
         hw.loc(i, v.sample_addr);
+        hw.wait(105);
         hw.len(i, poke_len(v.sample_len));
+        hw.wait(89);
         hw.per(i, v.period);
+        hw.wait(3);
     }
 
     /// The sample negation: every voice's sample at most once a call.

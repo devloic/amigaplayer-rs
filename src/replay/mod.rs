@@ -7,6 +7,7 @@
 //! lives in guest memory: the module where it was loaded, and the player's own
 //! waveforms in memory allocated for them.
 
+pub mod jamcracker;
 pub mod pumatracker;
 pub mod sidmon2;
 
@@ -44,7 +45,7 @@ pub struct Open {
     pub new: fn(data: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>>,
 }
 
-pub const REPLAYERS: &[Open] = &[pumatracker::OPEN, sidmon2::OPEN];
+pub const REPLAYERS: &[Open] = &[pumatracker::OPEN, sidmon2::OPEN, jamcracker::OPEN];
 
 /// The audio registers, written through the bus as guest code writes them (so
 /// Paula runs to the moment of the write, and the write log sees it).
@@ -69,6 +70,11 @@ impl Hw<'_> {
     }
     pub fn vol(&mut self, ch: usize, vol: u16) {
         self.bus.write_word(0xDFF0A8 + 16 * ch as u32, vol);
+    }
+    /// Lets `clocks` colour clocks pass before the next write, as the original's
+    /// code takes time between two (Paula runs on to the next write's moment).
+    pub fn wait(&mut self, clocks: u64) {
+        self.bus.clock += clocks;
     }
 }
 

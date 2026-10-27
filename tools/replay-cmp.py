@@ -4,8 +4,8 @@
 
 The logs are DELI_WRITE_LOG output. Sample addresses are made comparable: one
 inside the module becomes its offset in the module ("M+off", from the log's
-"# module" line), and every other one (a player's own waveforms) must differ
-between the two runs by one constant, which is reported. Writes are grouped into
+"# module" line), address 0 stays 0, and every other one (a player's own
+waveforms) must differ between the two runs by one constant, which is reported. Writes are grouped into
 ticks by the gaps between them; ticks are compared in order, and the first one
 that differs is printed with both sides.
 """
@@ -35,7 +35,9 @@ def load(path):
                 hi[ch] = v
                 continue
             addr = hi.pop(ch, 0) << 16 | v
-            if base <= addr < base + size:
+            if addr == 0:  # a pointer never set, not player memory
+                ticks[-1].append((f'LOC{ch}', ('Z', 0)))
+            elif base <= addr < base + size:
                 ticks[-1].append((f'LOC{ch}', ('M', addr - base)))
             else:
                 ticks[-1].append((f'LOC{ch}', ('X', addr)))
@@ -48,7 +50,7 @@ def load(path):
 def show(w, xoff):
     n, v = w
     if isinstance(v, tuple):
-        return f'{n}={v[0]}+{v[1]:x}' if v[0] == 'M' else f'{n}=X:{v[1]:06x}'
+        return f'{n}={v[0]}+{v[1]:x}' if v[0] == 'M' else f'{n}=0' if v[0] == 'Z' else f'{n}=X:{v[1]:06x}'
     return f'{n}={v:04x}'
 
 

@@ -7,6 +7,7 @@
 //! lives in guest memory: the module where it was loaded, and the player's own
 //! waveforms in memory allocated for them.
 
+pub mod deltamusic2;
 pub mod futurecomposer;
 pub mod jamcracker;
 pub mod pumatracker;
@@ -54,6 +55,7 @@ pub const REPLAYERS: &[Open] = &[
     futurecomposer::OPEN13,
     futurecomposer::OPEN14,
     soundmon::OPEN,
+    deltamusic2::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

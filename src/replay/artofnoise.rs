@@ -3,7 +3,11 @@
 //!
 //! Checked against the Art of Noise Eagleplayer ("Art of Noise player module
 //! V1.01", Bastian Spiegel, adapted by Buggs of DEFECT), which plays the 4-voice
-//! "AON4" modules. Like the original it plays from the module in guest memory,
+//! "AON4" and the 8-voice "AON8" modules with the same code. For 8 voices it
+//! asks for the Eagleplayer amplifier, but writes every voice through
+//! ENPP_Poke*, and the host drops the pokes for channels 4-7 (the amplifier is
+//! not implemented), so only voices 0-3 reach Paula; the port does the same and
+//! mixes nothing. Like the original it plays from the module in guest memory,
 //! finding the chunks by the original's search, and keeps its variables in guest
 //! memory in the layout of the original's code hunk: the fine-tune offsets, the
 //! periods and the vibrato tables, then the player's and the voices' variables.
@@ -41,6 +45,7 @@ use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
 
 pub const OPEN4: Open = Open { name: "Art of Noise 4V", detect: detect4, new: new4 };
+pub const OPEN8: Open = Open { name: "Art of Noise 8V", detect: detect8, new: new8 };
 
 include!("artofnoise_tables.rs");
 
@@ -183,6 +188,22 @@ fn new4(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     new(d, base, m, 4)
 }
 
+fn detect8(d: &[u8]) -> bool {
+    d.len() >= 4 && &d[..4] == b"AON8"
+}
+
+/// The 8-voice modules. The original plays them with the same code, its
+/// voice count the mark less "AON0", and asks for the Eagleplayer amplifier
+/// with 8 channels; but it writes every voice through ENPP_Poke*, whose
+/// channels 4-7 the host drops (the amplifier is not implemented), so only
+/// voices 0-3 reach Paula. The port does the same.
+fn new8(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    if !detect8(d) {
+        return None;
+    }
+    new(d, base, m, 8)
+}
+
 /// The code paths whose time is counted (`Art::spent`), by the original's
 /// addresses.
 #[derive(Clone, Copy)]
@@ -297,14 +318,19 @@ enum C {
     Loops,
     /// $11962: a voice's loop.
     Loop,
+    /// A poke for a channel past 3, which the host drops (8 voices).
+    Drop,
     Count,
 }
 
-/// Colour clocks for each of `C`, fitted to the Eagleplayer's write logs.
+/// Colour clocks for each of `C`, fitted by least squares to the Eagleplayer's
+/// write logs of 33 AON4 and 12 AON8 modules (rms 6.0 colour clocks over 818163
+/// writes): with 4 voices alone a tick's and its voices' costs cannot be told
+/// apart. Tags counted together on every path share their sum arbitrarily.
 const COST: [i64; C::Count as usize] = [
-    28, 52, 45, 52, 67, 206, 4, 118, 55, 33, 159, -7, 117, 170, 0, 170, 117, 41, 170, 3, 27, 64, 89, 209, 95, 71, 35, 32,
-    103, 112, 48, 9, 33, 56, 53, 179, 71, 31, 21, 0, 62, 18, 43, 136, 20, 36, 112, 48, 76, 50, 41, 15, 99, 13, 99, 177,
-    103, 97, 135, 164, 50, 68,
+    105, 325, 40, 325, 67, 121, 5, 65, 42, 14, 164, -9, 115, 171, 0, 171, 115, 49, 156, 5, 34, 64,
+    56, 210, 94, 69, 41, 29, 99, 107, 44, 9, 33, 56, 52, 180, 68, 28, 18, 0, 60, 16, 43, 139, 17,
+    36, 107, 48, 76, 46, 38, 15, 68, 11, 130, 177, 102, 97, 135, 164, 50, 69, 0,
 ];
 
 pub struct Art {
@@ -360,7 +386,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine, voices: u32) -> Option<Box<dyn Repl
     // clocks a step) and which copy the names and the remark: Paula's DMA runs in
     // slots of each line, so where in a line the ticks come changes the sound.
     // The times were fitted to the reference's start on 33 modules (rms 2 colour
-    // clocks).
+    // clocks; the first writes within 5 of the reference's, 8 voices too).
     let t = start + 29.0 * a.searched as f64;
     Hw { bus: &mut m.bus }.wait(t.round() as u64);
     Some(Box::new(a))
@@ -389,6 +415,10 @@ impl Replayer for Art {
 
     fn tick(&mut self, hw: &mut Hw) {
         self.spent = 0;
+        // the last interrupt's dropped pokes were before this one
+        if let Some(f) = &mut self.fit {
+            *f = [0; C::Count as usize];
+        }
         let g = self.code + G;
         match hw.bus.r8(g + G_PHASE) {
             0 => self.play(hw),
@@ -481,7 +511,9 @@ impl Art {
                 top = b;
             }
         }
-        let mut t = 20067.0 + 0.969 * cycles as f64 / 2.0 + 11.035 * (text(auth) + text(name)) as f64;
+        // 8 voices take 16 colour clocks more (measured on 12 modules)
+        let eight = if self.voices == 8 { 16.0 } else { 0.0 };
+        let mut t = 20046.0 + eight + 0.969 * cycles as f64 / 2.0 + 11.035 * (text(auth) + text(name)) as f64;
         // the remark: 48 cycles a character, 82 a control character, 94 a line
         // feed, 104 + 18 a space for a tab
         let n = len(rmrk).min(2000);
@@ -563,9 +595,21 @@ impl Art {
     // The host's ENPP_Poke* and ENPP_DMAMask, as the original calls them: only
     // channels 0-3 reach Paula.
     fn wait(&mut self, hw: &mut Hw, c: C) {
+        self.wait_on(hw, c, true);
+    }
+
+    /// The wait for a poke; one for a channel past 3 is not written, so its
+    /// time goes on into the next written one's (for AON_FIT).
+    fn wait_on(&mut self, hw: &mut Hw, c: C, written: bool) {
         self.cost(c);
+        if !written {
+            self.cost(C::Drop);
+        }
         hw.wait(self.spent.max(0) as u64);
         self.spent = 0;
+        if !written {
+            return;
+        }
         if let Some(f) = &mut self.fit {
             let s: Vec<String> =
                 f.iter().enumerate().filter(|x| *x.1 != 0).map(|(k, n)| format!("{k}:{n}")).collect();
@@ -575,28 +619,28 @@ impl Art {
     }
 
     fn poke_per(&mut self, hw: &mut Hw, i: u32, v: u16) {
-        self.wait(hw, C::Per);
+        self.wait_on(hw, C::Per, i < 4);
         if i < 4 {
             hw.per(i as usize, v);
         }
     }
 
     fn poke_vol(&mut self, hw: &mut Hw, i: u32, v: u16) {
-        self.wait(hw, C::Vol);
+        self.wait_on(hw, C::Vol, i < 4);
         if i < 4 {
             hw.vol(i as usize, v);
         }
     }
 
     fn poke_adr(&mut self, hw: &mut Hw, i: u32, a: u32) {
-        self.wait(hw, C::Adr);
+        self.wait_on(hw, C::Adr, i < 4);
         if i < 4 {
             hw.loc(i as usize, a);
         }
     }
 
     fn poke_len(&mut self, hw: &mut Hw, i: u32, v: u16) {
-        self.wait(hw, C::Len);
+        self.wait_on(hw, C::Len, i < 4);
         if i < 4 {
             hw.len(i as usize, v);
         }
@@ -1585,17 +1629,19 @@ mod tests {
     }
 
     /// One position of pattern 0, whose first row has note 25 of instrument
-    /// 1 on voice 0: a sample of 16 words without a loop, volume 64, no
-    /// envelope.
-    fn module() -> Vec<u8> {
-        let mut d = b"AON4artofnoise by bastian spiegel (twice/lego)\0\0".to_vec();
+    /// 1 on the given voices: a sample of 16 words without a loop, volume 64,
+    /// no envelope.
+    fn module(voices: usize, notes: &[usize]) -> Vec<u8> {
+        let mut d = format!("AON{voices}artofnoise by bastian spiegel (twice/lego)\0\0").into_bytes();
         chunk(&mut d, b"NAME", b"test");
         // the version, 1 position, restart at 0
         chunk(&mut d, b"INFO", &[0, 1, 0, 0]);
         chunk(&mut d, b"ARPG", &[0; 64]);
         chunk(&mut d, b"PLST", &[0, 0]);
-        let mut patt = vec![0u8; 64 * 4 * 4];
-        patt[..4].copy_from_slice(&[25, 1, 0, 0]);
+        let mut patt = vec![0u8; 64 * voices * 4];
+        for &i in notes {
+            patt[4 * i..4 * i + 4].copy_from_slice(&[25, 1, 0, 0]);
+        }
         chunk(&mut d, b"PATT", &patt);
         let mut inst = [0u8; 32];
         inst[1] = 64;
@@ -1609,20 +1655,27 @@ mod tests {
         d
     }
 
-    #[test]
-    fn plays_a_sample_on_paula() {
+    /// Plays the module for a second; its format, the writes, the output.
+    fn play(name: &str, d: Vec<u8>) -> (String, Vec<(u32, u16)>, Vec<f32>) {
         let dir = std::env::current_exe().unwrap().parent().unwrap().join("artofnoise-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.aon");
-        std::fs::write(&path, module()).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, d).unwrap();
         let mut e = Engine::new(48000.0);
         e.open_replayers = true;
         e.m.bus.write_log = Some(Vec::new());
         e.play_data(&path, std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(e.playing.as_ref().unwrap().format, "Art of Noise 4V");
+        let format = e.playing.as_ref().unwrap().format.clone();
         let mut out = vec![0f32; 2 * 48000];
         e.render(&mut out);
-        let log = e.m.bus.write_log.take().unwrap();
+        let log = e.m.bus.write_log.take().unwrap().iter().map(|w| (w.0, w.1)).collect();
+        (format, log, out)
+    }
+
+    #[test]
+    fn plays_a_sample_on_paula() {
+        let (format, log, out) = play("test.aon", module(4, &[0]));
+        assert_eq!(format, "Art of Noise 4V");
         let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
         // every tick turns the new notes' DMA off and then on, none at first;
         // the note's voice 0 once
@@ -1643,5 +1696,23 @@ mod tests {
         assert!(!reg(0xDFF0B6).is_empty());
         assert!(reg(0xDFF0B8).iter().all(|&v| v == 0));
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
+    }
+
+    #[test]
+    fn eight_voices_reach_paula_on_four() {
+        // the note on voices 1 and 5: the original's pokes for 4-7 are dropped
+        let (format, log, _) = play("test8.aon", module(8, &[1, 5]));
+        assert_eq!(format, "Art of Noise 8V");
+        let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        let dma = reg(0xDFF096);
+        assert!(dma.iter().all(|&v| v & 0x7fff & !2 == 0), "{dma:x?}");
+        assert_eq!(dma.iter().filter(|&&v| v & 2 != 0).count(), 2);
+        assert_eq!(*reg(0xDFF0B6).last().unwrap(), super::PERIODS[24]);
+        assert_eq!(*reg(0xDFF0B8).last().unwrap(), 63);
+        assert!(reg(0xDFF0A8).iter().all(|&v| v == 0));
+        assert!(log.iter().all(|w| w.0 < 0xDFF0E0 || w.0 >= 0xDFF100));
+        // 8 voices of cells a row: voice 0 has no note (the first period of
+        // the table, as a voice with no note has in the original)
+        assert!(reg(0xDFF0A6).iter().all(|&v| v == super::PERIODS[0]));
     }
 }

@@ -95,6 +95,7 @@ pub const REPLAYERS: &[Open] = &[
     digitalmugician::OPEN1,
     digitalmugician::OPEN2,
     artofnoise::OPEN4,
+    artofnoise::OPEN8,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

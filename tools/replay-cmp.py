@@ -5,18 +5,29 @@
 The logs are DELI_WRITE_LOG output. Sample addresses are made comparable: one
 inside the module becomes its offset in the module ("M+off", from the log's
 "# module" line), address 0 stays 0, and every other one (a player's own
-waveforms) must differ between the two runs by one constant, which is reported. Writes are grouped into
-ticks by the gaps between them; ticks are compared in order, and the first one
-that differs is printed with both sides.
+waveforms) must differ between the two runs by one constant, which is reported.
+Writes are grouped into ticks by the gaps between them; ticks are compared in
+order, and the first one that differs is printed with both sides.
+
+The time between a voice's DMA off and its DMA on is compared too: Paula stops
+a playing voice only at the end of its word, so with too short a gap a note does
+not restart, though every write is the same. A gap counts as different when it
+is off by more than DMA_SLACK colour clocks and the shorter of the two is less
+than a word of the voice at the period it played (2 * period colour clocks), so
+that the note may restart in one run and not in the other. A port's timing is
+the original's only roughly, so a few such gaps are reported but pass; more than
+DMA_BAD of them (a port writing a whole tick at one moment) count as a difference.
 """
 import sys
 
 TICK_GAP = 20000  # colour clocks: a tick's writes are far closer together than this
+DMA_SLACK = 300  # colour clocks: a port's timing is the original's only roughly
+DMA_BAD = 0.5  # measured: ports with no time there differ in 79-100%, timed ones in 0-29%
 
 
 def load(path):
     base, size, ticks, last = 0, 0, [], None
-    hi = {}
+    hi, gaps, off, per = {}, [], {}, [0] * 4
     for line in open(path):
         f = line.split()
         if f[0] == '#':
@@ -28,7 +39,17 @@ def load(path):
             continue
         if last is None or t - last > TICK_GAP:
             ticks.append([])
+            gaps.append({})
+            off = {}
         last = t
+        if a == 0xDFF096:
+            for ch in range(4):
+                if v & 1 << ch:
+                    if v & 0x8000 and ch in off:
+                        t0, word = off.pop(ch)
+                        gaps[-1].setdefault(ch, (t - t0, word))
+                    elif not v & 0x8000:
+                        off[ch] = (t, 2 * per[ch])
         if 0xDFF0A0 <= a < 0xDFF0E0 and (a - 0xDFF0A0) % 16 in (0, 2):
             ch = (a - 0xDFF0A0) // 16
             if (a - 0xDFF0A0) % 16 == 0:
@@ -42,9 +63,11 @@ def load(path):
             else:
                 ticks[-1].append((f'LOC{ch}', ('X', addr)))
             continue
+        if 0xDFF0A0 <= a < 0xDFF0E0 and (a - 0xDFF0A0) % 16 == 6:
+            per[(a - 0xDFF0A0) // 16] = v
         name = 'DMACON' if a == 0xDFF096 else f'{["LEN", "PER", "VOL", "DAT"][((a - 0xDFF0A0) % 16 - 4) // 2]}{(a - 0xDFF0A0) // 16}'
         ticks[-1].append((name, v))
-    return ticks
+    return ticks, gaps
 
 
 def show(w, xoff):
@@ -59,7 +82,7 @@ def main():
     limit = None
     if '--ticks' in args:
         i = args.index('--ticks'); limit = int(args[i + 1]); del args[i:i + 2]
-    ref, port = load(args[0]), load(args[1])
+    (ref, rgaps), (port, pgaps) = load(args[0]), load(args[1])
     n = min(len(ref), len(port)) if limit is None else min(limit, len(ref), len(port))
     xoff, same, first = None, 0, None
     for k in range(n):
@@ -82,10 +105,22 @@ def main():
             same += 1
         elif first is None:
             first = k
+    both = [(k, ch) for k in range(n) for ch in sorted(rgaps[k].keys() & pgaps[k].keys())]
+    late = [(k, ch) for k, ch in both
+            if abs(rgaps[k][ch][0] - pgaps[k][ch][0]) > DMA_SLACK
+            and min(rgaps[k][ch][0], pgaps[k][ch][0]) < rgaps[k][ch][1]]
+    bad_timing = len(late) > DMA_BAD * len(both)
     print(f'ticks: reference {len(ref)}, port {len(port)}, compared {n}, identical {same}')
     if xoff is not None:
         print(f'player memory: reference = port {xoff:+#x}')
+    if late:
+        k, ch = late[0]
+        print(f'DMA off to on differs in {len(late)} of {len(both)}, first at tick {k} on voice {ch} '
+              f'(a word takes {rgaps[k][ch][1]}): reference {rgaps[k][ch][0]}, '
+              f'port {pgaps[k][ch][0]} colour clocks' + (' (too many)' if bad_timing else ''))
     if first is None:
+        if bad_timing:
+            sys.exit(1)
         print('no difference')
         return
     print(f'first difference at tick {first}:')

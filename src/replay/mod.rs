@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod bendaglish;
+pub mod davidwhittaker;
 pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod fred;
@@ -84,6 +85,7 @@ pub const REPLAYERS: &[Open] = &[
     bendaglish::OPEN,
     hippel::OPEN_COSO,
     hippel::OPEN,
+    davidwhittaker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

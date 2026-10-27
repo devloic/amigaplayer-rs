@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod deltamusic2;
+pub mod fred;
 pub mod futurecomposer;
 pub mod jamcracker;
 pub mod pumatracker;
@@ -56,6 +57,7 @@ pub const REPLAYERS: &[Open] = &[
     futurecomposer::OPEN14,
     soundmon::OPEN,
     deltamusic2::OPEN,
+    fred::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

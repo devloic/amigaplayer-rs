@@ -758,7 +758,6 @@ impl Engine {
 
     fn start_sound(&mut self, idx: usize) -> Result<()> {
         let g = self.players[idx].globals;
-        self.m.bus.w16(g + dtg::TIMER, deli::DEFAULT_TIMER);
         let pl = &self.players[idx];
         let (vol, bal, init_sound, start_int, has_int) = (
             pl.tag(tag::VOLUME),

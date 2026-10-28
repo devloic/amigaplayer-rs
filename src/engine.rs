@@ -550,7 +550,7 @@ impl Engine {
         // 3. external players
         let eagle_from = self.eagle_from.unwrap_or(self.builtin_players);
         for idx in 0..eagle_from {
-            if self.check_player(idx)? {
+            if by_name_only(&self.players[idx].name, path) && self.check_player(idx)? {
                 log::info!("{} recognised by {}", path.display(), self.players[idx].name);
                 return self.start_deli(idx, path, false);
             }
@@ -561,7 +561,7 @@ impl Engine {
         }
         // 5. last resort: the Eagleplayers, whose checks are often looser
         for idx in eagle_from..self.builtin_players {
-            if self.check_player(idx)? {
+            if by_name_only(&self.players[idx].name, path) && self.check_player(idx)? {
                 log::info!("{} recognised by {}", path.display(), self.players[idx].name);
                 return self.start_deli(idx, path, false);
             }
@@ -1176,6 +1176,18 @@ impl Engine {
     }
 }
 
+/// Whether a player may check this file. TME's check (Eagleplayer 2.06, V2.3)
+/// takes most files of other formats that hold 256 zero bytes where it looks
+/// for its tables, and plays them silent; so, as UADE's eagleplayer.conf does,
+/// it is asked only for files named as TME modules ("tme." or ".tme").
+fn by_name_only(player: &str, path: &Path) -> bool {
+    if !player.eq_ignore_ascii_case("TME") {
+        return true;
+    }
+    let name = file_name(path).to_ascii_lowercase();
+    name.starts_with("tme.") || name.ends_with(".tme")
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
 }
@@ -1191,5 +1203,19 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
         } else if !p.extension().is_some_and(|x| x == "info") {
             out.push(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tme_checks_only_tme_names() {
+        assert!(by_name_only("TME", Path::new("x/tme.Labyrinth.msx")));
+        assert!(by_name_only("TME", Path::new("x/hawkeye.TME")));
+        assert!(!by_name_only("TME", Path::new("x/OSS.Mighty Dub Players")));
+        assert!(!by_name_only("TME", Path::new("x/agi.ingame_17")));
+        assert!(by_name_only("OctaMED", Path::new("x/OSS.Mighty Dub Players")));
     }
 }

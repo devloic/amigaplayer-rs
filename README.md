@@ -219,13 +219,16 @@ which runs as a process of its own, does not work. MusiclineEditor (a process
 player too) plays: its InitPlayer branches on the flags `dtg_AudioAlloc`
 returns, which the host sets as a `moveq #0,d0` would.
 
-TME (V1.1) claims many files of other formats and plays them silent: its
-`EP_Check5` looks for 256 zero bytes after the module's tables, or, in a file
-too short for that, at the words past the file's end, and never compares what
-it computes with `dtg_ChkSize`, as the later TME player UADE ships does. That
-is the player's own check, not the host's: in the coverage sample (79 files of
-498) no other Eagleplayer 2.06 takes those files when TME is removed, so they
-would not play either way. Some formats have an Eagleplayer 2.06 that does not
+TME (V2.3, Promax's beta) claims many files of other formats and plays them
+silent: its `EP_Check5` looks for 256 zero bytes after the module's tables, or,
+in a file too short for that, at the words past the file's end, and never
+compares what it computes with `dtg_ChkSize`, as the later TME player UADE
+ships does. That is the player's own check, not the host's (forced on those
+files in UADE it plays them silent too). So, as UADE's eagleplayer.conf does,
+the host asks TME only about files named as TME modules (`tme.*` or `*.tme`);
+the others (in the coverage sample about 1,900 of the archive's tunes:
+OctaMED SoundStudio, Sierra AGI, Sonix, early TFMX, Sonic Arranger) are left
+to the other players, or refused. Some formats have an Eagleplayer 2.06 that does not
 know the variant the archive holds: OctaMED and MED refuse MMD3 modules in
 mix mode (`flags2` bit 7, all of OctaMED SoundStudio's `oss.*`; the open replayers
 `OctaMED SoundStudio` and `OctaMED` play them), MusicMaker8

@@ -7,7 +7,8 @@
 //! to a Paula channel, in software, from the channel-0 audio interrupt. Like the
 //! original, the port loads the module into memory blocks of its own, one per
 //! chunk, in the original's order and sizes (so its samples land where the
-//! original's do, but for a constant), and plays from them; the tables of
+//! original's do, and the data hunk, which the loader puts at the top of memory,
+//! differs from the original's address by a constant), and plays from them; the tables of
 //! tunes, parts, arpeggios, instruments and samples point at an empty area for
 //! the missing ones, as the original's do.
 //!
@@ -34,6 +35,9 @@
 //!   are subsongs too, and an empty sequence holds $0010 (part 0) words;
 //! * nothing is range-checked (an arpeggio's volume up to 255, lengths as the
 //!   module gives them, the sample loader as the original's);
+//! * a phase effect with fill steps through the sizer table across its passes
+//!   in the high and low types (as one table, row after row) but restarts the row
+//!   each pass in the medium type;
 //! * the filter effect sets the LED filter through the CIA;
 //! * the song never ends (the original reports no end to DeliTracker).
 //!
@@ -44,9 +48,9 @@
 //! The port does the same, with the same volume table (computed: a sample byte
 //! times the volume / 128) and the same 16.16 stepping.
 //!
-//! Known difference: 9 of the 113 8-voice test modules differ from the original
-//! in a phase effect (the mixed bytes differ by a few steps from the first
-//! buffer the effect touches); it is not reproduced exactly.
+//! The 112 of 113 8-voice test modules compared have mix buffers byte-identical to
+//! UADE's; the other one (corpus line 255) differs only where UADE itself plays a
+//! buffer twice (a late interrupt), then one shifted by part of a buffer.
 //!
 //! The tables (`musicline_tables.rs`) come from NostalgicPlayer's Tables.cs; the
 //! 68k player was used only to check them, none of its code or data is copied.
@@ -529,8 +533,10 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     // the voices' buffers: the data hunk and the BSS
+    let top = std::mem::replace(&mut m.alloc_top, true);
     let data = m.alloc(DATA_SIZE);
     let bss = m.alloc(8 * 0x500);
+    m.alloc_top = top;
     if data == 0 || bss == 0 {
         return None;
     }
@@ -3028,7 +3034,6 @@ impl Musicline {
         let mut left = len - prev;
         let so = (prev - 1) * prev / 2;
         let sizer = |k: u32| (((k + 1) * n) / prev - 1) as u32;
-        let _ = so;
         let mut o = 0u32;
         let mut w = |hw: &mut Hw, b: i32| {
             hw.bus.w8(buf + o, b as u8);
@@ -3067,10 +3072,27 @@ impl Musicline {
             return;
         }
         if fill {
+            // High and Low keep stepping through the sizer table across the passes
+            // (Med restarts its row each pass)
+            let mut fk = 0u32;
             while left > 0 {
                 let c = prev.min(left);
                 for k in 0..c {
-                    let i = sizer(k);
+                    let i = if ptype == 1 || ptype == 3 {
+                        let t = so + fk;
+                        fk += 1;
+                        // the table is the rows of 1, 2, 3 ... entries one after the other
+                        let mut r = (((8 * t + 1) as f64).sqrt() as u32 + 1) / 2;
+                        while r * (r - 1) / 2 > t {
+                            r -= 1;
+                        }
+                        while (r + 1) * r / 2 <= t {
+                            r += 1;
+                        }
+                        (((t - r * (r - 1) / 2 + 1) * n) / r).wrapping_sub(1)
+                    } else {
+                        sizer(k)
+                    };
                     let s1 = rd(hw, i);
                     let s2 = rd(hw, rc);
                     rc += 1;

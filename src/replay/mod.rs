@@ -102,6 +102,7 @@ pub const REPLAYERS: &[Open] = &[
     sidmon1::OPEN,
     tfmx::OPEN_PRO,
     tfmx::OPEN_15,
+    tfmx::OPEN_7V,
     iffsmus::OPEN,
     bendaglish::OPEN,
     hippel::OPEN_COSO,

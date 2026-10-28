@@ -12,6 +12,12 @@
 //! packed modules ("@OARV1.0"), which NostalgicPlayer decrunches, the original
 //! does not take.
 //!
+//! A compiled module that only the later SonicArranger player's check takes (a
+//! subsong table of 2, 3 or 5 subsongs, or an empty last part: see `offsets`)
+//! plays as that player does where UADE's log shows it: the master volume starts
+//! at 64, and a note starts with period 1, the audio interrupt cleared and DMA
+//! off, with no length of 0, and every row writes DMACON.
+//!
 //! The original is an older player than the one NostalgicPlayer follows, and
 //! where they differ this follows the original:
 //! * a note turns its voice's DMA off and writes a length of 0 first; a sample's
@@ -206,6 +212,9 @@ pub struct SonicArranger {
     sub: u16,
     // the original's variables
     master: u16,
+    /// A module only the later player's check takes (see `offsets`): its master
+    /// volume starts at 64 and effect 6 keeps 64, as that player's does.
+    newer: bool,
     dma_mask: u16,
     /// A sample's loop goes to Paula on the next tick.
     loop_pending: [bool; 4],
@@ -227,6 +236,32 @@ pub struct SonicArranger {
     pend: i64,
 }
 
+/// The eight offsets at the module's start. `strict` is the original's check
+/// (the SonicArranger Eagleplayer V4.11); without it, the later player's and
+/// NostalgicPlayer's converter's: the subsong table may be of any size up to 32
+/// subsongs (the original's low byte test refuses 2, 3 and 5), and the last part
+/// may be empty.
+fn offsets(d: &[u8], strict: bool) -> bool {
+    let l = |o: usize| be32(d, o);
+    if d.len() < 32 || be16(d, 0) != 0 || be16(d, 4) != 0 || [8, 12, 16, 20].iter().any(|&o| d[o] != 0) {
+        return false;
+    }
+    let (l0, l1, l2, l3, l4, l5, l6) = (l(0), l(4), l(8), l(12), l(16), l(20), l(24));
+    if l0 == 0 || l0 & !7 != l0 || l1 == 0 {
+        return false;
+    }
+    let n = l1.wrapping_sub(l0);
+    // divu #12 with remainder 0, and at most 32 subsongs; the original's
+    // low byte may have only bits 2 and 3
+    if (strict && n & 0xf3 != 0) || n % 12 != 0 || n / 12 > 32 {
+        return false;
+    }
+    if l1 < l0 || l2 == 0 || l1 > l2 || (l2 - l1) & 0x0f != 0 {
+        return false;
+    }
+    l3 != 0 && l3 >= l2 && l4 != 0 && l3 <= l4 && l5 != 0 && l4 <= l5 && l6 != 0 && (l5 < l6 || (!strict && l5 == l6))
+}
+
 /// The module data's start (where the eight offsets are) and its layout: 0 for
 /// "SOARV1.0", 1 for the offsets alone, 2 for a replayer in front. As the
 /// original's check, with NostalgicPlayer's test of the replayer's init routine.
@@ -234,27 +269,7 @@ fn layout(d: &[u8]) -> Option<(usize, u8)> {
     if d.len() >= 8 && &d[..8] == b"SOARV1.0" {
         return Some((0, 0));
     }
-    let l = |o: usize| be32(d, o);
-    let offsets = || -> bool {
-        if d.len() < 32 || be16(d, 0) != 0 || be16(d, 4) != 0 || [8, 12, 16, 20].iter().any(|&o| d[o] != 0) {
-            return false;
-        }
-        let (l0, l1, l2, l3, l4, l5, l6) = (l(0), l(4), l(8), l(12), l(16), l(20), l(24));
-        if l0 == 0 || l0 & !7 != l0 || l1 == 0 {
-            return false;
-        }
-        let n = l1.wrapping_sub(l0);
-        // the low byte may have only bits 2 and 3; then divu #12, remainder 0
-        // and at most 32 subsongs
-        if n & 0xf3 != 0 || n % 12 != 0 || n / 12 > 32 {
-            return false;
-        }
-        if l1 < l0 || l2 == 0 || l1 > l2 || (l2 - l1) & 0x0f != 0 {
-            return false;
-        }
-        l3 != 0 && l3 >= l2 && l4 != 0 && l3 <= l4 && l5 != 0 && l4 <= l5 && l6 != 0 && l5 < l6
-    };
-    if offsets() {
+    if offsets(d, false) {
         return Some((0, 1));
     }
     if d.len() < 0x1630 || (0..6).any(|i| be16(d, 4 * i) != 0x4efa) {
@@ -293,6 +308,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         bss,
         sub: 0,
         master: 0,
+        newer: kind == 1 && !offsets(d, true),
         dma_mask: 0,
         loop_pending: [false; 4],
         speed: 0,
@@ -429,7 +445,8 @@ impl Replayer for SonicArranger {
         for v in 0..4 {
             self.update_voice(v, hw);
         }
-        if self.dma_mask & 0xff != 0 {
+        // the later player writes DMACON for every row, even with no note
+        if self.dma_mask & 0xff != 0 || (self.newer && self.dma_mask != 0) {
             self.write_wait(hw, t::ON);
             hw.dmacon(0x8000 | (self.dma_mask & 0xf));
             // the host's ENPP_DMAMask waits for the DMA, as dtg_WaitAudioDMA does:
@@ -505,7 +522,7 @@ impl SonicArranger {
 
     /// The original's InitSound for subsong `n` (the first valid one from it).
     fn init_sound(&mut self, mut n: u16, hw: &mut Hw) {
-        self.master = 0x3f;
+        self.master = if self.newer { 0x40 } else { 0x3f };
         loop {
             let e = self.subsong_table.wrapping_add(n as u32 * 12);
             if hw.bus.r16(e + 6) != 0xffff && hw.bus.r16(e + 8) != 0xffff {
@@ -625,10 +642,19 @@ impl SonicArranger {
             if b.r16(va + PREV_NOTE) == 0 {
                 b.w16(va + PREV_NOTE, n);
             }
-            self.write_wait(hw, t::OFF);
-            hw.dmacon(1 << v);
-            self.write_wait(hw, t::LEN);
-            hw.len(v, 0);
+            if self.newer {
+                // the later player: period 1, the interrupt cleared, DMA off
+                self.write_wait(hw, t::LEN);
+                hw.per(v, 1);
+                m68k::AddressBus::write_word(hw.bus, 0xDFF09C, 0x80 << v);
+                self.write_wait(hw, t::OFF);
+                hw.dmacon(1 << v);
+            } else {
+                self.write_wait(hw, t::OFF);
+                hw.dmacon(1 << v);
+                self.write_wait(hw, t::LEN);
+                hw.len(v, 0);
+            }
             let inst = if instr == 0 {
                 self.pend += t::NO_INSTRUMENT;
                 let inst = hw.bus.r32(va + INSTR);
@@ -769,7 +795,7 @@ impl SonicArranger {
                 b.w16(va + VIB_SPEED, (arg & 0xf0) >> 3);
                 b.w16(va + VIB_LEVEL, 0xa0u16.wrapping_sub((arg & 0xf) << 4));
             }
-            6 => self.master = arg & 0x3f,
+            6 => self.master = if self.newer && arg == 64 { 64 } else { arg & 0x3f },
             7 => {
                 b.w16(va + PORTA_CNT, arg);
                 b.w16(va + PORTA_LEN, arg);
@@ -1412,6 +1438,69 @@ mod tests {
         assert_eq!(reg(0xDFF0A8)[0], 63);
         // the other voices stay silent
         assert!(reg(0xDFF0B8).iter().all(|&v| v == 0));
+        assert!(out.iter().any(|&s| s != 0.0), "no sound");
+    }
+
+    /// A compiled module (the eight offsets alone) of `subsongs` identical
+    /// subsongs, the last part of its waveform tables empty, otherwise as
+    /// `module`.
+    fn compiled(subsongs: u32) -> Vec<u8> {
+        let (l0, l1) = (32u32, 32 + 12 * subsongs);
+        let l2 = l1 + 16;
+        let l3 = l2 + 16;
+        let l4 = l3 + 152;
+        let l5 = l4 + 128;
+        let l6 = l5 + 128;
+        let mut d = Vec::new();
+        for l in [l0, l1, l2, l3, l4, l5, l6, l6] {
+            d.extend(l.to_be_bytes());
+        }
+        for _ in 0..subsongs {
+            for w in [3u16, 2, 0, 0, 0, 50] {
+                d.extend(w.to_be_bytes());
+            }
+        }
+        for start in [0u32, 2, 2, 2] {
+            d.extend((start << 16).to_be_bytes());
+        }
+        for row in [0x1901_0000u32, 0, 0, 0] {
+            d.extend(row.to_be_bytes());
+        }
+        let mut inst = [0u8; 152];
+        inst[5] = 16;
+        inst[7] = 1;
+        inst[0x11] = 64;
+        d.extend(inst);
+        d.extend([0u8; 256]); // waveforms, then the ADSR tables
+        d.extend(1u32.to_be_bytes());
+        d.extend(32u32.to_be_bytes());
+        d.extend((0..32).map(|i| (i * 8) as u8));
+        d
+    }
+
+    #[test]
+    fn takes_the_compiled_modules_the_later_player_takes() {
+        // 3 subsongs: the original's low byte test refuses a table of 36
+        // bytes; here the last part (the AMF table) is empty as well
+        let d = compiled(3);
+        assert!(!super::offsets(&d, true));
+        assert!(super::offsets(&d, false));
+        assert_eq!(crate::open::detect(&d).as_deref(), Some("Sonic Arranger"));
+        // one subsong (12 bytes) is the original's too, and stays as it was
+        assert!(super::offsets(&compiled(1), true));
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new("test.sa"), d).unwrap();
+        let mut out = vec![0f32; 2 * 9600];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        // the later player's note start: period 1, DMA off, the sample, and
+        // its master volume of 64, not 63
+        assert_eq!(reg(0xDFF0A6)[0], 1);
+        assert_eq!(&reg(0xDFF0A4)[..2], &[16, 1]);
+        assert_eq!(reg(0xDFF0A8)[0], 64);
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
     }
 }

@@ -14,6 +14,8 @@ pub mod amosmusicbank;
 pub mod ahx;
 pub mod artofnoise;
 pub mod bendaglish;
+pub mod davelowe;
+mod davelowe_tables;
 pub mod davidwhittaker;
 pub mod digibooster;
 pub mod digitalmugician;
@@ -174,6 +176,8 @@ pub const REPLAYERS: &[Open] = &[
     ptm::OPEN,
     richardjoseph::OPEN,
     sonix::OPEN,
+    davelowe::OPEN_DL,
+    davelowe::OPEN_DLN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

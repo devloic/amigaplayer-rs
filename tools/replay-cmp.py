@@ -22,17 +22,23 @@ than a word of the voice at the period it played (2 * period colour clocks), so
 that the note may restart in one run and not in the other. A port's timing is
 the original's only roughly, so a few such gaps are reported but pass; more than
 DMA_BAD of them (a port writing a whole tick at one moment) count as a difference.
+
+An Eagleplayer amplifier's virtual voices (more than four, or no EPAMB_Direct)
+log at 0xD00000 | voice << 4 | register, register 0/2 LOC, 4 LEN, 6 PER, 8 VOL
+and 0xA DMA (0x8000 on, 0 off). They compare as VLOC0, VLEN0, ..., VDMA0, and
+each voice's DMA off to on time is checked as for Paula's.
 """
 import sys
 
 TICK_GAP = 20000  # colour clocks: a tick's writes are far closer together than this
 DMA_SLACK = 300  # colour clocks: a port's timing is the original's only roughly
 DMA_BAD = 0.5  # measured: ports with no time there differ in 79-100%, timed ones in 0-29%
+VIRT = 0xD00000  # amplifier virtual voices: VIRT | voice << 4 | register (src/amplifier.rs)
 
 
 def load(path, tick_gap=TICK_GAP):
     base, size, ticks, last = 0, 0, [], None
-    hi, gaps, off, per = {}, [], {}, [0] * 4
+    hi, gaps, off, per = {}, [], {}, {}
     for line in open(path):
         f = line.split()
         if f[0] == '#':
@@ -40,13 +46,28 @@ def load(path, tick_gap=TICK_GAP):
                 base, size = int(f[2], 16), int(f[3])
             continue
         a, v, t = int(f[0], 16), int(f[1], 16), int(f[2])
-        if not 0xDFF096 <= a <= 0xDFF0DF:
+        virt = VIRT <= a < VIRT + 0x200 and a & 0xF <= 0xA
+        if not (0xDFF096 <= a <= 0xDFF0DF or virt):
             continue
         if last is None or t - last > tick_gap:
             ticks.append([])
             gaps.append({})
             off = {}
         last = t
+        if virt:
+            ch, r = f'V{(a - VIRT) >> 4}', a & 0xF
+            if r == 0xA:
+                if v & 0x8000 and ch in off:
+                    t0, word = off.pop(ch)
+                    gaps[-1].setdefault(ch, (t - t0, word))
+                elif not v & 0x8000:
+                    off[ch] = (t, 2 * per.get(ch, 0))
+                ticks[-1].append((f'VDMA{ch[1:]}', v))
+                continue
+            a = 0xDFF0A0 + r  # the rest as a Paula voice's registers, voice "V<n>"
+        else:
+            ch = (a - 0xDFF0A0) // 16 if a >= 0xDFF0A0 else None
+        p, n = ('V', ch[1:]) if virt else ('', ch)
         if a == 0xDFF096:
             for ch in range(4):
                 if v & 1 << ch:
@@ -54,26 +75,25 @@ def load(path, tick_gap=TICK_GAP):
                         t0, word = off.pop(ch)
                         gaps[-1].setdefault(ch, (t - t0, word))
                     elif not v & 0x8000:
-                        off[ch] = (t, 2 * per[ch])
+                        off[ch] = (t, 2 * per.get(ch, 0))
         if 0xDFF0A0 <= a < 0xDFF0E0 and (a - 0xDFF0A0) % 16 in (0, 2):
-            ch = (a - 0xDFF0A0) // 16
             if (a - 0xDFF0A0) % 16 == 0:
                 hi[ch] = v
                 continue
             addr = hi.pop(ch, 0) << 16 | v
             if addr == 0:  # a pointer never set, not player memory
-                ticks[-1].append((f'LOC{ch}', ('Z', 0)))
+                ticks[-1].append((f'{p}LOC{n}', ('Z', 0)))
             elif base <= addr < base + size:
-                ticks[-1].append((f'LOC{ch}', ('M', addr - base)))
+                ticks[-1].append((f'{p}LOC{n}', ('M', addr - base)))
             else:
-                ticks[-1].append((f'LOC{ch}', ('X', addr)))
+                ticks[-1].append((f'{p}LOC{n}', ('X', addr)))
             continue
         if 0xDFF0A0 <= a < 0xDFF0E0 and (a - 0xDFF0A0) % 16 == 6:
-            per[(a - 0xDFF0A0) // 16] = v
+            per[ch] = v
         if a < 0xDFF0A0:  # DMACON, INTENA, INTREQ, ADKCON
             name = {0xDFF096: 'DMACON', 0xDFF09A: 'INTENA', 0xDFF09C: 'INTREQ', 0xDFF09E: 'ADKCON'}.get(a, f'{a:06x}')
         else:
-            name = f'{["LEN", "PER", "VOL", "DAT"][((a - 0xDFF0A0) % 16 - 4) // 2]}{(a - 0xDFF0A0) // 16}'
+            name = f'{p}{["LEN", "PER", "VOL", "DAT"][((a - 0xDFF0A0) % 16 - 4) // 2]}{n}'
         ticks[-1].append((name, v))
     return ticks, gaps
 
@@ -117,7 +137,7 @@ def main():
             same += 1
         elif first is None:
             first = k
-    both = [(k, ch) for k in range(n) for ch in sorted(rgaps[k].keys() & pgaps[k].keys())]
+    both = [(k, ch) for k in range(n) for ch in sorted(rgaps[k].keys() & pgaps[k].keys(), key=str)]
     late = [(k, ch) for k, ch in both
             if abs(rgaps[k][ch][0] - pgaps[k][ch][0]) > DMA_SLACK
             and min(rgaps[k][ch][0], pgaps[k][ch][0]) < rgaps[k][ch][1]]

@@ -30,6 +30,7 @@ pub mod jamcracker;
 pub mod med;
 pub mod musicassembler;
 pub mod musicmaker;
+pub mod multimod;
 pub mod musicmaker8;
 pub mod pretracker;
 mod pretracker_tables;
@@ -141,6 +142,8 @@ pub const REPLAYERS: &[Open] = &[
     soundtracker::OPEN_ST9,
     soundtracker::OPEN_MST,
     soundtracker::OPEN_ST2X,
+    multimod::OPEN,
+    multimod::OPEN_FLT8,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

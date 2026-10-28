@@ -42,9 +42,11 @@
 //!   flag), the frequency drum restarts from the whole fine tuning word, the
 //!   second low-pass filter reads its thresholds on past the waveform, and the
 //!   noise comes from the beam position, as the original's;
-//! * the song end is signalled on entering the last position (or on a jump
-//!   back); the tempo gives the timer value tempo * 14187 / 50, as the
-//!   original's InitSound computes it;
+//! * the song end is signalled when the last position is over (or on a jump
+//!   back), as the later SonicArranger Eagleplayer does: the original signals
+//!   it on entering the last position, which cuts that position off and ends a
+//!   one-position song after its first row; the tempo gives the timer value
+//!   tempo * 14187 / 50, as the original's InitSound computes it;
 //! * the writes are spaced as the original's: each part of its code costs the
 //!   time fitted to the gaps of its write logs (see `t`), so that a note's DMA
 //!   off stops the voice for as long before the tick's DMA on. The noise
@@ -568,12 +570,13 @@ impl SonicArranger {
             self.row = 0;
             self.pos = self.pos.wrapping_add(1);
             self.pend += t::POSITION;
-            if self.last as i16 >= self.pos as i16 {
-                if self.pos.wrapping_add(1) > self.last {
-                    self.signal_songend();
-                }
-            } else {
+            // the original signals the end on entering the last position, which
+            // cuts that position off (a one-position song ends at once); this
+            // signals it when the last one is over, as the later SonicArranger
+            // Eagleplayer does. Only the song end moves: the writes are the same.
+            if !(self.last as i16 >= self.pos as i16) {
                 self.pos = self.restart;
+                self.signal_songend();
             }
             let e = self.positions.wrapping_add((self.pos as u32) << 4);
             for v in 0..4 {

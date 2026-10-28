@@ -34,6 +34,7 @@ pub mod instereo2;
 pub mod hippel;
 pub mod hvl;
 pub mod jamcracker;
+pub mod jasonpage;
 pub mod jesperolsen;
 pub mod med;
 pub mod medpacker;
@@ -196,6 +197,7 @@ pub const REPLAYERS: &[Open] = &[
     tcbtracker::OPEN,
     mon::OPEN,
     specialfx::OPEN,
+    jasonpage::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

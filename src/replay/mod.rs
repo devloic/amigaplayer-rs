@@ -52,6 +52,7 @@ pub mod soundcontrol;
 pub mod soundfactory;
 pub mod soundfx;
 pub mod sonicarranger;
+pub mod sonix;
 pub mod soundmon;
 pub mod soundtracker;
 pub mod synthesis;
@@ -172,6 +173,7 @@ pub const REPLAYERS: &[Open] = &[
     agi::OPEN,
     ptm::OPEN,
     richardjoseph::OPEN,
+    sonix::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -484,6 +484,7 @@ impl Engine {
         self.last_error = None;
         self.m.deli.songend = false;
         let data = crate::decrunch::decrunch(data);
+        let data = if self.only_player.is_some() { data } else { crate::prowizard::convert(data, path) };
         if data.is_empty() {
             bail!("empty file");
         }

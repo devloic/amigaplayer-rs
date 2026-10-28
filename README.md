@@ -43,6 +43,8 @@ for EaglePlayers. It runs the **Eagleplayers** of Eagleplayer 2.06 too:
 * `src/protracker.rs`: native ProTracker/NoiseTracker/SoundTracker replayer
   (it is built into DeliTracker rather than shipped as a plugin).
 * `src/decrunch.rs`: PowerPacker (PP20) decrunching.
+* `src/prowizard/`: packed ProTracker modules converted back to ProTracker
+  (see ProWizard).
 * `src/ui.rs`: SDL3 window with transport controls, scopes and module list.
 * `crates/m68k-rc`, `crates/players-native`, `tools/recomp`,
   `tools/native-players.py`: the optional 68k → Rust translation of the players
@@ -372,3 +374,60 @@ Not implemented:
   process startup
 * XPK decrunching
 * the DataType player
+
+## ProWizard
+
+`src/prowizard/` is a Rust port of NostalgicPlayer's ProWizard converter (MIT,
+Thomas Neumann), itself after Asle's ProWizard and libxmp: 71 packers and
+protectors of ProTracker modules (The Player 2.2A-6.1A, NoisePacker 1-3,
+ProRunner 1/2, Promizer, ProPacker, Tracker Packer, Unic Tracker, Pha Packer,
+Channel Player, Images Music System, ...). After decrunching, the engine hands
+every module to `prowizard::convert`; the first format whose check passes turns
+it into a ProTracker module in memory, which the built-in ProTracker then plays
+(`--player` skips it). The checks run in NostalgicPlayer's order, also on
+plain modules, as Devils Replay and HCD Protector keep the `M.K.` mark.
+
+* Detection, over NostalgicPlayer's test files of all 214 formats and the
+  archive lists: 1554 of the 1555 test files of the 70 formats that have any
+  are taken by their own format (the other, a Tracker Packer 3 module, is
+  XPK-crunched); no file of any other format, plain MODs included, is taken.
+* Conversion, against libxmp's (`xmp`, for comparison only): most modules give
+  the same patterns and samples. The differences are NostalgicPlayer's choices,
+  kept (The Player 4.x's E02, B and D parameters, Images Music System's notes,
+  NoisePacker's B parameter, ...); two of its bugs are fixed: Fuchs Tracker
+  skips the `INST` mark, NovoTrade Packer's rows end on bit 15.
+* Playback, against UADE's PTK-Prowiz Eagleplayer in this engine, 20 s per
+  module, up to 15 archive modules per family; state = Paula's registers after
+  each tick:
+
+| Family | Played | State identical | specdist median (to 2 kHz) |
+| --- | --- | --- | --- |
+| AC1D Packer | 7 | 1 | 6.61 dB (1.60) |
+| Channel Player | 9 | 1 | 6.46 dB (1.41) |
+| Digital Illusions | 15 | 3 | 6.85 dB (3.26) |
+| Images Music System | 12 | 0 | 12.38 dB (10.52) |
+| NoisePacker 2 | 15 | 13 | 6.44 dB (1.36) |
+| NoisePacker 3 | 15 | 9 | 6.46 dB (1.37) |
+| Pha Packer | 15 | 9 | 6.46 dB (1.25) |
+| ProPacker 2.1 | 7 | 2 | 6.54 dB (2.02) |
+| ProPacker 3.0 | 5 | 3 | 2.68 dB (2.10) |
+| ProRunner 1 | 15 | 1 | 6.65 dB (2.00) |
+| ProRunner 2 | 15 | 6 | 6.80 dB (2.21) |
+| The Player 4.1A | 7 | 1 | 7.04 dB (2.55) |
+| The Player 4.x | 15 | 5 | 6.72 dB (1.90) |
+| The Player 5.x | 4 | 2 | 6.35 dB (2.54) |
+| The Player 6.0A | 15 | 8 | 6.89 dB (2.70) |
+| The Player 6.x | 15 | 5 | 6.79 dB (2.64) |
+| Tracker Packer 3 | 15 | 5 | 6.88 dB (2.21) |
+| Unic Tracker | 12 | 0 | 10.07 dB (8.87) |
+
+  Most of the difference is the built-in ProTracker's, not the conversion's:
+  over 20 ProPacker modules whose conversion libxmp confirms, 1 is
+  state-identical and the specdist median is 6.88 dB. The built-in replayer
+  starts with the LED filter off where PTK-Prowiz leaves it on (about 7 dB
+  above 2 kHz even with identical state), and computes fine-tuned periods by
+  formula, one off the tables now and then. Images Music System's notes are 11
+  semitones below PTK-Prowiz's from the first tick; Unic Tracker drifts later
+  (an octave on some notes). The reference refuses Magnetic Fields Packer,
+  NovoTrade Packer, Devils Replay and HCD Protector, so their playback is
+  unchecked.

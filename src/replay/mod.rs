@@ -50,6 +50,7 @@ pub mod pumatracker;
 pub mod quadracomposer;
 mod quadracomposer_tables;
 pub mod richardjoseph;
+pub mod soundplayer;
 pub mod ronklaren;
 pub mod sidmon1;
 pub mod sidmon2;
@@ -184,6 +185,7 @@ pub const REPLAYERS: &[Open] = &[
     jesperolsen::OPEN,
     pierreadane::OPEN,
     medpacker::OPEN,
+    soundplayer::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

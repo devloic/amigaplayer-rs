@@ -70,6 +70,7 @@ pub mod synthesis;
 pub mod tfmx;
 pub mod tcbtracker;
 pub mod tme;
+pub mod wallybeben;
 
 use crate::amplifier::Poke;
 use crate::bus::Bus;
@@ -198,6 +199,7 @@ pub const REPLAYERS: &[Open] = &[
     mon::OPEN,
     specialfx::OPEN,
     jasonpage::OPEN,
+    wallybeben::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

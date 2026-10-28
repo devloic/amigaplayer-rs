@@ -3,11 +3,21 @@
 
 pub const ECLOCK_PAL: f64 = 709_379.0;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Timer {
     latch: u16,
     counter: i64,
     cr: u8,
+}
+
+/// Power-on state: latch and counter $FFFF, stopped (the 6526/8520 reset sets the timer
+/// latches to all ones; UADE's CIA_reset and WinUAE do the same). A player that starts a
+/// timer before writing its latch (the Musicline Editor's) therefore gets its first
+/// underflow 65536 E-clock ticks later, not at once.
+impl Default for Timer {
+    fn default() -> Self {
+        Timer { latch: 0xFFFF, counter: 0xFFFF, cr: 0 }
+    }
 }
 
 impl Timer {

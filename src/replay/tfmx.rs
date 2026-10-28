@@ -1,7 +1,7 @@
-//! TFMX (Chris Hülsbeck), ported from NostalgicPlayer's TFMX player. Its engine
-//! is NostalgicPlayer's C# port of Michael Schwendt's libTfmxAudioDecoder,
-//! GPL-2.0-or-later (NostalgicPlayer's own code: Copyright (c) 2023 Thomas
-//! Neumann, MIT licence, see LICENSE-NostalgicPlayer).
+//! TFMX (Chris Hülsbeck), ported from NostalgicPlayer's TFMX player
+//! (Copyright (c) 2023 Thomas Neumann, MIT licence: see LICENSE-NostalgicPlayer),
+//! whose engine is NostalgicPlayer's port of libTfmxAudioDecoder (GPL-2.0-or-later),
+//! so this file is GPL-2.0-or-later, like the rest of deliplayer (see LICENSE).
 //!
 //! A TFMX song is two files: `mdat.NAME` (the song: tracks, patterns, macros)
 //! and `smpl.NAME` (the samples). NostalgicPlayer plays all three kinds (1.5,

@@ -359,8 +359,12 @@ replayer leaves them alone.
 
 `src/replay/` holds Rust ports of NostalgicPlayer's players (MIT, Thomas
 Neumann: `LICENSE-NostalgicPlayer`; the AHX one is a port of 8bitbubsy's
-ahx2play, BSD 3-Clause: `LICENSE-ahx2play`), open-source stand-ins for the 68k players,
-whose licences forbid modifying them or shipping them in another project.
+ahx2play, BSD 3-Clause: `LICENSE-ahx2play`), open-source stand-ins for the 68k players.
+DeliTracker's DeliPlayers and genies may not be modified or shipped in another
+project; Eagleplayer's main program and engines are GPL since 2.04, but its
+external Eagleplayers are not ("The external Eagleplayers are not released under
+the GPL", Eagleplayer 2.04 sources), and most of them hold the composers' own
+replay routines.
 `--open-replayers` plays the formats they know with them instead of the 68k
 players. They write Paula's registers as the original players do, and are
 checked against the Eagleplayers, not against NostalgicPlayer:
@@ -504,3 +508,20 @@ plain modules, as Devils Replay and HCD Protector keep the `M.K.` mark.
   identical; the other 4 differ only by PTK-Prowiz's late portamentos). The
   reference refuses Magnetic Fields Packer, NovoTrade Packer, Devils Replay and
   HCD Protector, so their playback is unchecked.
+
+## Licence
+
+deliplayer is free software under the GNU General Public License, version 2 or
+(at your option) any later version: see `LICENSE`. `src/paula.rs` and
+`src/paulaout.rs` are derived from UADE's (UAE's) GPL audio emulation, and
+`src/replay/tfmx.rs` from libTfmxAudioDecoder (GPL-2.0-or-later) by way of
+NostalgicPlayer. The built-in ProTracker is translated from pt2-clone and
+ProTracker 2.3F's replay source (BSD-3: `LICENSE-pt2-clone`), and the
+MusicMaker replayers from Thomas Winischhofer's MusicMaker sources (BSD), the
+AHX one from ahx2play (BSD-3: `LICENSE-ahx2play`), the PreTracker one from
+Raspberry Casket and rePlayer's C port (MIT, released with permission from
+Pink / Abyss: `LICENSE-PreTracker`). The
+other open replayers are ported from NostalgicPlayer (MIT:
+`LICENSE-NostalgicPlayer`, which has to travel with them). The 68k players
+deliplayer runs (DeliPlayers, Eagleplayers, genies) and the Rust recompiled from
+them (`crates/players-native/gen`) are not part of it and are not covered.

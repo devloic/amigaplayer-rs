@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod actionamics;
+pub mod agi;
 pub mod activisionpro;
 pub mod amosmusicbank;
 pub mod ahx;
@@ -166,6 +167,7 @@ pub const REPLAYERS: &[Open] = &[
     med::OPEN_MIX,
     med::OPEN_OSS,
     tme::OPEN,
+    agi::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

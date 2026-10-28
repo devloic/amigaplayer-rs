@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod actionamics;
+pub mod alcatrazpacker;
 pub mod agi;
 pub mod activisionpro;
 pub mod amosmusicbank;
@@ -45,6 +46,7 @@ pub mod pretracker;
 mod pretracker_tables;
 pub mod musicline;
 pub mod oktalyzer;
+pub mod peterverswyvelen;
 pub mod ptm;
 pub mod pumatracker;
 pub mod quadracomposer;
@@ -63,6 +65,7 @@ pub mod soundmon;
 pub mod soundtracker;
 pub mod synthesis;
 pub mod tfmx;
+pub mod tcbtracker;
 pub mod tme;
 
 use crate::amplifier::Poke;
@@ -186,6 +189,9 @@ pub const REPLAYERS: &[Open] = &[
     pierreadane::OPEN,
     medpacker::OPEN,
     soundplayer::OPEN,
+    peterverswyvelen::OPEN,
+    alcatrazpacker::OPEN,
+    tcbtracker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so
@@ -270,4 +276,42 @@ pub(crate) fn be16(d: &[u8], o: usize) -> u16 {
 
 pub(crate) fn be32(d: &[u8], o: usize) -> u32 {
     d.get(o..o + 4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Reference runs of a replayer against the original's write log: plays a module
+/// tick by tick without stopping at the song end and writes the register log.
+#[cfg(test)]
+mod run_dump {
+    use crate::engine::Engine;
+    use std::path::Path;
+
+    /// `PK_MODULE=file PK_TICKS=n PK_LOG=out cargo test --release run_dump -- --ignored`:
+    /// `n` ticks (960 samples each at 48 kHz) of the module, the log in `DELI_WRITE_LOG`'s
+    /// format, and the tick in which the song end was announced on stdout.
+    #[test]
+    #[ignore]
+    fn dump() {
+        let (Ok(file), Ok(ticks), Ok(out)) = (std::env::var("PK_MODULE"), std::env::var("PK_TICKS"), std::env::var("PK_LOG"))
+        else {
+            return;
+        };
+        let ticks: usize = ticks.parse().unwrap();
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new(&file), std::fs::read(&file).unwrap()).unwrap();
+        println!("format {}", e.playing.as_ref().unwrap().format);
+        let mut buf = vec![0f32; 2 * 960];
+        let mut end = None;
+        for t in 0..ticks {
+            e.render(&mut buf);
+            if end.is_none() && e.songend() {
+                end = Some(t);
+            }
+        }
+        println!("songend tick {:?}", end);
+        let l = e.m.bus.write_log.take().unwrap();
+        let text: String = l.iter().map(|(a, v, t)| format!("{a:06x} {v:04x} {t}\n")).collect();
+        std::fs::write(out, text).unwrap();
+    }
 }

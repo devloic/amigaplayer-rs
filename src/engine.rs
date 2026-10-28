@@ -17,8 +17,7 @@ pub const SCOPE_LEN: usize = 512;
 /// Players with more voices than it has are left to the built-in renderer (the
 /// genies with more mix in software, which takes a 68000 far too long).
 const DEFAULT_NOTE_GENIE: &str = "4Voices-NotePlayer";
-/// Colour clocks per E-clock tick.
-const ECLOCK_DIV: u64 = 5;
+use crate::bus::ECLOCK_DIV;
 /// Players of formats from the PC, played without the Amiga's output filters.
 const PC_FORMATS: &[&str] =
     &["669", "adpcm", "aiff", "wav", "riff", "mpeg", "mp3", "fasttracker", "screamtracker", "ps3m", "taketracker"];
@@ -124,8 +123,6 @@ pub struct Engine {
     /// (colour clocks).
     next_vblank: u64,
     next_timer: Option<u64>,
-    /// E-clock ticks the CIAs have been run to.
-    e_ticks: u64,
     /// Number of players found in the players directories (custom modules
     /// are appended after them and removed again).
     builtin_players: usize,
@@ -171,7 +168,6 @@ impl Engine {
             led: Biquad::lowpass(rate, 3275.0, 0.707),
             next_vblank: FRAME,
             next_timer: None,
-            e_ticks: 0,
             builtin_players: 0,
             only_player: None,
             open_replayers: false,
@@ -935,7 +931,7 @@ impl Engine {
             _ => {}
         }
         let cias = [&self.m.bus.ciaa, &self.m.bus.ciab];
-        let cia_due = cias.iter().filter_map(|c| c.until_underflow()).min().map(|n| (self.e_ticks + n) * ECLOCK_DIV);
+        let cia_due = cias.iter().filter_map(|c| c.until_underflow()).min().map(|n| (self.m.bus.e_ticks + n) * ECLOCK_DIV);
         let paula = &self.m.bus.paula;
         let mut t = paula.now() + paula.out.until_sample() as u64;
         for d in [Some(self.next_vblank), self.next_timer, cia_due].into_iter().flatten() {
@@ -946,11 +942,10 @@ impl Engine {
         }
         let now = self.m.bus.clock;
         // CIA timers (players with their own interrupt)
-        let ticks = now / ECLOCK_DIV - self.e_ticks;
-        self.e_ticks += ticks;
+        self.m.bus.cia_sync();
         for cia in 0..2 {
             let c = if cia == 0 { &mut self.m.bus.ciaa } else { &mut self.m.bus.ciab };
-            let fired = c.advance(ticks) & c.icr_mask;
+            let fired = c.take_pending();
             for bit in 0..2 {
                 if fired & (1 << bit) != 0 {
                     let is = self.m.os.icr_vectors[cia][bit];

@@ -14,6 +14,8 @@ pub const RAM_SIZE: usize = 0x00B0_0000;
 pub const FRAME: u64 = 313 * LINE;
 /// 68000 clock cycles per colour clock (7.09 MHz, PAL).
 pub(crate) const CPU_CYCLES: u64 = 2;
+/// Colour clocks per E-clock tick.
+pub const ECLOCK_DIV: u64 = 5;
 
 pub struct Bus {
     pub ram: Vec<u8>,
@@ -23,6 +25,8 @@ pub struct Bus {
     /// Time in colour clocks. The owner advances it between guest calls; while
     /// guest code runs, its instructions do (`m68k_rc::Bus::cycles`).
     pub clock: u64,
+    /// E-clock ticks (colour clocks / 5) the CIAs have been run to.
+    pub e_ticks: u64,
     /// The clock and the CPU cycle count of the code running at the same moment.
     pub(crate) epoch: (u64, u64),
     /// Colour clocks per frame: `FRAME`, or UADE's 312 lines.
@@ -44,6 +48,7 @@ impl Bus {
             ciaa: Cia::default(),
             ciab: Cia::default(),
             clock: 0,
+            e_ticks: 0,
             epoch: (0, 0),
             frame: FRAME,
             log_unmapped: false,
@@ -138,7 +143,20 @@ impl Bus {
         }
     }
 
+    /// Bring both CIAs up to the bus clock: E-clock = colour clock / 5, as the real chips count
+    /// whenever the 68000 is not looking. Underflows on the way stay pending for the engine.
+    pub fn cia_sync(&mut self) {
+        let e = self.clock / ECLOCK_DIV;
+        if e > self.e_ticks {
+            let ticks = e - self.e_ticks;
+            self.e_ticks = e;
+            self.ciaa.advance(ticks);
+            self.ciab.advance(ticks);
+        }
+    }
+
     fn cia_read(&mut self, a: u32) -> u8 {
+        self.cia_sync();
         let reg = (a >> 8) & 0xF;
         if a & 0x1000 == 0 {
             self.ciaa.read(reg)
@@ -150,6 +168,7 @@ impl Bus {
     }
 
     fn cia_write(&mut self, a: u32, v: u8) {
+        self.cia_sync();
         if let Some(l) = &mut self.write_log {
             l.push((a, v as u16, self.clock));
         }
@@ -254,5 +273,33 @@ impl AddressBus for Bus {
 
     fn fast_mem(&mut self) -> Option<FastMem> {
         Some(FastMem { ptr: self.ram.as_mut_ptr(), base: 0, len: RAM_SIZE as u32 })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A one-shot written mid-interval counts from the write, not from the CIA's stale time.
+    #[test]
+    fn one_shot_started_late_fires_n_eclocks_after_the_write() {
+        let mut b = Bus::new();
+        // CIA-B timer A: one-shot, interrupt enabled
+        b.ciab.write(0xE, 0x08);
+        b.ciab.icr_mask = 1;
+        // the CIAs have not been looked at for 1000 E-clocks
+        b.clock = 1000 * ECLOCK_DIV;
+        b.write_byte(0xBF_D400, 100); // TALO
+        b.write_byte(0xBF_D500, 0); // TAHI: loads and starts the one-shot
+        assert_eq!(b.e_ticks, 1000);
+        assert_eq!(b.ciab.take_pending(), 0, "stale time must not count against the new timer");
+        // latch 100: underflow 101 E-clocks after the write
+        assert_eq!(b.ciab.until_underflow(), Some(101));
+        b.clock = (1000 + 100) * ECLOCK_DIV;
+        b.cia_sync();
+        assert_eq!(b.ciab.take_pending(), 0);
+        b.clock = (1000 + 101) * ECLOCK_DIV;
+        b.cia_sync();
+        assert_eq!(b.ciab.take_pending(), 1);
     }
 }

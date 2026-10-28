@@ -52,6 +52,8 @@ pub struct Cia {
     ddra: u8,
     ddrb: u8,
     sdr: u8,
+    /// ICR bits (TA=1, TB=2) that fired and are unmasked, not yet taken by the interrupt dispatcher.
+    pending: u8,
 }
 
 impl Cia {
@@ -139,7 +141,13 @@ impl Cia {
             fired |= 2;
         }
         self.icr_data |= fired;
+        self.pending |= fired & self.icr_mask;
         fired
+    }
+
+    /// The unmasked underflows since the last call (masked at the moment they happened).
+    pub fn take_pending(&mut self) -> u8 {
+        std::mem::take(&mut self.pending)
     }
 
     /// E-clock ticks until either timer underflows.

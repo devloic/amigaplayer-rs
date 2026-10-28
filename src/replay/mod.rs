@@ -9,6 +9,7 @@
 
 pub mod actionamics;
 pub mod activisionpro;
+pub mod amosmusicbank;
 pub mod artofnoise;
 pub mod bendaglish;
 pub mod davidwhittaker;
@@ -117,6 +118,7 @@ pub const REPLAYERS: &[Open] = &[
     activisionpro::OPEN,
     musicmaker::OPEN,
     musicmaker8::OPEN,
+    amosmusicbank::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

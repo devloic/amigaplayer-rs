@@ -36,6 +36,8 @@ pub mod pretracker;
 mod pretracker_tables;
 pub mod musicline;
 pub mod pumatracker;
+pub mod quadracomposer;
+mod quadracomposer_tables;
 pub mod ronklaren;
 pub mod sidmon1;
 pub mod sidmon2;
@@ -144,6 +146,7 @@ pub const REPLAYERS: &[Open] = &[
     soundtracker::OPEN_ST2X,
     multimod::OPEN,
     multimod::OPEN_FLT8,
+    quadracomposer::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

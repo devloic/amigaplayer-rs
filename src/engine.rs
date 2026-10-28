@@ -1039,7 +1039,7 @@ impl Engine {
                 continue;
             }
             if let Some(Playing { backend: Backend::Replay(r), .. }) = &mut self.playing {
-                if r.audio_irq(&mut crate::replay::Hw { bus: &mut self.m.bus }) {
+                if r.audio_irq_ch(ch, &mut crate::replay::Hw { bus: &mut self.m.bus }) {
                     continue;
                 }
             }

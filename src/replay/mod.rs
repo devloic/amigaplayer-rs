@@ -83,9 +83,17 @@ pub trait Replayer: Send {
     /// An audio interrupt, for a player whose original has a handler: called as
     /// the 68k players' handlers are, when Paula raises an enabled one. Returns
     /// whether it took it; if not, the handler in the interrupt vector runs (a
-    /// port may install a 68k one, as TFMX's does).
+    /// port may install a 68k one).
     fn audio_irq(&mut self, _hw: &mut Hw) -> bool {
         false
+    }
+    /// The same, for the audio interrupt of channel `ch` (0-3) in particular:
+    /// the engine calls this one, once for each channel that raised an enabled
+    /// interrupt, lowest first. A player whose handlers are per channel (a
+    /// 68k handler each in the original) overrides it; the default is
+    /// `audio_irq`, for the players whose one handler looks at INTREQ.
+    fn audio_irq_ch(&mut self, _ch: usize, hw: &mut Hw) -> bool {
+        self.audio_irq(hw)
     }
 }
 

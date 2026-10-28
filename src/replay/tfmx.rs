@@ -34,8 +34,10 @@
 //!   the whole second word; no volume clamp at $40;
 //! * the subsongs are the original's list (`subsong_list`), and the song ends
 //!   where the original calls dtg_SongEnd;
-//! * wait on DMA counts the voice's audio interrupts with a handler in guest
-//!   memory (`IRQ_CODE`), as the original's does;
+//! * wait on DMA counts the voice's audio interrupts as the original's handler
+//!   does (`audio_irq_ch`): it clears the request, counts down, and when the
+//!   count goes negative lets the macro run and disables the interrupt, with
+//!   the 68000's time for its instructions (no guest code runs);
 //! * the random numbers come from the beam position (`VHPOSR`), as the
 //!   original's do, so a random play macro matches only where the writes are
 //!   timed to the colour clock.
@@ -221,20 +223,6 @@ const P_RET_STEP: usize = 0xa8;
 /// starts: a guest address is needed, so the port allocates it.
 const EMPTY_PATTERN: [u8; 8] = [0xf4, 0, 0, 0, 0xf0, 0, 0, 0];
 
-/// The audio interrupt handler for wait on DMA, one per voice (a1 = the voice's
-/// counter word, then its flag byte): clear the request, count down, and when
-/// the count goes negative let the macro run again and disable the interrupt.
-/// The mask words are patched in.
-const IRQ_CODE: [u16; 13] = [
-    0x33fc, 0x0080, 0x00df, 0xf09c, // move.w #bit,INTREQ
-    0x5351, // subq.w #1,(a1)
-    0x6a0c, // bpl.s done
-    0x50e9, 0x0002, // st 2(a1)
-    0x33fc, 0x0080, 0x00df, 0xf09a, // move.w #bit,INTENA
-    0x4e75, // rts
-];
-const IRQ_SIZE: u32 = 26 + 22 + 4; // code, interrupt structure, counter and flag
-
 /// The time the original takes from its last write, by code path. Its waits for
 /// the audio DMA (`dma_wait`) are to a line boundary, and are not here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -282,7 +270,10 @@ pub struct Pro {
     mdat_len: u32,
     smpl: u32,
     empty: u32,
-    irq: u32,
+    /// Wait on DMA, per voice: the audio interrupt count (the original's
+    /// handler counts a word down) and the flag it sets when it goes negative.
+    dma_count: [u16; 4],
+    dma_flag: [bool; 4],
     /// The subsongs (song numbers), as InitPlayer lists them.
     songs: Vec<u8>,
     sub: u16,
@@ -386,8 +377,7 @@ fn new_pro(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     let smpl = m.alloc((smpl_data.len() as u32).max(4));
     let empty = m.alloc(EMPTY_PATTERN.len() as u32);
-    let irq = m.alloc(4 * IRQ_SIZE);
-    if smpl == 0 || empty == 0 || irq == 0 {
+    if smpl == 0 || empty == 0 {
         return None;
     }
     m.bus.write_bytes(smpl, &smpl_data);
@@ -402,7 +392,8 @@ fn new_pro(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         mdat_len: d.len() as u32,
         smpl,
         empty,
-        irq,
+        dma_count: [0; 4],
+        dma_flag: [false; 4],
         songs: Vec::new(),
         sub: 0,
         timer0: crate::deli::DEFAULT_TIMER,
@@ -418,19 +409,6 @@ fn new_pro(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     p.g.sw(G_TRACK_LOOP, 0xffff);
     p.p.sw(P_SPEED, 6);
     p.init_player(&mut m.bus)?;
-    // the audio interrupt handlers (the original's SetIntVector of INTB_AUD0-3)
-    for ch in 0..4u32 {
-        let a = irq + ch * IRQ_SIZE;
-        for (k, &w) in IRQ_CODE.iter().enumerate() {
-            m.bus.w16(a + 2 * k as u32, w);
-        }
-        m.bus.w16(a + 2, 0x80 << ch);
-        m.bus.w16(a + 18, 0x80 << ch);
-        let is = a + 26;
-        m.bus.w32(is + 14, is + 22);
-        m.bus.w32(is + 18, a);
-        m.os.int_vectors[crate::os::INTB_AUD0 + ch as usize] = is;
-    }
     let mut hw = Hw { bus: &mut m.bus };
     p.init_sound(0, &mut hw);
     Some(Box::new(p))
@@ -515,23 +493,16 @@ impl Pro {
         self.mdat.wrapping_add(hw.bus.r32(self.g.l(G_PATTERNS).wrapping_add(n * 4)))
     }
 
-    fn irq_cell(&self, i: usize) -> u32 {
-        self.irq + i as u32 * IRQ_SIZE + 26 + 22
-    }
-
     /// The interrupt handler's flag: its count went negative, the macro runs.
-    fn irq_flag(&mut self, hw: &mut Hw, i: usize) {
-        let a = self.irq_cell(i);
-        if hw.bus.r8(a + 2) != 0 {
-            hw.bus.w8(a + 2, 0);
+    fn irq_flag(&mut self, i: usize) {
+        if std::mem::take(&mut self.dma_flag[i]) {
             self.v[i].sb(V_RUN, 0xff);
         }
     }
 
-    fn set_dma_count(&mut self, hw: &mut Hw, i: usize, n: u16) {
-        let a = self.irq_cell(i);
-        hw.bus.w16(a, n);
-        hw.bus.w8(a + 2, 0);
+    fn set_dma_count(&mut self, i: usize, n: u16) {
+        self.dma_count[i] = n;
+        self.dma_flag[i] = false;
     }
 
     /// InitPlayer: the module's fixes, the subsong list, and the tests the
@@ -1235,7 +1206,7 @@ impl Pro {
                 v.sb(V_EFX, 0);
                 v.sb(V_LOOP, 0);
                 v.sb(V_RUN, 0xff);
-                self.set_dma_count(hw, i, 0);
+                self.set_dma_count(i, 0);
                 let m = self.v[i].w(V_INT_OFF);
                 self.intena(hw, m);
                 self.intreq(hw, m);
@@ -1248,7 +1219,7 @@ impl Pro {
     /// $11ab0: voice `i`'s tick: a sound effect's note, the macro, the effects.
     fn voice(&mut self, hw: &mut Hw, i: usize) {
         self.at(At::VoiceStart);
-        self.irq_flag(hw, i);
+        self.irq_flag(i);
         let lock = self.v[i].w(V_LOCK);
         if (lock as i16) >= 0 {
             self.v[i].sw(V_LOCK, lock.wrapping_sub(1));
@@ -1577,7 +1548,7 @@ impl Pro {
                 Next::Step
             }
             0x1a => {
-                self.set_dma_count(hw, i, w1);
+                self.set_dma_count(i, w1);
                 self.v[i].sb(V_RUN, 0);
                 let m = self.v[i].w(V_INT_ON);
                 self.intena(hw, m);
@@ -2114,6 +2085,31 @@ impl Pro {
 impl Replayer for Pro {
     fn format(&self) -> &'static str {
         "TFMX Pro"
+    }
+
+    /// Wait on DMA's audio interrupt, which the original's per-voice handler
+    /// takes: it clears the request, counts the voice's word down, and when the
+    /// count goes negative sets the voice's flag (the macro runs at the next
+    /// tick) and disables the interrupt. The handler's 68000 instructions take
+    /// their time (20 cycles for each move to a custom register, 12 for the
+    /// subq, 10 or 8 for the branch, 16 for the st and the rts), 2 per colour
+    /// clock, and the two writes are made when their instructions end.
+    fn audio_irq_ch(&mut self, ch: usize, hw: &mut Hw) -> bool {
+        let bit = 0x80u16 << ch;
+        hw.wait(10);
+        hw.bus.write_word(0xdff09c, bit);
+        hw.wait(6);
+        self.dma_count[ch] = self.dma_count[ch].wrapping_sub(1);
+        if (self.dma_count[ch] as i16) >= 0 {
+            hw.wait(5 + 8);
+        } else {
+            hw.wait(4 + 8);
+            self.dma_flag[ch] = true;
+            hw.wait(10);
+            hw.bus.write_word(0xdff09a, bit);
+            hw.wait(8);
+        }
+        true
     }
 
     fn title(&self) -> String {
@@ -5122,6 +5118,31 @@ mod tests {
         let per = log.iter().find(|w| w.0 == 0xDFF0A6 && w.1 == super::PERIODS[30]).unwrap().2;
         let on = log.iter().find(|w| w.0 == 0xDFF096 && w.1 == 0x8201).unwrap().2;
         assert!(on >= per + 8 * crate::paula::LINE);
+    }
+
+    #[test]
+    fn pro_wait_on_dma_counts_audio_interrupts_in_rust() {
+        // DMA on, wait on DMA with a count of 1, then SetVol $10 (the first
+        // SetVol is $30): the handler clears the request each time, and on the
+        // second interrupt (the count goes negative) disables the voice's
+        // interrupt and lets the macro run on
+        let run = |name: &str, count: u32| {
+            let macro_ = [0x0000_0000, 0x0200_0000, 0x0300_0010, 0x0e00_0030, 0x0800_0000, 0x0100_0000, 0x1a00_0000 | count, 0x0e00_0010, 0x0700_0000];
+            let (format, log) = play(name, mdat(b"TFMX-SONG ", &macro_));
+            assert_eq!(format, "TFMX Pro");
+            let count_of = |a, v| reg(&log, a).into_iter().filter(|&x| x == v).count();
+            let ena = reg(&log, 0xDFF09A);
+            assert!(ena.contains(&0x8080), "{ena:x?}");
+            let vol = reg(&log, 0xDFF0A8);
+            assert!(vol.contains(&0x10), "the macro ran on after the wait: {vol:x?}");
+            (count_of(0xDFF09C, 0x0080), count_of(0xDFF09A, 0x0080))
+        };
+        // a count of n takes n + 1 interrupts: each clears the request, the
+        // last one disables the interrupt (the same once for any count)
+        let (req0, dis0) = run("pro-dma0", 0);
+        let (req3, dis3) = run("pro-dma3", 3);
+        assert_eq!(req3, req0 + 3);
+        assert_eq!(dis3, dis0);
     }
 
     #[test]

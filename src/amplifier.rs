@@ -82,7 +82,14 @@ const IN_LOOP: u8 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Poke {
     Loc(u32),
+    /// LOC at any byte (Paula's is a word address; a software mixer's voice
+    /// may start or loop at an odd sample).
+    LocByte(u32),
     Len(u16),
+    /// LEN as a byte count (a voice's block may be longer than the 65535
+    /// words Paula's register counts; players that mix in software, as
+    /// OctaMED SoundStudio's does, play samples that long). Latched like LEN.
+    LenBytes(u32),
     Per(u16),
     Vol(u16),
     Dma(bool),
@@ -93,6 +100,8 @@ pub enum Poke {
 struct Voice {
     lc: u32,
     len: u16,
+    /// A LEN poked in bytes (0: the word count).
+    len_bytes: u32,
     per: u16,
     vol: u8,
     on: bool,
@@ -108,7 +117,12 @@ impl Voice {
     fn poke(&mut self, p: Poke) {
         match p {
             Poke::Loc(a) => self.lc = a & 0xFF_FFFE,
-            Poke::Len(l) => self.len = l,
+            Poke::LocByte(a) => self.lc = a & 0xFF_FFFF,
+            Poke::Len(l) => {
+                self.len = l;
+                self.len_bytes = 0;
+            }
+            Poke::LenBytes(b) => self.len_bytes = b.max(1),
             Poke::Per(p) => self.per = p,
             Poke::Vol(v) => self.vol = if v & 64 != 0 { 64 } else { (v & 63) as u8 },
             Poke::Dma(true) if !self.on => {
@@ -124,7 +138,13 @@ impl Voice {
     /// LOC and LEN become the block to play.
     fn latch(&mut self) {
         self.pt = self.lc;
-        self.bytes = if self.len == 0 { 0x20000 } else { 2 * self.len as u32 };
+        self.bytes = if self.len_bytes != 0 {
+            self.len_bytes
+        } else if self.len == 0 {
+            0x20000
+        } else {
+            2 * self.len as u32
+        };
     }
 
     /// Plays `cc` colour clocks. Returns whether a block ended (Paula's
@@ -322,6 +342,11 @@ impl Amplifier {
                     l.push((a + 2, x as u16, t));
                 }
                 Poke::Len(x) => l.push((a + 4, x, t)),
+                Poke::LocByte(x) => {
+                    l.push((a, (x >> 16) as u16, t));
+                    l.push((a + 2, x as u16, t));
+                }
+                Poke::LenBytes(x) => l.push((a + 4, (x / 2).min(0xFFFF) as u16, t)),
                 Poke::Per(x) => l.push((a + 6, x, t)),
                 Poke::Vol(x) => l.push((a + 8, x, t)),
                 Poke::Dma(on) => l.push((a + 0xA, if on { 0x8000 } else { 0 }, t)),
@@ -333,10 +358,14 @@ impl Amplifier {
         }
         let s = self.structs + v as u32 * aus::SIZE;
         match p {
-            Poke::Loc(a) => w32(ram, s + aus::LOOP_ADR, a),
+            Poke::Loc(a) | Poke::LocByte(a) => w32(ram, s + aus::LOOP_ADR, a),
             Poke::Len(l) => {
                 w32(ram, s + aus::LOOP_LEN, 2 * l as u32);
                 w8(ram, s + aus::LOOP, (l != 0) as u8);
+            }
+            Poke::LenBytes(b) => {
+                w32(ram, s + aus::LOOP_LEN, b);
+                w8(ram, s + aus::LOOP, (b != 0) as u8);
             }
             Poke::Per(p) => w16(ram, s + aus::PER, p << 2),
             Poke::Vol(x) => {

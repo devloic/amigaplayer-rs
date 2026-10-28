@@ -13,6 +13,9 @@
 //! period, volumes 0-64, and the commands as the proplayer knows them. See the
 //! README for the list of places where the two differ.
 //!
+//! Songs in mix mode or on 5-8 channels, and OctaMED SoundStudio's MMD3 ones, are
+//! played by `mix` (the mixer's player on the host's amplifier), not by this one.
+//!
 //! The module stays in guest memory where it was loaded, with its pointers
 //! unrelocated: notes, commands, samples and synth waveforms are read from
 //! there, so a module that points past its blocks reads what the original
@@ -25,6 +28,9 @@ use crate::paula::LINE;
 use m68k::AddressBus;
 
 mod med4;
+mod mix;
+
+pub use mix::{OPEN_MIX, OPEN_OSS};
 
 pub const OPEN: Open = Open {
     name: "MED",

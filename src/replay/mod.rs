@@ -154,6 +154,8 @@ pub const REPLAYERS: &[Open] = &[
     facethemusic::OPEN,
     oktalyzer::OPEN,
     digibooster::OPEN,
+    med::OPEN_MIX,
+    med::OPEN_OSS,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so
@@ -192,8 +194,16 @@ impl Hw<'_> {
     pub fn voice_loc(&mut self, v: usize, a: u32) {
         self.bus.amp_poke(v, Poke::Loc(a));
     }
+    /// LOC at any byte, for a voice that mixes in software.
+    pub fn voice_loc_byte(&mut self, v: usize, a: u32) {
+        self.bus.amp_poke(v, Poke::LocByte(a));
+    }
     pub fn voice_len(&mut self, v: usize, words: u16) {
         self.bus.amp_poke(v, Poke::Len(words));
+    }
+    /// LEN in bytes, for a block longer than Paula's register counts.
+    pub fn voice_len_bytes(&mut self, v: usize, bytes: u32) {
+        self.bus.amp_poke(v, Poke::LenBytes(bytes));
     }
     pub fn voice_per(&mut self, v: usize, period: u16) {
         self.bus.amp_poke(v, Poke::Per(period));

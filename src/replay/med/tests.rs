@@ -178,3 +178,124 @@ fn converts_med4() {
     assert_eq!(c[smp..smp + 14], [0, 0, 0, 8, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(super::detect(&med4()));
 }
+
+// ---- OctaMED SoundStudio (MMD3) on the amplifier
+
+const O_SONG: usize = 0x34;
+const O_PSEQTAB: usize = O_SONG + 0x314;
+const O_PSEQ: usize = O_PSEQTAB + 4;
+const O_SECT: usize = O_PSEQ + 0x2a + 2;
+const O_TRKVOL: usize = O_SECT + 2;
+const O_TRKPAN: usize = O_TRKVOL + 8;
+const O_BLOCKARR: usize = O_TRKPAN + 8;
+const O_BLOCK: usize = O_BLOCKARR + 4;
+const O_LINES: usize = 4;
+const O_SMPLARR: usize = O_BLOCK + 8 + O_LINES * 5 * 4;
+const O_SMP1: usize = O_SMPLARR + 8;
+const O_LEN1: usize = 200;
+const O_SMP2: usize = O_SMP1 + 6 + O_LEN1;
+const O_FRAMES2: usize = 100;
+
+/// An MMD3 module in mix mode, 5 tracks and channels, 125 BPM at 4 lines a beat
+/// and 6 ticks a line, one 4-line block: track 0 plays note 25 of instrument 1
+/// (a 200-byte 8-bit sample looping over its second half), track 4 note 25 of
+/// instrument 2 (a 100-frame 16-bit stereo sample), both at volume 0C20 (32 of
+/// 64, in the new volume command's hexadecimal).
+fn oss_module() -> Vec<u8> {
+    let mut d = vec![0u8; O_SMP2 + 6 + 4 * O_FRAMES2 + 16];
+    d[0..4].copy_from_slice(b"MMD3");
+    let n = d.len() as u32;
+    put32(&mut d, 4, n);
+    put32(&mut d, 8, O_SONG as u32);
+    put32(&mut d, 0x10, O_BLOCKARR as u32);
+    put32(&mut d, 0x18, O_SMPLARR as u32);
+    // the 8-bit instrument loops over its second half (in words), both at volume 64
+    put16(&mut d, O_SONG, 50);
+    put16(&mut d, O_SONG + 2, 50);
+    d[O_SONG + 6] = 64;
+    d[O_SONG + 8 + 6] = 64;
+    put16(&mut d, O_SONG + 0x1f8, 1); // blocks
+    put16(&mut d, O_SONG + 0x1fa, 1); // sections
+    put32(&mut d, O_SONG + 0x1fc, O_PSEQTAB as u32);
+    put32(&mut d, O_SONG + 0x200, O_SECT as u32);
+    put32(&mut d, O_SONG + 0x204, O_TRKVOL as u32);
+    put16(&mut d, O_SONG + 0x208, 5); // tracks
+    put16(&mut d, O_SONG + 0x20a, 1); // play sequences
+    put32(&mut d, O_SONG + 0x20c, O_TRKPAN as u32);
+    put16(&mut d, O_SONG + 0x214, 100);
+    put16(&mut d, O_SONG + 0x216, 5); // channels
+    put16(&mut d, O_SONG + 0x2fc, 125);
+    d[O_SONG + 0x2ff] = 0x10; // volumes in hex
+    d[O_SONG + 0x300] = 0xa3; // mix, BPM, 4 lines a beat
+    d[O_SONG + 0x301] = 6;
+    d[O_SONG + 0x312] = 64;
+    d[O_SONG + 0x313] = 2;
+    put32(&mut d, O_PSEQTAB, O_PSEQ as u32);
+    put16(&mut d, O_PSEQ + 0x28, 1);
+    put16(&mut d, O_PSEQ + 0x2a, 0);
+    for t in 0..5 {
+        d[O_TRKVOL + t] = 64;
+    }
+    put32(&mut d, O_BLOCKARR, O_BLOCK as u32);
+    put16(&mut d, O_BLOCK, 5);
+    put16(&mut d, O_BLOCK + 2, O_LINES as u16 - 1);
+    d[O_BLOCK + 8..O_BLOCK + 12].copy_from_slice(&[25, 1, 0x0c, 0x20]);
+    d[O_BLOCK + 8 + 16..O_BLOCK + 8 + 20].copy_from_slice(&[25, 2, 0x0c, 0x20]);
+    put32(&mut d, O_SMPLARR, O_SMP1 as u32);
+    put32(&mut d, O_SMPLARR + 4, O_SMP2 as u32);
+    put32(&mut d, O_SMP1, O_LEN1 as u32);
+    for k in 0..O_LEN1 {
+        d[O_SMP1 + 6 + k] = k as u8;
+    }
+    put32(&mut d, O_SMP2, 2 * O_FRAMES2 as u32); // bytes a channel
+    put16(&mut d, O_SMP2 + 4, 0x30); // 16-bit stereo
+    for k in 0..O_FRAMES2 {
+        put16(&mut d, O_SMP2 + 6 + 2 * k, (k as i16 * 256 + 512) as u16);
+        put16(&mut d, O_SMP2 + 6 + 2 * O_FRAMES2 + 2 * k, (k as i16 * 256 - 512) as u16);
+    }
+    d
+}
+
+#[test]
+fn plays_an_octamed_soundstudio_module_on_the_amplifier() {
+    use crate::amplifier::LOG_BASE;
+    let m = oss_module();
+    assert!(!super::detect(&m), "the 4-channel replayer leaves MMD3 alone");
+    assert!((super::OPEN_OSS.detect)(&m));
+    let mut e = Engine::new(48000.0);
+    e.open_replayers = true;
+    e.m.bus.write_log = Some(Vec::new());
+    e.play_data(Path::new("mod.test"), m).unwrap();
+    let mut out = vec![0f32; 2 * 24000];
+    e.render(&mut out);
+    let log = e.m.bus.write_log.take().unwrap();
+    assert_eq!(e.playing.as_ref().unwrap().format, "OctaMED SoundStudio");
+    let base = e.m.deli.list.first().unwrap().0;
+    let reg = |v: u32, r: u32| log.iter().filter(|w| w.0 == LOG_BASE | v << 4 | r).map(|w| w.1).collect::<Vec<_>>();
+    let loc = |v: u32| {
+        let (hi, lo) = (reg(v, 0), reg(v, 2));
+        hi.iter().zip(lo).map(|(&h, l)| (h as u32) << 16 | l as u32).collect::<Vec<_>>()
+    };
+    // note 25 is index 24 of the frequency table (C-3, 4186 Hz): the period is
+    // counted in NTSC clocks, 3579545 / 4186 = 855, on both tracks
+    assert_eq!(super::mix::freq_table()[8][24], 4186);
+    assert!(reg(0, 6).contains(&855) && reg(4, 6).contains(&855));
+    // volume 32 of 64 on both, through the track and master volumes
+    assert!(reg(0, 8).contains(&32) && reg(4, 8).contains(&32));
+    // the 8-bit sample in place: from its start, then the loop of its second half
+    let l0 = loc(0);
+    // (the voices start on a word of silence)
+    assert_eq!(l0[1], base + O_SMP1 as u32 + 6);
+    assert_eq!(l0[2], base + O_SMP1 as u32 + 6 + 100);
+    assert_eq!(reg(0, 4)[1..3], [100, 50]);
+    // the 16-bit stereo sample became 8-bit mono where it lay: the mean of the
+    // channels' high bytes (frame k: k plus 2 and minus 2)
+    let at = base + O_SMP2 as u32 + 6;
+    for k in [0u32, 1, 7, 99] {
+        assert_eq!(e.m.bus.r8(at + k) as i8, k as i8, "frame {k}");
+    }
+    assert_eq!(loc(4)[1], at);
+    assert_eq!(reg(4, 4)[1], O_FRAMES2 as u16 / 2);
+    // five voices on the amplifier
+    assert!(log.iter().all(|w| w.0 & !0xF != LOG_BASE | 5 << 4));
+}

@@ -26,6 +26,7 @@ pub mod instereo1;
 pub mod instereo2;
 pub mod hippel;
 pub mod jamcracker;
+pub mod med;
 pub mod musicassembler;
 pub mod musicmaker;
 pub mod musicmaker8;
@@ -123,6 +124,7 @@ pub const REPLAYERS: &[Open] = &[
     amosmusicbank::OPEN,
     gamemusiccreator::OPEN,
     ahx::OPEN,
+    med::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

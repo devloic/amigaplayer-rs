@@ -39,6 +39,7 @@ pub mod musicassembler;
 pub mod musicmaker;
 pub mod multimod;
 pub mod musicmaker8;
+pub mod pierreadane;
 pub mod pretracker;
 mod pretracker_tables;
 pub mod musicline;
@@ -180,6 +181,7 @@ pub const REPLAYERS: &[Open] = &[
     davelowe::OPEN_DL,
     davelowe::OPEN_DLN,
     jesperolsen::OPEN,
+    pierreadane::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

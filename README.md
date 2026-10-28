@@ -193,10 +193,25 @@ Eagleplayer 2.06: 112 of its 118 player files load (the four `AYPlayers` are
 Z80 emulators for PlayAY, and BFB Master and Datatype have no module check).
 Rendered over the test modules with no DeliPlayers loaded, 46 play audible
 music, and where a DeliPlayer covers the same format most renders correlate at
-0.9 or better with the DeliPlayer's. Eagleplayers that need a software mixer
-(no `EPAMB_Direct` in their amplifier flags: Fasttracker II, PS3M, OctaMED, 8
-voice Oktalyzer) or AHI (DigiBoosterPRO) are recognised but stay silent, and
-those that run as a process of their own (PlayAY, MusiclineEditor) do not
+0.9 or better with the DeliPlayer's. Those that ask for the Eagleplayer
+amplifier with more than 4 voices or without `EPAMB_Direct` (Fasttracker II,
+PS3M with its S3M, MTM and 5-32 channel MODs, OctaMED, Oktalyzer, Digibooster,
+8-voice Art of Noise) play all their voices through the host's amplifier
+(`src/amplifier.rs`), a clean-room mixer "compatible with the 8 Bit
+Amplifier": it keeps up to 32 virtual voices (Paula's semantics when poked,
+the AudioStructs otherwise), mixes them in integers into two 8-bit buffers in
+chip memory, and plays those on Paula channels 0 (left) and 1 (right) by DMA,
+double-buffered, the next one mixed on channel 0's audio interrupt. Its
+settings are the 8 Bit Amplifier's factory defaults: mix rate 28000 Hz less
+500 for every voice past 2 (24978 Hz for 8), LRRL sides where the player sets
+none, boost 1.0, 1.1 from 5 voices, 1.2 from 9 and so on; so these play quieter than a
+4-voice module, and with 8-bit output. With `DELI_WRITE_LOG` the voices'
+pokes are logged before mixing, at `0xD00000 | voice << 4 | register`
+(register 0/2 LOC, 4 LEN, 6 PER, 8 VOL, `0xA` DMA, `0x8000` on), and
+`tools/replay-cmp.py` compares them as `VLOC0`.. `VDMA31`; the amplifier's own
+Paula writes are not logged. Players with 4 Direct voices or fewer still poke
+Paula itself, as before. DigiBoosterPRO needs AHI and stays silent, and the
+players that run as a process of their own (PlayAY, MusiclineEditor) do not
 work. TME's check accepts almost any large file, and Eagleplayers are asked in
 file name order, so with no DeliPlayers installed it takes some modules that
 later Eagleplayers would play.
@@ -322,7 +337,7 @@ while the register writes are the same.
 | Digital Mugician 1 | NostalgicPlayer Digital Mugician, following the original's replayer | Digital Mugician (Eagleplayer, "Digital Mugician player module V1.3", adapted by DEFECT) | 94 of 94 4-voice modules identical for 20 s (25 more of the list are missing, 37 are copies of others), and later subsongs of 2 modules (up to the seventh); where NostalgicPlayer differs from the original (the note's DMA order, the no-DMA and no-wander effects, the morphing effect's second source, the finetune and volume-loop bits, two periods of the table, no range checks) the port follows the original, and plays from the module in guest memory as it does. Writes spaced by the original's code-path costs fitted to its logs (rms 0.19 colour clocks; within 8 colour clocks of the reference's over 20 s); renders of 10 modules within a median 0.03 dB (specdist) |
 | Digital Mugician 2 | NostalgicPlayer Digital Mugician (its 7-voice modules), following the original's replayer | Digital Mugician (the same Eagleplayer), which does no mixing: it plays the four tracks of the subsong's own slot with its 4-voice replayer | 8 of 8 7-voice modules identical for 20 s, and later subsongs of 2 modules; NostalgicPlayer's mixing of the next slot onto the fourth voice is not ported, as the original has none. Writes timed as for Digital Mugician 1; renders of 8 modules within a median 0.02 dB (specdist) |
 | Art of Noise 4V | NostalgicPlayer Art of Noise (its `AON4` modules) | Art of Noise (Eagleplayer, "Art of Noise player module V1.01", 13-Dec-96) | 98 of 98 modules the original plays identical for 20 s (`replay-batch.py --tick-gap 2000`: its timer runs at three times the tempo's rate, ticks 23650 colour clocks apart at tempo 125); the original crashes on 31 more (and 29 `AON8` ones) whose empty `AUTH` chunk it copies as 65536 bytes, which the port plays; 9 more files are packed (`S404`, `SFCD`) and 32 of the list are missing. Its tables and variables in guest memory in the original's layout, so reads past the tables come out the same; the original's first period, 3424 (NostalgicPlayer: 3434). Writes spaced by fitted code-path costs (rms 6.0 colour clocks over 818163 writes on 33 `AON4` and 12 `AON8` modules), the start by the time of the original's chunk searches and text copies (rms 2); renders of 12 modules within a median 1.11 dB (specdist) |
-| Art of Noise 8V | NostalgicPlayer Art of Noise (its `AON8` modules) | Art of Noise (the same Eagleplayer, which plays both with one code) | 39 of 39 modules the original plays identical for 20 s (`--tick-gap 2000`); it crashes on 29 more, as for 4V. The original asks for the Eagleplayer amplifier but writes all 8 voices through `ENPP_Poke*`, and deliplayer's host drops channels 4-7 (the amplifier is not implemented), so only voices 0-3 reach Paula: the port plays all 8 and writes those 4, and mixes nothing. Writes spaced by the same costs (the dropped pokes take their time too), first writes within 3 colour clocks; renders of 12 modules within a median 0.00 dB (specdist) |
+| Art of Noise 8V | NostalgicPlayer Art of Noise (its `AON8` modules) | Art of Noise (the same Eagleplayer, which plays both with one code) | 39 of 39 modules the original plays identical for 20 s (`--tick-gap 2000`); it crashes on 29 more, as for 4V. The original asks for the Eagleplayer amplifier (8 AudioStructs, `EPAMB_Direct`) and writes all 8 voices through `ENPP_Poke*` and `ENPP_DMAMask`; the port pokes the host's amplifier the same way (`Hw::voice_*`), and the 39 compare on all 8 virtual voices. Writes spaced by the same costs, first writes within 3 colour clocks; renders of 12 modules within 0.1 dB of the reference's RMS per side (the 8-bit mix's quantisation and the buffers' phase make their short-term spectra differ in the quiet bins) |
 | Ron Klaren | NostalgicPlayer Ron Klaren, working on the module's own variables in guest memory | RonKlaren (Eagleplayer V1.13, which patches the module's own replayer and runs it) | 15 of the 15 modules the original plays identical for 20 s, every subsong of the multi-subsong ones too (19 for 30 s); 5 more of the list (`Other_RK_Versions`, no hunk header) the original refuses, and so does the port; the writes come at the original's times, its start, its interrupt's path and the costs between writes counted in its cycles: 96.7% of 196k writes at the same colour clock, 98.8% within 2; renders of 15 modules within a median 0.00 dB (specdist) of the reference, the worst mean 0.07 dB |
 | Digital Sound Studio | NostalgicPlayer Digital Sound Studio, following the original's much smaller replayer | DSS (Eagleplayer, "Digital Sound Studio player module V1.71", adapted by Buggs/Defect; the PlayerStore DeliPlayer DSS has the same name, so run with `DELIPLAYERS` pointing elsewhere), which knows effects 0 to 6 only | 32 of 32 modules identical for 20 s and for 180 s (11 more of the list are copies); no subsongs, as the original has none. The original reads the speed as a word with the tempo byte before it, so the 11 modules with a tempo play their first row after 11 minutes or more, silent for 20 s in both (`Africa` checked to its first row at 700 s). It plays from the module in guest memory as the original does (InitSound clears each sample's first long, set speed writes the module); the arpeggio reads on past the original's period table in a copy of its hunk. Writes spaced by fitted code-path costs (rms 0.16 colour clocks), the timer's start by the start's loops over positions and samples: 99.7% of 567k writes within 2 colour clocks of the reference's; renders of the 21 modules with writes within a median 0.01 dB (specdist), the worst mean 0.51 dB |
 | Music Assembler | NostalgicPlayer Music Assembler, working on the module's own variables in guest memory | Music Assembler (Eagleplayer V2.11, adapted by DEFECT, with its own copy of the replayer, which plays on the module's tables at fixed offsets) | 8 of the 8 modules the original plays identical for 20 s and for 180 s, every write at the reference's colour clock, and subsongs 1-9 of all 8 (which the original plays as subsong 0: its InitSound overwrites the subsong number with the module's data offset); the other 2 files of the list are a ProTracker module and an XM, which the original refuses too, 5 are missing; 210 variants of 5 of them with random instruments and voices' saved state (110 with random track bytes too) are identical for 15 s; renders of the 8 within a median 0.00 dB (specdist; byte-identical) |
@@ -330,8 +345,9 @@ while the register writes are the same.
 
 Not implemented:
 
-* the Eagleplayer mixing amplifier (AudioStructs without `EPAMB_Direct`), and
-  AudioStruct interrupt handlers (`EPAMB_AudioInts`)
+* of the Eagleplayer amplifier, all but the 8 Bit Amplifier's default mixing:
+  16-bit samples, its delay, surround and mono effects, its prefs, and the 14
+  Bit and AHI amplifier engines (the 68k engines themselves do not run)
 * most `ENPP_*` functions besides the DeliTracker ones, the amplifier pokes,
   `LoadExecutable` and `AllocSampleStruct` (the rest log once and return)
 * the windows of GUI genies (scopes, analyzers, ModuleInfo): they load and run,

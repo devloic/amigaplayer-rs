@@ -62,6 +62,7 @@ pub mod soundfactory;
 pub mod soundfx;
 pub mod sonicarranger;
 pub mod sonix;
+pub mod specialfx;
 pub mod soundmon;
 pub mod soundtracker;
 pub mod synthesis;
@@ -194,6 +195,7 @@ pub const REPLAYERS: &[Open] = &[
     alcatrazpacker::OPEN,
     tcbtracker::OPEN,
     mon::OPEN,
+    specialfx::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

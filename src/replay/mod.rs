@@ -32,6 +32,7 @@ pub mod musicmaker;
 pub mod musicmaker8;
 pub mod pretracker;
 mod pretracker_tables;
+pub mod musicline;
 pub mod pumatracker;
 pub mod ronklaren;
 pub mod sidmon1;
@@ -129,6 +130,7 @@ pub const REPLAYERS: &[Open] = &[
     ahx::OPEN,
     med::OPEN,
     pretracker::OPEN,
+    musicline::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

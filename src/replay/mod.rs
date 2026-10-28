@@ -15,6 +15,8 @@ pub mod amosmusicbank;
 pub mod ahx;
 pub mod artofnoise;
 pub mod bendaglish;
+pub mod beathoven;
+mod beathoven_tables;
 pub mod davelowe;
 mod davelowe_tables;
 pub mod davidwhittaker;
@@ -200,6 +202,7 @@ pub const REPLAYERS: &[Open] = &[
     specialfx::OPEN,
     jasonpage::OPEN,
     wallybeben::OPEN,
+    beathoven::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

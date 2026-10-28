@@ -4,10 +4,10 @@
 //! Checked against the Art of Noise Eagleplayer ("Art of Noise player module
 //! V1.01", Bastian Spiegel, adapted by Buggs of DEFECT), which plays the 4-voice
 //! "AON4" and the 8-voice "AON8" modules with the same code. For 8 voices it
-//! asks for the Eagleplayer amplifier, but writes every voice through
-//! ENPP_Poke*, and the host drops the pokes for channels 4-7 (the amplifier is
-//! not implemented), so only voices 0-3 reach Paula; the port does the same and
-//! mixes nothing. Like the original it plays from the module in guest memory,
+//! asks for the Eagleplayer amplifier (8 AudioStructs, EPAMB_Direct) and writes
+//! every voice through ENPP_Poke* and ENPP_DMAMask, which the host's amplifier
+//! plays as virtual voices; the port pokes the same amplifier (`Hw::voice_*`).
+//! Like the original it plays from the module in guest memory,
 //! finding the chunks by the original's search, and keeps its variables in guest
 //! memory in the layout of the original's code hunk: the fine-tune offsets, the
 //! periods and the vibrato tables, then the player's and the voices' variables.
@@ -194,14 +194,14 @@ fn detect8(d: &[u8]) -> bool {
 
 /// The 8-voice modules. The original plays them with the same code, its
 /// voice count the mark less "AON0", and asks for the Eagleplayer amplifier
-/// with 8 channels; but it writes every voice through ENPP_Poke*, whose
-/// channels 4-7 the host drops (the amplifier is not implemented), so only
-/// voices 0-3 reach Paula. The port does the same.
+/// with 8 channels, poking all of them; so does the port, on the host's
+/// amplifier.
 fn new8(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect8(d) {
         return None;
     }
-    new(d, base, m, 8)
+    let r = new(d, base, m, 8)?;
+    super::start_amplifier(m, 8).then_some(r)
 }
 
 /// The code paths whose time is counted (`Art::spent`), by the original's
@@ -318,7 +318,9 @@ enum C {
     Loops,
     /// $11962: a voice's loop.
     Loop,
-    /// A poke for a channel past 3, which the host drops (8 voices).
+    /// A poke for a channel past 3 when the host dropped them (8 voices, before
+    /// the amplifier): kept for the fitted table's layout, no longer counted.
+    #[allow(dead_code)]
     Drop,
     Count,
 }
@@ -415,7 +417,7 @@ impl Replayer for Art {
 
     fn tick(&mut self, hw: &mut Hw) {
         self.spent = 0;
-        // the last interrupt's dropped pokes were before this one
+        // paths counted after the last interrupt's last write belong to no write
         if let Some(f) = &mut self.fit {
             *f = [0; C::Count as usize];
         }
@@ -592,24 +594,12 @@ impl Art {
         self.timer = TIMER;
     }
 
-    // The host's ENPP_Poke* and ENPP_DMAMask, as the original calls them: only
-    // channels 0-3 reach Paula.
+    // The host's ENPP_Poke* and ENPP_DMAMask, as the original calls them: Paula's
+    // channels for 4 voices, the amplifier's virtual voices for 8.
     fn wait(&mut self, hw: &mut Hw, c: C) {
-        self.wait_on(hw, c, true);
-    }
-
-    /// The wait for a poke; one for a channel past 3 is not written, so its
-    /// time goes on into the next written one's (for AON_FIT).
-    fn wait_on(&mut self, hw: &mut Hw, c: C, written: bool) {
         self.cost(c);
-        if !written {
-            self.cost(C::Drop);
-        }
         hw.wait(self.spent.max(0) as u64);
         self.spent = 0;
-        if !written {
-            return;
-        }
         if let Some(f) = &mut self.fit {
             let s: Vec<String> =
                 f.iter().enumerate().filter(|x| *x.1 != 0).map(|(k, n)| format!("{k}:{n}")).collect();
@@ -619,29 +609,37 @@ impl Art {
     }
 
     fn poke_per(&mut self, hw: &mut Hw, i: u32, v: u16) {
-        self.wait_on(hw, C::Per, i < 4);
-        if i < 4 {
+        self.wait(hw, C::Per);
+        if self.voices == 8 {
+            hw.voice_per(i as usize, v);
+        } else {
             hw.per(i as usize, v);
         }
     }
 
     fn poke_vol(&mut self, hw: &mut Hw, i: u32, v: u16) {
-        self.wait_on(hw, C::Vol, i < 4);
-        if i < 4 {
+        self.wait(hw, C::Vol);
+        if self.voices == 8 {
+            hw.voice_vol(i as usize, v);
+        } else {
             hw.vol(i as usize, v);
         }
     }
 
     fn poke_adr(&mut self, hw: &mut Hw, i: u32, a: u32) {
-        self.wait_on(hw, C::Adr, i < 4);
-        if i < 4 {
+        self.wait(hw, C::Adr);
+        if self.voices == 8 {
+            hw.voice_loc(i as usize, a);
+        } else {
             hw.loc(i as usize, a);
         }
     }
 
     fn poke_len(&mut self, hw: &mut Hw, i: u32, v: u16) {
-        self.wait_on(hw, C::Len, i < 4);
-        if i < 4 {
+        self.wait(hw, C::Len);
+        if self.voices == 8 {
+            hw.voice_len(i as usize, v);
+        } else {
             hw.len(i as usize, v);
         }
     }
@@ -649,7 +647,11 @@ impl Art {
     /// ENPP_DMAMask with the mask in bits 0-7 and bit 15 for on.
     fn dma_mask(&mut self, hw: &mut Hw, v: u16, c: C) {
         self.wait(hw, c);
-        hw.dmacon(v & 0x800f);
+        if self.voices == 8 {
+            hw.voice_dma((v & 0xff) as u32, v & 0x8000 != 0);
+        } else {
+            hw.dmacon(v & 0x800f);
+        }
     }
 
     /// The tick proper: the rows, every voice's effects, then their writes.
@@ -1699,20 +1701,25 @@ mod tests {
     }
 
     #[test]
-    fn eight_voices_reach_paula_on_four() {
-        // the note on voices 1 and 5: the original's pokes for 4-7 are dropped
+    fn eight_voices_poke_the_amplifier() {
+        // the note on voices 1 and 5: all 8 voices go to the amplifier's
+        // virtual voices, none to Paula's registers
         let (format, log, _) = play("test8.aon", module(8, &[1, 5]));
         assert_eq!(format, "Art of Noise 8V");
         let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
-        let dma = reg(0xDFF096);
-        assert!(dma.iter().all(|&v| v & 0x7fff & !2 == 0), "{dma:x?}");
-        assert_eq!(dma.iter().filter(|&&v| v & 2 != 0).count(), 2);
-        assert_eq!(*reg(0xDFF0B6).last().unwrap(), super::PERIODS[24]);
-        assert_eq!(*reg(0xDFF0B8).last().unwrap(), 63);
-        assert!(reg(0xDFF0A8).iter().all(|&v| v == 0));
-        assert!(log.iter().all(|w| w.0 < 0xDFF0E0 || w.0 >= 0xDFF100));
-        // 8 voices of cells a row: voice 0 has no note (the first period of
-        // the table, as a voice with no note has in the original)
-        assert!(reg(0xDFF0A6).iter().all(|&v| v == super::PERIODS[0]));
+        let v = |voice: u32, r: u32| reg(crate::amplifier::LOG_BASE | voice << 4 | r);
+        assert!(log.iter().all(|w| !(0xDFF096..0xDFF0E0).contains(&w.0)));
+        for voice in [1, 5] {
+            assert_eq!(v(voice, 0xA), [0, 0x8000], "voice {voice}");
+            assert_eq!(*v(voice, 6).last().unwrap(), super::PERIODS[24]);
+            assert_eq!(*v(voice, 8).last().unwrap(), 63);
+        }
+        for voice in [0, 2, 3, 4, 6, 7] {
+            assert!(v(voice, 0xA).is_empty(), "voice {voice}");
+            assert!(v(voice, 8).iter().all(|&x| x == 0));
+            // 8 voices of cells a row: a voice with no note has the first
+            // period of the table, as in the original
+            assert!(v(voice, 6).iter().all(|&x| x == super::PERIODS[0]));
+        }
     }
 }

@@ -32,6 +32,7 @@ pub mod sonicarranger;
 pub mod soundmon;
 pub mod tfmx;
 
+use crate::amplifier::Poke;
 use crate::bus::Bus;
 use crate::machine::Machine;
 use m68k::AddressBus;
@@ -135,6 +136,36 @@ impl Hw<'_> {
     pub fn wait(&mut self, clocks: u64) {
         self.bus.clock += clocks;
     }
+
+    // The Eagleplayer amplifier's virtual voices (`start_amplifier`), poked as
+    // its ENPP_Poke* and ENPP_DMAMask do for an Eagleplayer: Paula semantics,
+    // each at the current colour clock, logged at amplifier::LOG_BASE.
+    pub fn voice_loc(&mut self, v: usize, a: u32) {
+        self.bus.amp_poke(v, Poke::Loc(a));
+    }
+    pub fn voice_len(&mut self, v: usize, words: u16) {
+        self.bus.amp_poke(v, Poke::Len(words));
+    }
+    pub fn voice_per(&mut self, v: usize, period: u16) {
+        self.bus.amp_poke(v, Poke::Per(period));
+    }
+    pub fn voice_vol(&mut self, v: usize, vol: u16) {
+        self.bus.amp_poke(v, Poke::Vol(vol));
+    }
+    /// DMA on or off for the voices of `mask` (bit n: voice n), in voice order.
+    pub fn voice_dma(&mut self, mask: u32, on: bool) {
+        for v in (0..32).filter(|v| mask & 1 << v != 0) {
+            self.bus.amp_poke(v, Poke::Dma(on));
+        }
+    }
+}
+
+/// Starts the Eagleplayer amplifier with `voices` virtual voices poked directly
+/// (EPAMB_Direct, signed 8-bit samples in chip memory), sides LRRL as for an
+/// Eagleplayer whose AudioStructs leave them 0; `Hw::voice_*` then play them.
+pub fn start_amplifier(m: &mut Machine, voices: usize) -> bool {
+    use crate::eagle::epamb;
+    crate::amplifier::start(m, voices, 0, epamb::DIRECT | epamb::BIT8 | epamb::CHIP_RAM)
 }
 
 pub(crate) fn be16(d: &[u8], o: usize) -> u16 {

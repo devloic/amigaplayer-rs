@@ -129,7 +129,9 @@ pub unsafe extern "C" fn dp_open(
         }
     }
     s.pcm.truncate(max_frames * 2);
-    s.info = format!("{}\t{}\t{want}\t{lo}\t{hi}", song.title(), song.format());
+    // the subsong played: an empty one at the start is skipped for the next
+    let cur = song.subsongs().2;
+    s.info = format!("{}\t{}\t{cur}\t{lo}\t{hi}", song.title(), song.format());
     0
 }
 

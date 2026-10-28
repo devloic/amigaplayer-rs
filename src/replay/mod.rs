@@ -30,6 +30,8 @@ pub mod med;
 pub mod musicassembler;
 pub mod musicmaker;
 pub mod musicmaker8;
+pub mod pretracker;
+mod pretracker_tables;
 pub mod pumatracker;
 pub mod ronklaren;
 pub mod sidmon1;
@@ -125,6 +127,7 @@ pub const REPLAYERS: &[Open] = &[
     gamemusiccreator::OPEN,
     ahx::OPEN,
     med::OPEN,
+    pretracker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

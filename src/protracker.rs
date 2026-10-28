@@ -86,6 +86,24 @@ pub struct ProTracker {
     loops: [(u32, u32); 4],
 }
 
+/// An audio register write ($DFF0A0 + `reg`), logged for DELI_WRITE_LOG.
+fn write_reg(paula: &mut Paula, reg: u32, v: u16) {
+    let t = paula.now();
+    if let Some(l) = &mut paula.native_log {
+        l.push((0xDFF0A0 + reg, v, t));
+    }
+    paula.write_audio_reg(reg, v);
+}
+
+/// A DMACON write, logged for DELI_WRITE_LOG.
+fn write_dma(paula: &mut Paula, v: u16) {
+    let t = paula.now();
+    if let Some(l) = &mut paula.native_log {
+        l.push((0xDFF096, v, t));
+    }
+    paula.write_dmacon(v);
+}
+
 fn word(d: &[u8], o: usize) -> u32 {
     ((d[o] as u32) << 8) | d[o + 1] as u32
 }
@@ -267,11 +285,11 @@ impl ProTracker {
 
     fn set_hw_period(&mut self, paula: &mut Paula, c: usize, period: u16) {
         self.ch[c].out_period = period;
-        paula.write_audio_reg(c as u32 * 16 + 6, period);
+        write_reg(paula, c as u32 * 16 + 6, period);
     }
 
     fn set_hw_volume(&mut self, paula: &mut Paula, c: usize, v: u8) {
-        paula.write_audio_reg(c as u32 * 16 + 8, v as u16);
+        write_reg(paula, c as u32 * 16 + 8, v as u16);
     }
 
     fn trigger(&mut self, paula: &mut Paula, c: usize, offset: u32) {
@@ -280,7 +298,7 @@ impl ProTracker {
             return;
         }
         let r = c as u32 * 16;
-        paula.write_dmacon(1 << c);
+        write_dma(paula, 1 << c);
         let start = self.base + s.offset;
         let (mut st, mut len) = (start, s.len);
         if offset > 0 {
@@ -292,9 +310,9 @@ impl ProTracker {
                 len = s.rep_len.max(2);
             }
         }
-        paula.write_audio_reg(r, (st >> 16) as u16);
-        paula.write_audio_reg(r + 2, st as u16);
-        paula.write_audio_reg(r + 4, (len / 2).max(1) as u16);
+        write_reg(paula, r, (st >> 16) as u16);
+        write_reg(paula, r + 2, st as u16);
+        write_reg(paula, r + 4, (len / 2).max(1) as u16);
         self.dma_pending |= 1 << c;
         self.loops[c] = if s.rep_len > 2 {
             (start + s.rep_start, s.rep_len)
@@ -312,13 +330,13 @@ impl ProTracker {
         if mask == 0 {
             return;
         }
-        paula.write_dmacon(0x8000 | mask);
+        write_dma(paula, 0x8000 | mask);
         for c in 0..4 {
             if mask & 1 << c != 0 {
                 let (r, (ls, ll)) = (c as u32 * 16, self.loops[c]);
-                paula.write_audio_reg(r, (ls >> 16) as u16);
-                paula.write_audio_reg(r + 2, ls as u16);
-                paula.write_audio_reg(r + 4, (ll / 2).max(1) as u16);
+                write_reg(paula, r, (ls >> 16) as u16);
+                write_reg(paula, r + 2, ls as u16);
+                write_reg(paula, r + 4, (ll / 2).max(1) as u16);
             }
         }
     }

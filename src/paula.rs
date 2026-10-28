@@ -72,6 +72,10 @@ pub struct Paula {
     last: u64,
     next_line: u64,
     quirks: Quirks,
+    /// The built-in ProTracker's register writes, which go to Paula directly and
+    /// not through the bus's write log: ($DFF000 + register, value, colour clock).
+    /// Kept for DELI_WRITE_LOG when set.
+    pub native_log: Option<Vec<(u32, u16, u64)>>,
 }
 
 fn setclr(r: &mut u16, v: u16) {
@@ -116,14 +120,16 @@ impl Paula {
             last: 0,
             next_line: LINE,
             quirks: Quirks::Hardware,
+            native_log: None,
         }
     }
 
     /// Back to the power-on state, keeping the time and the output format.
     pub fn reset(&mut self) {
         let (out, last, next_line, quirks) = (self.out.clone(), self.last, self.next_line, self.quirks);
+        let log = self.native_log.take();
         *self = Self::with_output(out.rate(), out.filter());
-        (self.out, self.last, self.next_line, self.quirks) = (out, last, next_line, quirks);
+        (self.out, self.last, self.next_line, self.quirks, self.native_log) = (out, last, next_line, quirks, log);
     }
 
     /// Plays volume 64 as 63 and periods below 16 as 16, as UADE does.

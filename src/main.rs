@@ -109,6 +109,7 @@ fn render_wav(args: &Args) -> Result<()> {
     }
     if std::env::var_os("DELI_WRITE_LOG").is_some() {
         e.m.bus.write_log = Some(Vec::new());
+        e.m.bus.paula.native_log = Some(Vec::new());
     }
     e.play_file(file)?;
     for _ in 0..args.subsong.unsigned_abs() {
@@ -144,7 +145,10 @@ fn render_wav(args: &Args) -> Result<()> {
     }
     let peak = out.iter().fold(0f32, |a, &b| a.max(b.abs()));
     eprintln!("{} frames written, peak {:.3}", done, peak);
-    if let (Ok(p), Some(l)) = (std::env::var("DELI_WRITE_LOG"), &e.m.bus.write_log) {
+    if let (Ok(p), Some(l)) = (std::env::var("DELI_WRITE_LOG"), &mut e.m.bus.write_log) {
+        // the built-in ProTracker's writes, in time order with the bus's
+        l.extend(e.m.bus.paula.native_log.take().unwrap_or_default());
+        l.sort_by_key(|w| w.2);
         // where the module was loaded, so logs of runs that loaded it elsewhere compare
         let head: String = e.m.deli.list.first().map(|(a, n)| format!("# module {a:06x} {n}\n")).unwrap_or_default();
         let text: String =

@@ -210,7 +210,17 @@ const FX_PT_VIBRATO: u8 = 0xea;
 // Colour clocks the original's code takes between its writes (68000, from
 // the Eagleplayer's write log) and the CIA's wait.
 const ECLOCK: u64 = 5;
-const PLAY_TIME: u64 = 3000;
+const PLAY_TIME: u64 = 4814;
+// The time of the tick's work before its first write grows with what it does
+// (fitted to the original's tick times on four tunes, 4-voice tunes only):
+// per voice that starts a row, and per byte an effect handles.
+const ROW_TIME: u64 = 1158;
+const PHASE_BYTE: u64 = 21;
+const MIX_BYTE: u64 = 32;
+const FILTER_BYTE: u64 = 113;
+// Not seen in the four tunes; taken from the effects that do alike.
+const RESONANCE_BYTE: u64 = 113;
+const TRANSFORM_BYTE: u64 = 32;
 const PER_TO_VOL: u64 = 114;
 const VOL_TO_PER: u64 = 58;
 const OFF_TO_TIMER: u64 = 107;
@@ -482,6 +492,8 @@ pub struct Musicline {
     tune: u32,
     eight: bool,
     first: bool,
+    /// Colour clocks of the first period that the start's own tick used up.
+    used: std::cell::Cell<u64>,
     master: u16,
     tune_speed: u8,
     tune_groove: u8,
@@ -576,6 +588,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         tune: 0,
         eight: false,
         first: true,
+        used: std::cell::Cell::new(0),
         master: 64 << 4,
         tune_speed: 0,
         tune_groove: 0,
@@ -895,7 +908,9 @@ impl Replayer for Musicline {
             // the audio interrupt is the tick
             1 << 40
         } else {
-            (self.timer as u64 + 1) * ECLOCK
+            // the first period is shortened by what the start's tick took
+            let used = self.used.replace(0);
+            ((self.timer as u64 + 1) * ECLOCK).saturating_sub(used).max(1)
         }
     }
 
@@ -995,7 +1010,15 @@ impl Musicline {
         self.first = true;
         if !self.eight {
             self.timer = (0x1b0f88 / (self.tempo as u32).max(1)) as u16;
+            // the original starts the timer and runs the first tick at once, not a
+            // period later (its DMA-on write is 131 colour clocks after the timer
+            // starts, the tick's first write 91 after that)
+            let t0 = hw.bus.clock;
+            hw.wait(131);
             hw.dmacon(0x8000 | self.dma_mask);
+            hw.wait(91);
+            self.handler(hw);
+            self.used.set(hw.bus.clock - t0);
         } else {
             hw.bus.write_word(0xdff09c, 0x0080);
             hw.bus.write_word(0xdff09a, 0x8080);
@@ -1166,6 +1189,10 @@ impl Musicline {
             spd = x.groove;
         }
         x.speed_counter = spd;
+        if !self.eight {
+            hw.wait(ROW_TIME);
+        }
+        let x = &mut self.voices[v];
         x.speed_part = 0;
         x.groove_part = 0;
         for _ in 0..256 {
@@ -2198,11 +2225,27 @@ impl Musicline {
         }
         self.envelope_play(v);
         self.move_loop(hw, v);
+        let len = self.voices[v].repeat_length as u32 * 2;
         self.transform_play(hw, v);
+        if self.voices[v].effect2 & E2_TRANSFORM != 0 {
+            self.spend(hw, len, TRANSFORM_BYTE);
+        }
         self.phase_play(hw, v);
+        if self.voices[v].effect2 & E2_PHASE != 0 {
+            self.spend(hw, len, PHASE_BYTE);
+        }
         self.mix_play(hw, v);
+        if self.voices[v].effect2 & E2_MIX != 0 {
+            self.spend(hw, len, MIX_BYTE);
+        }
         self.resonance_play(hw, v);
+        if self.voices[v].effect2 & E2_RESONANCE != 0 {
+            self.spend(hw, len, RESONANCE_BYTE);
+        }
         self.filter_play(hw, v);
+        if self.voices[v].effect2 & E2_FILTER != 0 {
+            self.spend(hw, len, FILTER_BYTE);
+        }
         let eight = self.eight;
         let x = &mut self.voices[v];
         if !eight {
@@ -2214,6 +2257,8 @@ impl Musicline {
                     x.wave_pointer = wb;
                 }
                 let n = (x.repeat_length >> 3) as u32 * 16;
+                // Paula has played on while the effects ran
+                hw.bus.paula.sync(hw.bus.clock, &hw.bus.ram);
                 for k in 0..n / 4 {
                     let b = rl(hw, rp + 4 * k);
                     hw.bus.w32(wb + 4 * k, b);
@@ -2992,6 +3037,13 @@ impl Musicline {
             let s1 = rs8(hw, src1.wrapping_add(k));
             let s2 = rs8(hw, src2.wrapping_add(k));
             hw.bus.w8(buf + k, ((((s2 - s1) * factor) >> 8) + s1) as u8);
+        }
+    }
+
+    /// The time an effect takes over `bytes` bytes (4-voice tunes).
+    fn spend(&self, hw: &mut Hw, bytes: u32, per: u64) {
+        if !self.eight {
+            hw.wait(bytes as u64 * per);
         }
     }
 

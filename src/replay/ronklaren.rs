@@ -42,14 +42,19 @@
 //!
 //! The writes come at the original's times as the emulator runs it, whose clock
 //! is half the cycles counted since its last call of the host (each patched
-//! write, the DMA wait): the Eagleplayer's start (its scan of the relocated
-//! code for its 25 patterns, replicated here cycle by cycle, the copies of the
-//! module, DTP_SubSongRange, InitSound), the interrupt's cycles to its first
-//! voice (counted on the code), and between writes the costs of the code points
-//! the replayer passes (`At`), fitted to the reference's write log for the older
+//! write, the DMA wait): the Eagleplayer's start (the time to its first write
+//! fitted to its logs from the module's header size, its subsong range and the
+//! kind of replayer, within 250 colour clocks; the copies of the module,
+//! DTP_SubSongRange, InitSound), the interrupt's cycles to its first voice
+//! (counted on the code), and between writes the costs of the code points the
+//! replayer passes (`At`), fitted to the reference's write log for the older
 //! and newer replayers and for a newer one whose instrument sample the
-//! Eagleplayer patches as two calls. The patterns it misses are read from the
-//! scan too: an InitVoice it does not patch writes directly.
+//! Eagleplayer patches as two calls. No code or data of the Eagleplayer is
+//! kept: the timer's value and the interrupt routine are found as
+//! NostalgicPlayer finds them (`timer_and_irq`), and the two forms of the
+//! replayer's code whose writes the Eagleplayer patches in another way (an
+//! InitVoice that writes directly, an instrument command split in two) are told
+//! by the replayer's own instructions (`code_forms`).
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -123,7 +128,6 @@ struct Layout {
     /// The Eagleplayer's time from loading the module to starting its timer.
     init_wait: u64,
     hdr: u32,
-    code_len: usize,
     /// DTP_SubSongRange's time (cycles).
     ssr_cycles: u64,
 }
@@ -196,8 +200,7 @@ fn layout(d: &[u8]) -> Option<Layout> {
     // move.w 4(a1),4(a2); clr.w 8(a2)
     let init_volume = r.find(0, &[0x3569, 4, 4, 0x426a, 8]).is_some();
     let stop85 = r.find(0, &[0x0c12, 0x85]).is_some();
-    let scan = ep_scan(code);
-    let irq = scan.irq? as usize;
+    let (timer, irq) = timer_and_irq(r)?;
     let prologue = cycles_to(code, irq, first?)?;
     let (subsongs, ssr_cycles) = ep_subsongs(r)?;
     let mut l = Layout {
@@ -216,79 +219,108 @@ fn layout(d: &[u8]) -> Option<Layout> {
         stop85,
         subsongs,
         irq,
-        timer: 0,
+        timer: if timer == 0 { crate::deli::DEFAULT_TIMER } else { timer },
         timing: Timing::Older,
         init_direct: false,
         instr_split: false,
         init_wait: 0,
         hdr: r.l(4),
-        code_len: code.len(),
         ssr_cycles,
     };
-    l.scanned(&scan);
+    l.start_up(r);
     Some(l)
 }
 
+/// How the replayer writes the voices' registers, which tells how the
+/// Eagleplayer's patching leaves its code: the instrument's sample start after
+/// a DMA off is written through `0(a1)` in two places or in fewer (the
+/// instrument command's writes then go out as two calls), and InitVoice copies
+/// the sample's start and length, the next pointer after them, in one form
+/// (otherwise its writes are the replayer's own, not patched).
+fn code_forms(r: Rd) -> (bool, bool) {
+    // move.w d(a0),DMACON; movea.l 0(a1),a4
+    let starts = (0..r.0.len()).step_by(2).filter(|&o| r.at(o, &[0x33e8, ANY, 0x00df, 0xf096, 0x2869, 0])).count();
+    // move.l 0(a1),0(a2); move.w 4(a1),4(a2); move.l 8(a0),$c(a0)
+    let direct = match r.find(0, &[0x3569, 4, 4]) {
+        Some(o) => !(o >= 6 && r.at(o - 6, &[0x2569, 0, 0]) && r.at(o + 6, &[0x2168, 8, 0xc])),
+        None => true,
+    };
+    (starts < 2, direct)
+}
+
 impl Layout {
-    /// What the Eagleplayer's patching leaves, and its time to the timer's
-    /// start: InitPlayer (the scan, the copy of the module at 29 cycles a byte),
-    /// DTP_SubSongRange, InitSound (the copy back, the subsong routine), and
-    /// the calls around them (the emulator's cycles, two a colour clock).
-    fn scanned(&mut self, scan: &Scan) {
-        self.timer = if scan.timer == 0 { crate::deli::DEFAULT_TIMER } else { scan.timer };
-        self.instr_split = scan.found[3] < 2;
-        self.init_direct = scan.found[9] == 0;
+    /// What the Eagleplayer's patching leaves of the code, and its time to the
+    /// timer's start: InitPlayer (its scan of the code for the replayer's
+    /// writes, the copy of the module), DTP_SubSongRange, InitSound (the copy
+    /// back, the subsong routine). The scan's time is not counted on the code:
+    /// it is about 6.54 million cycles in all of the modules, within 0.1%, and
+    /// the time to the first write is fitted to the Eagleplayer's logs by the
+    /// header's size (the copies, 29 cycles a byte each way, taken as one
+    /// colour clock for 2 cycles), the subsong range's cycles, and a constant
+    /// for each kind of replayer (the median of the corpus' modules: older,
+    /// newer, newer with the instrument command split); it is within 250
+    /// colour clocks of the reference's for all of them.
+    fn start_up(&mut self, r: Rd) {
+        (self.instr_split, self.init_direct) = code_forms(r);
         self.timing = match (self.newer, self.instr_split) {
             (false, _) => Timing::Older,
             (true, false) => Timing::Newer,
             (true, true) => Timing::Split,
         };
-        let copy = 29 * self.hdr as u64;
-        let init_player = (517 + scan.cycles + copy) / 2;
-        let init_sound = (copy + if self.newer { 346 } else { 222 }) / 2;
-        self.init_wait = 638 + init_player + 4478 + self.ssr_cycles / 2 + init_sound;
+        let base = match self.timing {
+            Timing::Older => 3_275_442,
+            Timing::Newer => 3_278_459,
+            Timing::Split => 3_276_983,
+        };
+        self.init_wait = base + 29 * self.hdr as u64 + self.ssr_cycles / 2;
     }
 }
 
-/// The code the Eagleplayer patches, in its order: the timer set-up (CIA-B
-/// timer A's value, $FFFC/$FFFD, and the interrupt's address, $FFFE twice, are
-/// read from it), the stop routine, the interrupt's end, and each of the
-/// replayer's writes to the audio registers, which become calls of its own
-/// routines and the ENPP_ functions.
-const PATCHES: [&[u16]; 25] = [
-    &[
-        0x33fc, 0x4000, 0x00df, 0xf09a, 0x13fc, 0x0000, 0x00bf, 0xde00, 0x13fc, 0xfffc, 0x00bf, 0xd400, 0x13fc, 0xfffd,
-        0x00bf, 0xd500, 0x13fc, 0x0081, 0x00bf, 0xdd00, 0x13fc, 0x0011, 0x00bf, 0xde00, 0x23f9, 0x0000, 0x0078, 0xfffe,
-        0xfffe, 0x23fc, 0xfffe, 0xfffe, 0x0000, 0x0078, 0x33fc, 0xc000, 0x00df, 0xf09a, 0x33fc, 0x800f, 0x00df, 0xf096,
-    ],
-    &[
-        0x33fc, 0x4000, 0x00df, 0xf09a, 0x13fc, 0x0001, 0x00bf, 0xdd00, 0x23f9, 0xffef, 0xfffe, 0x0000, 0x0078, 0x33fc,
-        0xc000, 0x00df, 0xf09a, 0x33fc, 0x000f, 0x00df, 0xf096, 0x4e75,
-    ],
-    &[0x1039, 0x00bf, 0xdd00, 0x33fc, 0x2000, 0x00df, 0xf09c, 0x4cdf, 0x3f1f, 0x4e73],
-    &[0x33e8, 0x002e, 0x00df, 0xf096, 0x2869, 0x0000, 0x276c, 0x0000, 0x0000, 0x376c, 0x0004, 0x0004],
-    &[0x4228, 0x003a, 0x377c, 0x0001, 0x0004],
-    &[0x3140, 0x0024, 0x4a28, 0x003d, 0x6604, 0x3740, 0x0006],
-    &[0xd468, 0x0024, 0x4a28, 0x003d, 0x6604, 0x3742, 0x0006],
-    &[0x2869, 0x0000, 0x276c, 0x0000, 0x0000, 0x376c, 0x0004, 0x0004],
-    &[0x4a28, 0x003d, 0x6608, 0x0243, 0x003f, 0x3743, 0x0008],
-    &[0x2569, 0x0000, 0x0000, 0x3569, 0x0004, 0x0004, 0x2168, 0x0008, 0x000c],
-    &[0x4a14, 0x6a08, 0x2868, 0x0008, 0x214c, 0x000c],
-    &[0x3140, 0x0028, 0x1143, 0x0039, 0x0243, 0x003f, 0x3743, 0x0008],
-    &[0x2171, 0x1000, 0x0000, 0x3171, 0x1004, 0x0004, 0x3171, 0x1006, 0x0006, 0x3171, 0x1008, 0x0008],
-    &[0x3142, 0x0024, 0x3742, 0x0006],
-    &[0x1229, 0x000c, 0xc5c1, 0xd468, 0x0024, 0x3742, 0x0006],
-    &[0x214a, 0x0010, 0x3768, 0x0024, 0x0006],
-    &[0x2851, 0x2694, 0x376c, 0x0004, 0x0004],
-    &[0x303c, 0x8000, 0x8068, 0x002e, 0x33c0, 0x00df, 0xf096],
-    &[0x33e8, 0x002e, 0x00df, 0xf096],
-    &[0x3140, 0x0024, 0x3740, 0x0006],
-    &[0x41f9, 0x00df, 0xf008, 0x4268, 0x00a0, 0x4268, 0x00b0, 0x4268, 0x00c0, 0x4268, 0x00d0],
-    &[0x33fc, 0x000f, 0x00df, 0xf096],
-    &[0x1039, 0x00bf, 0xdd00, 0x33fc, 0x2000, 0x00df, 0xf09c],
-    &[0x3142, 0x0024, 0x4a28, 0x003d, 0x663e, 0x3742, 0x0006, 0x6038],
-    &[0x4a28, 0x003d, 0x6606, 0x3768, 0x0024, 0x0006],
-];
+/// The timer's value and the interrupt routine, found as NostalgicPlayer finds
+/// them: one of the first two jumps after the module's header goes to the
+/// timer set-up (it starts with a `bsr.w` or a `move.w #n,abs`), whose code to
+/// its `rts` writes CIA-B timer A's low and high bytes (`move.b #n,$bfd400`
+/// and `$bfd500`) and the interrupt's address into the level 6 vector
+/// (`move.l #addr,$78`). A module whose jumps go elsewhere has the set-up
+/// somewhere in its code: the first `move.l #addr,$78`, with the two timer
+/// writes just before it.
+fn timer_and_irq(r: Rd) -> Option<(u16, usize)> {
+    let init = (0..2).find_map(|i| {
+        let j = 32 + 6 * i;
+        let a = r.l(j + 2) as usize;
+        (r.w(j) == 0x4ef9 && matches!(r.w(a), 0x6100 | 0x33fc)).then_some(a)
+    });
+    let (mut lo, mut hi, mut irq) = (0u8, 0u8, 0usize);
+    let (from, to) = match init {
+        Some(a) => (a, None),
+        None => {
+            let v = (0..r.0.len()).step_by(2).find(|&o| r.at(o, &[0x23fc, ANY, ANY, 0, 0x78]))?;
+            (v.saturating_sub(0x60), Some(v + 10))
+        }
+    };
+    let mut o = from;
+    while o + 10 < r.0.len() && to.map_or(r.w(o) != 0x4e75, |t| o < t) {
+        match r.w(o) {
+            0x13fc => {
+                match r.l(o + 4) {
+                    0xbfd400 => lo = r.b(o + 3),
+                    0xbfd500 => hi = r.b(o + 3),
+                    _ => {}
+                }
+                o += 6;
+            }
+            0x23fc => {
+                if r.l(o + 6) == 0x78 {
+                    irq = r.l(o + 2) as usize;
+                }
+                o += 8;
+            }
+            _ => {}
+        }
+        o += 2;
+    }
+    (irq != 0 && irq < r.0.len()).then_some((u16::from(hi) << 8 | u16::from(lo), irq))
+}
 
 /// The fewest cycles (as the emulator counts them) the code takes from `from`
 /// to `to`, through its branches and subroutine calls: the interrupt's path to
@@ -319,145 +351,6 @@ fn cycles_to(code: &[u8], from: usize, to: usize) -> Option<u64> {
         q.extend(to.iter().map(|&n| Reverse((t, n))));
     }
     None
-}
-
-/// What the Eagleplayer's scan finds, and its time.
-struct Scan {
-    found: [u16; PATCHES.len()],
-    irq: Option<u32>,
-    /// CIA-B timer A's value the timer set-up writes (0 if it writes none).
-    timer: u16,
-    /// 68000 cycles, as the emulator counts each instruction (a branch the
-    /// same taken or not).
-    cycles: u64,
-}
-
-/// The Eagleplayer's patching (in its InitPlayer), to the instruction: each
-/// pattern is looked for word by word in the code's first 6000 bytes (or as
-/// many as its header says), and each match is overwritten with a `jsr` and
-/// `nop`s, so that a later pattern does not find it. `code` is the code as
-/// loaded (relocated), as the Eagleplayer compares it.
-fn ep_scan(code: &[u8]) -> Scan {
-    let hdr = Rd(code).l(4) as usize;
-    let lim = hdr.min(6000) & !1;
-    let mut c = code.to_vec();
-    c.resize(c.len().max(lim + 0x100), 0);
-    let mut s = Scan { found: [0; PATCHES.len()], irq: None, timer: 0, cycles: 0 };
-    // the limit, the table
-    let mut t: u64 = 12 + 18 + 9 + if hdr > 6000 { 0 } else { 16 } + 14 + 8 + 4 + 4;
-    let mut timer = false;
-    let (mut lo, mut hi) = (0u8, 0u8);
-    for (k, pat) in PATCHES.iter().enumerate() {
-        let n = pat.len() - 1;
-        // the pattern's set-up
-        t += 123;
-        let mut cap = None;
-        let mut a4 = 0;
-        'pattern: loop {
-            let r = Rd(&c);
-            let mut a0 = a4;
-            let mut i = 0;
-            let mut left = n as i32;
-            let ok = loop {
-                let p = pat[i];
-                i += 1;
-                // the pattern's word, and the test for the special ones
-                t += 25;
-                let hit = if p < 0xfffc {
-                    t += 17;
-                    r.w(a0) == p
-                } else {
-                    t += 17;
-                    match p {
-                        0xfffc | 0xfffd => {
-                            // CIA-B timer A's low or high byte
-                            if p == 0xfffd {
-                                t += 34;
-                            }
-                            t += 33;
-                            if r.l(a0 + 2) == if p == 0xfffc { 0xbfd400 } else { 0xbfd500 } {
-                                t += 34;
-                                timer |= c[a0 + 1] != 0;
-                                if p == 0xfffc {
-                                    lo = c[a0 + 1];
-                                } else {
-                                    hi = c[a0 + 1];
-                                }
-                                true
-                            } else {
-                                t += 17;
-                                r.w(a0) == p
-                            }
-                        }
-                        0xfffe => {
-                            // a long, the interrupt's address
-                            t += 17 + 58;
-                            i += 1;
-                            cap = Some(r.l(a0));
-                            a0 += 2;
-                            left -= 1;
-                            true
-                        }
-                        _ => {
-                            t += 17 + 17 + 70;
-                            true
-                        }
-                    }
-                };
-                if !hit {
-                    break false;
-                }
-                t += 15;
-                if lim <= a0 {
-                    t += 18;
-                    break 'pattern;
-                }
-                t += 18;
-                a0 += 2;
-                left -= 1;
-                if left < 0 {
-                    break true;
-                }
-            };
-            if ok {
-                s.found[k] += 1;
-                if k == 0 {
-                    s.irq = cap;
-                    s.timer = u16::from_be_bytes([hi, lo]);
-                }
-                // the captured long and timer bytes go to the replacement
-                t += 29;
-                if cap.take().is_some_and(|a| a != 0) {
-                    t += 70;
-                }
-                t += 25;
-                if std::mem::take(&mut timer) {
-                    t += 54;
-                }
-                t += 77;
-                c[a4..a4 + 6].copy_from_slice(&[0x4e, 0xb9, 0, 0, 0, 0]);
-                a4 += 6;
-                if n >= 3 {
-                    for _ in 0..n - 2 {
-                        c[a4..a4 + 2].copy_from_slice(&[0x4e, 0x71]);
-                        a4 += 2;
-                    }
-                    t += 22 * (n as u64 - 2) + 10;
-                }
-            } else {
-                t += 12;
-                a4 += 2;
-            }
-            t += 15;
-            if lim <= a4 {
-                t += 18;
-                break;
-            }
-            t += 18;
-        }
-    }
-    s.cycles = t + 35;
-    s
 }
 
 /// The Eagleplayer's DTP_SubSongRange: past the jumps after the module's name,
@@ -632,11 +525,8 @@ pub struct RonKlaren {
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
-    let mut l = layout(d)?;
+    let l = layout(d)?;
     let (_seg, code) = crate::deli::load_seg(m, d).ok()?;
-    // the Eagleplayer scans the code relocated
-    let loaded: Vec<u8> = (0..l.code_len as u32).map(|i| m.bus.r8(code + i)).collect();
-    l.scanned(&ep_scan(&loaded));
     let len = m.bus.r32(code + 4);
     let saved = (0..len).map(|i| m.bus.r8(code + 0x28 + i)).collect();
     let mut hw = Hw { bus: &mut m.bus };
@@ -1369,13 +1259,26 @@ mod tests {
     /// (a 32-byte sample, an envelope straight to its peak). The code is only
     /// the parts the Eagleplayer and the port look for.
     fn module() -> Vec<u8> {
+        module_with(false)
+    }
+
+    /// `module`, whose first jump goes to the timer set-up if `jump`, as the
+    /// replayers' do; otherwise it goes nowhere and the set-up is found in the
+    /// code.
+    fn module_with(jump: bool) -> Vec<u8> {
         let mut a = Asm::default();
         a.w(&[0x70ff, 0x4e75, 0, 0]);
         a.d.extend(b"RON_KLAREN_SOUNDMODULE!\0");
         // a jump, then the subsong entries (move.w #1,d0; jmp)
-        a.w(&[0x4ef9, 0, 0, 0x303c, 1, 0x4ef9, 0, 0]);
+        a.w(&[0x4ef9]);
+        if jump {
+            a.p("timer");
+        } else {
+            a.w(&[0, 0]);
+        }
+        a.w(&[0x303c, 1, 0x4ef9, 0, 0]);
         // the timer set-up, the interrupt at `irq`
-        a.w(&[0x33fc, 0x4000, 0x00df, 0xf09a, 0x13fc, 0x0000, 0x00bf, 0xde00, 0x13fc, 0x0037, 0x00bf, 0xd400]);
+        a.l("timer").w(&[0x33fc, 0x4000, 0x00df, 0xf09a, 0x13fc, 0x0000, 0x00bf, 0xde00, 0x13fc, 0x0037, 0x00bf, 0xd400]);
         a.w(&[0x13fc, 0x0037, 0x00bf, 0xd500, 0x13fc, 0x0081, 0x00bf, 0xdd00, 0x13fc, 0x0011, 0x00bf, 0xde00]);
         a.w(&[0x23f9, 0, 0x78, 0, 0, 0x23fc]).p("irq").w(&[0, 0x78]);
         a.w(&[0x33fc, 0xc000, 0x00df, 0xf09a, 0x33fc, 0x800f, 0x00df, 0xf096, 0x4e75]);
@@ -1412,6 +1315,19 @@ mod tests {
             a.l(v).w(&voice);
         }
         a.exe()
+    }
+
+    #[test]
+    fn finds_the_timer_and_interrupt_from_the_header_jump_or_the_code() {
+        let by_jump = super::layout(&module_with(true)).unwrap();
+        let by_code = super::layout(&module_with(false)).unwrap();
+        // the module's $3737 in the timer's two bytes
+        assert_eq!(by_jump.timer, 0x3737);
+        assert_eq!((by_code.timer, by_code.irq), (by_jump.timer, by_jump.irq));
+        assert_ne!(by_jump.irq, 0);
+        // an older replayer; it has no InitVoice, whose writes are then direct
+        assert_eq!(by_jump.timing, super::Timing::Older);
+        assert!(by_jump.init_direct);
     }
 
     #[test]

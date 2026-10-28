@@ -113,6 +113,8 @@ struct Layout {
     subsongs: u16,
     /// The interrupt routine the Eagleplayer finds.
     irq: usize,
+    /// CIA-B timer A's value (the module's own tick rate).
+    timer: u16,
     /// Timing variant (the row of `COSTS`), and the writes the Eagleplayer's
     /// patterns miss: InitVoice's, and an instrument's sample after its DMA off.
     timing: Timing,
@@ -214,6 +216,7 @@ fn layout(d: &[u8]) -> Option<Layout> {
         stop85,
         subsongs,
         irq,
+        timer: 0,
         timing: Timing::Older,
         init_direct: false,
         instr_split: false,
@@ -232,6 +235,7 @@ impl Layout {
     /// DTP_SubSongRange, InitSound (the copy back, the subsong routine), and
     /// the calls around them (the emulator's cycles, two a colour clock).
     fn scanned(&mut self, scan: &Scan) {
+        self.timer = if scan.timer == 0 { crate::deli::DEFAULT_TIMER } else { scan.timer };
         self.instr_split = scan.found[3] < 2;
         self.init_direct = scan.found[9] == 0;
         self.timing = match (self.newer, self.instr_split) {
@@ -321,6 +325,8 @@ fn cycles_to(code: &[u8], from: usize, to: usize) -> Option<u64> {
 struct Scan {
     found: [u16; PATCHES.len()],
     irq: Option<u32>,
+    /// CIA-B timer A's value the timer set-up writes (0 if it writes none).
+    timer: u16,
     /// 68000 cycles, as the emulator counts each instruction (a branch the
     /// same taken or not).
     cycles: u64,
@@ -336,10 +342,11 @@ fn ep_scan(code: &[u8]) -> Scan {
     let lim = hdr.min(6000) & !1;
     let mut c = code.to_vec();
     c.resize(c.len().max(lim + 0x100), 0);
-    let mut s = Scan { found: [0; PATCHES.len()], irq: None, cycles: 0 };
+    let mut s = Scan { found: [0; PATCHES.len()], irq: None, timer: 0, cycles: 0 };
     // the limit, the table
     let mut t: u64 = 12 + 18 + 9 + if hdr > 6000 { 0 } else { 16 } + 14 + 8 + 4 + 4;
     let mut timer = false;
+    let (mut lo, mut hi) = (0u8, 0u8);
     for (k, pat) in PATCHES.iter().enumerate() {
         let n = pat.len() - 1;
         // the pattern's set-up
@@ -371,6 +378,11 @@ fn ep_scan(code: &[u8]) -> Scan {
                             if r.l(a0 + 2) == if p == 0xfffc { 0xbfd400 } else { 0xbfd500 } {
                                 t += 34;
                                 timer |= c[a0 + 1] != 0;
+                                if p == 0xfffc {
+                                    lo = c[a0 + 1];
+                                } else {
+                                    hi = c[a0 + 1];
+                                }
                                 true
                             } else {
                                 t += 17;
@@ -411,6 +423,7 @@ fn ep_scan(code: &[u8]) -> Scan {
                 s.found[k] += 1;
                 if k == 0 {
                     s.irq = cap;
+                    s.timer = u16::from_be_bytes([hi, lo]);
                 }
                 // the captured long and timer bytes go to the replacement
                 t += 29;
@@ -640,6 +653,10 @@ impl Replayer for RonKlaren {
 
     fn title(&self) -> String {
         String::new()
+    }
+
+    fn tick_clocks(&self) -> u64 {
+        (self.l.timer as u64 + 1) * 5
     }
 
     fn songend(&self) -> bool {

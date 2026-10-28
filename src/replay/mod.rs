@@ -26,6 +26,7 @@ pub mod ronklaren;
 pub mod sidmon1;
 pub mod sidmon2;
 pub mod soundcontrol;
+pub mod soundfactory;
 pub mod soundfx;
 pub mod sonicarranger;
 pub mod soundmon;
@@ -102,6 +103,7 @@ pub const REPLAYERS: &[Open] = &[
     ronklaren::OPEN,
     digitalsoundstudio::OPEN,
     musicassembler::OPEN,
+    soundfactory::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

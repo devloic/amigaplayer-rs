@@ -41,6 +41,7 @@ pub mod musicassembler;
 pub mod musicmaker;
 pub mod multimod;
 pub mod musicmaker8;
+pub mod mon;
 pub mod pierreadane;
 pub mod pretracker;
 mod pretracker_tables;
@@ -192,6 +193,7 @@ pub const REPLAYERS: &[Open] = &[
     peterverswyvelen::OPEN,
     alcatrazpacker::OPEN,
     tcbtracker::OPEN,
+    mon::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

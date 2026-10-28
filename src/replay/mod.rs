@@ -18,6 +18,8 @@ pub mod digitalmugician;
 pub mod digitalsoundstudio;
 pub mod deltamusic1;
 pub mod deltamusic2;
+pub mod facethemusic;
+mod facethemusic_tables;
 pub mod fred;
 pub mod futurecomposer;
 pub mod gamemusiccreator;
@@ -147,6 +149,7 @@ pub const REPLAYERS: &[Open] = &[
     multimod::OPEN,
     multimod::OPEN_FLT8,
     quadracomposer::OPEN,
+    facethemusic::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

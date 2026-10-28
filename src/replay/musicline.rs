@@ -211,6 +211,9 @@ const FX_PT_VIBRATO: u8 = 0xea;
 // the Eagleplayer's write log) and the CIA's wait.
 const ECLOCK: u64 = 5;
 const PLAY_TIME: u64 = 4814;
+// The first tick's first write, after the timer starts: 65536 E-clocks and the
+// interrupt's entry.
+const FIRST_TICK: u64 = 65536 * ECLOCK + 47;
 // The time of the tick's work before its first write grows with what it does
 // (fitted to the original's tick times on four tunes, 4-voice tunes only):
 // per voice that starts a row, and per byte an effect handles.
@@ -492,7 +495,7 @@ pub struct Musicline {
     tune: u32,
     eight: bool,
     first: bool,
-    /// Colour clocks of the first period that the start's own tick used up.
+    /// Colour clocks from the start's DMA-on write to the first tick.
     used: std::cell::Cell<u64>,
     master: u16,
     tune_speed: u8,
@@ -909,8 +912,10 @@ impl Replayer for Musicline {
             1 << 40
         } else {
             // the first period is shortened by what the start's tick took
-            let used = self.used.replace(0);
-            ((self.timer as u64 + 1) * ECLOCK).saturating_sub(used).max(1)
+            match self.used.replace(0) {
+                0 => (self.timer as u64 + 1) * ECLOCK,
+                first => first,
+            }
         }
     }
 
@@ -1010,15 +1015,15 @@ impl Musicline {
         self.first = true;
         if !self.eight {
             self.timer = (0x1b0f88 / (self.tempo as u32).max(1)) as u16;
-            // the original starts the timer and runs the first tick at once, not a
-            // period later (its DMA-on write is 131 colour clocks after the timer
-            // starts, the tick's first write 91 after that)
+            // the original starts the timer before writing its latch, so the
+            // timer counts down from $FFFF: its first interrupt comes 65536
+            // E-clocks after the start (the tick's first write 47 colour clocks
+            // later) and the ticks are regular from there. The DMA-on write is
+            // 131 colour clocks after the timer starts.
             let t0 = hw.bus.clock;
             hw.wait(131);
             hw.dmacon(0x8000 | self.dma_mask);
-            hw.wait(91);
-            self.handler(hw);
-            self.used.set(hw.bus.clock - t0);
+            self.used.set(FIRST_TICK.saturating_sub(hw.bus.clock - t0).max(1));
         } else {
             hw.bus.write_word(0xdff09c, 0x0080);
             hw.bus.write_word(0xdff09a, 0x8080);

@@ -19,6 +19,7 @@ pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod fred;
 pub mod futurecomposer;
+pub mod gamemusiccreator;
 pub mod iffsmus;
 pub mod instereo1;
 pub mod instereo2;
@@ -119,6 +120,7 @@ pub const REPLAYERS: &[Open] = &[
     musicmaker::OPEN,
     musicmaker8::OPEN,
     amosmusicbank::OPEN,
+    gamemusiccreator::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

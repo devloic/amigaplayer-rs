@@ -94,6 +94,176 @@ const COPY: u64 = 2565;
 const COPY_PASS: u64 = 32;
 const COPY_NOISE: u64 = 2122;
 
+// The Eagleplayer's start: before InitSound's first write the host runs the
+// player's InitPlayer, which builds the waveforms (the same time for every
+// module) and the module info, whose song-length scan and loops over the
+// instruments and their names take a time that depends on the module. Its
+// 68000 cycles (two a colour clock), counted per code path and checked
+// against the first write of all 483 reference logs.
+/// The cycles that do not depend on the module, with the host's own.
+const START_CYCLES: u64 = 71_475_758 + 9594;
+/// Per instrument (its two loops), per byte of the title and of the names,
+/// with subsongs, with a title, with track 0 in the module.
+const START_INSTRUMENT: u64 = 134;
+const START_BYTE: u64 = 17;
+const START_SUBSONGS: u64 = 36;
+const START_TITLE: u64 = 16;
+const START_TRACK0: u64 = 8;
+/// The song-length scan: its set-up, a position, a voice's track, with track 0
+/// left out of the module, a row (its speed loop a pass, the rest), a voice's
+/// call and move on, the end of a row and the next, after the last, the end.
+const SCAN_SETUP: u64 = 3571;
+const SCAN_POSITION: u64 = 54;
+const SCAN_TRACK: u64 = 209;
+const SCAN_NULL_SUB: u64 = 13;
+const SCAN_NULL_ZERO: u64 = 4;
+const SCAN_ROWS: u64 = 411;
+const SCAN_SPEED: u64 = 27;
+const SCAN_ROW: u64 = 36;
+const SCAN_CALL: u64 = 99;
+const SCAN_NEXT: u64 = 38;
+const SCAN_ROW_END: u64 = 64;
+const SCAN_ROW_NEXT: u64 = 14;
+const SCAN_LAST: u64 = 33;
+const SCAN_EXIT: u64 = 465;
+/// The effect of a row: 0, B (it ends the scan; more with a position other
+/// than the first), D, F (0 ends it), E (with a D0 command), the others.
+const SCAN_E0: u64 = 149;
+const SCAN_EB: u64 = 409;
+const SCAN_EB_MORE: u64 = 95;
+const SCAN_ED: u64 = 241;
+const SCAN_EF: u64 = 139;
+const SCAN_EF_END: u64 = 125;
+const SCAN_EE: u64 = 156;
+const SCAN_EE_D0: u64 = 150;
+const SCAN_EOTHER: u64 = 119;
+
+/// The colour clocks from the host's start to InitSound's first write, for
+/// a module's bytes (what lies past them reads as 0).
+fn start_clocks(d: &[u8]) -> u64 {
+    let b = |a: i64| -> i64 {
+        if a >= 0 && (a as usize) < d.len() {
+            d[a as usize] as i64
+        } else {
+            0
+        }
+    };
+    let fl = ((d[6] as i64) << 8) | d[7] as i64;
+    let (ns, len_nr, tl, ni) = (d[13] as i64, fl & 0x3FF, d[10] as i64, d[12] as i64);
+    let null = fl & 0x8000 != 0;
+    let (pos, tracks) = (14 + 2 * ns, 14 + 2 * ns + 8 * len_nr);
+    let mut cyc = START_CYCLES + SCAN_SETUP;
+    if len_nr != 0 {
+        let last = pos + 8 * (len_nr - 1);
+        let (mut a0, mut speed, mut start_row) = (pos - 8, 6i64, 0i64);
+        'scan: loop {
+            a0 += 8;
+            cyc += SCAN_POSITION;
+            let mut ptr = [0i64; 4];
+            for (v, p) in ptr.iter_mut().enumerate() {
+                let mut t = b(a0 + 2 * v as i64);
+                cyc += SCAN_TRACK;
+                if null {
+                    cyc += SCAN_NULL_SUB;
+                    t -= 1;
+                    if t < 0 {
+                        t = 0;
+                        cyc += SCAN_NULL_ZERO;
+                    }
+                }
+                *p = tracks + ((((t * tl) & 0xFFFF) + start_row) & 0xFFFF) * 3;
+            }
+            cyc += SCAN_ROWS;
+            if last < a0 {
+                break;
+            }
+            let mut rows = ((tl - 1 - start_row) & 0xFFFF) + 1;
+            start_row = 0;
+            let mut brk = false;
+            loop {
+                cyc += SCAN_SPEED * speed.max(1) as u64 + SCAN_ROW;
+                for p in ptr.iter_mut() {
+                    let (e, param) = (b(*p + 1) & 0xF, b(*p + 2));
+                    let mut end = false;
+                    cyc += match e {
+                        0 => SCAN_E0,
+                        0xB => {
+                            end = true;
+                            SCAN_EB + if pos != a0 { SCAN_EB_MORE } else { 0 }
+                        }
+                        0xD => {
+                            start_row = ((param >> 4) * 10 + (param & 0xF)) & 0xFF;
+                            brk = true;
+                            SCAN_ED
+                        }
+                        0xF if param == 0 => {
+                            end = true;
+                            SCAN_EF_END
+                        }
+                        0xF => {
+                            speed = param;
+                            SCAN_EF
+                        }
+                        0xE => SCAN_EE + if param & 0xF0 == 0xD0 { SCAN_EE_D0 } else { 0 },
+                        _ => SCAN_EOTHER,
+                    };
+                    cyc += SCAN_CALL;
+                    if end {
+                        break 'scan;
+                    }
+                    cyc += SCAN_NEXT;
+                    *p += 3;
+                }
+                cyc += SCAN_ROW_END;
+                if brk {
+                    break;
+                }
+                cyc += SCAN_ROW_NEXT;
+                rows -= 1;
+                if rows == 0 {
+                    cyc += SCAN_LAST;
+                    if last > a0 {
+                        break;
+                    }
+                    break 'scan;
+                }
+            }
+        }
+    }
+    cyc += SCAN_EXIT;
+    // the module info: the instruments (past the tracks, as InitModule's
+    // adda.w takes their size), then the title and the names
+    let sz = ((tl * 3 * (d[11] as i64 + !null as i64)) & 0xFFFF) as u16 as i16 as i64;
+    let mut a = 14 + 2 * ns + 8 * len_nr + sz;
+    for _ in 0..ni {
+        a += 22 + 4 * b(a + 0x15);
+    }
+    let mut t = a;
+    while b(t) != 0 {
+        t += 1;
+    }
+    cyc += START_BYTE * (t - a + 1) as u64 + START_INSTRUMENT * ni as u64;
+    if b(a) != 0 {
+        cyc += START_TITLE;
+    }
+    let mut p = t + 1;
+    for _ in 0..ni {
+        let q = p;
+        while b(p) != 0 {
+            p += 1;
+        }
+        cyc += START_BYTE * (p - q + 1) as u64;
+        p += 1;
+    }
+    if ns != 0 {
+        cyc += START_SUBSONGS;
+    }
+    if !null {
+        cyc += START_TRACK0;
+    }
+    cyc / 2
+}
+
 fn detect(d: &[u8]) -> bool {
     // the Eagleplayer's check: "THX" and a revision of 0 or 1
     d.len() >= 14 && d.starts_with(b"THX") && d[3] <= 1
@@ -313,6 +483,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
     };
     let mut hw = Hw { bus: &mut m.bus };
+    hw.wait(start_clocks(d));
     p.init_sub_song(0, &mut hw);
     hw.wait(INIT_TO_TIMER);
     Some(Box::new(p))
@@ -1255,6 +1426,9 @@ mod tests {
         e.render(&mut out);
         let log = e.m.bus.write_log.take().unwrap();
         let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        // InitSound's first write comes where the Eagleplayer's start (the
+        // waveforms, the song-length scan of this module) ends
+        assert_eq!(log[0].2, 35_748_331);
         // the first tick's setup
         assert_eq!(&reg(0xDFF096)[..2], &[0x000F, 0x800F]);
         assert_eq!(reg(0xDFF0A4)[0], 0x140);

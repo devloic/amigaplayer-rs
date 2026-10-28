@@ -33,6 +33,7 @@ pub mod instereo2;
 pub mod hippel;
 pub mod hvl;
 pub mod jamcracker;
+pub mod jesperolsen;
 pub mod med;
 pub mod musicassembler;
 pub mod musicmaker;
@@ -178,6 +179,7 @@ pub const REPLAYERS: &[Open] = &[
     sonix::OPEN,
     davelowe::OPEN_DL,
     davelowe::OPEN_DLN,
+    jesperolsen::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

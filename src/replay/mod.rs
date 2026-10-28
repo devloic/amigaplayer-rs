@@ -14,6 +14,7 @@ pub mod ahx;
 pub mod artofnoise;
 pub mod bendaglish;
 pub mod davidwhittaker;
+pub mod digibooster;
 pub mod digitalmugician;
 pub mod digitalsoundstudio;
 pub mod deltamusic1;
@@ -152,6 +153,7 @@ pub const REPLAYERS: &[Open] = &[
     quadracomposer::OPEN,
     facethemusic::OPEN,
     oktalyzer::OPEN,
+    digibooster::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

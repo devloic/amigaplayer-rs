@@ -24,6 +24,7 @@ pub mod instereo2;
 pub mod hippel;
 pub mod jamcracker;
 pub mod musicassembler;
+pub mod musicmaker;
 pub mod pumatracker;
 pub mod ronklaren;
 pub mod sidmon1;
@@ -113,6 +114,7 @@ pub const REPLAYERS: &[Open] = &[
     instereo2::OPEN,
     synthesis::OPEN,
     activisionpro::OPEN,
+    musicmaker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

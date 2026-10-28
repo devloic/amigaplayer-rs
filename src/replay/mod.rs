@@ -32,6 +32,7 @@ pub mod soundfactory;
 pub mod soundfx;
 pub mod sonicarranger;
 pub mod soundmon;
+pub mod synthesis;
 pub mod tfmx;
 
 use crate::amplifier::Poke;
@@ -109,6 +110,7 @@ pub const REPLAYERS: &[Open] = &[
     soundfactory::OPEN,
     instereo1::OPEN,
     instereo2::OPEN,
+    synthesis::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

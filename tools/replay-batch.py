@@ -8,8 +8,11 @@ LIST has one module path per line (a missing file is also looked for as
 PATH.xz). Modules are copied into DIR, except with --in-place, where one found
 as itself is played where it is, next to the files it loads (TFMX's smpl.*, an
 IFF-SMUS song's instruments). Each distinct module is played with the 68k player (--player) and
-with the open replayers (--open-replayers, whose "playing" line must show
-[FORMAT]), and the write logs are compared with replay-cmp.py. Prints how
+with the open replayers (--open-replayers, run with DELIPLAYERS, EAGLEPLAYERS
+and DELIGENIES all pointing at an empty directory, so that only an open
+replayer or the built-in ProTracker can play it and the 68k player never stands
+in for the port; its "playing" line must show exactly [FORMAT], case
+included), and the write logs are compared with replay-cmp.py. Prints how
 many are identical, differ (with the first line of the comparison), or were
 refused by either side (--tick-gap goes to replay-cmp.py). The logs, renders
 and modules stay in DIR.
@@ -25,11 +28,13 @@ ap.add_argument('--seconds', default='20')
 ap.add_argument('--bin', default=os.path.join(HERE, '..', 'target', 'release', 'deliplayer'))
 ap.add_argument('--in-place', action='store_true')
 ap.add_argument('--tick-gap')
-ap.add_argument('--eagleplayers', help='Eagleplayer directory for the reference run and the port (passed through)')
+ap.add_argument('--eagleplayers', help='Eagleplayer directory for the reference run (the port runs with none)')
 ap.add_argument('list')
 a = ap.parse_args()
 os.makedirs(a.out, exist_ok=True)
 
+empty = os.path.abspath(os.path.join(a.out, '.empty'))
+os.makedirs(empty, exist_ok=True)
 seen, res = set(), {}
 for p in (l.strip() for l in open(a.list)):
     if not p:
@@ -51,8 +56,12 @@ for p in (l.strip() for l in open(a.list)):
         open(mod, 'wb').write(data)
 
     def run(tag, extra):
-        extra = extra + (['--eagleplayers', a.eagleplayers] if a.eagleplayers else [])
         env = dict(os.environ, DELI_WRITE_LOG=f'{out}.{tag}.log', SDL_AUDIO_DRIVER='dummy')
+        if tag == 'port':
+            # no 68k player can load: the reference must not stand in for the port
+            env.update(DELIPLAYERS=empty, EAGLEPLAYERS=empty, DELIGENIES=empty)
+        elif a.eagleplayers:
+            extra = extra + ['--eagleplayers', a.eagleplayers]
         try:
             r = subprocess.run([a.bin, *extra, '--wav', f'{out}.{tag}.wav', '--seconds', a.seconds, mod],
                                env=env, capture_output=True, text=True, timeout=300)
@@ -65,7 +74,7 @@ for p in (l.strip() for l in open(a.list)):
         res.setdefault('reference refuses', []).append((p, ref[0]))
         continue
     port = run('port', ['--open-replayers'])
-    if not port[0].startswith('playing') or f'[{a.format}' not in port[0]:
+    if not port[0].startswith('playing') or f'[{a.format}]' not in port[0]:
         res.setdefault('port refuses', []).append((p, port[0]))
         continue
     c = subprocess.run([sys.executable, '-I', os.path.join(HERE, 'replay-cmp.py'), f'{out}.ref.log', f'{out}.port.log',

@@ -210,11 +210,24 @@ pokes are logged before mixing, at `0xD00000 | voice << 4 | register`
 (register 0/2 LOC, 4 LEN, 6 PER, 8 VOL, `0xA` DMA, `0x8000` on), and
 `tools/replay-cmp.py` compares them as `VLOC0`.. `VDMA31`; the amplifier's own
 Paula writes are not logged. Players with 4 Direct voices or fewer still poke
-Paula itself, as before. DigiBoosterPRO needs AHI and stays silent, and the
-players that run as a process of their own (PlayAY, MusiclineEditor) do not
-work. TME's check accepts almost any large file, and Eagleplayers are asked in
-file name order, so with no DeliPlayers installed it takes some modules that
-later Eagleplayers would play.
+Paula itself, as before. DigiBoosterPRO needs AHI and stays silent, and PlayAY,
+which runs as a process of its own, does not work. MusiclineEditor (a process
+player too) plays: its InitPlayer branches on the flags `dtg_AudioAlloc`
+returns, which the host sets as a `moveq #0,d0` would.
+
+TME (V1.1) claims many files of other formats and plays them silent: its
+`EP_Check5` looks for 256 zero bytes after the module's tables, or, in a file
+too short for that, at the words past the file's end, and never compares what
+it computes with `dtg_ChkSize`, as the later TME player UADE ships does. That
+is the player's own check, not the host's: in the coverage sample (79 files of
+498) no other Eagleplayer 2.06 takes those files when TME is removed, so they
+would not play either way. Some formats have an Eagleplayer 2.06 that does not
+know the variant the archive holds: OctaMED and MED refuse MMD3 modules in
+mix mode (`flags2` bit 7, all of OctaMED SoundStudio's `oss.*`), MusicMaker8
+the single-file `FORM MMV8` modules, and Mark Cooksey, SoundMaster, Sound
+Images, Jesper Olsen and Sean Conran the replayer variants of the files they
+refuse (their checks match code or data patterns of other variants; UADE plays
+them with later versions of these players).
 
 Players that run as a process of their own (`DTP_Process`: IFF-8SVX, AIFF,
 RIFF-WAV) work. The process is a guest task with its own stack that the host
@@ -320,7 +333,7 @@ while the register writes are the same.
 | SoundFX1.3 | NostalgicPlayer SoundFX and its 1.x converter (mark `SONG`) | SoundFX 1.3 (Eagleplayer V2.1, 20 Dec 96) | 327 of 327 modules identical for 20 s; renders of 12 modules within a median 0.96 dB (specdist) of the reference (47.7 dB with no time between the writes); where a DMA off to on gap is shorter than a word at the voice's period, the restart can differ (the reference's ticks start later, by its init time), as in `AA Demo 1` (3.8 dB) |
 | SoundFX2.0 | NostalgicPlayer SoundFX (mark `SO31`) | SoundFX 2.0 (Eagleplayer V2.1, 20 Dec 96) | 89 of 89 modules identical for 20 s; renders of 12 modules within a median 1.35 dB (specdist) of the reference (25.9 dB with no time between the writes). The original tests the flags `dtg_GetListData` returns, which the host now sets as UADE's does |
 | Delta Music 1.0 | NostalgicPlayer Delta Music 1.0 | DeltaMusic 1.0 (Eagleplayer V2.1) | 9 modules (1 more file of the list is another format): 1 identical for 20 s; the other 8 differ only in the period, at volume 0, of a voice that has not played a note yet, whose arpeggio the original reads from its code hunk's pointer to its data hunk, so from where it was loaded. With the reference's pointer in that place all 9 are identical for 20 s and for 90 s. The variables live in guest memory in the original's layout, and the writes come within a few colour clocks of the original's; specdist mean, median of the 9: 0.30 dB (0.03 with the reference's pointer, 8.4 without the waits) |
-| Sonic Arranger | NostalgicPlayer Sonic Arranger and its "final" converter | SonicArranger (Eagleplayer V4.11; the DeliPlayer SAplayer_note has the same name, so run with `DELIPLAYERS` pointing elsewhere) | 263 of 263 modules identical for 20 s ("SOARV1.0", offsets-only and with the replayer in front; the 43 others of the list are lh-packed `@OARV1.0`, Lionheart's, or other formats, which the original refuses too), subsongs too; writes spaced by the original's code-path costs fitted to its logs; renders of 10 modules within a median 0.94 dB (specdist; 1.44 dB with flat gaps) |
+| Sonic Arranger | NostalgicPlayer Sonic Arranger and its "final" converter | SonicArranger (Eagleplayer V4.11; the DeliPlayer SAplayer_note has the same name, so run with `DELIPLAYERS` pointing elsewhere) | 263 of 263 modules identical for 20 s ("SOARV1.0", offsets-only and with the replayer in front; the 43 others of the list are lh-packed `@OARV1.0`, Lionheart's, or other formats, which the original refuses too), subsongs too; writes spaced by the original's code-path costs fitted to its logs; renders of 10 modules within a median 0.94 dB (specdist; 1.44 dB with flat gaps). The song end comes when the last position is over, as the later SonicArranger Eagleplayer (UADE's) signals it; the original signals it on entering the last position, so a one-position song (`sa.199`, Marvin's Marvellous Adventure) ended after 0.1 s, and now plays its 7.8 s; the 263 stay identical for 20 s played on past either side's song end. The Lionheart offsets-only files with 2 or 3 subsongs (`sa.level_6`, `sa.endgegner34.SA`) the original refuses (its check takes a subsong table only when its size's low byte has no bits but 2 and 3, so one subsong), and so does the port |
 | SidMon 1.0 | NostalgicPlayer SidMon 1.0 | SIDMon 1.0 (Eagleplayer V4.01, adapted by DEFECT; the DeliPlayer Sidmon1.0_note plays these first, so run with `DELIPLAYERS` pointing elsewhere) | 37 of 52 modules identical for 20 s; the other 15 read periods past the table (mostly instrument 0, 32 bytes before the instruments, with a stray finetune), where the original reads past its code hunk and the port writes no period; with those masked all 52 are identical. It spaces its writes as the original does; renders of 12 modules within a median 1.8 dB (specdist), 1.0 dB for the 7 of them that are identical |
 | TFMX Pro | NostalgicPlayer TFMX (its engine for all three TFMX kinds), following the original's replayer | TFMX_Pro (Eagleplayer, "TFMX_Pro player module V1.4") | 173 of 174 modules identical for 20 s (`mdat.NAME` with `smpl.NAME` beside it, old fixed and offset-table layouts, sound effects modules), subsongs too; `Masterblazer ingame` differs from tick 578 in a random play macro, whose random numbers the original takes from the beam position (`VHPOSR`), so from the exact time of its code. The voice, track and global variables are kept in the original's byte layout; macro DMA ons and the periods go out at the end of the tick after its 9-line wait, a DMA off with a second byte at the start of the next one, as the Eagleplayer's default mode does; writes spaced by code-path costs fitted to its logs; renders of 10 modules within a median 0.96 dB (specdist) |
 | TFMX 1.5 | NostalgicPlayer TFMX, following the original's replayer | TFMX_1.5 (Eagleplayer, "TFMX 1.6 player module V1.91"), an older replayer of its own (26 macro commands, fixed tables, Paula through `ENPP_Poke*`) | 18 of 18 modules identical for 20 s (Rock'n'Roll), subsongs too; the single-file TFHD form the Eagleplayer also takes is not supported; writes spaced by code-path costs fitted to its logs; renders of 10 modules within a median 1.83 dB (specdist) |

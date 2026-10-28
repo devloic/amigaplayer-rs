@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod actionamics;
+pub mod activisionpro;
 pub mod artofnoise;
 pub mod bendaglish;
 pub mod davidwhittaker;
@@ -111,6 +112,7 @@ pub const REPLAYERS: &[Open] = &[
     instereo1::OPEN,
     instereo2::OPEN,
     synthesis::OPEN,
+    activisionpro::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

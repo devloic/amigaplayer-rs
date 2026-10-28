@@ -37,6 +37,7 @@ pub mod musicmaker8;
 pub mod pretracker;
 mod pretracker_tables;
 pub mod musicline;
+pub mod oktalyzer;
 pub mod pumatracker;
 pub mod quadracomposer;
 mod quadracomposer_tables;
@@ -150,6 +151,7 @@ pub const REPLAYERS: &[Open] = &[
     multimod::OPEN_FLT8,
     quadracomposer::OPEN,
     facethemusic::OPEN,
+    oktalyzer::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

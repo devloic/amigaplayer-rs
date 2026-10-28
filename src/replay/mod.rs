@@ -43,6 +43,7 @@ pub mod soundfactory;
 pub mod soundfx;
 pub mod sonicarranger;
 pub mod soundmon;
+pub mod soundtracker;
 pub mod synthesis;
 pub mod tfmx;
 
@@ -133,6 +134,13 @@ pub const REPLAYERS: &[Open] = &[
     pretracker::OPEN,
     musicline::OPEN,
     hvl::OPEN,
+    soundtracker::OPEN_UST10,
+    soundtracker::OPEN_UST18,
+    soundtracker::OPEN_ST2,
+    soundtracker::OPEN_ST6,
+    soundtracker::OPEN_ST9,
+    soundtracker::OPEN_MST,
+    soundtracker::OPEN_ST2X,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

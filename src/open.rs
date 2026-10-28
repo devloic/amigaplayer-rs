@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 
 /// The format the open replayers or the built-in ProTracker would play `data` as,
 /// if any (after decrunching and ProWizard's conversion, as the engine does). The
-/// 15-instrument SoundTracker heuristic is not claimed: it is loose, and the host's
-/// own players take those modules.
+/// 15-instrument modules that `replay::soundtracker` identifies are claimed, by
+/// variant ("Ultimate SoundTracker 1.8", "SoundTracker II", ...). The engine's
+/// last-resort 15-instrument heuristic ("SoundTracker") is not: it is loose, and the
+/// host's own players take the modules it alone would claim.
 pub fn detect(data: &[u8]) -> Option<String> {
     let data = crate::decrunch::decrunch(data.to_vec());
     let data = crate::prowizard::convert(data, Path::new(""));

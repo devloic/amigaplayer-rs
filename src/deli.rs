@@ -483,11 +483,9 @@ pub fn host_call(m: &mut Machine, f: u16) {
             let n = m.d(0) as usize;
             let (a, s) = m.deli.list.get(n).copied().unwrap_or((0, 0));
             m.cpu.dar[8] = a;
-            m.set_d0(s);
             // and the flags of a `move.l` of the size into d0, as UADE's score
             // returns: SoundFX 2.0's InitSound tests them (beq) after the call
-            let ccr = m.cpu.get_ccr() & 0x10;
-            m.cpu.set_ccr(ccr | if s == 0 { 4 } else { 0 } | if s >> 31 != 0 { 8 } else { 0 });
+            m.set_d0_flags(s);
         }
         1 => {
             // LoadFile(): load file named in path buffer
@@ -524,7 +522,9 @@ pub fn host_call(m: &mut Machine, f: u16) {
             let s = m.bus.read_cstr(m.a(0));
             path_append(m, &s);
         }
-        5 => m.set_d0(0), // AudioAlloc ok
+        // AudioAlloc ok, with the flags of a `moveq #0,d0`: MusiclineEditor's
+        // InitPlayer branches on them (beq) to go on loading the module
+        5 => m.set_d0_flags(0),
         6 => {}
         7 => m.deli.timer_running = true,
         8 => m.deli.timer_running = false,
@@ -621,5 +621,19 @@ mod tests {
         let p = Player { name: String::new(), version: 0, tags: t, configured: false, eagle: true, globals: 0, tag_list: 0x1000 };
         assert_eq!(p.check(), Some(0x200));
         assert!(p.is_player());
+    }
+
+    #[test]
+    fn audio_alloc_sets_the_flags() {
+        // MusiclineEditor's InitPlayer: jsr AudioAlloc ; beq go_on
+        let mut m = Machine::new(m68k::CpuType::M68000);
+        let stub = m.new_stub(Trap::Deli(5));
+        let code = m.alloc(16);
+        // moveq #1,d0 ; jsr (a0) ; seq d1 ; rts
+        m.bus.write_bytes(code, &[0x70, 0x01, 0x4E, 0x90, 0x57, 0xC1, 0x4E, 0x75]);
+        let mut r = [0u32; 16];
+        r[8] = stub;
+        let out = m.call(code, &r).unwrap();
+        assert_eq!((out[0], out[1] & 0xFF), (0, 0xFF));
     }
 }

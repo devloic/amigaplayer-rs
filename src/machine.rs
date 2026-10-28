@@ -228,6 +228,14 @@ impl Machine {
         self.cpu.dar[0] = v;
     }
 
+    /// `set_d0` with the flags a `move.l` of the value into D0 leaves (X kept): for
+    /// host functions whose callers test the condition codes after the call.
+    pub fn set_d0_flags(&mut self, v: u32) {
+        self.set_d0(v);
+        let x = self.cpu.get_ccr() & 0x10;
+        self.cpu.set_ccr(x | if v == 0 { 4 } else { 0 } | if v >> 31 != 0 { 8 } else { 0 });
+    }
+
     /// Whether the host call being handled may block: it was made by a task, not by
     /// code the host called.
     pub fn can_yield(&self) -> bool {

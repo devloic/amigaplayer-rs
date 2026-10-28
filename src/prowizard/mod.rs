@@ -12,6 +12,7 @@
 //! HCD Protector) keep the "M.K." mark, and no check takes a plain module (none
 //! of the NostalgicPlayer test files of other formats, plain MODs included, nor
 //! of the archive lists, is taken). An executable is left as it is.
+//! A module of under 64 bytes is only tried against the NoisePacker formats.
 
 pub mod core;
 pub mod ac1d;
@@ -120,10 +121,15 @@ pub fn formats() -> Vec<Box<dyn core::Format>> {
 
 /// The converted module and the name of the format it was packed with.
 pub fn identify_convert(data: &[u8], files: &dyn core::Loader) -> Option<(&'static str, Vec<u8>)> {
-    if data.len() < 64 || data[..4] == [0, 0, 3, 0xf3] {
+    if data.len() < 15 || data[..4] == [0, 0, 3, 0xf3] {
         return None;
     }
     for mut f in formats() {
+        // a module under 64 bytes can only be a NoisePacker one (a one-sample
+        // sound effect of a few bytes: UADE plays it, silently)
+        if data.len() < 64 && !f.name().starts_with("NoisePacker") {
+            continue;
+        }
         // a format reading out of its tables fails as the C# one throws
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut s = core::Stream::new(data);
@@ -175,6 +181,18 @@ mod plain {
         st.extend(&m[950..1080]);
         st.extend(&m[1084..]);
         assert!(identify_convert(&st, &NoFiles).is_none());
+    }
+
+    #[test]
+    fn tiny_noisepacker_module_is_taken() {
+        // a one-sample, silent NoisePacker 3 sound effect of 46 bytes
+        let m: [u8; 46] = [
+            0x00, 0x1c, 0x00, 0x02, 0x00, 0x08, 0x00, 0x06, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 4,
+            0, 4, 0, 4, 0, 0, 0, 0x0f, 0x1f, 0xc1, 0xc0, 0, 0, 0,
+        ];
+        let (name, c) = identify_convert(&m, &NoFiles).expect("taken");
+        assert_eq!(name, "NoisePacker 3");
+        assert_eq!(&c[1080..1084], b"M.K.");
     }
 
     #[test]

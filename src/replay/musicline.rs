@@ -43,6 +43,13 @@
 //! interrupt, mixes into its fast-memory buffer and copies that to the chip one.
 //! The port does the same, with the same volume table (computed: a sample byte
 //! times the volume / 128) and the same 16.16 stepping.
+//!
+//! Known difference: 9 of the 113 8-voice test modules differ from the original
+//! in a phase effect (the mixed bytes differ by a few steps from the first
+//! buffer the effect touches); it is not reproduced exactly.
+//!
+//! The tables (`musicline_tables.rs`) come from NostalgicPlayer's Tables.cs; the
+//! 68k player was used only to check them, none of its code or data is copied.
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;

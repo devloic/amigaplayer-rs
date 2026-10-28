@@ -35,6 +35,7 @@ pub mod hvl;
 pub mod jamcracker;
 pub mod jesperolsen;
 pub mod med;
+pub mod medpacker;
 pub mod musicassembler;
 pub mod musicmaker;
 pub mod multimod;
@@ -182,6 +183,7 @@ pub const REPLAYERS: &[Open] = &[
     davelowe::OPEN_DLN,
     jesperolsen::OPEN,
     pierreadane::OPEN,
+    medpacker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

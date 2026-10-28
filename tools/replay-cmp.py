@@ -150,8 +150,12 @@ def main():
         print(f'DMA off to on differs in {len(late)} of {len(both)}, first at tick {k} on voice {ch} '
               f'(a word takes {rgaps[k][ch][1]}): reference {rgaps[k][ch][0]}, '
               f'port {pgaps[k][ch][0]} colour clocks' + (' (too many)' if bad_timing else ''))
+    # a different tick rate still matches over the shorter log's ticks
+    rate_differs = abs(len(ref) - len(port)) > max(2, min(len(ref), len(port)) // 100)
+    if rate_differs:
+        print(f'tick counts differ: reference {len(ref)}, port {len(port)}')
     if first is None:
-        if bad_timing:
+        if bad_timing or rate_differs:
             sys.exit(1)
         print('no difference')
         return

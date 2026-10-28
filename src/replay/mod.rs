@@ -53,6 +53,7 @@ pub mod soundmon;
 pub mod soundtracker;
 pub mod synthesis;
 pub mod tfmx;
+pub mod tme;
 
 use crate::amplifier::Poke;
 use crate::bus::Bus;
@@ -156,6 +157,7 @@ pub const REPLAYERS: &[Open] = &[
     digibooster::OPEN,
     med::OPEN_MIX,
     med::OPEN_OSS,
+    tme::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -540,10 +540,25 @@ impl Amplifier {
 /// Starts the amplifier for `n` voices: its buffers in guest memory and Paula
 /// playing them.
 pub fn start(m: &mut Machine, n: usize, structs: u32, flags: u32) -> bool {
+    start_with(m, n, structs, flags, None, 100)
+}
+
+/// The same for poked voices whose sides the player chooses: `pans[v]` positive
+/// left, negative right, 0 the Amiga LRRL side of voice `v`; `gain` is the boost
+/// in percent of the default's (100: as `start`), for a player whose mix is not
+/// scaled down by the voices of a side as far as the default is.
+pub fn start_panned(m: &mut Machine, n: usize, flags: u32, pans: &[i16], gain: u32) -> bool {
+    start_with(m, n, 0, flags, Some(pans), gain)
+}
+
+fn start_with(m: &mut Machine, n: usize, structs: u32, flags: u32, sides: Option<&[i16]>, gain: u32) -> bool {
     let n = n.min(MAX_VOICES);
-    let pans: Vec<i16> =
-        (0..n as u32).map(|v| if structs == 0 { 0 } else { m.bus.r16(structs + v * aus::SIZE + aus::PAN) as i16 }).collect();
+    let pans: Vec<i16> = match sides {
+        Some(p) => p.to_vec(),
+        None => (0..n as u32).map(|v| if structs == 0 { 0 } else { m.bus.r16(structs + v * aus::SIZE + aus::PAN) as i16 }).collect(),
+    };
     let mut a = Amplifier::new(n, structs, flags, &pans);
+    a.boost = a.boost * gain / 100;
     a.buf = m.alloc(4 * BUF);
     if a.buf == 0 {
         return false;

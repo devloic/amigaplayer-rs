@@ -40,6 +40,7 @@ pub mod pretracker;
 mod pretracker_tables;
 pub mod musicline;
 pub mod oktalyzer;
+pub mod ptm;
 pub mod pumatracker;
 pub mod quadracomposer;
 mod quadracomposer_tables;
@@ -168,6 +169,7 @@ pub const REPLAYERS: &[Open] = &[
     med::OPEN_OSS,
     tme::OPEN,
     agi::OPEN,
+    ptm::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so
@@ -237,6 +239,13 @@ impl Hw<'_> {
 pub fn start_amplifier(m: &mut Machine, voices: usize) -> bool {
     use crate::eagle::epamb;
     crate::amplifier::start(m, voices, 0, epamb::DIRECT | epamb::BIT8 | epamb::CHIP_RAM)
+}
+
+/// The same with the voices' sides chosen by the player and the boost `gain` percent
+/// of the default's (see `amplifier::start_panned`).
+pub fn start_amplifier_panned(m: &mut Machine, pans: &[i16], gain: u32) -> bool {
+    use crate::eagle::epamb;
+    crate::amplifier::start_panned(m, pans.len(), epamb::DIRECT | epamb::BIT8 | epamb::CHIP_RAM, pans, gain)
 }
 
 pub(crate) fn be16(d: &[u8], o: usize) -> u16 {

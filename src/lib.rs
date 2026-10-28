@@ -13,6 +13,7 @@ pub mod heap;
 pub mod hunk;
 pub mod machine;
 pub mod notes;
+pub mod open;
 pub mod os;
 pub mod paula;
 pub mod paulaout;

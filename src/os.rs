@@ -60,6 +60,9 @@ pub struct OsState {
     pub progdir: PathBuf,
     /// The current module's directory, where the `Instruments:` volume is.
     pub module_dir: PathBuf,
+    /// Files held in memory, by host path, read before the disk: a host with no
+    /// file system (the browser) hands a module's companions over this way.
+    pub mem_files: HashMap<PathBuf, Vec<u8>>,
     logged: HashSet<(usize, i32)>,
     pub console: String,
 }
@@ -1402,6 +1405,16 @@ const ERROR_OBJECT_NOT_FOUND: u32 = 205;
 const CONSOLE_FH: u32 = 0x3FFF_FF00 >> 2;
 
 impl OsState {
+    /// The file at host path `p`: one of `mem_files` (the path in any case, as the
+    /// Amiga's names are), else the disk's.
+    pub fn read_file(&self, p: &Path) -> std::io::Result<Vec<u8>> {
+        let want = p.to_string_lossy();
+        if let Some((_, d)) = self.mem_files.iter().find(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case(&want)) {
+            return Ok(d.clone());
+        }
+        std::fs::read(p)
+    }
+
     pub fn host_path(&self, name: &str, current: Option<&Path>) -> PathBuf {
         if let Some(rest) = name.strip_prefix("PROGDIR:").or_else(|| name.strip_prefix("progdir:")) {
             return self.progdir.join(rest);

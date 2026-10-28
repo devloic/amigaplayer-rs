@@ -3,7 +3,12 @@ name = "players-native"
 description = "DeliPlayers and Eagleplayers recompiled from 68k to Rust by tools/native-players.py. The generated code (gen/) is derived from the user's own player files and is not part of the repository."
 edition = "2021"
 version = "0.1.0"
+license = "GPL-2.0-or-later"
 build = "build.rs"
 
 [dependencies]
 m68k = { package = "m68k-rc", path = "../m68k-rc" }
+
+[features]
+# Compile gen/ when it exists. Off, the registry is empty.
+gen = []

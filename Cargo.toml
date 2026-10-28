@@ -2,6 +2,7 @@
 name = "deliplayer"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-2.0-or-later"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -14,9 +15,12 @@ players-native = { path = "crates/players-native" }
 sdl3 = { version = "0.20", optional = true }
 
 [features]
-default = ["ui"]
+default = ["ui", "native"]
 # The SDL3 player window. The library (engine only) builds without it.
 ui = ["dep:sdl3"]
+# The players recompiled to Rust (crates/players-native/gen), when generated. They
+# are derived from the user's player files: leave this off in a build to distribute.
+native = ["players-native/gen"]
 
 [lib]
 name = "deliplayer"

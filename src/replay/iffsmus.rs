@@ -447,7 +447,7 @@ impl Loader<'_> {
     /// dos Open: the file's name as an Amiga path, the handle's 44 bytes.
     fn open(&mut self, name: &str) -> Option<File> {
         let p = self.m.os.host_path(name, None);
-        let data = std::fs::read(&p).ok()?;
+        let data = self.m.os.read_file(&p).ok()?;
         self.feat[l::FILE] += 1;
         let fh = self.m.alloc(44);
         self.allocs.push(fh);

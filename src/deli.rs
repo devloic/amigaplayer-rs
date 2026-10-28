@@ -590,7 +590,7 @@ pub fn wait_audio_dma(m: &mut Machine) {
 /// the module's directory; case is ignored).
 pub fn read_companion(m: &Machine, name: &str) -> (PathBuf, std::io::Result<Vec<u8>>) {
     let p = m.os.host_path(name, Some(&m.deli.module_dir));
-    let d = std::fs::read(&p).or_else(|_| find_case_insensitive(&p));
+    let d = m.os.read_file(&p).or_else(|_| find_case_insensitive(&p));
     (p, d)
 }
 

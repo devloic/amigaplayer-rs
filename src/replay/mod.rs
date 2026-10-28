@@ -19,6 +19,7 @@ pub mod fred;
 pub mod futurecomposer;
 pub mod iffsmus;
 pub mod instereo1;
+pub mod instereo2;
 pub mod hippel;
 pub mod jamcracker;
 pub mod musicassembler;
@@ -107,6 +108,7 @@ pub const REPLAYERS: &[Open] = &[
     musicassembler::OPEN,
     soundfactory::OPEN,
     instereo1::OPEN,
+    instereo2::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

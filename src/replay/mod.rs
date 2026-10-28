@@ -25,6 +25,7 @@ pub mod iffsmus;
 pub mod instereo1;
 pub mod instereo2;
 pub mod hippel;
+pub mod hvl;
 pub mod jamcracker;
 pub mod med;
 pub mod musicassembler;
@@ -131,6 +132,7 @@ pub const REPLAYERS: &[Open] = &[
     med::OPEN,
     pretracker::OPEN,
     musicline::OPEN,
+    hvl::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

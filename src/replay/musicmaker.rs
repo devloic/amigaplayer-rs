@@ -459,7 +459,7 @@ pub(crate) fn hardwareinit(hw: &mut Hw) {
 }
 
 /// `getalegalvolume`: 0 to `max`.
-fn legal_vol(v: u16, max: u16) -> u16 {
+pub(crate) fn legal_vol(v: u16, max: u16) -> u16 {
     if (v as i16) < 0 {
         0
     } else if v as i16 > max as i16 {

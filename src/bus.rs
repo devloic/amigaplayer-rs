@@ -31,6 +31,9 @@ pub struct Bus {
     /// Every custom-chip and CIA write (address, value, colour clock), when enabled: diffing two
     /// runs' logs finds where they part far more precisely than comparing audio.
     pub write_log: Option<Vec<(u32, u16, u64)>>,
+    /// The Eagleplayer amplifier, while a player's voices are mixed (it plays
+    /// on channels 0 and 1).
+    pub amp: Option<Box<crate::amplifier::Amplifier>>,
 }
 
 impl Bus {
@@ -45,6 +48,7 @@ impl Bus {
             frame: FRAME,
             log_unmapped: false,
             write_log: None,
+            amp: None,
         }
     }
 
@@ -155,6 +159,13 @@ impl Bus {
         }
         if a & 0x2000 == 0 {
             self.ciab.write(reg, v);
+        }
+    }
+
+    /// A poke for the amplifier's voice `v`, now.
+    pub fn amp_poke(&mut self, v: usize, p: crate::amplifier::Poke) {
+        if let Some(a) = &mut self.amp {
+            a.poke(&mut self.write_log, &mut self.ram, self.clock, v, p);
         }
     }
 

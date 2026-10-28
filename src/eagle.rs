@@ -8,7 +8,9 @@
 //! Most of these players use the "amplifier" interface, which is not in the
 //! kit: `EP_InitAmplifier` hands the host a tag list, and from then on the
 //! player sends its Paula writes through `ENPP_PokeAdr/Len/Per/Vol` and
-//! `ENPP_DMAMask`. Like UADE's score, the host writes them straight to Paula.
+//! `ENPP_DMAMask`. Like UADE's score, the host writes them straight to Paula,
+//! unless the player has more than 4 voices or leaves them in AudioStructs
+//! (no `EPAMB_Direct`): then they go to the mixing amplifier (amplifier.rs).
 
 use crate::deli::{self, dtg, TAG_USER};
 use crate::machine::{Machine, Trap};
@@ -61,9 +63,14 @@ pub mod epamt {
 pub mod epamb {
     /// The player pokes Paula through ENPP_Poke*: no mixing needed.
     pub const DIRECT: u32 = 1;
+    /// Signed 8-bit samples.
     pub const BIT8: u32 = 2;
+    /// The next kind of samples: the 8 Bit Amplifier takes them as unsigned
+    /// 8-bit ones, and PS3M sets it for S3M modules with unsigned samples.
     pub const BIT16: u32 = 4;
     pub const CHIP_RAM: u32 = 0x10;
+    /// AudioStruct interrupts (`aus::INT`).
+    pub const AUDIO_INTS: u32 = 0x40;
 }
 
 /// EaglePlayerGlobals offsets past the DeliTracker part.
@@ -187,11 +194,9 @@ pub fn prepare(m: &mut Machine, tag_list: u32, size: u32) {
     m.bus.w32(g + epg::AMPLIFIER_TAG_LIST, 0);
 }
 
-/// Reports what the player asked for in EP_InitAmplifier. The pokes go to
-/// Paula whatever the flags say. A player without EPAMB_Direct leaves its
-/// voices in the AudioStructs for a software mixer to play, which is not
-/// implemented (score has none either); nor are audio interrupt handlers in
-/// the AudioStructs called.
+/// Takes what the player asked for in EP_InitAmplifier. With EPAMB_Direct and
+/// at most 4 voices the pokes go to Paula; otherwise the amplifier mixes the
+/// voices, poked or left in the AudioStructs.
 pub fn amplifier_ready(m: &mut Machine, player: &str) {
     let tl = m.bus.r32(m.deli.eagle.globals + epg::AMPLIFIER_TAG_LIST);
     if tl == 0 {
@@ -202,8 +207,17 @@ pub fn amplifier_ready(m: &mut Machine, player: &str) {
     let (n, structs, flags) =
         (get(epamt::NUM_STRUCTS).unwrap_or(0), get(epamt::AUDIO_STRUCTS).unwrap_or(0), get(epamt::FLAGS).unwrap_or(0));
     log::info!("{player}: amplifier with {n} AudioStructs at ${structs:06x}, flags ${flags:x}");
-    if flags & epamb::DIRECT == 0 {
-        log::warn!("{player} needs a mixing amplifier ({n} voices), which is not implemented");
+    let direct = flags & epamb::DIRECT != 0;
+    if direct && n <= 4 {
+        return;
+    }
+    let structs_ok = structs != 0 && structs as usize + n as usize * 100 <= crate::bus::RAM_SIZE;
+    if n == 0 || n as usize > crate::amplifier::MAX_VOICES {
+        log::warn!("{player}: {n} amplifier voices, not mixed");
+    } else if !direct && (!structs_ok || flags & (epamb::BIT8 | epamb::BIT16) == 0) {
+        log::warn!("{player}: AudioStructs ${structs:06x} with flags ${flags:x}, not mixed");
+    } else {
+        crate::amplifier::start(m, n as usize, if structs_ok { structs } else { 0 }, flags);
     }
 }
 
@@ -283,6 +297,15 @@ pub fn host_call(m: &mut Machine, f: u16) {
             }
             m.set_d0(a);
         }
+        ENPP_DMA_MASK if m.bus.amp.is_some() => {
+            let (mask, on) = (m.d(1), m.d(0) & 0x8000 != 0);
+            for v in (0..32).filter(|v| mask & 1 << v != 0) {
+                m.bus.amp_poke(v, crate::amplifier::Poke::Dma(on));
+            }
+            if on {
+                deli::wait_audio_dma(m);
+            }
+        }
         ENPP_DMA_MASK => {
             // d1 = channel mask; d0.w negative switches them on
             let mut v = m.d(1) as u16 & 0xF;
@@ -298,12 +321,18 @@ pub fn host_call(m: &mut Machine, f: u16) {
         ENPP_POKE_ADR..=ENPP_POKE_VOL => {
             // d0 = value, d1.w = channel
             let ch = m.d(1) as u16;
+            let v = m.d(0);
+            if m.bus.amp.is_some() {
+                use crate::amplifier::Poke;
+                let p = [Poke::Loc(v), Poke::Len(v as u16), Poke::Per(v as u16), Poke::Vol(v as u16)];
+                m.bus.amp_poke(ch as usize, p[(f - ENPP_POKE_ADR) as usize]);
+                return;
+            }
             if ch >= 4 {
                 log::debug!("ENPP_{name}: channel {ch}");
                 return;
             }
             let reg = 0x0A0 + 16 * ch as u32;
-            let v = m.d(0);
             match f - ENPP_POKE_ADR {
                 0 => {
                     custom_w16(m, reg, (v >> 16) as u16);
@@ -323,7 +352,7 @@ pub fn host_call(m: &mut Machine, f: u16) {
                 (c, a) => log::debug!("ENPP_PokeCommand {c} {a}"),
             }
         }
-        // the pokes take effect at once, so there is nothing to flush
+        // the pokes take effect at their time, so there is nothing to flush
         ENPP_AMPLIFIER => {}
         ENPP_GET_HARDWARE_TYPE => m.set_d0(0), // EPHT_Amiga
         _ => {

@@ -440,6 +440,9 @@ impl Engine {
         }
         self.m.bus.paula.write_dmacon(0x000F);
         self.m.bus.paula.write_intena(0x0780);
+        if let Some(a) = self.m.bus.amp.take() {
+            self.m.heap.free(a.buf);
+        }
         (self.next_timer, self.pt_dma_at) = (None, None);
         self.m.os.audio = Default::default();
         self.m.os.audio_alloc = Default::default();
@@ -785,6 +788,8 @@ impl Engine {
         } else if let Some(f) = start_int {
             deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
         }
+        // the amplifier's channels play whatever the player did to Paula
+        crate::amplifier::restart(&mut self.m.bus);
         Ok(())
     }
 
@@ -805,6 +810,9 @@ impl Engine {
             let _ = deli::call_fn(&mut self.m, self.players[idx].globals, f, None);
         }
         self.m.bus.paula.write_dmacon(0x000F);
+        if let Some(a) = &mut self.m.bus.amp {
+            a.all_off();
+        }
         self.m.deli.voices.reset();
     }
 
@@ -821,7 +829,11 @@ impl Engine {
                         return Ok(());
                     }
                     self.m.bus.paula.write_dmacon(0x000F);
+                    if let Some(a) = &mut self.m.bus.amp {
+                        a.all_off();
+                    }
                     r.set_subsong(n as u16, &mut crate::replay::Hw { bus: &mut self.m.bus });
+                    crate::amplifier::restart(&mut self.m.bus);
                     (*sub, *frames) = (n as u16, 0);
                     self.song_starts();
                 }
@@ -1026,10 +1038,18 @@ impl Engine {
     /// was set since: an interrupt pending when it is enabled is taken at once.
     fn audio_irqs(&mut self) {
         let p = &mut self.m.bus.paula;
-        let raised = (std::mem::take(&mut p.raised) | p.intreq & p.intena & !self.intena_seen) & (0xF << 7);
+        let mut raised = (std::mem::take(&mut p.raised) | p.intreq & p.intena & !self.intena_seen) & (0xF << 7);
         self.intena_seen = p.intena;
         if raised == 0 || self.m.bus.paula.pending_audio_irqs() == 0 {
             return;
+        }
+        if raised & 0x80 != 0 && self.m.bus.amp.is_some() {
+            // the amplifier's buffer started: the host mixes the next
+            raised &= !0x80;
+            for is in crate::amplifier::interrupt(&mut self.m.bus) {
+                let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));
+                crate::os::call_int_code(&mut self.m, code, data, 0);
+            }
         }
         for ch in 0..4 {
             let bit = 0x80u16 << ch;

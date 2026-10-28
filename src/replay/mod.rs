@@ -12,6 +12,7 @@ pub mod artofnoise;
 pub mod bendaglish;
 pub mod davidwhittaker;
 pub mod digitalmugician;
+pub mod digitalsoundstudio;
 pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod fred;
@@ -98,6 +99,7 @@ pub const REPLAYERS: &[Open] = &[
     artofnoise::OPEN4,
     artofnoise::OPEN8,
     ronklaren::OPEN,
+    digitalsoundstudio::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

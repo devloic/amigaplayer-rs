@@ -61,6 +61,13 @@
 //! period and volume as the tick writes them), step through their sample by
 //! the period's 16.16 fraction of the mixer's, and loop as Paula does.
 //!
+//! An early `TFMX-SONG ` module of the fixed tables (nothing at $1D0) with no
+//! `smpl.NAME` beside it but one `smpl.set` is played by the TFMX 1.5 engine
+//! (`new_early`), as UADE's TFMX player does, which differs from the
+//! Eagleplayer's in three ways found by comparing its write log: the song starts
+//! at master volume $40 (no fade to $3F), SetNote adds the note's detune, and
+//! DMA on goes out at the macro's command.
+//!
 //! All three space their writes as the originals do: each code path costs the
 //! colour clocks fitted by least squares to the Eagleplayers' write logs
 //! (`COST`, `COST15`, `COST7`), and the originals' waits for the DMA are kept.
@@ -372,7 +379,11 @@ fn new_pro(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         Some(p) if p.eq_ignore_ascii_case("mdat.") => &file[5..],
         _ => &file[..],
     };
-    let smpl_data = crate::deli::read_companion(m, &format!("smpl.{rest}")).1.ok()?;
+    let smpl_data = match crate::deli::read_companion(m, &format!("smpl.{rest}")).1 {
+        Ok(s) => s,
+        // an early song of the fixed tables, whose samples are `smpl.set`
+        Err(_) => return new_early(d, base, m),
+    };
     let smpl = m.alloc((smpl_data.len() as u32).max(4));
     let empty = m.alloc(EMPTY_PATTERN.len() as u32);
     let irq = m.alloc(4 * IRQ_SIZE);
@@ -2226,6 +2237,8 @@ enum B {
 const COST15: [u64; B::Count as usize] = [150, 0, 0, 62, 134, 377, 375, 58, 0, 142, 187, 80, 277, 0, 63, 205, 106];
 
 pub struct V15 {
+    /// An early module (`new_early`): no fade to $3F at the start, as UADE's player.
+    early: bool,
     g: Blk<0x46>,
     w: Blk<0x120>,
     p: Blk<0xc8>,
@@ -2251,11 +2264,26 @@ fn new_15(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         _ => &file[..],
     };
     let smpl_data = crate::deli::read_companion(m, &format!("smpl.{rest}")).1.ok()?;
+    build_15(d, base, m, &smpl_data, false)
+}
+
+/// An early `TFMX-SONG ` module (the fixed tables of TFMX 1.5, no offsets at
+/// $1D0), which the Pro replayer declined for want of `smpl.NAME`: its samples
+/// are one `smpl.set` for the whole game. UADE's TFMX 1.5 player plays these.
+fn new_early(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    if be32(d, 0x1d0) != 0 || d.len() < 0x800 {
+        return None;
+    }
+    let smpl_data = crate::deli::read_companion(m, "smpl.set").1.ok()?;
+    build_15(d, base, m, &smpl_data, true)
+}
+
+fn build_15(d: &[u8], base: u32, m: &mut Machine, smpl_data: &[u8], early: bool) -> Option<Box<dyn Replayer>> {
     let smpl = m.alloc((smpl_data.len() as u32).max(4));
     if smpl == 0 {
         return None;
     }
-    m.bus.write_bytes(smpl, &smpl_data);
+    m.bus.write_bytes(smpl, smpl_data);
     // InitPlayer: the last subsong is before the second song starting at 0
     let (mut n, mut zeros) = (29i32, 2);
     for k in 0..31 {
@@ -2268,6 +2296,7 @@ fn new_15(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         }
     }
     let mut p = V15 {
+        early,
         g: Blk([0; 0x46]),
         w: Blk([0; 0x120]),
         p: Blk([0; 0xc8]),
@@ -2372,6 +2401,12 @@ impl V15 {
         self.g.sl(H_SMPL, self.smpl);
         self.g.sw(H_ON, 1);
         self.g.sw(H_START, sub);
+        if self.early {
+            self.g.sb(H_FADE_END, 0x40);
+            self.g.sb(H_FADE_DIR, 0);
+            self.fade_lock = 0;
+            return;
+        }
         // $11476
         self.fade_lock = 1;
         self.g.sb(H_FADE_END, 0x3f);
@@ -2870,7 +2905,13 @@ impl V15 {
                     step_on(self);
                 }
                 0x01 => {
-                    self.dma_on |= self.w.w(v + W_DMA_ON);
+                    if self.early {
+                        // UADE's player switches the voice on at once
+                        let m = self.w.w(v + W_DMA_ON);
+                        self.dma_mask(hw, m);
+                    } else {
+                        self.dma_on |= self.w.w(v + W_DMA_ON);
+                    }
                     step_on(self);
                 }
                 0x02 => {
@@ -2940,6 +2981,9 @@ impl V15 {
                     let per = if c == 0x08 {
                         let n = b1.wrapping_add(self.w.b(v + W_NOTE)) as usize;
                         self.period(n).wrapping_add(self.w.b(v + W_FINE + 1) as i8 as u16)
+                    } else if self.early {
+                        // UADE's player adds the note's detune to SetNote too
+                        self.period(b1 as usize).wrapping_add(self.w.b(v + W_FINE + 1) as i8 as u16)
                     } else {
                         self.period(b1 as usize)
                     }
@@ -5036,10 +5080,15 @@ mod tests {
     /// Plays `mdat` (with a 64-byte square wave as smpl.test) for 0.2 s, and
     /// returns the format, the smpl address (LOC0's first value) and the writes.
     fn play(name: &str, mdat: Vec<u8>) -> (String, Vec<(u32, u16, u64)>) {
+        play_smpl(name, mdat, "smpl.test")
+    }
+
+    /// `play` with the samples in the file `smpl_name`.
+    fn play_smpl(name: &str, mdat: Vec<u8>, smpl_name: &str) -> (String, Vec<(u32, u16, u64)>) {
         let dir = std::env::temp_dir().join(format!("deliplayer-tfmx-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let smpl: Vec<u8> = (0..64).map(|i| if i < 32 { 0x40 } else { 0xc0 }).collect();
-        std::fs::write(dir.join("smpl.test"), smpl).unwrap();
+        std::fs::write(dir.join(smpl_name), smpl).unwrap();
         let mut e = Engine::new(48000.0);
         e.open_replayers = true;
         e.m.bus.write_log = Some(Vec::new());
@@ -5085,6 +5134,25 @@ mod tests {
         assert_eq!(&reg(&log, 0xDFF0A4)[..1], &[16]);
         assert_eq!(&reg(&log, 0xDFF0A6)[..1], &[super::PERIODS[30]]);
         assert!(reg(&log, 0xDFF0A8).contains(&(0x30 * 4 * 0x3f >> 8)));
+    }
+
+    #[test]
+    fn early_song_without_its_own_samples_plays_as_tfmx_15_from_smpl_set() {
+        // an early "(Empty)" song of the fixed tables whose samples are the
+        // game's one smpl.set: UADE's TFMX 1.5 player plays it. The volume is
+        // not faded to $3F, the note's detune adds to SetNote's period, and
+        // DMA on goes out at the macro's command.
+        let mut d = mdat(b"TFMX-SONG ", &[0x0000_0000, 0x0200_0000, 0x0300_0010, 0x0e00_0030, 0x0900_0000, 0x0100_0000, 0x0700_0000]);
+        d[0x10..0x18].copy_from_slice(b"(Empty) ");
+        d[0xa03] = 5; // the note's detune
+        let (format, log) = play_smpl("early", d.clone(), "smpl.set");
+        assert_eq!(format, "TFMX 1.5");
+        assert!(reg(&log, 0xDFF0A8).contains(&0x30));
+        assert!(reg(&log, 0xDFF0A6).contains(&(super::PERIODS[0] + 5)));
+        assert!(reg(&log, 0xDFF096).contains(&0x8001));
+        // with smpl.NAME present the Pro replayer keeps it
+        let (format, _) = play_smpl("early-own", d, "smpl.test");
+        assert_eq!(format, "TFMX Pro");
     }
 
     #[test]

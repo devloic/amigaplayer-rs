@@ -148,6 +148,8 @@ pub struct Engine {
     genie_mem: u32,
     /// INTENA as `audio_irqs` last saw it.
     intena_seen: u16,
+    /// The current subsong has made a sound (see `skip_empty_subsong`).
+    heard: bool,
 }
 
 impl Engine {
@@ -179,6 +181,7 @@ impl Engine {
             running_genies: Vec::new(),
             genie_mem: 0,
             intena_seen: 0,
+            heard: false,
         }
     }
 
@@ -468,6 +471,23 @@ impl Engine {
     fn song_starts(&mut self) {
         self.m.bus.paula.sync(self.m.bus.clock, &self.m.bus.ram);
         self.m.bus.paula.samples.clear();
+        self.heard = false;
+    }
+
+    /// A subsong that ends within its first seconds without a sound (an empty
+    /// one: Richard Joseph songs often start with one) is skipped for the next,
+    /// as UADE and DeliTracker go on to the next subsong at a song end.
+    fn skip_empty_subsong(&mut self) {
+        const EMPTY_SECS: f64 = 2.0;
+        let Some(p) = &self.playing else { return };
+        if self.heard || p.sub >= p.sub_max || matches!(p.backend, Backend::Native(_)) {
+            return;
+        }
+        if self.elapsed_secs() < EMPTY_SECS && self.songend() {
+            if let Err(e) = self.change_subsong(1) {
+                log::debug!("next subsong: {e}");
+            }
+        }
     }
 
     fn start_module(&mut self, path: &Path, data: Vec<u8>) -> Result<()> {
@@ -1091,12 +1111,14 @@ impl Engine {
                 }
                 self.advance();
             };
+            self.heard |= pl != 0 || pr != 0;
             let (hl, hr) = (pl as f32 / 32768.0, pr as f32 / 32768.0);
             let mut l = hl * (0.5 + sep * 0.5) + hr * (0.5 - sep * 0.5);
             let mut r = hr * (0.5 + sep * 0.5) + hl * (0.5 - sep * 0.5);
             if self.m.deli.voices.in_use {
                 // the built-in NotePlayer renderer has its own filters
                 let (nl, nr) = self.m.deli.voices.render(&self.m.bus.ram, self.rate);
+                self.heard |= nl != 0.0 || nr != 0.0;
                 let mut vl = nl * (0.5 + sep * 0.5) + nr * (0.5 - sep * 0.5);
                 let mut vr = nr * (0.5 + sep * 0.5) + nl * (0.5 - sep * 0.5);
                 if self.settings.a500_filter {
@@ -1123,6 +1145,7 @@ impl Engine {
             let paula = &self.m.bus.paula;
             self.push_scopes([0, 1, 2, 3].map(|i| paula.output(i)));
         }
+        self.skip_empty_subsong();
     }
 
     fn push_scopes(&mut self, paula: [f32; 4]) {

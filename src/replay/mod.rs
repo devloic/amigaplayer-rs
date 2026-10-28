@@ -44,6 +44,7 @@ pub mod ptm;
 pub mod pumatracker;
 pub mod quadracomposer;
 mod quadracomposer_tables;
+pub mod richardjoseph;
 pub mod ronklaren;
 pub mod sidmon1;
 pub mod sidmon2;
@@ -170,6 +171,7 @@ pub const REPLAYERS: &[Open] = &[
     tme::OPEN,
     agi::OPEN,
     ptm::OPEN,
+    richardjoseph::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

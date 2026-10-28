@@ -19,9 +19,6 @@ pub const SCOPE_LEN: usize = 512;
 const DEFAULT_NOTE_GENIE: &str = "4Voices-NotePlayer";
 /// Colour clocks per E-clock tick.
 const ECLOCK_DIV: u64 = 5;
-/// How long ProTracker waits between turning a channel's DMA off and on again
-/// for a new note (its DMA wait loop, about 7 lines on an A500).
-const PT_DMA_WAIT: u64 = 7 * crate::paula::LINE;
 /// Players of formats from the PC, played without the Amiga's output filters.
 const PC_FORMATS: &[&str] =
     &["669", "adpcm", "aiff", "wav", "riff", "mpeg", "mp3", "fasttracker", "screamtracker", "ps3m", "taketracker"];
@@ -123,11 +120,10 @@ pub struct Engine {
     scope_pos: usize,
     a500: OnePole,
     led: Biquad,
-    /// When the next vertical blank, DeliTracker timer interrupt and DMA restart
-    /// of the built-in ProTracker are due (colour clocks).
+    /// When the next vertical blank and DeliTracker timer interrupt are due
+    /// (colour clocks).
     next_vblank: u64,
     next_timer: Option<u64>,
-    pt_dma_at: Option<u64>,
     /// E-clock ticks the CIAs have been run to.
     e_ticks: u64,
     /// Number of players found in the players directories (custom modules
@@ -175,7 +171,6 @@ impl Engine {
             led: Biquad::lowpass(rate, 3275.0, 0.707),
             next_vblank: FRAME,
             next_timer: None,
-            pt_dma_at: None,
             e_ticks: 0,
             builtin_players: 0,
             only_player: None,
@@ -443,7 +438,7 @@ impl Engine {
         if let Some(a) = self.m.bus.amp.take() {
             self.m.heap.free(a.buf);
         }
-        (self.next_timer, self.pt_dma_at) = (None, None);
+        self.next_timer = None;
         self.m.os.audio = Default::default();
         self.m.os.audio_alloc = Default::default();
         self.m.deli.voices.reset();
@@ -604,7 +599,7 @@ impl Engine {
         pt.clear_loop_words(&mut self.m.bus.ram);
         self.m.bus.paula.reset();
         self.intena_seen = 0;
-        (self.next_timer, self.pt_dma_at) = (None, None);
+        self.next_timer = None;
         let name = if pt.title.is_empty() { file_name(path) } else { pt.title.clone() };
         self.playing = Some(Playing {
             backend: Backend::Native(Box::new(pt)),
@@ -622,7 +617,7 @@ impl Engine {
 
     fn start_replay(&mut self, r: Box<dyn crate::replay::Replayer>, path: &Path) -> Result<()> {
         self.intena_seen = 0;
-        (self.next_timer, self.pt_dma_at) = (None, None);
+        self.next_timer = None;
         let title = r.title();
         let (sub_min, sub_max, sub) = r.subsongs();
         self.playing = Some(Playing {
@@ -645,7 +640,7 @@ impl Engine {
         }
         self.m.bus.paula.reset();
         self.intena_seen = 0;
-        (self.next_timer, self.pt_dma_at) = (None, None);
+        self.next_timer = None;
         self.m.deli.voices.reset();
         let g = self.players[idx].globals;
         let pl = &self.players[idx];
@@ -944,7 +939,7 @@ impl Engine {
         let cia_due = cias.iter().filter_map(|c| c.until_underflow()).min().map(|n| (self.e_ticks + n) * ECLOCK_DIV);
         let paula = &self.m.bus.paula;
         let mut t = paula.now() + paula.out.until_sample() as u64;
-        for d in [Some(self.next_vblank), self.next_timer, self.pt_dma_at, cia_due].into_iter().flatten() {
+        for d in [Some(self.next_vblank), self.next_timer, cia_due].into_iter().flatten() {
             t = t.min(d);
         }
         if t > now {
@@ -965,12 +960,6 @@ impl Engine {
                         crate::os::call_int_code(&mut self.m, code, data, 0);
                     }
                 }
-            }
-        }
-        if self.pt_dma_at.is_some_and(|d| d <= now) {
-            self.pt_dma_at = None;
-            if let Some(Playing { backend: Backend::Native(pt), .. }) = &mut self.playing {
-                pt.dma_on(&mut self.m.bus.paula);
             }
         }
         if let (Some(d), Some(n)) = (self.next_timer, period) {
@@ -1012,10 +1001,8 @@ impl Engine {
         match &mut p.backend {
             Backend::Replay(r) => r.tick(&mut crate::replay::Hw { bus: &mut self.m.bus }),
             Backend::Native(pt) => {
-                pt.tick(&mut self.m.bus.paula);
-                if pt.dma_pending != 0 {
-                    self.pt_dma_at = Some(self.m.bus.clock + PT_DMA_WAIT);
-                }
+                // its DMA waits run the clock on, as the 68k replay's loops do
+                pt.tick(&mut self.m.bus);
                 // E0x / LED filter
                 if pt.filter {
                     self.m.bus.ciaa.pra &= !2;

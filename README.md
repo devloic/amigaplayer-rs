@@ -41,7 +41,9 @@ for EaglePlayers. It runs the **Eagleplayers** of Eagleplayer 2.06 too:
   undocumented. Its layout was recovered by disassembling `SoundFX13_note` and
   the 4Voc, 8Voc and Headphone NotePlayer genies.
 * `src/protracker.rs`: native ProTracker/NoiseTracker/SoundTracker replayer
-  (it is built into DeliTracker rather than shipped as a plugin).
+  (it is built into DeliTracker rather than shipped as a plugin), a translation
+  of ProTracker 2.3D's replay routine after 8bitbubsy's pt2-clone and PT2.3F
+  (BSD 3-Clause: `LICENSE-pt2-clone`; see Built-in ProTracker).
 * `src/decrunch.rs`: PowerPacker (PP20) decrunching.
 * `src/prowizard/`: packed ProTracker modules converted back to ProTracker
   (see ProWizard).
@@ -283,7 +285,9 @@ colour clocks (3,546,895 Hz):
   interrupt comes every timer value + 1 E-clock ticks, and `dtg_WaitAudioDMA`
   (and `ENPP_DMAMask` switching DMA on) waits for 10 new raster lines, as
   UADE's score does (DeliTracker's own wait is not known). The built-in
-  ProTracker waits 7 lines between switching a channel's DMA off and on.
+  ProTracker waits as ProTracker 2.3D does, a DBRA loop of 300 (1515 colour
+  clocks, 6.7 lines on a 7 MHz 68000), before switching the new notes' DMA on,
+  and again before setting the repeats.
 * `_note` players go through a NotePlayer genie (4Voices by default) and so
   through Paula like everything else; the built-in renderer, used without one,
   keeps its own filters.
@@ -297,6 +301,59 @@ tables, not an A500's 68000.
 
 `src/paula.rs` and `src/paulaout.rs` follow UADE's `audio.c` and are derived
 from GPL-2 code.
+
+## Built-in ProTracker
+
+`src/protracker.rs` translates ProTracker 2.3D's replay routine, after
+8bitbubsy's pt2-clone (its C port of the 2.3D replayer) and his PT2.3F
+re-source of 2.3D (BSD 3-Clause, `LICENSE-pt2-clone`). The engine calls it
+from DeliTracker's timer interrupt, and it writes Paula's registers through the
+bus as the 68k routine does, in its order:
+
+* a row: per voice the period when the previous note long was empty, DMA off,
+  length, pointer and period of a new note, the period or volume its effect
+  sets, its volume; then 2.3D's DMA wait (a DBRA loop of 300, 1515 colour
+  clocks), DMA on for the new notes, the wait again, and the repeat pointer and
+  length of all four voices, the last voice first. The first row comes on the
+  sixth interrupt, as in ProTracker;
+* between rows, each voice's effect writes and volume;
+* the writes spaced as the 68000 takes from one to the next (estimated from
+  the cycle counts of the 2.3 code paths, not measured);
+* periods from ProTracker's tables (16 finetunes, and what an arpeggio on
+  finetune -1 reads past them), the LED filter on at the start (as an Amiga
+  starts and ProTracker leaves it; E0x switches it), a new tempo from the next
+  tick (the CIA latch), and 2.3D's quirks: 9xx added twice, B after D on one
+  row clearing the break row, E6x and EEx on delayed rows, the tremolo ramp
+  testing the vibrato position, the 12-bit wrap of portamentos, EFx inverting
+  the sample in memory, F00 ending the song. E8x does nothing (pt2-clone's
+  default, PT2.3F). An empty sample's note takes the replay's null-pointer path
+  (length 1, no repeat), as in the 2.3D editor, where it has no memory.
+
+Checked against UADE's PTK-Prowiz (a ProTracker 3.0b replay): in uade123 for
+plain modules (its check wants the module type UADE's uade.library passes;
+A500 filter, LED forced on unless the module uses E0x, as UADE starts it off),
+in this engine for the ProWizard families (see ProWizard); 20 s each, 300
+random archive MODs, NostalgicPlayer's ProTracker and NoiseTracker test files
+and 25 or 15 of each SoundTracker folder's, 638 played (59 the reference
+refuses, 20 other players take):
+
+| | State identical | The same writes in the same order, but the repeats' order | specdist median, to 2 kHz |
+| --- | --- | --- | --- |
+| before | 392 | 0 | 5.20 dB, 2.01 |
+| now | 480 | 329 | 2.43 dB, 2.06 |
+
+(7 more files, StarTrekker modules with no tick to compare, count as identical
+in both.) Strict order never matches whole files: PTK-Prowiz sets the repeats
+first voice first, 2.3D last voice first. It also plays SoundTracker modules in
+a NoiseTracker-like mode (the period in every effects tick), so they match in
+state only. Of the periods that still differ first, most are PTK-Prowiz
+starting a portamento a tick later than 2.3D does; others are 0-length
+samples, which PTK-Prowiz does not play. Its DMA waits are 10 raster lines,
+2.3D's 1515 colour clocks.
+
+8-channel MODs (`CD81`, `8CHN`, `FLT8`) are not ProTracker's: DeliTracker's
+TakeTracker and PS3M players take them and mix in software, so the built-in
+replayer leaves them alone.
 
 ## Open replayers
 
@@ -404,34 +461,40 @@ plain modules, as Devils Replay and HCD Protector keep the `M.K.` mark.
   module, up to 15 archive modules per family; state = Paula's registers after
   each tick:
 
-| Family | Played | State identical | specdist median (to 2 kHz) |
+| Family | Played | State identical (before) | specdist median, to 2 kHz (before) |
 | --- | --- | --- | --- |
-| AC1D Packer | 7 | 1 | 6.61 dB (1.60) |
-| Channel Player | 9 | 1 | 6.46 dB (1.41) |
-| Digital Illusions | 15 | 3 | 6.85 dB (3.26) |
-| Images Music System | 12 | 0 | 12.38 dB (10.52) |
-| NoisePacker 2 | 15 | 13 | 6.44 dB (1.36) |
-| NoisePacker 3 | 15 | 9 | 6.46 dB (1.37) |
-| Pha Packer | 15 | 9 | 6.46 dB (1.25) |
-| ProPacker 2.1 | 7 | 2 | 6.54 dB (2.02) |
-| ProPacker 3.0 | 5 | 3 | 2.68 dB (2.10) |
-| ProRunner 1 | 15 | 1 | 6.65 dB (2.00) |
-| ProRunner 2 | 15 | 6 | 6.80 dB (2.21) |
-| The Player 4.1A | 7 | 1 | 7.04 dB (2.55) |
-| The Player 4.x | 15 | 5 | 6.72 dB (1.90) |
-| The Player 5.x | 4 | 2 | 6.35 dB (2.54) |
-| The Player 6.0A | 15 | 8 | 6.89 dB (2.70) |
-| The Player 6.x | 15 | 5 | 6.79 dB (2.64) |
-| Tracker Packer 3 | 15 | 5 | 6.88 dB (2.21) |
-| Unic Tracker | 12 | 0 | 10.07 dB (8.87) |
+| AC1D Packer | 7 | 2 (1) | 1.38 dB, 0.87 (6.61, 1.60) |
+| Channel Player | 9 | 4 (1) | 0.96 dB, 0.52 (6.46, 1.41) |
+| Digital Illusions | 15 | 5 (3) | 2.35 dB, 1.71 (6.79, 2.42) |
+| Images Music System | 12 | 0 (0) | 10.62 dB, 10.54 (12.38, 10.52) |
+| NoisePacker 2 | 15 | 13 (13) | 1.16 dB, 0.54 (6.44, 1.36) |
+| NoisePacker 3 | 15 | 11 (9) | 1.27 dB, 0.67 (6.46, 1.37) |
+| Pha Packer | 15 | 11 (9) | 0.96 dB, 0.30 (6.46, 1.25) |
+| ProPacker 2.1 | 7 | 3 (2) | 1.63 dB, 0.74 (6.54, 2.02) |
+| ProPacker 3.0 | 5 | 4 (3) | 2.58 dB, 1.74 (2.68, 2.10) |
+| ProRunner 1 | 15 | 4 (1) | 1.82 dB, 1.05 (6.65, 2.00) |
+| ProRunner 2 | 15 | 9 (6) | 2.09 dB, 1.45 (6.80, 2.21) |
+| The Player 4.1A | 7 | 6 (1) | 2.74 dB, 1.92 (7.04, 2.55) |
+| The Player 4.x | 15 | 7 (4) | 1.61 dB, 1.13 (6.72, 2.12) |
+| The Player 5.x | 4 | 3 (2) | 1.58 dB, 1.23 (6.35, 2.54) |
+| The Player 6.0A | 15 | 12 (8) | 2.49 dB, 1.69 (6.89, 2.70) |
+| The Player 6.x | 15 | 10 (5) | 2.60 dB, 1.71 (6.79, 2.64) |
+| Tracker Packer 3 | 15 | 9 (5) | 2.13 dB, 1.45 (6.88, 2.21) |
+| Unic Tracker | 12 | 8 (5) | 2.29 dB, 2.00 (6.93, 2.59) |
 
-  Most of the difference is the built-in ProTracker's, not the conversion's:
-  over 20 ProPacker modules whose conversion libxmp confirms, 1 is
-  state-identical and the specdist median is 6.88 dB. The built-in replayer
-  starts with the LED filter off where PTK-Prowiz leaves it on (about 7 dB
-  above 2 kHz even with identical state), and computes fine-tuned periods by
-  formula, one off the tables now and then. Images Music System's notes are 11
-  semitones below PTK-Prowiz's from the first tick; Unic Tracker drifts later
-  (an octave on some notes). The reference refuses Magnetic Fields Packer,
-  NovoTrade Packer, Devils Replay and HCD Protector, so their playback is
-  unchecked.
+  "Before" is the built-in ProTracker before it became a translation of
+  ProTracker 2.3D (see Built-in ProTracker): it started with the LED filter
+  off and computed fine-tuned periods by formula. Over all 213 modules, 121
+  are state-identical now (78 before), specdist median 2.19 dB (6.75). Most of
+  what still differs is PTK-Prowiz's: it plays these conversions in a
+  NoiseTracker-like mode (the period written in every effects tick), starts
+  portamentos a tick later than 2.3D, and does not play 0-length samples.
+  Images Music System is the converter's choice against PTK-Prowiz's (Asle's
+  ProWizard) conversion: the files' note numbers run from 12 to 47, which
+  NostalgicPlayer's table (from 1712, so 12 is 856 and 47 is 113) maps onto
+  ProTracker's three octaves exactly; PTK-Prowiz takes note n as ProTracker's
+  period n - 1, 11 semitones higher, with notes above 36 off its table. Unic
+  Tracker's octave drift was the old replayer's (its notes are now 8 of 12
+  identical; the other 4 differ only by PTK-Prowiz's late portamentos). The
+  reference refuses Magnetic Fields Packer, NovoTrade Packer, Devils Replay and
+  HCD Protector, so their playback is unchecked.

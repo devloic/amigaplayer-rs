@@ -25,6 +25,7 @@ pub mod davidwhittaker;
 pub mod digibooster;
 pub mod digitalmugician;
 pub mod digitalsoundstudio;
+pub mod dsc;
 pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod facethemusic;
@@ -217,6 +218,7 @@ pub const REPLAYERS: &[Open] = &[
     andrewparton::OPEN,
     soundmaster::OPEN,
     timfollin::OPEN,
+    dsc::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

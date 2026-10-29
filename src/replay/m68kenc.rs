@@ -166,6 +166,10 @@ pub fn move_l_imm_abs(imm: u32, addr: u32) -> Vec<u16> {
 pub fn move_w_imm_abs(imm: u16, addr: u32) -> Vec<u16> {
     [&[3 << 12 | 1 << 9 | 7 << 6 | IMM, imm][..], &l(addr)].concat()
 }
+/// `move.w #imm,d16(an)`.
+pub fn move_w_imm_disp(imm: u16, n: u16, disp: i16) -> Vec<u16> {
+    vec![3 << 12 | n << 9 | 5 << 6 | IMM, imm, disp as u16]
+}
 /// `move.w dn,abs.l`.
 pub fn move_w_d_abs(n: u16, addr: u32) -> Vec<u16> {
     [&[3 << 12 | 1 << 9 | 7 << 6 | n][..], &l(addr)].concat()
@@ -478,6 +482,16 @@ mod tests {
         let i = dec(add_w_pcidx_d(1, 0, 60, 4));
         assert_eq!((i.k, i.size, i.dst), (K::Add, 2, Ea::D(4)));
         assert!(matches!(i.src, Ea::PcIdx(60, _)));
+    }
+
+    #[test]
+    fn the_desire_opening_forms_round_trip() {
+        let i = dec(move_w_imm_disp(255, 3, 158));
+        assert_eq!((i.k, i.size, i.src, i.dst), (K::Move, 2, Ea::Imm { val: 255, pos: 2 }, Ea::Disp(3, 158)));
+        let i = dec(lea_abs(2, 0xDFF000));
+        assert_eq!((i.k, i.src, i.dst), (K::Lea, Ea::AbsL { addr: 0xDFF000, pos: 2 }, Ea::A(2)));
+        let i = dec(movea_l_imm(5, 0xDFF000));
+        assert_eq!((i.k, i.size, i.src, i.dst), (K::Movea, 4, Ea::Imm { val: 0xDFF000, pos: 2 }, Ea::A(5)));
     }
 
     fn be16_of(ws: &[u16]) -> u16 {

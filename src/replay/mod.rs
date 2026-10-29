@@ -27,6 +27,7 @@ pub mod digibooster;
 pub mod digitalmugician;
 pub mod digitalsoundstudio;
 pub mod dsc;
+pub mod ems;
 pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod desire;
@@ -253,6 +254,7 @@ pub const REPLAYERS: &[Open] = &[
     dirkbialluch::OPEN,
     desire::OPEN,
     fashiontracker::OPEN,
+    ems::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

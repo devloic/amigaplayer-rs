@@ -41,12 +41,15 @@ pub mod hippel;
 pub mod hvl;
 pub mod jamcracker;
 pub mod jasonbrooke;
+pub mod jankomrsicflogel;
 pub mod jasonpage;
 pub mod jeroentel;
 pub mod jesperolsen;
 pub mod kh;
 pub mod med;
 pub(crate) mod m68kdec;
+#[cfg(test)]
+mod m68kenc;
 pub mod mikedavies;
 pub mod medpacker;
 pub mod musicassembler;
@@ -241,6 +244,7 @@ pub const REPLAYERS: &[Open] = &[
     kh::OPEN,
     jeroentel::OPEN,
     amcomposer::OPEN,
+    jankomrsicflogel::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

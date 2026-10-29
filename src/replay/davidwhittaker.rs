@@ -43,12 +43,16 @@
 //!   when the Eagleplayer's scan misses that flag, the module's pre-computed
 //!   sample pointers stay, as they do in the original), the LED filter the
 //!   init routine turns off, the voices' state the module file holds;
-//! * not ported: the old replayer (Q-Ball) and the one with $1e-byte voices
-//!   (Leviathan), which this port refuses; an effect that starts the game's
-//!   sound effect routine (Super League Manager, Emlyn Hughes International
-//!   Soccer); and the Eagleplayer's relocation reaching only part of the code
-//!   (its scan length comes from a false match of the sample loop in Jaws, whose
-//!   voice code then writes Paula directly), where this port always flushes.
+//! * the build with $1e-byte voices (Leviathan) has its own voice code here
+//!   (`Leviathan`), written from a clean-room description of its replayer (no
+//!   NostalgicPlayer code) and checked against the Eagleplayer's writes; its
+//!   code paths have their own fitted times, the other builds' are kept;
+//! * not ported: the old replayer (Q-Ball), which this port refuses; an effect
+//!   that starts the game's sound effect routine (Super League Manager, Emlyn
+//!   Hughes International Soccer); and the Eagleplayer's relocation reaching
+//!   only part of the code (its scan length comes from a false match of the
+//!   sample loop in Jaws, whose voice code then writes Paula directly), where
+//!   this port always flushes.
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -480,7 +484,16 @@ fn count_subsongs(r: Rd, init: i64, base: i64) -> u16 {
 }
 
 fn detect(d: &[u8]) -> bool {
-    ep_check(d).is_some_and(|ep| analyse(Rd(d), &ep).is_some())
+    ep_check(d).is_some_and(|ep| analyse(Rd(d), &ep).is_some() || lev_analyse(Rd(d), &ep).is_some())
+}
+
+/// The stop routine's DMACON write (`move.w #mask,$dff096`) and the voices
+/// whose volume it zeroes (`move.w #0,$dff0a8+16*ch`).
+fn stop_writes(r: Rd, st: i64) -> (u16, [bool; 4]) {
+    let st_end = r.find(st, st + 0x80, &[0x4e75]).unwrap_or(st + 0x80);
+    let stop_mask = r.find(st, st_end, &[0x33fc, ANY, 0x00df, 0xf096]).map_or(0xf, |o| r.w(o + 2));
+    let stop_vols = [0, 1, 2, 3].map(|ch: u32| r.find(st, st_end, &[0x33fc, 0, 0x00df, 0xf0a8 + 16 * ch]).is_some());
+    (stop_mask, stop_vols)
 }
 
 /// How the row before a note turns the voice off.
@@ -986,10 +999,7 @@ fn analyse(r: Rd, ep: &Ep) -> Option<Var> {
         Some(f)
     })();
     // the stop routine: move.w #mask,$dff096 / move.w #0,$dff0a8+16*ch
-    let st = ep.stop;
-    let st_end = r.find(st, st + 0x80, &[0x4e75]).unwrap_or(st + 0x80);
-    let stop_mask = r.find(st, st_end, &[0x33fc, ANY, 0x00df, 0xf096]).map_or(0xf, |o| r.w(o + 2));
-    let stop_vols = [0, 1, 2, 3].map(|ch: u32| r.find(st, st_end, &[0x33fc, 0, 0x00df, 0xf0a8 + 16 * ch]).is_some());
+    let (stop_mask, stop_vols) = stop_writes(r, ep.stop);
     // cmp.b #n,d0 / bne / add.b c(pc),d0 / addq.b #1,c(a3) / cmpi.b #m,c(a3) / bne / clr.b c(a3)
     let sub_cycle = r.find(ep.init, ep.init + 0x20, &[0xb03c, ANY, hi(0x66), 0xd03a, ANY, 0x522b, ANY, 0x0c2b, ANY, ANY, 0x6604, 0x422b])
         .map(|o| (r.b(o + 3), r.rel(o + 8) as u32, r.b(o + 17)));
@@ -1141,6 +1151,7 @@ fn classify(r: Rd, t: i64, base: i64, stop: i64, tr: u32) -> Fx {
 /// the last flush. Cleared, a location is 0, a length $FFFF, a period 0 and a
 /// volume's low byte $FF: those are not sent.
 struct Shadow {
+    c: &'static Costs,
     dma: u16,
     loc: [u32; 4],
     len: [u16; 4],
@@ -1149,8 +1160,8 @@ struct Shadow {
 }
 
 impl Shadow {
-    fn new() -> Self {
-        let mut s = Shadow { dma: 0, loc: [0; 4], len: [0; 4], per: [0; 4], vol: [0; 4] };
+    fn new(c: &'static Costs) -> Self {
+        let mut s = Shadow { c, dma: 0, loc: [0; 4], len: [0; 4], per: [0; 4], vol: [0; 4] };
         s.clear();
         s
     }
@@ -1167,35 +1178,35 @@ impl Shadow {
 
     /// Sends the copy to Paula, the fourth voice first, then DMACON.
     fn flush(&mut self, hw: &mut Hw) {
-        hw.wait(T_FLUSH);
+        hw.wait(self.c.flush);
         for ch in (0..4).rev() {
-            hw.wait(T_FLUSH_VOICE);
+            hw.wait(self.c.flush_voice);
             if self.loc[ch] != 0 {
-                hw.wait(T_POKE);
+                hw.wait(self.c.poke);
                 hw.loc(ch, self.loc[ch]);
             } else {
-                hw.wait(T_SKIP);
+                hw.wait(self.c.skip);
             }
             if self.len[ch] != 0xffff {
-                hw.wait(T_POKE);
+                hw.wait(self.c.poke);
                 hw.len(ch, self.len[ch]);
             } else {
-                hw.wait(T_SKIP);
+                hw.wait(self.c.skip);
             }
             if self.per[ch] != 0 {
-                hw.wait(T_POKE_PER);
+                hw.wait(self.c.poke_per);
                 hw.per(ch, self.per[ch]);
             } else {
-                hw.wait(T_SKIP);
+                hw.wait(self.c.skip);
             }
             if self.vol[ch] & 0xff != 0xff {
-                hw.wait(T_POKE);
+                hw.wait(self.c.poke);
                 hw.vol(ch, (self.vol[ch] & 0xff).min(64));
             } else {
-                hw.wait(T_SKIP_VOL);
+                hw.wait(self.c.skip_vol);
             }
         }
-        hw.wait(T_FLUSH_END);
+        hw.wait(self.c.flush_end);
         if self.dma != 0 {
             let v = (self.dma & 0x8000) | (self.dma & 0xf);
             hw.dmacon(v);
@@ -1209,26 +1220,42 @@ impl Shadow {
 
     /// A DMACON write: the Eagleplayer's handler flushes at once.
     fn dmacon(&mut self, v: u16, hw: &mut Hw) {
-        hw.wait(T_DMA_CALL);
+        hw.wait(self.c.dma_call);
         self.dma = v;
         self.flush(hw);
         self.clear();
-        hw.wait(T_DMA_RET);
+        hw.wait(self.c.dma_ret);
     }
 }
 
-// The flush's costs, in colour clocks, measured on the reference's write log:
-// a poke (the period's scaling costs more), a register it skips, each voice,
-// and from the last voice to the DMACON call.
-const T_FLUSH: u64 = 40;
-const T_FLUSH_VOICE: u64 = 9;
-const T_POKE: u64 = 45;
-const T_POKE_PER: u64 = 62;
-const T_SKIP: u64 = 17;
-const T_SKIP_VOL: u64 = 13;
-const T_FLUSH_END: u64 = 62;
-const T_DMA_CALL: u64 = 100;
-const T_DMA_RET: u64 = 100;
+/// The flush's costs, in colour clocks: its entry, each voice, a poke (the
+/// period's scaling costs more), a register it skips (the volume's test costs
+/// more), from the last voice to the DMACON call; and from a DMACON write of
+/// the replayer to the flush, and from the host's handler back to the replayer.
+struct Costs {
+    flush: u64,
+    flush_voice: u64,
+    poke: u64,
+    poke_per: u64,
+    skip: u64,
+    skip_vol: u64,
+    flush_end: u64,
+    dma_call: u64,
+    dma_ret: u64,
+}
+
+/// Measured on the reference's write log.
+static COSTS: Costs = Costs {
+    flush: 40,
+    flush_voice: 9,
+    poke: 45,
+    poke_per: 62,
+    skip: 17,
+    skip_vol: 13,
+    flush_end: 62,
+    dma_call: 100,
+    dma_ret: 100,
+};
 
 #[derive(Clone, Copy, Default)]
 struct Voice {
@@ -1278,7 +1305,9 @@ enum Next {
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let ep = ep_check(d)?;
-    let mut v = analyse(Rd(d), &ep)?;
+    let Some(mut v) = analyse(Rd(d), &ep) else {
+        return lev_new(d, &ep, base, m);
+    };
     // offsets in the module to guest addresses
     let g = |o: u32| base.wrapping_add(o);
     v.module = base;
@@ -1375,7 +1404,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             }
         }
     }
-    let mut w = Whittaker { v, voices, sh: Shadow::new(), sub: 0, last_subsong: ep.last_subsong, init_flag, no_env, bad_sample };
+    let mut w = Whittaker { v, voices, sh: Shadow::new(&COSTS), sub: 0, last_subsong: ep.last_subsong, init_flag, no_env, bad_sample };
     let _ = w.no_env;
     w.init_sound(0, &mut Hw { bus: &mut m.bus });
     Some(Box::new(w))
@@ -1931,6 +1960,506 @@ impl Whittaker {
     }
 }
 
+// The Leviathan build: a replayer with $1e-byte voices, the counter at $12,
+// long position lists and a long effect table, $10-byte sample entries, and
+// none of the other builds' transposes, envelopes, arpeggios or vibrato. Only
+// one module of it is known (Leviathan); it is recognised by its code as the
+// others are, and played by its own voice code below with the same
+// Eagleplayer layer (the `Shadow`, the stop routine, the sample patch).
+
+/// What a track byte from $80 to $bf does in the Leviathan build.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LevFx {
+    NextPosition,
+    Slide,
+    Mute,
+    Stop,
+    Nop,
+}
+
+/// The Leviathan build's code: guest addresses of its variables and tables.
+#[derive(Clone, Debug)]
+struct LevVar {
+    base: u32,
+    voices: u32,
+    playing: u32,
+    empty: u32,
+    empty_len: u16,
+    periods: u32,
+    speed: u32,
+    sample_info: u32,
+    fx: Vec<LevFx>,
+    subsongs: u32,
+    sub_size: u32,
+    sample_data: u32,
+    sample_count: u32,
+    /// The flag the sample routine tests, and the variables it sets after its
+    /// loop: the address after the samples (the empty sample) and the flag.
+    sample_flag: u32,
+    sample_end: u32,
+    sample_done: u32,
+    stop_mask: u16,
+    stop_vols: [bool; 4],
+}
+
+/// Reads the Leviathan build's code (offsets in the module, `LevVar` holding
+/// them until `lev_new` makes them guest addresses).
+fn lev_analyse(r: Rd, ep: &Ep) -> Option<LevVar> {
+    let p = ep.play;
+    let base = ep.base;
+    // lea 0(pc),a3 / tst.b playing(a3) / beq
+    if !r.at(p, &[hi(0x47), ANY, 0x4a2b, ANY, hi(0x67)]) {
+        return None;
+    }
+    let playing = base + r.sw(p + 6);
+    // moveq #3,d7 / lea $dff000,a6 / move.w #$1e,d0 / mulu.w d7,d0 / lea voices(pc),a0
+    let vl = r.find(p, p + 0x40, &[0x7e03, 0x4df9, 0x00df, 0xf000, 0x303c, 0x001e, 0xc0c7, 0x41fa, ANY])?;
+    let voices = r.rel(vl + 16);
+    // tst.b $18(a0) / bne / st.b $18(a0) / move.l 4(a5),d0 / bmi
+    let ld = r.find(vl + 18, vl + 18 + 0x40, &[0x4a28, 0x0018, hi(0x66), 0x50e8, 0x0018, 0x202d, 0x0004, hi(0x6b)])?;
+    // subq.w #1,$12(a0) / beq row / cmpi.w #1,$12(a0) / bne frame / DMA off
+    let c = r.find(ld + 16, ld + 16 + 0x60, &[0x5368, 0x0012, hi(0x67), 0x0c68, 0x0001, 0x0012, hi(0x66), 0x4241, 0x0fc1, 0x33c1, 0x00df, 0xf096])?;
+    // move.l empty(pc),$a0(a6) / move.w #n,$a4(a6)
+    let e = r.find(ld + 16, c, &[0x2d7a, ANY, 0x00a0, 0x3d7c, ANY, 0x00a4])?;
+    let empty = r.rel(e + 2);
+    let empty_len = r.w(e + 8);
+    if r.b(c + 5) == 0 {
+        return None;
+    }
+    let row = c + 6 + r.b(c + 5) as i8 as i64;
+    // clr.b 0(a0) / moveq #0,d0 / move.b (a1)+,d0 / bmi.w cmd / the note's stores and writes
+    if !r.at(row, &[0x4228, 0x0000, 0x7000, 0x1019, 0x6b00, ANY, 0x3168, 0x0010, 0x0012, 0x1140, 0x0002, 0x2149, 0x0004,
+        0x2d6d, 0x0000, 0x00a0, 0x3d6d, 0x0008, 0x00a4, 0x3d6d, 0x000e, 0x00a8]) {
+        return None;
+    }
+    let cmd = r.rel(row + 10);
+    let pe = r.find(row, row + 0x80, &[0x45fa, ANY, 0x322d, 0x000c])?;
+    let periods = r.rel(pe + 2);
+    // cmp.b #$e0,d0 / bcs / addi.b #$21,d0 / mulu.w speed(pc),d0
+    if !r.at(cmd, &[0xb03c, 0x00e0, hi(0x65), 0x0600, 0x0021, 0xc0fa, ANY]) {
+        return None;
+    }
+    let speed = r.rel(cmd + 12);
+    // cmp.b #$c0,d0 / bcs / addi.b #$40,d0 / lea samples(pc),a5 / mulu.w #$10,d0
+    let c2 = r.find(cmd + 14, cmd + 14 + 0x20, &[0xb03c, 0x00c0, hi(0x65), 0x0600, 0x0040, 0x4bfa, ANY, 0xc0fc, 0x0010])?;
+    let sample_info = r.rel(c2 + 12);
+    // andi.b #$7f,d0 / lsl.w #2,d0 / lea table(pc),a2 / movea.l 0(a2,d0.w),a2 / adda.l a3,a2 / jmp (a2)
+    let fj = r.find(c2 + 18, c2 + 18 + 0x20, &[0x0200, 0x007f, 0xe548, 0x45fa, ANY, 0x2472, 0x0000, 0xd5cb, 0x4ed2])?;
+    let jt = r.rel(fj + 8);
+    let mut fx = Vec::new();
+    for k in 0..0x80 {
+        let t = base + r.l(jt + 4 * k) as i32 as i64;
+        if t < p || t >= jt {
+            break;
+        }
+        fx.push(if r.at(t, &[0x2028, 0x000c, 0x2468, 0x0008, 0xd5c0, 0x5880, 0x4a92]) {
+            LevFx::NextPosition
+        } else if r.at(t, &[0x1159, 0x0016, 0x1159, 0x0017, 0x08e8, 0x0001, 0x0000]) {
+            LevFx::Slide
+        } else if r.at(t, &[0x3168, 0x0010, 0x0012, 0x2149, 0x0004, 0x2d7a]) {
+            LevFx::Mute
+        } else if r.at(t, &[0x6000]) && r.rel(t + 2) == ep.stop {
+            LevFx::Stop
+        } else {
+            // a bra back to the row's read, or (past the handlers) not known
+            LevFx::Nop
+        });
+    }
+    // andi.w #$ff,d0 / mulu.w #size,d0 / lea subsongs(pc),a0 / move.w 0(a0,d0.w),speed(a3) / moveq #0,d7
+    let is = r.find(ep.init, ep.init + 0x80, &[0x0240, 0x00ff, 0xc0fc, ANY, 0x41fa, ANY, 0x3770, 0x0000, ANY, 0x7e00])?;
+    let sub_size = r.w(is + 6) as u32;
+    let subsongs = r.rel(is + 10);
+    if base + r.sw(is + 16) != speed {
+        return None;
+    }
+    // the voices: counter 1, flags 0, loop done, the subsong table again
+    r.find(is + 20, is + 20 + 0x40, &[0x337c, 0x0001, 0x0012, 0x51e9, 0x0000, 0x50e9, 0x0018, 0x41fa])?;
+    // the sample loop, with $10-byte entries and the factor at +$c
+    let sl = r.find(0, r.0.len() as i64, &[0x2418, 0x3618, 0x2b48, 0x0000, 0xd1c2, 0xe28a, 0x3b42, 0x0008, 0x243c, 0x0036,
+        0x9e99, 0x84c3, 0x3b42, 0x000c, 0xdbfc, 0x0000, 0x0010, hi(0x51)])?;
+    let sd = (1..=24).map(|k| sl - 2 * k).find(|&a| r.w(a) == 0x41fa)?;
+    let sample_data = r.rel(sd + 2);
+    let mq = r.find(sd, sl, &[hi(0x72)])?;
+    let sample_count = r.b(mq + 1) as u32 + 1;
+    let sf = r.find(sd - 8, sd, &[0x4a2b, ANY, hi(0x66)])?;
+    let sample_flag = base + r.sw(sf + 2);
+    let post = sl + 38;
+    let se = r.find(post, post + 0x10, &[0x2748, ANY])?;
+    let sample_end = base + r.sw(se + 2);
+    let sdn = r.find(post, post + 0x10, &[0x50eb, ANY])?;
+    let sample_done = base + r.sw(sdn + 2);
+    let (stop_mask, stop_vols) = stop_writes(r, ep.stop);
+    let u = |v: i64| v as u32;
+    Some(LevVar {
+        base: u(base),
+        voices: u(voices),
+        playing: u(playing),
+        empty: u(empty),
+        empty_len,
+        periods: u(periods),
+        speed: u(speed),
+        sample_info: u(sample_info),
+        fx,
+        subsongs: u(subsongs),
+        sub_size,
+        sample_data: u(sample_data),
+        sample_count,
+        sample_flag: u(sample_flag),
+        sample_end: u(sample_end),
+        sample_done: u(sample_done),
+        stop_mask,
+        stop_vols,
+    })
+}
+
+/// A voice of the Leviathan build (its record's fields, in the module at
+/// $1e-byte strides).
+#[derive(Clone, Copy, Default)]
+struct LevVoice {
+    /// Bit 1: the slide.
+    flags: u8,
+    note: u8,
+    track: u32,
+    list: u32,
+    /// The next entry's byte offset in the position list.
+    pos: u32,
+    duration: u16,
+    counter: u16,
+    period: u16,
+    slide_step: u8,
+    slide_delay: u8,
+    loop_done: bool,
+    sample: u32,
+}
+
+pub struct Leviathan {
+    v: LevVar,
+    voices: [LevVoice; 4],
+    sh: Shadow,
+    sub: u16,
+    last_subsong: u16,
+    init_flag: Option<u32>,
+    /// The Eagleplayer's stand-in for an unplayable sample.
+    bad_sample: u32,
+}
+
+fn lev_new(d: &[u8], ep: &Ep, base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    let mut v = lev_analyse(Rd(d), ep)?;
+    let g = |o: u32| base.wrapping_add(o);
+    for a in [&mut v.base, &mut v.voices, &mut v.playing, &mut v.empty, &mut v.periods, &mut v.speed, &mut v.sample_info,
+        &mut v.subsongs, &mut v.sample_data, &mut v.sample_flag, &mut v.sample_end, &mut v.sample_done] {
+        *a = g(*a);
+    }
+    let bad = m.alloc(16);
+    if bad == 0 {
+        return None;
+    }
+    let b = &m.bus;
+    // what the module's records hold: the init routine does not set the note,
+    // duration, period, slide and sample
+    let voices = [0u32, 1, 2, 3].map(|ch| {
+        let a = v.voices + 0x1e * ch;
+        LevVoice {
+            flags: b.r8(a),
+            note: b.r8(a + 2),
+            track: b.r32(a + 4),
+            list: b.r32(a + 8),
+            pos: b.r32(a + 0xc),
+            duration: b.r16(a + 0x10),
+            counter: b.r16(a + 0x12),
+            period: b.r16(a + 0x14),
+            slide_step: b.r8(a + 0x16),
+            slide_delay: b.r8(a + 0x17),
+            loop_done: b.r8(a + 0x18) != 0,
+            sample: b.r32(a + 0x1a),
+        }
+    });
+    let mut w = Leviathan {
+        v,
+        voices,
+        sh: Shadow::new(&LEV_COSTS),
+        sub: 0,
+        last_subsong: ep.last_subsong,
+        init_flag: ep.init_flag.map(|o| g(o as u32)),
+        bad_sample: bad + 8,
+    };
+    w.init_sound(0, &mut Hw { bus: &mut m.bus });
+    Some(Box::new(w))
+}
+
+/// The Leviathan build's flush costs, fitted to the reference's write times.
+static LEV_COSTS: Costs = Costs {
+    flush: 40,
+    flush_voice: 14,
+    poke: 40,
+    poke_per: 76,
+    skip: 10,
+    skip_vol: 16,
+    flush_end: 68,
+    dma_call: 83,
+    dma_ret: 347,
+};
+
+// The Leviathan build's code paths, fitted to the reference's write times as
+// the flush's: a voice, its loop write, a row, a note before its DMACON write,
+// a duration and a sample byte, the next-position, slide and stop effects, a
+// frame, and a sliding voice's frame on top. A subsong change's, measured on
+// the reference's start-up writes: from the end of InitSound's flush to
+// EndSound's stop routine (InitSound's last volume to EndSound's DMACON, 874),
+// from InitSound's entry to its stop routine (EndSound's DMACON to
+// InitSound's, 1251), and from the stop routine's DMACON to the flush (to the
+// first volume, 2350).
+const LEV_T_END: u64 = 375;
+const LEV_T_VOICE: u64 = 107;
+const LEV_T_LOOP: u64 = 44;
+const LEV_T_ROW: u64 = 86;
+const LEV_T_NOTE: u64 = 49;
+const LEV_T_DURATION: u64 = 68;
+const LEV_T_SAMPLE: u64 = 82;
+const LEV_T_NEXT: u64 = 117;
+const LEV_T_SLIDE_FX: u64 = 86;
+const LEV_T_STOP: u64 = 37;
+const LEV_T_FRAME: u64 = 24;
+const LEV_T_SLIDE: u64 = 31;
+const LEV_T_INIT_ENTRY: u64 = 473;
+const LEV_T_INIT: u64 = 1879;
+
+impl Replayer for Leviathan {
+    fn format(&self) -> &'static str {
+        "David Whittaker"
+    }
+
+    fn title(&self) -> String {
+        String::new()
+    }
+
+    fn songend(&self) -> bool {
+        false
+    }
+
+    fn subsongs(&self) -> (u16, u16, u16) {
+        (0, self.last_subsong, self.sub)
+    }
+
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        // EndSound: the stop routine, whose DMACON write is flushed
+        self.sh.clear();
+        hw.wait(LEV_T_END);
+        self.stop(hw);
+        self.init_sound(n, hw);
+    }
+
+    fn tick(&mut self, hw: &mut Hw) {
+        hw.wait(T_TICK);
+        self.sh.clear();
+        self.play(hw);
+        self.sh.flush(hw);
+    }
+}
+
+impl Leviathan {
+    /// The stop routine: the playing flag cleared, the voices off, volumes 0.
+    fn stop(&mut self, hw: &mut Hw) {
+        hw.bus.w8(self.v.playing, 0);
+        self.sh.dmacon(self.v.stop_mask, hw);
+        for ch in 0..4 {
+            if self.v.stop_vols[ch] {
+                self.sh.vol[ch] = 0;
+            }
+        }
+    }
+
+    /// The init routine, as the Eagleplayer calls it (the samples' flag
+    /// cleared first).
+    fn init_sound(&mut self, n: u16, hw: &mut Hw) {
+        self.sub = n;
+        self.sh.clear();
+        hw.wait(LEV_T_INIT_ENTRY);
+        if let Some(f) = self.init_flag {
+            hw.bus.w8(f, 0);
+        }
+        self.stop(hw);
+        self.init_samples(hw);
+        let v = &self.v;
+        let b = &mut *hw.bus;
+        let e = v.subsongs.wrapping_add((n as u32 & 0xff) * (v.sub_size & 0xffff));
+        b.w16(v.speed, b.r16(e));
+        for (ch, vo) in self.voices.iter_mut().enumerate() {
+            vo.counter = 1;
+            vo.flags = 0;
+            vo.loop_done = true;
+            vo.list = v.base.wrapping_add(b.r32(e + 2 + 4 * ch as u32));
+            vo.pos = 4;
+            vo.track = v.base.wrapping_add(b.r32(vo.list));
+        }
+        b.w8(v.playing, 0xff);
+        hw.wait(LEV_T_INIT);
+        self.sh.flush(hw);
+    }
+
+    /// The sample loop: each sample's address, length and period factor into
+    /// its table entry, then the empty sample after the last and the flag.
+    fn init_samples(&mut self, hw: &mut Hw) {
+        let v = &self.v;
+        let b = &mut *hw.bus;
+        if b.r8(v.sample_flag) != 0 {
+            return;
+        }
+        let mut a0 = v.sample_data;
+        let mut a5 = v.sample_info;
+        for _ in 0..v.sample_count {
+            let mut len = b.r32(a0);
+            let mut freq = b.r16(a0.wrapping_add(4));
+            a0 = a0.wrapping_add(6);
+            if freq == 0 || len >= 0x20000 {
+                // the Eagleplayer's patch
+                a0 = self.bad_sample + 4;
+                freq = 0x2000;
+                len = 2;
+            }
+            b.w32(a5, a0);
+            a0 = a0.wrapping_add(len);
+            b.w16(a5 + 8, (len >> 1) as u16);
+            let q = 0x369e99 / freq as u32;
+            b.w16(a5 + 0xc, if q <= 0xffff { q as u16 } else { 0x9e99 });
+            a5 += 0x10;
+        }
+        b.w32(v.sample_end, a0);
+        b.w8(v.sample_done, 0xff);
+    }
+
+    fn play(&mut self, hw: &mut Hw) {
+        if hw.bus.r8(self.v.playing) == 0 {
+            return;
+        }
+        for ch in [3, 2, 1, 0] {
+            if let Next::Stop = self.voice(ch, hw) {
+                return;
+            }
+        }
+    }
+
+    fn voice(&mut self, ch: usize, hw: &mut Hw) -> Next {
+        hw.wait(LEV_T_VOICE);
+        let v = &self.v;
+        let vo = &mut self.voices[ch];
+        let s = vo.sample;
+        if !vo.loop_done {
+            hw.wait(LEV_T_LOOP);
+            let b = &*hw.bus;
+            vo.loop_done = true;
+            let lp = b.r32(s.wrapping_add(4));
+            if lp as i32 >= 0 {
+                // the loop offset's low word, halved
+                self.sh.loc[ch] = b.r32(s).wrapping_add(lp);
+                self.sh.len[ch] = b.r16(s.wrapping_add(8)).wrapping_sub((lp as u16) >> 1);
+            } else {
+                self.sh.loc[ch] = b.r32(v.empty);
+                self.sh.len[ch] = v.empty_len;
+            }
+        }
+        vo.counter = vo.counter.wrapping_sub(1);
+        if vo.counter == 0 {
+            return self.row(ch, hw);
+        }
+        if vo.counter == 1 {
+            // the voice off, the tick before its next row (no tie in this build)
+            self.sh.dmacon(1 << ch, hw);
+            return Next::Voice;
+        }
+        hw.wait(LEV_T_FRAME);
+        if vo.flags & 2 != 0 {
+            hw.wait(LEV_T_SLIDE);
+            if vo.slide_delay != 0 {
+                vo.slide_delay -= 1;
+            } else {
+                vo.period = vo.period.wrapping_sub(vo.slide_step as i8 as i16 as u16);
+                self.sh.per[ch] = vo.period;
+            }
+        }
+        Next::Voice
+    }
+
+    fn row(&mut self, ch: usize, hw: &mut Hw) -> Next {
+        hw.wait(LEV_T_ROW);
+        let v = self.v.clone();
+        let vo = &mut self.voices[ch];
+        vo.flags = 0;
+        // the track is read through a1, which only a note and the mute save
+        let mut a1 = vo.track;
+        let next = |hw: &Hw, a1: &mut u32| {
+            let x = hw.bus.r8(*a1);
+            *a1 = a1.wrapping_add(1);
+            x
+        };
+        for _ in 0..4096 {
+            let byte = next(hw, &mut a1);
+            if byte < 0x80 {
+                hw.wait(LEV_T_NOTE);
+                let b = &*hw.bus;
+                let s = vo.sample;
+                vo.counter = vo.duration;
+                vo.note = byte;
+                vo.track = a1;
+                self.sh.loc[ch] = b.r32(s);
+                self.sh.len[ch] = b.r16(s.wrapping_add(8));
+                self.sh.vol[ch] = b.r16(s.wrapping_add(0xe));
+                let p = b.r16(v.periods.wrapping_add(2 * byte as u32)) as u32;
+                vo.period = ((p * b.r16(s.wrapping_add(0xc)) as u32) >> 10) as u16;
+                self.sh.per[ch] = vo.period;
+                vo.loop_done = false;
+                self.sh.dmacon(0x8000 | 1 << ch, hw);
+                return Next::Voice;
+            }
+            if byte >= 0xe0 {
+                hw.wait(LEV_T_DURATION);
+                vo.duration = ((byte - 0xdf) as u32 * hw.bus.r16(v.speed) as u32) as u16;
+                continue;
+            }
+            if byte >= 0xc0 {
+                hw.wait(LEV_T_SAMPLE);
+                vo.sample = v.sample_info.wrapping_add((byte - 0xc0) as u32 * 0x10);
+                continue;
+            }
+            match v.fx.get((byte & 0x7f) as usize).copied().unwrap_or(LevFx::Nop) {
+                LevFx::NextPosition => {
+                    hw.wait(LEV_T_NEXT);
+                    let b = &*hw.bus;
+                    let mut at = vo.list.wrapping_add(vo.pos);
+                    let mut pos = vo.pos.wrapping_add(4);
+                    if b.r32(at) == 0 {
+                        at = vo.list;
+                        pos = 4;
+                    }
+                    a1 = v.base.wrapping_add(b.r32(at));
+                    vo.track = a1;
+                    vo.pos = pos;
+                }
+                LevFx::Slide => {
+                    hw.wait(LEV_T_SLIDE_FX);
+                    vo.slide_step = next(hw, &mut a1);
+                    vo.slide_delay = next(hw, &mut a1);
+                    vo.flags |= 2;
+                }
+                LevFx::Mute => {
+                    vo.counter = vo.duration;
+                    vo.track = a1;
+                    self.sh.loc[ch] = hw.bus.r32(v.empty);
+                    self.sh.len[ch] = v.empty_len;
+                    return Next::Voice;
+                }
+                LevFx::Stop => {
+                    hw.wait(LEV_T_STOP);
+                    self.stop(hw);
+                    return Next::Stop;
+                }
+                LevFx::Nop => {}
+            }
+        }
+        Next::Voice
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::engine::Engine;
@@ -2075,6 +2604,112 @@ mod tests {
         assert_eq!(&reg(0xDFF0A4)[..2], &[16, 2]);
         assert_eq!(&reg(0xDFF0A8)[..2], &[0, 64]);
         assert_eq!(reg(0xDFF0A6)[0], 0x1AF);
+        assert!(out.iter().any(|&s| s != 0.0), "no sound");
+    }
+
+    /// A replayer of the Leviathan build ($1e-byte voices), written from the
+    /// instruction signatures its recognition reads: one subsong of speed 3,
+    /// whose voices 0-2 play a duration, the sample, a note and the jump to the
+    /// next position (the same track again); voice 3 has the stop effect in
+    /// its second position. One sample of 32 bytes at 10000 Hz, with no loop.
+    fn lev_module() -> Vec<u8> {
+        let mut a = Asm::default();
+        // InitSound: lea 0(pc),a3 / bsr stop / the sample routine / the subsong
+        a.l("base").w(&[0x47fa]).r("base").w(&[0x6100]).r("stop");
+        a.w(&[0x4a2b]).a("flag").s(0x66, "sdone");
+        a.w(&[0x41fa]).r("sdata").w(&[0x4bfa]).r("sinfo").w(&[0x7200]);
+        a.l("sloop").w(&[0x2418, 0x3618, 0x2b48, 0x0000, 0xd1c2, 0xe28a, 0x3b42, 0x0008, 0x243c, 0x0036, 0x9e99, 0x84c3]);
+        a.w(&[0x3b42, 0x000c, 0xdbfc, 0x0000, 0x0010, 0x51c9]).r("sloop");
+        a.w(&[0x2748]).a("empty").w(&[0x50eb]).a("flag");
+        a.l("sdone").w(&[0x0240, 0x00ff, 0xc0fc, 0x0012, 0x41fa]).r("subs").w(&[0x3770, 0x0000]).a("speed").w(&[0x7e00]);
+        a.w(&[0x43fa]).r("voices");
+        a.w(&[0x337c, 0x0001, 0x0012, 0x51e9, 0x0000, 0x50e9, 0x0018, 0x41fa]).r("subs");
+        a.w(&[0x2348, 0x0008, 0x50eb]).a("playing").w(&[0x4e75]);
+        // the stop routine: DMA off, the filter, volumes 0
+        a.l("stop").w(&[0x47fa]).r("base").w(&[0x51eb]).a("playing");
+        a.w(&[0x33fc, 0x000f, 0x00df, 0xf096, 0x33fc, 0x00ff, 0x00df, 0xf09e]);
+        for ch in 0..4 {
+            a.w(&[0x33fc, 0x0000, 0x00df, 0xf0a8 + 16 * ch]);
+        }
+        a.w(&[0x4e75]);
+        // the play routine: the voices 3 to 0
+        a.l("play").w(&[0x47fa]).r("base").w(&[0x4a2b]).a("playing").w(&[0x6700]).r("rts");
+        a.w(&[0x7e03, 0x4df9, 0x00df, 0xf000]);
+        a.l("voice").w(&[0x303c, 0x001e, 0xc0c7, 0x41fa]).r("voices").w(&[0xd0c0, 0x2a68, 0x001a]);
+        // the loop write, once after a note
+        a.w(&[0x4a28, 0x0018]).s(0x66, "count").w(&[0x50e8, 0x0018, 0x202d, 0x0004]).s(0x6b, "noloop");
+        a.w(&[0x6000]).r("count");
+        a.l("noloop").w(&[0x2d7a]).r("empty").w(&[0x00a0, 0x3d7c, 0x0020, 0x00a4]);
+        // the counter: the row at 0, the voice off at 1, else the frame
+        a.l("count").w(&[0x5368, 0x0012]).s(0x67, "row").w(&[0x0c68, 0x0001, 0x0012]).s(0x66, "frame");
+        a.w(&[0x4241, 0x0fc1, 0x33c1, 0x00df, 0xf096, 0x6000]).r("next");
+        a.l("frame").w(&[0x6000]).r("next");
+        a.l("row").w(&[0x4228, 0x0000]);
+        a.l("read").w(&[0x7000, 0x1019, 0x6b00]).r("cmd");
+        a.w(&[0x3168, 0x0010, 0x0012, 0x1140, 0x0002, 0x2149, 0x0004, 0x2d6d, 0x0000, 0x00a0, 0x3d6d, 0x0008, 0x00a4]);
+        a.w(&[0x3d6d, 0x000e, 0x00a8, 0xd040, 0x45fa]).r("periods").w(&[0x322d, 0x000c, 0x6000]).r("next");
+        a.l("next").w(&[0x51cf]).r("voice");
+        a.l("rts").w(&[0x4e75]);
+        // the commands: a duration from $e0, a sample from $c0, then the effects
+        a.l("cmd").w(&[0xb03c, 0x00e0]).s(0x65, "smp").w(&[0x0600, 0x0021, 0xc0fa]).r("speed");
+        a.w(&[0x3140, 0x0010, 0x6000]).r("read");
+        a.l("smp").w(&[0xb03c, 0x00c0]).s(0x65, "fx").w(&[0x0600, 0x0040, 0x4bfa]).r("sinfo").w(&[0xc0fc, 0x0010]);
+        a.w(&[0xdbc0, 0x214d, 0x001a, 0x6000]).r("read");
+        a.l("fx").w(&[0x0200, 0x007f, 0xe548, 0x45fa]).r("jt").w(&[0x2472, 0x0000, 0xd5cb, 0x4ed2]);
+        a.l("fx80").w(&[0x2028, 0x000c, 0x2468, 0x0008, 0xd5c0, 0x5880, 0x4a92, 0x6000]).r("read");
+        a.l("fx81").w(&[0x1159, 0x0016, 0x1159, 0x0017, 0x08e8, 0x0001, 0x0000, 0x6000]).r("read");
+        a.l("fxnop").w(&[0x6000]).r("read");
+        a.l("fx84").w(&[0x6000]).r("stop");
+        a.l("jt");
+        for fx in ["fx80", "fx81", "fxnop", "fxnop", "fx84"] {
+            a.w(&[0]).a(fx);
+        }
+        // the variables, the song, the tables
+        a.l("playing").w(&[0]);
+        a.l("flag").w(&[0]);
+        a.l("speed").w(&[0]);
+        a.l("empty").w(&[0, 0]);
+        a.l("list").w(&[0]).a("track").w(&[0, 0]);
+        a.l("list3").w(&[0]).a("track").w(&[0]).a("halt").w(&[0, 0]);
+        a.l("track").w(&[0xe0c0, 0x0c80]);
+        a.l("halt").w(&[0x8400]);
+        a.l("subs").w(&[3, 0]).a("list").w(&[0]).a("list").w(&[0]).a("list").w(&[0]).a("list3").w(&[0]);
+        a.l("voices").w(&[0; 4 * 0x1e / 2]);
+        a.l("periods").w(&[0; 12]).w(&[0x400]);
+        // the sample's table entry: no loop, volume 64
+        a.l("sinfo").w(&[0, 0, 0xffff, 0xffff, 0, 0, 0, 0x40]);
+        // the sample: 32 bytes at 10000 Hz, then the empty sample's 64 bytes
+        a.l("sdata").w(&[0, 0x20, 10000]).w(&[0x4000; 16]).w(&[0; 32]);
+        a.bytes()
+    }
+
+    #[test]
+    fn plays_the_leviathan_build() {
+        let d = lev_module();
+        let len = d.len() as u32;
+        assert!(super::analyse(super::Rd(&d), &super::ep_check(&d).unwrap()).is_none());
+        assert!(super::detect(&d));
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new("test.dw"), d).unwrap();
+        assert_eq!(e.playing.as_ref().unwrap().format, "David Whittaker");
+        let base = e.m.deli.list.first().unwrap().0;
+        let mut out = vec![0f32; 2 * 9600];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        // InitSound's stop; the notes, voice 3 first; each voice off the tick
+        // before its next row; voice 3's next row stops the replayer
+        assert_eq!(reg(0xDFF096), &[0x000F, 0x8008, 0x8004, 0x8002, 0x8001, 8, 4, 2, 1, 0x000F]);
+        // the note: the sample (its data after the length and frequency), 16
+        // words, volume 64, period $400 * ($369e99 / 10000) >> 10; on the next
+        // tick the empty sample after it, 32 words; the stop's volumes 0
+        let loc = (base + len - 96) as u16;
+        assert_eq!(reg(0xDFF0D2), &[loc, loc + 32]);
+        assert_eq!(reg(0xDFF0D4), &[16, 32]);
+        assert_eq!(reg(0xDFF0D6), &[0x165]);
+        assert_eq!(reg(0xDFF0D8), &[0, 64, 0]);
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
     }
 }

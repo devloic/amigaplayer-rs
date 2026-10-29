@@ -14,14 +14,14 @@
 //!
 //! Recognition and layout. The four branch targets, the stop routine's load of the
 //! AUD0VOL address, the first `lea d16(pc),a0` (its target is the first sample, `FORM`) and
-//! the `lea` before it (its target is the pointer base) are matched on decoded instructions
-//! (`m68kdec`). The variable offsets are not derivable from those: the specification gives
-//! them as a per-build table, so the table here is keyed on the four entry offsets (the
-//! specification's own identification of a build), and a file is accepted only when the
-//! structure agrees with the entry: the derived sample start equals the table's, the
-//! variables hold their initial values, the voice record and the arpeggio interval table
-//! have their constants, and the samples parse. Any other file is refused (so that another
-//! engine can take it).
+//! the `lea` before it (its target is the pointer base, and its register the pointer-base
+//! register) are matched on decoded instructions (`m68kdec`). The variable offsets, the
+//! table offsets and the build flags are then derived from the module's own code by the
+//! specification's structural rules (`stevebarrett_loc.rs`: the routines are found by their
+//! content, the variables by how the routines use them, with cross-checks and data checks);
+//! no table keyed on the entries remains. A file for which a rule or a check fails is refused
+//! (so that another engine can take it). What stays a checked constant (specification L12):
+//! the voice-record field layout, the record sizes, and the 100 Hz rule (samples size).
 //!
 //! Two code families: "early" (Kelly X, MUNGOMUSIC: no slide, arpeggio or portamento) and
 //! "full". Build differences: whether the sample init gives the samples their loops,
@@ -51,126 +51,9 @@ use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "Steve Barrett", detect, new };
 
-// ------------------------------------------------------------------ the builds
-
-/// One code build: how it differs from the others.
-struct Build {
-    /// Offsets of the four entries: sample init, song init, play, stop.
-    entries: [usize; 4],
-    early: bool,
-    /// The sample init gives the samples loops (and runs the stop routine).
-    loops: bool,
-    /// Song numbers 1..=limit start a song.
-    limit: u8,
-    /// The repeat stage covers all four voices (else voice 0 only).
-    all_voices: bool,
-    portamento: bool,
-    /// The two instrument words are swapped (repeat length first).
-    swap: bool,
-    /// The host waits before the repeat stage.
-    wait: bool,
-}
-
-static BUILDS: [Build; 6] = [
-    Build { entries: [112, 102, 190, 1278], early: true, loops: true, limit: 5, all_voices: true, portamento: false, swap: false, wait: true },
-    Build { entries: [80, 70, 158, 1246], early: true, loops: true, limit: 5, all_voices: true, portamento: false, swap: false, wait: true },
-    Build { entries: [118, 108, 174, 1630], early: false, loops: false, limit: 5, all_voices: true, portamento: true, swap: false, wait: true },
-    Build { entries: [122, 112, 200, 1658], early: false, loops: true, limit: 5, all_voices: true, portamento: true, swap: false, wait: true },
-    Build { entries: [112, 102, 190, 1556], early: false, loops: true, limit: 5, all_voices: true, portamento: false, swap: false, wait: true },
-    Build { entries: [66, 56, 126, 1570], early: false, loops: false, limit: 6, all_voices: false, portamento: true, swap: true, wait: false },
-];
-
-/// Offsets of the player's variables in a build (0 where the build has none).
-#[derive(Clone, Copy, Default)]
-struct Lay {
-    flag: usize,
-    pertab: usize,
-    perout: usize,
-    vrec: usize,
-    cnt: usize,
-    started: usize,
-    speed: usize,
-    spdcnt: usize,
-    vibdepth: usize,
-    vibshift: usize,
-    arpparam: usize,
-    rowbytes: usize,
-    regoff: usize,
-    p_steps: usize,
-    p_lo: usize,
-    p_lo2: usize,
-    p_dir: usize,
-    p_tgt: usize,
-    dmamask: usize,
-    arpint: usize,
-    baseper: usize,
-    p_delta: usize,
-    smpstart: usize,
-    replen: usize,
-    repoff: usize,
-    patptr: usize,
-    seqptr: usize,
-    curseq: usize,
-    curpat: usize,
-    vibdelta: usize,
-    vibacc: usize,
-    arpbuf: usize,
-    smpaddr: usize,
-    instr: usize,
-    env: usize,
-    songs: usize,
-    pattab: usize,
-    samples: usize,
-}
-
-/// The per-build table, one column per build in the order of `BUILDS`.
-fn layout_of(c: usize) -> Lay {
-    macro_rules! col {
-        ($($f:ident: [$a:expr, $b:expr, $c:expr, $d:expr, $e:expr, $g:expr]),* $(,)?) => {
-            Lay { $($f: [$a, $b, $c, $d, $e, $g][c]),* }
-        };
-    }
-    col! {
-        flag: [1686, 1654, 2274, 2300, 2042, 2214],
-        pertab: [1688, 1656, 2276, 2302, 2044, 2216],
-        perout: [1834, 1802, 2416, 2442, 2224, 2356],
-        vrec: [1850, 1818, 2432, 2458, 2240, 2364],
-        cnt: [1978, 1946, 2560, 2586, 2368, 2492],
-        started: [1979, 1947, 2561, 2587, 2369, 2493],
-        speed: [1980, 1948, 2562, 2588, 2370, 2494],
-        spdcnt: [1981, 1949, 2563, 2589, 2371, 2495],
-        vibdepth: [1982, 1950, 2564, 2590, 2372, 2496],
-        vibshift: [1983, 1951, 2565, 2591, 2373, 2497],
-        arpparam: [1984, 1952, 2566, 2592, 2374, 2498],
-        rowbytes: [1985, 1953, 2567, 2593, 2375, 2499],
-        regoff: [1986, 1954, 2568, 2594, 2376, 2500],
-        p_steps: [0, 0, 2570, 2596, 0, 2502],
-        p_lo: [0, 0, 2571, 2597, 0, 2503],
-        p_lo2: [0, 0, 2572, 2598, 0, 2504],
-        p_dir: [0, 0, 2573, 2600, 0, 2505],
-        p_tgt: [0, 0, 2574, 2601, 0, 2506],
-        dmamask: [1994, 1962, 2575, 2602, 2384, 2507],
-        arpint: [0, 0, 2576, 2603, 2385, 2508],
-        baseper: [1996, 1964, 2584, 2612, 2394, 2516],
-        p_delta: [0, 0, 2592, 2620, 0, 2524],
-        smpstart: [2014, 1982, 2602, 2630, 2412, 2534],
-        replen: [2030, 1998, 2618, 2646, 2428, 2550],
-        repoff: [2038, 2006, 2626, 2654, 2436, 2558],
-        patptr: [2046, 2014, 2634, 2662, 2444, 2566],
-        seqptr: [2062, 2030, 2650, 2678, 2460, 2582],
-        curseq: [2078, 2046, 2666, 2694, 2476, 2598],
-        curpat: [2082, 2050, 2670, 2698, 2480, 2602],
-        vibdelta: [2086, 2054, 2674, 2702, 2484, 2606],
-        vibacc: [2090, 2058, 2678, 2706, 2488, 2610],
-        arpbuf: [0, 0, 2682, 2710, 2492, 2614],
-        smpaddr: [2094, 2062, 2722, 2750, 2502, 2654],
-        instr: [2136, 2110, 2812, 2834, 2568, 2744],
-        env: [2192, 2174, 2940, 2946, 2656, 2824],
-        songs: [2312, 2326, 3076, 3188, 2832, 2968],
-        pattab: [2320, 2350, 3092, 3220, 2840, 3008],
-        samples: [3596, 4058, 4084, 5394, 3728, 4010],
-    }
-}
+#[path = "stevebarrett_loc.rs"]
+mod loc;
+use loc::{Build, Lay};
 
 // Voice record fields (the byte of voice v is at `vrec + F + v`).
 const F_REGOFF: usize = 0;
@@ -198,6 +81,7 @@ const F_ATARGET: usize = 84;
 const F_ASTEP: usize = 88;
 const F_RSTEP: usize = 92;
 const F_VOL: usize = 96;
+#[cfg(test)]
 const F_DMABIT: usize = 100;
 const F_VIBPARAM: usize = 104;
 const F_RELEASING: usize = 108;
@@ -216,7 +100,7 @@ const REPEAT_WAIT: u64 = 2000;
 
 /// What the structure of a file says.
 struct Found {
-    build: usize,
+    build: Build,
     /// The pointer base as a signed offset from the file start.
     pbase: i32,
     lay: Lay,
@@ -302,44 +186,13 @@ fn find(d: &[u8]) -> Option<Found> {
         return None;
     }
     let pbase = pb as i64 as i32;
-    // the table row of this build, and the structure that must agree with it
-    let build = BUILDS.iter().position(|b| b.entries == entries)?;
-    let b = &BUILDS[build];
-    let lay = layout_of(build);
-    if lay.samples != first || d.len() <= lay.samples {
-        return None;
-    }
-    let at = |o: usize| d.get(o).copied();
-    let initial = [
-        (lay.flag, 1),
-        (lay.started, 0),
-        (lay.speed, 1),
-        (lay.spdcnt, 0),
-        (lay.dmamask, 15),
-        (lay.cnt, 0),
-    ];
-    if initial.iter().any(|&(o, v)| at(o) != Some(v)) {
-        return None;
-    }
-    if !b.early && (0..6).any(|i| at(lay.arpint + i) != Some([3, 5, 6, 7, 8, 9][i])) {
-        return None;
-    }
-    // the voice record's constants
-    for v in 0..4usize {
-        let ok = at(lay.vrec + F_REGOFF + v) == Some(16 * v as u8)
-            && at(lay.vrec + F_DMABIT + v) == Some(1 << v)
-            && (b.early || at(lay.vrec + F_ARPBASE + v) == Some(10 * v as u8));
-        if !ok {
-            return None;
-        }
-    }
-    let subs = lay.pattab.checked_sub(lay.songs)? / 8;
-    if subs == 0 || subs > b.limit as usize {
-        return None;
-    }
-    if lay.pattab + 2 > d.len() || lay.env + 8 > d.len() || lay.instr + 8 > d.len() {
-        return None;
-    }
+    let preg = match prev.dst {
+        Ea::A(r) => r,
+        _ => return None,
+    };
+    // the layout and the build flags come from the module's own code
+    let det = loc::Det { entries, first, pbase: pbase as i64, preg };
+    let loc::Located { lay, build, subs } = loc::locate(d, &det)?;
     walk_samples(d, lay.samples, |_, _, _, _| {})?;
     Some(Found { build, pbase, lay, subs })
 }
@@ -356,7 +209,7 @@ struct Sb {
     m: Vec<u8>,
     base: u32,
     pbase: i32,
-    b: &'static Build,
+    b: Build,
     l: Lay,
     subs: u16,
     sub: u16,
@@ -1072,7 +925,7 @@ fn init(d: &[u8], base: u32) -> Option<(Sb, Vec<u32>)> {
         m: d.to_vec(),
         base,
         pbase: f.pbase,
-        b: &BUILDS[f.build],
+        b: f.build,
         l: f.lay,
         subs: f.subs as u16,
         sub: 0,

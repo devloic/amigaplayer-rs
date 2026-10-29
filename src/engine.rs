@@ -52,11 +52,29 @@ pub struct Settings {
     pub a500_filter: bool, // fixed 4.4 kHz RC low-pass
     pub led_filter: bool,  // honour the LED filter
     pub mono: bool,
+    /// Forces the filter model (`--filter`); None follows the format (`output_filter`).
+    pub filter_model: Option<Filter>,
+    /// Switches the LED filter on whatever the player does (`--led force`).
+    pub led_force: bool,
+    /// libxmp mixer interpolation (`--interp`).
+    pub interp: crate::xmp::mixer::Interp,
+    /// libxmp's resonant filter for the modules that use it (`--xmp-filter`).
+    pub xmp_filter: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { volume: 0.8, separation: 0.7, a500_filter: true, led_filter: true, mono: false }
+        Settings {
+            volume: 0.8,
+            separation: 0.7,
+            a500_filter: true,
+            led_filter: true,
+            mono: false,
+            filter_model: None,
+            led_force: false,
+            interp: crate::xmp::mixer::Interp::Linear,
+            xmp_filter: true,
+        }
     }
 }
 
@@ -153,6 +171,10 @@ pub struct Engine {
     intena_seen: u16,
     /// The current subsong has made a sound (see `skip_empty_subsong`).
     heard: bool,
+    /// The LED filter's state at the first sample, and each change after it
+    /// (rendered frame, new state), for the first few changes.
+    pub led_log: Vec<(u64, bool)>,
+    led_seen: Option<bool>,
 }
 
 impl Engine {
@@ -185,6 +207,8 @@ impl Engine {
             genie_mem: 0,
             intena_seen: 0,
             heard: false,
+            led_log: Vec::new(),
+            led_seen: None,
         }
     }
 
@@ -475,6 +499,8 @@ impl Engine {
         self.m.bus.paula.sync(self.m.bus.clock, &self.m.bus.ram);
         self.m.bus.paula.samples.clear();
         self.heard = false;
+        self.led_log.clear();
+        self.led_seen = None;
     }
 
     /// A subsong that ends within its first seconds without a sound (an empty
@@ -662,7 +688,8 @@ impl Engine {
         Ok(())
     }
 
-    fn start_mix(&mut self, x: Box<crate::xmp::XmpPlayer>, path: &Path) -> Result<()> {
+    fn start_mix(&mut self, mut x: Box<crate::xmp::XmpPlayer>, path: &Path) -> Result<()> {
+        x.set_mixer(self.settings.interp, self.settings.xmp_filter);
         self.m.bus.paula.reset();
         self.intena_seen = 0;
         self.next_timer = None;
@@ -1125,10 +1152,94 @@ impl Engine {
             let f = p.format.to_ascii_lowercase();
             PC_FORMATS.iter().any(|n| f.contains(n))
         });
+        if let Some(f) = self.settings.filter_model {
+            return f;
+        }
         match (pc, self.settings.a500_filter) {
             (true, _) => Filter::None,
             (false, true) => Filter::A500,
             (false, false) => Filter::A1200,
+        }
+    }
+
+    /// The output stages in effect for the module playing, after every
+    /// automatic choice, as one line of `key=value` words (what `--wav` prints
+    /// on stderr as `output: ...`).
+    pub fn output_report(&self) -> String {
+        let Some(p) = &self.playing else { return "output: nothing playing".into() };
+        let sx = &self.settings;
+        let (backend, player) = match &p.backend {
+            Backend::Deli(i) => ("68k", self.players.get(*i).map_or("?".to_string(), |x| x.name.clone())),
+            Backend::Native(_) => ("builtin-protracker", p.format.clone()),
+            Backend::Replay(_) => ("open-replayer", p.format.clone()),
+            Backend::Mix(_) => ("libxmp-port", p.format.clone()),
+        };
+        let q = |t: &str| t.replace(' ', "_");
+        let mut o = format!("output: backend={backend} player={} format={}", q(&player), q(&p.format));
+        let name = |f: Filter| match f {
+            Filter::None => "none",
+            Filter::A500 => "a500",
+            Filter::A1200 => "a1200",
+        };
+        if let Backend::Mix(x) = &p.backend {
+            let interp = match sx.interp {
+                crate::xmp::mixer::Interp::Nearest => "nearest",
+                crate::xmp::mixer::Interp::Linear => "linear",
+                crate::xmp::mixer::Interp::Spline => "spline",
+            };
+            let used = x.uses_resonant_filter();
+            o += &format!(
+                " filter=none led=n/a sep=libxmp(100) mono={} resampler=libxmp-mixer amplifier=none interp={interp} xmp-filter={}",
+                sx.mono as u8,
+                match (sx.xmp_filter, used) {
+                    (true, true) => "on(used)",
+                    (true, false) => "on(unused)",
+                    (false, true) => "off(module uses it)",
+                    (false, false) => "off",
+                }
+            );
+        } else {
+            let f = self.output_filter();
+            let auto = if sx.filter_model.is_none() { "(auto)" } else { "" };
+            let led = if f == Filter::None {
+                "n/a".to_string()
+            } else if !sx.led_filter {
+                "off".to_string()
+            } else if sx.led_force {
+                "force".to_string()
+            } else {
+                "auto(player)".to_string()
+            };
+            let amp = match &self.m.bus.amp {
+                Some(a) => format!("8bit@{:.0}Hz,voices={},boost={}.{}", a.rate(), a.n, a.boost / 10, a.boost % 10),
+                None => "none".to_string(),
+            };
+            let voices = if self.m.deli.voices.in_use { "builtin-noteplayer(onepole4420+led-biquad3275)" } else { "no" };
+            o += &format!(
+                " filter={}{auto} led={led} sep={:.2} mono={} resampler=uade-default amplifier={amp} builtin-voices={voices}",
+                name(f),
+                sx.separation.clamp(0.0, 1.0),
+                sx.mono as u8
+            );
+        }
+        o += &format!(" volume={:.2}", sx.volume);
+        o
+    }
+
+    /// What the player did with the LED filter during the render: the state at
+    /// the first sample, then "yes at Ns (on|off)" for the first change.
+    pub fn led_report(&self) -> String {
+        let t = |f: u64| f as f64 / self.rate;
+        match self.led_log.as_slice() {
+            [] => "led-switched: n/a".into(),
+            [(_, s)] => format!("led-switched: no (led {} throughout)", if *s { "on" } else { "off" }),
+            [(_, s0), (f, s), ..] => format!(
+                "led-switched: yes at {:.2}s ({}, {} change(s); led {} at start)",
+                t(*f),
+                if *s { "on" } else { "off" },
+                self.led_log.len() - 1,
+                if *s0 { "on" } else { "off" }
+            ),
         }
     }
 
@@ -1148,7 +1259,13 @@ impl Engine {
                 frame[1] = 0.0;
                 continue;
             }
-            self.m.bus.paula.out.led = filter != Filter::None && self.settings.led_filter && self.m.bus.led();
+            let led_now = self.m.bus.led();
+            if self.led_seen != Some(led_now) && self.led_log.len() < 16 {
+                self.led_log.push((self.playing.as_ref().map_or(0, |p| p.frames), led_now));
+            }
+            self.led_seen = Some(led_now);
+            let led_on = self.settings.led_force || led_now;
+            self.m.bus.paula.out.led = filter != Filter::None && self.settings.led_filter && led_on;
             let (pl, pr) = loop {
                 if let Some(s) = self.m.bus.paula.samples.pop_front() {
                     break s;
@@ -1168,11 +1285,11 @@ impl Engine {
                 self.heard |= nl != 0.0 || nr != 0.0;
                 let mut vl = nl * (0.5 + sep * 0.5) + nr * (0.5 - sep * 0.5);
                 let mut vr = nr * (0.5 + sep * 0.5) + nl * (0.5 - sep * 0.5);
-                if self.settings.a500_filter {
+                if self.settings.filter_model.map_or(self.settings.a500_filter, |f| f == Filter::A500) {
                     vl = self.a500.run(0, vl);
                     vr = self.a500.run(1, vr);
                 }
-                if self.settings.led_filter && self.m.bus.led() {
+                if self.settings.led_filter && self.settings.filter_model != Some(Filter::None) && led_on {
                     vl = self.led.run(0, vl);
                     vr = self.led.run(1, vr);
                 }

@@ -1,5 +1,7 @@
 mod ui;
 
+use amigaplayer_rs::paulaout::Filter;
+use amigaplayer_rs::xmp::mixer::Interp;
 use amigaplayer_rs::{default_eagleplayers_dir, default_genies_dir, default_players_dir, engine, SAMPLE_RATE};
 
 use anyhow::{bail, Result};
@@ -16,6 +18,12 @@ struct Args {
     seconds: f64,
     subsong: i32,
     led: bool,
+    led_force: bool,
+    filter: Option<Filter>,
+    separation: Option<f32>,
+    mono: bool,
+    interp: Interp,
+    xmp_filter: bool,
     volume: Option<f32>,
     files: Vec<PathBuf>,
 }
@@ -24,7 +32,10 @@ fn usage() -> ! {
     eprintln!(
         "usage: amigaplayer-rs [--players DIR] [--eagleplayers DIR] [--player NAME] [--open-replayers]\n\
          \x20                 [--genies DIR] [--genie NAME]... [--noteplayer NAME]\n\
-         \x20                 [--wav OUT.wav [--seconds N] [--subsong N] [--led on|off] [--volume V]]\n\
+         \x20                 [--wav OUT.wav [--seconds N] [--subsong N] [--volume V]]\n\
+         \x20                 [--filter a500|a1200|none|auto] [--led auto|on|off|force]\n\
+         \x20                 [--separation 0..1] [--mono] [--interp nearest|linear|spline]\n\
+         \x20                 [--xmp-filter on|off]\n\
          \x20                 [FILES/DIRS...]\n\
          \n\
          Without --wav the SDL3 player window opens with FILES as the module list.\n\
@@ -39,14 +50,20 @@ fn usage() -> ! {
          built-in renderer play them). --open-replayers plays the formats the\n\
          open replayers (Rust ports of NostalgicPlayer's players) know with them\n\
          instead of the 68k players. --led off renders with the LED filter\n\
-         ignored (UADE's start state; an Amiga starts with it on), --volume V\n\
-         sets the output volume (default 0.8; UADE's level is 1)."
+         ignored (UADE's start state; an Amiga starts with it on); auto (the\n\
+         default, also spelled on) follows the player's LED; force switches it on\n\
+         whatever the player does. --filter picks the Amiga filter model (auto:\n\
+         A500, none for PC formats; the A1200 has no fixed filter). --separation\n\
+         (default 0.7; 1 = hard Amiga panning) and --mono shape the Paula mix.\n\
+         --interp and --xmp-filter are libxmp's mixer's (linear, on). --volume V\n\
+         sets the output volume (default 0.8; UADE's level is 1). With --wav the\n\
+         stages in effect are printed on stderr (`output: ...`, `led-switched: ...`)."
     );
     std::process::exit(2)
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { players: None, eagleplayers: None, genies: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, volume: None, files: Vec::new() };
+    let mut a = Args { players: None, eagleplayers: None, genies: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, files: Vec::new() };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -61,6 +78,36 @@ fn parse_args() -> Args {
             "--subsong" => a.subsong = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
             "--led" => {
                 a.led = match it.next().as_deref() {
+                    Some("on" | "auto") => true,
+                    Some("off") => false,
+                    Some("force") => {
+                        a.led_force = true;
+                        true
+                    }
+                    _ => usage(),
+                }
+            }
+            "--filter" => {
+                a.filter = match it.next().as_deref() {
+                    Some("a500") => Some(Filter::A500),
+                    Some("a1200") => Some(Filter::A1200),
+                    Some("none") => Some(Filter::None),
+                    Some("auto") => None,
+                    _ => usage(),
+                }
+            }
+            "--separation" => a.separation = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
+            "--mono" => a.mono = true,
+            "--interp" => {
+                a.interp = match it.next().as_deref() {
+                    Some("nearest") => Interp::Nearest,
+                    Some("linear") => Interp::Linear,
+                    Some("spline") => Interp::Spline,
+                    _ => usage(),
+                }
+            }
+            "--xmp-filter" => {
+                a.xmp_filter = match it.next().as_deref() {
                     Some("on") => true,
                     Some("off") => false,
                     _ => usage(),
@@ -118,11 +165,19 @@ fn render_wav(args: &Args) -> Result<()> {
     e.only_player = args.only_player.clone();
     e.open_replayers = args.open_replayers;
     e.settings.led_filter = args.led;
+    e.settings.led_force = args.led_force;
+    e.settings.filter_model = args.filter;
+    e.settings.mono = args.mono;
+    e.settings.interp = args.interp;
+    e.settings.xmp_filter = args.xmp_filter;
     if let Some(v) = args.volume {
         e.settings.volume = v;
     }
     if std::env::var_os("DELI_UADE").is_some() {
         e.set_uade_compat();
+    }
+    if let Some(v) = args.separation {
+        e.settings.separation = v;
     }
     if std::env::var_os("DELI_WRITE_LOG").is_some() {
         e.m.bus.write_log = Some(Vec::new());
@@ -138,6 +193,7 @@ fn render_wav(args: &Args) -> Result<()> {
             p.module_name, p.format, p.sub_min, p.sub_max, p.sub
         );
     }
+    eprintln!("{}", e.output_report());
     let total = (args.seconds * SAMPLE_RATE as f64) as usize;
     let mut out = vec![0f32; total * 2];
     let mut done = 0;
@@ -154,6 +210,7 @@ fn render_wav(args: &Args) -> Result<()> {
         }
     }
     out.truncate(done * 2);
+    eprintln!("{}", e.led_report());
     if let Some(err) = &e.last_error {
         eprintln!("error: {err}");
     }

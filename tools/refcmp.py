@@ -1,0 +1,553 @@
+"""Bit-compare amigaplayer-rs's open replayers with their originals, and flag inconsistencies.
+
+    python3 -I tools/refcmp.py --all -j 8                 # whole list, against the baseline
+    python3 -I tools/refcmp.py --fmt tfmx --fmt 'corpus: emod' -j 4
+    python3 -I tools/refcmp.py --all --update-baseline    # accept this run as the baseline
+
+Each file of the list (default: the listen page's files.json: entries
+{fmt, path, id}, paths possibly .xz) is rendered twice with identical output
+settings, WAV for WAV:
+
+  port       amigaplayer-rs --open-replayers, with every player directory empty
+             (so no 68k player stands in for the port)
+  reference  the ORIGINAL player: the same binary without --open-replayers,
+             running the real Eagleplayer/DeliPlayer on the emulated Amiga with
+             the same output stage (first of EP206, then the Eagleplayers UADE
+             ships, whose player runs on the 68k); for the formats the libxmp
+             port plays, libxmp 4.7.4 itself (the C harness `render`, 48 kHz
+             s16, its defaults).
+
+The two sample streams are compared and each file gets a class:
+
+  IDENTICAL   every sample equal, same length
+  LAG-ONLY    equal after a shift of at most LAG_MAX frames
+  NEAR        differences of at most NEAR_MAXABS LSB (rounding)
+  SIMILAR     not equal, but the same sound: level within SIMILAR_DB, every band
+              within SIMILAR_DB, same length (write-timing/phase differences)
+  inconsistencies (what the baseline gate fails on):
+  FAIL        a side did not render
+  STAGE-MISMATCH  the two `output:` lines differ in a stage that must be equal
+  SILENT      one side silent, or silent for stretches the other is not
+  LENGTH      song end / loop differs by more than LENGTH_TOL_S (or LENGTH_TOL_PCT)
+  FILTER      spectral tilt: band-energy differences spread more than FILTER_DB
+              (the LED / A500 kind: 2-5 kHz vs the low band)
+  LEVEL       overall RMS differs by more than LEVEL_DB
+  PITCH       dominant spectral peak shifted by more than PITCH_PCT
+  TEMPO       onset rate differs by more than TEMPO_PCT
+  DIFF        anything else
+  NOREF       no original available (neutral: not counted as an inconsistency)
+
+Outputs (in --out): refcmp.tsv, summary.txt, report.html. The baseline
+(tools/refcmp-baseline.tsv) holds each file's class and numbers; a run reports
+NEW inconsistencies (bad now, good or absent before) and FIXED ones, and exits 1
+on a new one. Renders are cached (--cache) by binary mtime and size, settings,
+module and player directories.
+"""
+import argparse, concurrent.futures as cf, hashlib, html, json, lzma, os, re, shutil, subprocess, sys, wave
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRATCH = '/media/lolo/kingston2tb/claude-scratch/deliplayerrust'
+DEFAULT_LIST = SCRATCH + '/listen/files.json'
+DEFAULT_BIN = os.path.join(HERE, '..', 'target', 'release', 'amigaplayer-rs')
+EP206 = SCRATCH + '/eplicense/x/Eagleplayer_2.06/Eagleplayers'
+UADE_PLAYERS = os.path.expanduser('~/.local/opt/uade/share/uade/players')
+XMP_ORACLE = SCRATCH + '/ports/x01-core/harness/render'
+LISTEN_PY = SCRATCH + '/listen/listen.py'
+BASELINE = os.path.join(HERE, 'refcmp-baseline.tsv')
+
+# ---- thresholds -------------------------------------------------------------
+LAG_MAX = 4000          # frames: largest shift searched (83 ms at 48 kHz)
+LAG_PCT = 99.9          # % of frames equal after the shift for LAG-ONLY
+NEAR_MAXABS = 2         # LSB: largest difference of a NEAR file
+SIMILAR_DB = 1.0        # dB: band and level tolerance of SIMILAR
+LEVEL_DB = 1.5          # dB: RMS difference that is a LEVEL inconsistency
+FILTER_DB = 3.0         # dB: spread of the per-band differences for FILTER
+LENGTH_TOL_S = 0.5      # s: length difference tolerated ...
+LENGTH_TOL_PCT = 2.0    # ... or this % of the longer side, whichever is more
+SILENT_RMS = 3.0        # LSB: a 100 ms window below this is silent
+SILENT_FRAC = 0.20      # difference of the silent-window fractions for SILENT
+PITCH_PCT = 1.5         # % shift of the dominant spectral peak
+TEMPO_PCT = 8.0         # % difference of onsets per second
+BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
+BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
+MUST_MATCH = ('filter', 'led', 'sep', 'mono', 'resampler', 'volume', 'interp', 'xmp-filter')
+
+GOOD = ('IDENTICAL', 'LAG-ONLY', 'NEAR', 'SIMILAR', 'NOREF')
+CLASSES = GOOD + ('FAIL', 'STAGE-MISMATCH', 'SILENT', 'LENGTH', 'FILTER', 'LEVEL', 'PITCH', 'TEMPO', 'DIFF')
+
+
+# ---- comparison -------------------------------------------------------------
+def read_wav(path):
+    """(rate, int16 array of shape (n, 2))."""
+    with wave.open(path, 'rb') as w:
+        ch, rate, n = w.getnchannels(), w.getframerate(), w.getnframes()
+        a = np.frombuffer(w.readframes(n), dtype='<i2')
+    a = a.reshape(-1, ch)
+    if ch == 1:
+        a = np.repeat(a, 2, axis=1)
+    return rate, a[:, :2]
+
+
+def read_raw(path):
+    return 48000, np.fromfile(path, dtype='<i2').reshape(-1, 2)
+
+
+def _bands(mid, rate):
+    n = 8192
+    if len(mid) < n:
+        mid = np.pad(mid, (0, n - len(mid)))
+    win = np.hanning(n)
+    nb = len(mid) // n
+    frames = mid[:nb * n].reshape(nb, n) * win
+    p = (np.abs(np.fft.rfft(frames, axis=1)) ** 2).mean(axis=0) / (n * n * 0.375) / (32768.0 ** 2)
+    f = np.fft.rfftfreq(n, 1.0 / rate)
+    out = []
+    for lo, hi in zip(BAND_EDGES, BAND_EDGES[1:]):
+        out.append(10 * np.log10(p[(f >= lo) & (f < hi)].sum() + 1e-20))
+    pk = f[50 * n // rate:][np.argmax(p[50 * n // rate:])] if p.max() > 0 else 0.0
+    return out, float(pk)
+
+
+def _onsets_per_s(mid, rate):
+    hop = rate // 100
+    n = len(mid) // hop
+    if n < 20:
+        return 0.0
+    env = np.abs(mid[:n * hop]).reshape(n, hop).mean(axis=1)
+    flux = np.maximum(np.diff(env), 0)
+    thr = flux.mean() + 2 * flux.std()
+    peaks = (flux[1:-1] > thr) & (flux[1:-1] >= flux[:-2]) & (flux[1:-1] > flux[2:])
+    return float(peaks.sum()) / (n / 100.0)
+
+
+def _silent_frac(mid, rate):
+    w = rate // 10
+    n = len(mid) // w
+    if n == 0:
+        return 1.0
+    rms = np.sqrt((mid[:n * w].reshape(n, w) ** 2).mean(axis=1))
+    return float((rms < SILENT_RMS).mean())
+
+
+def _best_lag(a, b):
+    """Shift s (b[i+s] ~ a[i]) with the highest cross-correlation of the mid channels."""
+    n = min(len(a), len(b), 10 * 48000)
+    if n < 2 * LAG_MAX:
+        return 0
+    x = a[:n].mean(axis=1)
+    y = b[:n].mean(axis=1)
+    size = 1 << (2 * n - 1).bit_length()
+    c = np.fft.irfft(np.fft.rfft(y, size) * np.conj(np.fft.rfft(x, size)), size)
+    cand = np.concatenate([c[:LAG_MAX + 1], c[size - LAG_MAX:]])
+    lags = np.concatenate([np.arange(LAG_MAX + 1), np.arange(-LAG_MAX, 0)])
+    return int(lags[np.argmax(cand)])
+
+
+def _aligned(a, b, s):
+    """a and b with b shifted by s (b[i+s] against a[i])."""
+    if s >= 0:
+        b2, a2 = b[s:], a
+    else:
+        a2, b2 = a[-s:], b
+    n = min(len(a2), len(b2))
+    return a2[:n], b2[:n]
+
+
+def compare(a, b, rate=48000):
+    """Numbers for the pair a (reference) and b (port), int16 (n, 2) arrays."""
+    r = {'len_a': len(a), 'len_b': len(b)}
+    n = min(len(a), len(b))
+    x, y = a[:n].astype(np.int32), b[:n].astype(np.int32)
+    d = np.abs(x - y)
+    r['identical'] = bool(len(a) == len(b) and n and not d.any())
+    bad = np.nonzero(d.any(axis=1))[0] if n else []
+    r['first_diff'] = int(bad[0]) if len(bad) else -1
+    r['first_diff_s'] = round(r['first_diff'] / rate, 4) if len(bad) else -1
+    r['pct_identical'] = round(100.0 * (1 - len(bad) / n), 3) if n else 0.0
+    r['maxabs'] = int(d.max()) if n else 0
+    ma, mb = a.astype(np.float64).mean(axis=1), b.astype(np.float64).mean(axis=1)
+    rms = lambda v: float(np.sqrt((v.astype(np.float64) ** 2).mean())) if len(v) else 0.0
+    ra, rb = rms(a), rms(b)
+    r['rms_a'], r['rms_b'] = round(ra, 1), round(rb, 1)
+    r['level_db'] = round(20 * np.log10((rb + 1e-9) / (ra + 1e-9)), 2) if ra > 0 and rb > 0 else None
+    # lag
+    r['lag'], r['lag_pct'], r['lag_maxabs'] = 0, r['pct_identical'], r['maxabs']
+    if not r['identical'] and n > 2 * LAG_MAX and ra > 0 and rb > 0:
+        s = _best_lag(a, b)
+        if s:
+            a2, b2 = _aligned(a, b, s)
+            dd = np.abs(a2.astype(np.int32) - b2.astype(np.int32))
+            r['lag'] = s
+            r['lag_pct'] = round(100.0 * (1 - dd.any(axis=1).mean()), 3) if len(dd) else 0.0
+            r['lag_maxabs'] = int(dd.max()) if len(dd) else 0
+    # spectrum, silence, onsets
+    m = min(len(ma), len(mb))
+    ba, pa = _bands(ma[:m], rate)
+    bb, pb = _bands(mb[:m], rate)
+    r['bands_db'] = [round(float(q - p), 2) if min(p, q) > BAND_MIN_DB else None for p, q in zip(ba, bb)]
+    r['peak_a'], r['peak_b'] = round(pa, 1), round(pb, 1)
+    r['silent_a'], r['silent_b'] = round(_silent_frac(ma, rate), 3), round(_silent_frac(mb, rate), 3)
+    r['onsets_a'], r['onsets_b'] = round(_onsets_per_s(ma, rate), 2), round(_onsets_per_s(mb, rate), 2)
+    return r
+
+
+def classify(r):
+    """The class of a compare() result."""
+    if r['identical']:
+        return 'IDENTICAL'
+    la, lb = r['len_a'], r['len_b']
+    if r['lag'] and r['lag_pct'] >= LAG_PCT and abs(la - lb) <= abs(r['lag']) + 1:
+        return 'LAG-ONLY'
+    if la == lb and r['maxabs'] <= NEAR_MAXABS:
+        return 'NEAR'
+    if r['lag'] and r['lag_maxabs'] <= NEAR_MAXABS and abs(la - lb) <= abs(r['lag']) + 1:
+        return 'NEAR'
+    sa, sb = r['silent_a'], r['silent_b']
+    if (r['rms_a'] == 0) != (r['rms_b'] == 0) or abs(sa - sb) > SILENT_FRAC:
+        return 'SILENT'
+    tol = max(LENGTH_TOL_S * 48000, LENGTH_TOL_PCT / 100.0 * max(la, lb))
+    if abs(la - lb) > tol:
+        return 'LENGTH'
+    db = [v for v in r['bands_db'] if v is not None]
+    lv = r['level_db'] or 0.0
+    if db and max(db) - min(db) > FILTER_DB:
+        return 'FILTER'
+    if abs(lv) > LEVEL_DB:
+        return 'LEVEL'
+    pa, pb = r['peak_a'], r['peak_b']
+    if pa > 0 and pb > 0 and abs(pb / pa - 1) * 100 > PITCH_PCT and not abs(np.log2(pb / pa) - round(np.log2(pb / pa))) < 0.01:
+        return 'PITCH'
+    oa, ob = r['onsets_a'], r['onsets_b']
+    if max(la, lb) >= 3 * 48000 and max(oa, ob) >= 0.5 and abs(ob - oa) / max(oa, ob) * 100 > TEMPO_PCT:
+        return 'TEMPO'
+    if abs(lv) <= SIMILAR_DB and all(abs(v) <= SIMILAR_DB for v in db):
+        return 'SIMILAR'
+    return 'DIFF'
+
+
+def parse_output(line):
+    """`output: k=v k=v ...` as a dict ({} when there is no such line)."""
+    if not line:
+        return {}
+    d = {}
+    for w in line.split()[1:]:
+        k, _, v = w.partition('=')
+        d[k] = v
+    return d
+
+
+def _led_state(line):
+    """'on' / 'off' / 'switched' from a `led-switched:` line ('' when unknown)."""
+    if 'yes at' in line:
+        return 'switched'
+    m = re.search(r'led (on|off) throughout', line)
+    return m.group(1) if m else ''
+
+
+def stage_mismatch(oa, ob):
+    """The stages in MUST_MATCH whose value differs between two output lines."""
+    return [f'{k}:{oa[k]}!={ob[k]}' for k in MUST_MATCH if k in oa and k in ob and oa[k] != ob[k]]
+
+
+# ---- rendering --------------------------------------------------------------
+def _fallback_stage(path, cache):
+    d = os.path.join(cache, 'stage', hashlib.md5(path.encode()).hexdigest()[:16])
+    name = re.sub(r'\.xz$', '', os.path.basename(path))
+    mod = os.path.join(d, name)
+    if not os.path.exists(mod):
+        os.makedirs(d, exist_ok=True)
+        src = path if os.path.exists(path) else path + '.xz'
+        b = open(src, 'rb').read()
+        if b[:6] == b'\xfd7zXZ\x00':
+            b = lzma.decompress(b)
+        open(mod, 'wb').write(b)
+    return mod
+
+
+class Ctx:
+    def __init__(self, a):
+        self.bin = os.path.abspath(a.bin)
+        st = os.stat(self.bin)
+        self.binkey = f'{int(st.st_mtime)}-{st.st_size}'
+        self.secs = a.seconds
+        self.flags = a.flags
+        self.cache = a.cache
+        os.makedirs(self.cache, exist_ok=True)
+        self.empty = os.path.join(self.cache, 'empty')
+        os.makedirs(self.empty, exist_ok=True)
+        self.stage = None
+        if os.path.exists(a.listen):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('listen_stage', a.listen)
+            mod = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(mod)
+                mod.CACHE = os.path.join(self.cache, 'lstage')
+                os.makedirs(mod.CACHE, exist_ok=True)
+                self.stage = mod.stage
+            except Exception as e:  # noqa
+                print('listen.py staging unavailable:', e, file=sys.stderr)
+        self.oracle = a.oracle
+
+
+def _run_cached(ctx, key, cmd, env, cwd, wav):
+    """Runs cmd (writing wav) unless cached; returns (wav path or None, stderr lines)."""
+    h = hashlib.sha1(json.dumps([ctx.binkey, key, cmd, sorted((k, env[k]) for k in env if k in
+                                 ('DELIPLAYERS', 'EAGLEPLAYERS', 'DELIGENIES'))]).encode()).hexdigest()[:20]
+    out = os.path.join(ctx.cache, h + '.wav')
+    err = out + '.err'
+    if not (os.path.exists(out) and os.path.exists(err)) and not os.path.exists(err):
+        full = [c.replace('@WAV@', out) for c in cmd]
+        try:
+            r = subprocess.run(full, env=env, cwd=cwd, capture_output=True, text=True, timeout=ctx.secs * 4 + 120)
+            text = r.stderr
+        except subprocess.TimeoutExpired:
+            text = 'timeout\n'
+        open(err, 'w').write(text)
+    lines = open(err).read().splitlines()
+    return (out if os.path.exists(out) else None), lines
+
+
+def render_engine(ctx, mod, open_replayers, eagle, extra=()):
+    env = dict(os.environ, SDL_AUDIO_DRIVER='dummy', RUST_LOG='error', DELIPLAYERS=ctx.empty,
+               DELIGENIES=ctx.empty, EAGLEPLAYERS=eagle or ctx.empty)
+    cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else []), *ctx.flags, *extra,
+           '--wav', '@WAV@', '--seconds', str(ctx.secs), mod]
+    wav, lines = _run_cached(ctx, mod, cmd, env, os.path.dirname(mod), None)
+    play = next((l for l in lines if l.startswith('playing')), None)
+    out = next((l for l in lines if l.startswith('output:')), None)
+    led = next((l for l in lines if l.startswith('led-switched')), None)
+    return wav, play, out, led, lines
+
+
+def render_oracle(ctx, mod):
+    h = hashlib.sha1(json.dumps([mod, ctx.secs, os.path.getmtime(ctx.oracle)]).encode()).hexdigest()[:20]
+    raw = os.path.join(ctx.cache, h + '.xmp.raw')
+    inf = raw + '.txt'
+    if not os.path.exists(inf):
+        r = subprocess.run([ctx.oracle, mod, raw, str(ctx.secs)], capture_output=True, text=True,
+                           cwd=os.path.dirname(mod), timeout=300)
+        open(inf, 'w').write(r.stdout.strip())
+    return (raw if os.path.exists(raw) else None), open(inf).read()
+
+
+def find_reference(ctx, mod, po):
+    """The original's render for a file whose port output line parses to `po`:
+    dict(kind 'engine'|'libxmp'|'none', wav (path), data ((rate, samples)), out, led, player, o, note, noref)."""
+    none = dict(kind='none', note='', noref=True)
+    if po.get('backend') == 'libxmp-port':
+        if not os.path.exists(ctx.oracle):
+            return dict(none, note='no libxmp oracle')
+        raw, info = render_oracle(ctx, mod)
+        if not raw or '\t' not in info:
+            return dict(none, note='oracle: ' + info[:100], noref=False)
+        return dict(kind='libxmp', wav=raw, data=read_raw(raw), out='libxmp 4.7.4 ' + info.replace('\t', ' '),
+                    led='', player='libxmp 4.7.4 (oracle)', o={}, note='')
+    want = re.sub(r'[^a-z0-9]', '', po.get('format', '').lower())
+    dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
+    tries = [(t, d, ()) for t, d in dirs]
+    pn = po.get('player', '')
+    names = [pn, pn.replace('_', ' '), pn.replace('_', '-')]
+    if po.get('backend') == 'builtin-protracker':
+        # the built-in ProTracker's original: UADE's PTK-Prowiz replay, the Protracker4 Eagleplayer
+        names += ['PTK-Prowiz', 'Protracker4']
+    for variant in dict.fromkeys(names):
+        tries += [(t + '+player', d, ('--player', variant)) for t, d in dirs]
+    fallback = None
+    for tag, eagle, extra in tries:
+        rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, eagle, extra)
+        o = parse_output(rout)
+        if not (rw and rplay and o.get('backend') == '68k'):
+            continue
+        got = re.sub(r'[^a-z0-9]', '', o.get('format', '').lower())
+        cand = dict(kind='engine', wav=rw, data=None, out=rout, led=rled or '', player=f'{tag}: {rplay}', o=o, note='')
+        if want and (want in got or got in want):
+            fallback = cand
+            break
+        fallback = fallback or cand
+    if not fallback:
+        return dict(none, note='no original player plays it in the engine')
+    fallback['data'] = read_wav(fallback['wav'])
+    if not fallback['data'][1].any():
+        return dict(none, note='the original is silent in the engine (' + fallback['player'][:60] + ')')
+    return fallback
+
+
+def process(ctx, f):
+    """One file: renders, comparison, class. Returns the result row (a dict)."""
+    row = {'id': f['id'], 'fmt': f['fmt'], 'path': f['path'], 'cls': 'FAIL', 'note': ''}
+    try:
+        path = f['path']
+        mod = ctx.stage(path) if ctx.stage else _fallback_stage(path, ctx.cache)
+        pw, pplay, pout, pled, plines = render_engine(ctx, mod, True, None)
+        row['out_port'] = pout or ''
+        row['led_port'] = pled or ''
+        if not pw or not pplay:
+            row['note'] = 'port: ' + (plines[-1] if plines else 'no output')[:120]
+            return row
+        row['player'] = pplay
+        po = parse_output(pout)
+        ref = find_reference(ctx, mod, po)
+        if ref['kind'] == 'none':
+            row['cls'] = 'NOREF' if ref['noref'] else 'FAIL'
+            row['note'] = ref['note']
+            return row
+        row.update(out_ref=ref['out'], led_ref=ref['led'], ref_player=ref['player'])
+        ra, oref = ref['data'], ref['o']
+        rb = read_wav(pw)
+        if ra[0] != rb[0]:
+            row['note'] = f'rates {ra[0]} vs {rb[0]}'
+            return row
+        r = compare(ra[1], rb[1], ra[0])
+        row.update({k: r[k] for k in ('identical', 'first_diff', 'first_diff_s', 'pct_identical', 'maxabs',
+                                      'level_db', 'lag', 'lag_pct', 'len_a', 'len_b', 'silent_a', 'silent_b',
+                                      'peak_a', 'peak_b', 'onsets_a', 'onsets_b', 'bands_db')})
+        mm = stage_mismatch(oref, po)
+        cls = classify(r)
+        mm = [m for m in mm]
+        if mm and cls not in ('IDENTICAL', 'LAG-ONLY', 'NEAR'):
+            cls = 'STAGE-MISMATCH'
+        lr, lp = _led_state(row.get('led_ref', '')), _led_state(row.get('led_port', ''))
+        if lr and lp and lr != lp:
+            mm.append(f'led-start/switch ref={lr} port={lp}')
+        row['cls'] = cls
+        row['note'] = ' '.join(mm)
+    except Exception as e:  # noqa
+        row['note'] = f'{type(e).__name__}: {e}'[:160]
+    return row
+
+
+# ---- reports ----------------------------------------------------------------
+COLS = ['id', 'fmt', 'cls', 'identical', 'first_diff_s', 'pct_identical', 'maxabs', 'level_db', 'lag', 'lag_pct',
+        'len_a', 'len_b', 'silent_a', 'silent_b', 'peak_a', 'peak_b', 'onsets_a', 'onsets_b', 'bands_db',
+        'note', 'path', 'ref_player', 'out_ref', 'out_port', 'led_ref', 'led_port']
+
+
+def tsv_line(row):
+    return '\t'.join(str(row.get(c, '')).replace('\t', ' ').replace('\n', ' ') for c in COLS)
+
+
+def write_tsv(path, rows):
+    with open(path, 'w') as fh:
+        fh.write('\t'.join(COLS) + '\n')
+        for r in rows:
+            fh.write(tsv_line(r) + '\n')
+
+
+def read_tsv(path):
+    if not os.path.exists(path):
+        return {}
+    lines = open(path).read().splitlines()
+    cols = lines[0].split('\t')
+    out = {}
+    for l in lines[1:]:
+        v = l.split('\t')
+        d = dict(zip(cols, v))
+        out[d['path']] = d
+    return out
+
+
+def summary(rows):
+    fm = {}
+    for r in rows:
+        d = fm.setdefault(r['fmt'], {})
+        d[r['cls']] = d.get(r['cls'], 0) + 1
+    lines = [f'{"format":42s} exact/total  ' + ' '.join(f'{c}' for c in CLASSES if any(c in d for d in fm.values()))]
+    used = [c for c in CLASSES if any(c in d for d in fm.values())]
+    lines = [f'{"format":42s} {"exact":>5s}/{"tot":<4s} ' + ' '.join(f'{c[:6]:>6s}' for c in used)]
+    for k in sorted(fm):
+        d = fm[k]
+        lines.append(f'{k[:42]:42s} {d.get("IDENTICAL", 0):>5d}/{sum(d.values()):<4d} ' + ' '.join(f'{d.get(c, 0):>6d}' for c in used))
+    tot = {}
+    for r in rows:
+        tot[r['cls']] = tot.get(r['cls'], 0) + 1
+    lines.append('')
+    lines.append('total ' + ' '.join(f'{c}={tot[c]}' for c in CLASSES if c in tot) + f' of {len(rows)}')
+    bad = sum(v for c, v in tot.items() if c not in GOOD)
+    lines.append(f'inconsistencies: {bad}')
+    return '\n'.join(lines)
+
+
+def write_html(path, rows, new, fixed):
+    col = {'IDENTICAL': '#2a6', 'LAG-ONLY': '#6b6', 'NEAR': '#8b4', 'SIMILAR': '#bb4', 'NOREF': '#aaa'}
+    h = ['<!doctype html><meta charset=utf-8><title>refcmp</title><style>body{font:13px system-ui;margin:16px}'
+         'table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:2px 6px;text-align:left}'
+         '.m{font-family:monospace;font-size:11px;color:#555}</style>']
+    h.append('<h1>refcmp</h1><pre>' + html.escape(summary(rows)) + '</pre>')
+    h.append(f'<p>new inconsistencies: {len(new)}, fixed: {len(fixed)}</p>')
+    h.append('<table><tr>' + ''.join(f'<th>{c}</th>' for c in ('id', 'format', 'class', 'first diff s', '% identical',
+             'maxabs', 'level dB', 'lag', 'bands dB (20-500-2k-5k-10k-20k)', 'ref output', 'port output', 'note')) + '</tr>')
+    for r in sorted(rows, key=lambda r: (r['cls'] in GOOD, r['fmt'], r['id'])):
+        c = col.get(r['cls'], '#c33')
+        h.append(f'<tr><td>{r["id"]}</td><td>{html.escape(r["fmt"])}</td><td style="color:{c};font-weight:600">{r["cls"]}</td>'
+                 f'<td>{r.get("first_diff_s", "")}</td><td>{r.get("pct_identical", "")}</td><td>{r.get("maxabs", "")}</td>'
+                 f'<td>{r.get("level_db", "")}</td><td>{r.get("lag", "")}</td><td>{r.get("bands_db", "")}</td>'
+                 f'<td class=m>{html.escape(str(r.get("out_ref", "")))}</td><td class=m>{html.escape(str(r.get("out_port", "")))}</td>'
+                 f'<td>{html.escape(str(r.get("note", "")))}</td></tr>')
+    h.append('</table>')
+    open(path, 'w').write('\n'.join(h))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--all', action='store_true', help='every file of the list')
+    ap.add_argument('--fmt', action='append', help='only formats containing this text (repeatable)')
+    ap.add_argument('--id', action='append', type=int, help='only this list id (repeatable)')
+    ap.add_argument('--list', default=DEFAULT_LIST)
+    ap.add_argument('--bin', default=DEFAULT_BIN)
+    ap.add_argument('--seconds', type=int, default=20)
+    ap.add_argument('-j', type=int, default=os.cpu_count() // 2 or 1)
+    ap.add_argument('--flags', nargs='*', default=[], help='extra amigaplayer-rs flags for both sides, e.g. --flags --filter a1200')
+    ap.add_argument('--out', default=SCRATCH + '/refcmp-out')
+    ap.add_argument('--cache', default=SCRATCH + '/refcmp-cache')
+    ap.add_argument('--baseline', default=BASELINE)
+    ap.add_argument('--update-baseline', action='store_true')
+    ap.add_argument('--listen', default=LISTEN_PY, help='listen.py, for its staging of modules with companions')
+    ap.add_argument('--oracle', default=XMP_ORACLE)
+    a = ap.parse_args()
+    files = json.load(open(a.list))
+    if not a.all:
+        if not a.fmt and not a.id:
+            ap.error('give --all, --fmt or --id')
+        files = [f for f in files if f['id'] in (a.id or []) or any(s.lower() in f['fmt'].lower() for s in a.fmt or [])]
+    ctx = Ctx(a)
+    os.makedirs(a.out, exist_ok=True)
+    rows = []
+    with cf.ThreadPoolExecutor(a.j) as ex:
+        for i, row in enumerate(ex.map(lambda f: process(ctx, f), files), 1):
+            rows.append(row)
+            print(f'[{i}/{len(files)}] {row["cls"]:15s} {row["fmt"]} #{row["id"]} {row["note"]}', flush=True)
+    write_tsv(os.path.join(a.out, 'refcmp.tsv'), rows)
+    base = read_tsv(a.baseline)
+    new, fixed, changed = [], [], []
+    for r in rows:
+        b = base.get(r['path'])
+        bad_now = r['cls'] not in GOOD
+        bad_then = b is not None and b['cls'] not in GOOD
+        if bad_now and not bad_then:
+            new.append(r)
+        elif bad_now and bad_then and b['cls'] != r['cls']:
+            changed.append((r, b['cls']))
+        elif not bad_now and bad_then:
+            fixed.append(r)
+    text = summary(rows)
+    text += f'\n\nvs baseline ({len(base)} files): NEW inconsistencies {len(new)}, FIXED {len(fixed)}, class changed {len(changed)}\n'
+    for r in new:
+        text += f'  NEW   {r["cls"]:15s} {r["fmt"]} #{r["id"]} {r.get("level_db", "")} dB {r["note"]}\n'
+    for r in fixed:
+        text += f'  FIXED {r["fmt"]} #{r["id"]} now {r["cls"]}\n'
+    for r, was in changed:
+        text += f'  CHANGED {r["fmt"]} #{r["id"]} {was} -> {r["cls"]}\n'
+    open(os.path.join(a.out, 'summary.txt'), 'w').write(text)
+    write_html(os.path.join(a.out, 'report.html'), rows, new, fixed)
+    print('\n' + text)
+    if a.update_baseline:
+        write_tsv(a.baseline, rows)
+        print('baseline updated:', a.baseline)
+        return 0
+    return 1 if new else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

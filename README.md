@@ -308,6 +308,56 @@ tables, not an A500's 68000.
 `src/paula.rs` and `src/paulaout.rs` follow UADE's `audio.c` and are derived
 from GPL-2 code.
 
+## Output stages
+
+Everything audible passes through some of these stages. With `--wav` the
+program prints the ones in effect for the file on stderr, after every
+automatic choice (`output: backend=... filter=a500(auto) led=auto(player)
+sep=0.70 ...`), and a second line telling whether the player switched the LED
+filter during the render (`led-switched: yes at 1.23s (off, 2 change(s); led
+on at start)`).
+
+| Stage | Models | Default | Used by | Switch |
+|---|---|---|---|---|
+| Paula resampler (`src/paulaout.rs`) | UADE's "default" resampler: each channel averaged over the colour clocks of an output sample (48 kHz), hard left/right (channels 0, 3 left; 1, 2 right) | on, always | every Paula backend: 68k players, Eagleplayers, built-in ProTracker, open replayers | none |
+| Filter model | A500: fixed RC low-pass 6.2 kHz plus 20 kHz; A1200: none; none | `auto`: A500, and none for PC formats (`PC_FORMATS` in `src/engine.rs`: 669, ADPCM, AIFF, WAV/RIFF, MPEG/MP3, FastTracker, ScreamTracker, PS3M, TakeTracker) | Paula backends | `--filter a500\|a1200\|none\|auto`; **F** in the window toggles A500/A1200 |
+| LED filter | the Amiga's LED low-pass (7 kHz biquad), on while CIA-A PRA bit 1 is low; an Amiga starts with it on, UADE with it off | `auto`: follows the player (`--led on` is the same) | Paula backends, except where the filter model is none | `--led auto\|on\|off\|force`: `off` ignores it, `force` keeps it on whatever the player writes |
+| Separation | mixes a fraction of each side into the other: 1 = hard Amiga panning, 0 = mono (`Settings::separation`); UADE-compat (`DELI_UADE=1`) sets 1 | 0.7 | Paula backends (libxmp's own mix is 100 %) | `--separation V` |
+| Mono | sums both sides | off | all backends | `--mono` |
+| Volume | output gain; UADE's level is 1 | 0.8 (= libxmp's full scale on its backend) | all | `--volume V` |
+| 8-bit amplifier (`src/amplifier.rs`) | Eagleplayer's "8 Bit Amplifier": voices mixed sample-and-hold at the mix rate (28 kHz less 500 Hz per voice past 2) onto Paula channels 0 and 1, boost 1.0 + (voices-1)/4 tenths (10 + (n-1)/4 in tenths, scaled by the player's gain), clipped to 8 bits | on, for the players that ask for it | the Eagleplayers that call `EP_InitAmplifier` (the software-mixing ones) and the open replayers that port them | none (printed as `amplifier=8bit@...Hz,boost=...`) |
+| Built-in NotePlayer renderer | its own one-pole 4.42 kHz low-pass and LED biquad (3.275 kHz) in software, outside Paula | used only with `--noteplayer builtin` or when no genie fits | `_note` players | follows `--filter`/`--led` (a500 and LED switches); printed as `builtin-voices=...` |
+| libxmp mixer (`src/xmp`) | libxmp 4.7.4's 16-bit stereo software mixer: volume ramps, anticlick, separation 100 | linear interpolation | the PC-tracker formats of the libxmp port; no Paula, no Amiga filters, no LED | `--interp nearest\|linear\|spline` |
+| libxmp resonant filter | the IT/LIQ/IMF lowpass (`QUIRK_FILTER`) | on (only modules that use it are affected) | libxmp backend | `--xmp-filter on\|off` |
+
+Other places: the wasm crate (`crates/amigaplayer-wasm`) renders through
+`open::Song`, so it has the engine's default settings (A500 filter, LED
+following the player, separation 0.7, 0.8 volume); libxmp formats there are the
+same mixer. There is no DC removal or dithering anywhere, and the only clipping
+is the final `clamp(-1, 1)` of the f32 mix (and the 8-bit amplifier's).
+
+### Comparing with the originals
+
+`tools/refcmp.py` renders every file of the listen page's list with the open
+replayer and with its original player under the same output settings, and
+compares the PCM:
+
+```sh
+python3 -I tools/refcmp.py --all -j 8            # whole list; non-zero exit on a NEW inconsistency
+python3 -I tools/refcmp.py --fmt tfmx --id 101   # a few formats / ids
+python3 -I tools/refcmp.py --all --update-baseline
+```
+
+The original is the same binary playing the real Eagleplayer/DeliPlayer on the
+emulated Amiga (so the output stage is identical and bit-identical output is
+possible); for the libxmp-port formats it is libxmp itself. Each file gets a
+class (IDENTICAL, LAG-ONLY, NEAR, SIMILAR, or an inconsistency: FAIL,
+STAGE-MISMATCH, SILENT, LENGTH, FILTER, LEVEL, PITCH, TEMPO, DIFF, with the
+thresholds as named constants at the top of the script). `tools/refcmp-baseline.tsv`
+holds each file's class; a run reports new and fixed inconsistencies against it.
+Where the register writes of a port fall at other times than the original's,
+expect SIMILAR rather than IDENTICAL.
+
 ## Built-in ProTracker
 
 `src/protracker.rs` translates ProTracker 2.3D's replay routine, after

@@ -153,6 +153,18 @@ impl XmpPlayer {
         Some(p)
     }
 
+    /// Sets the mixer's interpolation and whether its resonant filter runs
+    /// (libxmp's `XMP_INTERP_*` and `XMP_DSP_LOWPASS`).
+    pub fn set_mixer(&mut self, interp: mixer::Interp, filter: bool) {
+        self.ctx.s.interp = interp;
+        self.ctx.s.dsp = if filter { mixer::XMP_DSP_LOWPASS } else { 0 };
+    }
+
+    /// Whether the module sets libxmp's filter quirk (IT, Liquid, Imago).
+    pub fn uses_resonant_filter(&self) -> bool {
+        self.ctx.m.quirk & module::QUIRK_FILTER != 0
+    }
+
     /// libxmp's module type ("Composer 669", "MultiTracker 1.00 MTM"...).
     pub fn format(&self) -> &str {
         &self.ctx.m.module.type_

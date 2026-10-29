@@ -15,6 +15,8 @@ struct Args {
     wav: Option<PathBuf>,
     seconds: f64,
     subsong: i32,
+    led: bool,
+    volume: Option<f32>,
     files: Vec<PathBuf>,
 }
 
@@ -22,7 +24,8 @@ fn usage() -> ! {
     eprintln!(
         "usage: deliplayer [--players DIR] [--eagleplayers DIR] [--player NAME] [--open-replayers]\n\
          \x20                 [--genies DIR] [--genie NAME]... [--noteplayer NAME]\n\
-         \x20                 [--wav OUT.wav [--seconds N] [--subsong N]] [FILES/DIRS...]\n\
+         \x20                 [--wav OUT.wav [--seconds N] [--subsong N] [--led on|off] [--volume V]]\n\
+         \x20                 [FILES/DIRS...]\n\
          \n\
          Without --wav the SDL3 player window opens with FILES as the module list.\n\
          --players DIR holds the original 68k DeliPlayers (default: $DELIPLAYERS,\n\
@@ -35,13 +38,15 @@ fn usage() -> ! {
          (default: 4Voices-NotePlayer when installed; --noteplayer builtin has the\n\
          built-in renderer play them). --open-replayers plays the formats the\n\
          open replayers (Rust ports of NostalgicPlayer's players) know with them\n\
-         instead of the 68k players."
+         instead of the 68k players. --led off renders with the LED filter\n\
+         ignored (UADE's start state; an Amiga starts with it on), --volume V\n\
+         sets the output volume (default 0.8; UADE's level is 1)."
     );
     std::process::exit(2)
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { players: None, eagleplayers: None, genies: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, files: Vec::new() };
+    let mut a = Args { players: None, eagleplayers: None, genies: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, volume: None, files: Vec::new() };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -54,6 +59,14 @@ fn parse_args() -> Args {
             "--wav" => a.wav = it.next().map(PathBuf::from),
             "--seconds" => a.seconds = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
             "--subsong" => a.subsong = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
+            "--led" => {
+                a.led = match it.next().as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => usage(),
+                }
+            }
+            "--volume" => a.volume = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
             _ => a.files.push(PathBuf::from(s)),
         }
@@ -104,6 +117,10 @@ fn render_wav(args: &Args) -> Result<()> {
     }
     e.only_player = args.only_player.clone();
     e.open_replayers = args.open_replayers;
+    e.settings.led_filter = args.led;
+    if let Some(v) = args.volume {
+        e.settings.volume = v;
+    }
     if std::env::var_os("DELI_UADE").is_some() {
         e.set_uade_compat();
     }

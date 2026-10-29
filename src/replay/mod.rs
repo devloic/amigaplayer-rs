@@ -88,6 +88,7 @@ pub mod soundimages;
 pub mod sonicarranger;
 pub mod sonix;
 pub mod specialfx;
+pub mod steveturner;
 pub mod soundmaster;
 pub mod soundmon;
 pub mod soundtracker;
@@ -255,6 +256,7 @@ pub const REPLAYERS: &[Open] = &[
     desire::OPEN,
     fashiontracker::OPEN,
     ems::OPEN,
+    steveturner::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

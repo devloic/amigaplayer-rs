@@ -28,6 +28,7 @@ pub mod player;
 pub mod scan;
 mod spline_lut;
 pub mod virt;
+pub mod voltable;
 pub mod vorbis;
 
 use load::Hio;
@@ -63,11 +64,16 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Galaxy Music System 4.0", test: loaders::gal4::test, load: loaders::gal4::load },
     Loader { name: "DSMI Advanced Module Format", test: loaders::amf::test, load: loaders::amf::load },
     Loader { name: "Asylum Music Format v1.0", test: loaders::asylum::test, load: loaders::asylum::load },
+    Loader { name: "Chiptracker", test: loaders::chip::test, load: loaders::chip::load },
     Loader { name: "Real Tracker", test: loaders::rtm::test, load: loaders::rtm::load },
     Loader { name: "Digital Tracker", test: loaders::dt::test, load: loaders::dt::load },
     Loader { name: "Farandole Composer", test: loaders::far::test, load: loaders::far::load },
+    Loader { name: "Coconizer", test: loaders::coco::test, load: loaders::coco::load },
+    Loader { name: "Images Music System", test: loaders::ims::test, load: loaders::ims::load },
     Loader { name: "Composer 669", test: loaders::c669::test, load: loaders::c669::load },
+    Loader { name: "Funktracker", test: loaders::fnk::test, load: loaders::fnk::load },
     Loader { name: "Magnetic Fields Packer", test: loaders::mfp::test, load: loaders::mfp::load },
+    Loader { name: "Astroidea XMF", test: loaders::xmf::test, load: loaders::xmf::load },
 ];
 
 /// The loader that claims `data`, if any.

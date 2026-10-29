@@ -8,6 +8,11 @@
 pub mod amf;
 pub mod asylum;
 pub mod c669;
+pub mod chip;
+pub mod coco;
+pub mod fnk;
+pub mod ims;
+pub mod xmf;
 pub mod gal4;
 pub mod gal5;
 pub mod dt;

@@ -70,6 +70,7 @@ pub mod specialfx;
 pub mod soundmon;
 pub mod soundtracker;
 pub mod synthesis;
+pub mod synthpack;
 pub mod tfmx;
 pub mod tcbtracker;
 pub mod tme;
@@ -205,6 +206,7 @@ pub const REPLAYERS: &[Open] = &[
     wallybeben::OPEN,
     beathoven::OPEN,
     mikedavies::OPEN,
+    synthpack::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so
@@ -298,7 +300,7 @@ mod run_dump {
     use crate::engine::Engine;
     use std::path::Path;
 
-    /// `PK_MODULE=file PK_TICKS=n PK_LOG=out cargo test --release run_dump -- --ignored`:
+    /// `PK_MODULE=file PK_TICKS=n PK_LOG=out [PK_SUBSONG=k] cargo test --release run_dump -- --ignored`:
     /// `n` ticks (960 samples each at 48 kHz) of the module, the log in `DELI_WRITE_LOG`'s
     /// format, and the tick in which the song end was announced on stdout; `PK_SUBSONG=k`
     /// first steps `k` subsongs on, as `--subsong k` does.
@@ -315,6 +317,9 @@ mod run_dump {
         e.m.bus.write_log = Some(Vec::new());
         e.play_data(Path::new(&file), std::fs::read(&file).unwrap()).unwrap();
         for _ in 0..std::env::var("PK_SUBSONG").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0) {
+        // PK_SUBSONG=n: the n-th subsong after the first
+        let sub: u32 = std::env::var("PK_SUBSONG").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        for _ in 0..sub {
             e.change_subsong(1).unwrap();
         }
         println!("format {}", e.playing.as_ref().unwrap().format);

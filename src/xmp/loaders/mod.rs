@@ -14,3 +14,5 @@ pub mod masi16;
 pub mod mfp;
 pub mod mtm;
 pub mod ult;
+pub mod rtm;
+pub mod stx;

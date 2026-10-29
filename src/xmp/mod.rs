@@ -36,6 +36,7 @@ pub struct Loader {
 
 /// The loaders, in libxmp's order (`format_loaders` of `format.c`).
 pub static LOADERS: &[Loader] = &[
+    Loader { name: "STMIK 0.2", test: loaders::stx::test, load: loaders::stx::load },
     Loader { name: "MultiTracker", test: loaders::mtm::test, load: loaders::mtm::load },
     Loader { name: "Ultra Tracker", test: loaders::ult::test, load: loaders::ult::load },
     Loader { name: "General Digital Music", test: loaders::gdm::test, load: loaders::gdm::load },
@@ -43,6 +44,7 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Epic MegaGames MASI", test: loaders::masi::test, load: loaders::masi::load },
     Loader { name: "Epic MegaGames MASI 16", test: loaders::masi16::test, load: loaders::masi16::load },
     Loader { name: "DSMI Advanced Module Format", test: loaders::amf::test, load: loaders::amf::load },
+    Loader { name: "Real Tracker", test: loaders::rtm::test, load: loaders::rtm::load },
     Loader { name: "Composer 669", test: loaders::c669::test, load: loaders::c669::load },
     Loader { name: "Magnetic Fields Packer", test: loaders::mfp::test, load: loaders::mfp::load },
 ];

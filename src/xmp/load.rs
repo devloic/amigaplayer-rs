@@ -86,8 +86,10 @@ impl<'a> Hio<'a> {
     pub fn read(&mut self, out: &mut [u8]) -> usize {
         let avail = self.data.len().saturating_sub(self.pos);
         let n = out.len().min(avail);
-        out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-        self.pos += n;
+        if n > 0 {
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+        }
         if n < out.len() {
             self.error = true;
         }

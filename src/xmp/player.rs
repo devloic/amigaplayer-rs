@@ -1,5 +1,5 @@
 //! libxmp's player core: `player.c` (frame loop, envelopes, volume, pitch and pan
-//! processing), `read_event.c` (the ProTracker-style `read_event_mod`), `lfo.c`,
+//! processing), `read_event.c` (`read_event_mod`, `read_event_ft2`, `read_event_st3`), `lfo.c`,
 //! `period.c`, `flow.c` and the RNG of `rng.c`.
 //!
 //! Ported from libxmp 4.7.4, MIT licence, Copyright (C) 1996-2026 Claudio Matsuoka
@@ -2254,8 +2254,330 @@ impl Context {
         }
     }
 
-    /// `libxmp_read_event`. Only the ProTracker-style handling (`read_event_mod`)
-    /// is ported so far: the FT2, ST3, IT and MED ones come with the loaders that
+    fn sustain_check(env: &Envelope, idx: i32) -> bool {
+        env.flg & XMP_ENVELOPE_ON != 0
+            && env.flg & XMP_ENVELOPE_SUS != 0
+            && env.flg & XMP_ENVELOPE_LOOP == 0
+            && idx == env.data[(env.sus << 1) as usize] as i32
+    }
+
+    /// `set_period_ft2`: an instrument number alone keeps the portamento target
+    /// (OpenMPT Porta-Pickup.xm); only a note with toneporta sets it.
+    fn set_period_ft2(&mut self, key: i32, note: i32, sub: Option<SubInstrument>, chn: usize, is_toneporta: bool) {
+        if Self::is_valid_note(key - 1) && is_toneporta {
+            // the target updates even for invalid instruments, transpose +0
+            let mut n = key - 1;
+            if let Some(s) = sub {
+                let ins = self.p.xc_data[chn].ins as usize;
+                n += self.m.module.xxi[ins].map[(key - 1) as usize].xpo as i32;
+                n += s.xpo;
+            }
+            let (fin, adj) = (self.p.xc_data[chn].finetune, self.p.xc_data[chn].per_adj);
+            self.p.xc_data[chn].porta.target = note_to_period(&self.m, n, fin, adj);
+        }
+        if sub.is_some() && note >= 0 {
+            let xc = &self.p.xc_data[chn];
+            if xc.period < 1.0 || !is_toneporta {
+                let per = note_to_period(&self.m, note, xc.finetune, xc.per_adj);
+                self.p.xc_data[chn].period = per;
+            }
+        }
+    }
+
+    /// `read_event_ft2`: Fasttracker 2's note, instrument and key-off handling,
+    /// with its quirks (the OpenMPT and libxmp test cases the C code names).
+    fn read_event_ft2(&mut self, e: &Event, chn: usize) {
+        // FT2 ignores notes next to an out-of-range note delay, checked against
+        // the song speed only (OpenMPT DelayCombination.xm)
+        if self.p.frame >= self.p.speed {
+            return;
+        }
+        let ft2bugs = self.has_quirk(QUIRK_FT2BUGS);
+        let mut ev = *e;
+        self.p.xc_data[chn].flags = 0;
+        let mut note = -1;
+        let mut key = ev.note as i32;
+        let mut is_toneporta = false;
+        let mut is_delayed = false;
+
+        if ev.fxt == FX_EXTENDED && msn(ev.fxp) == EX_DELAY && lsn(ev.fxp) != 0 {
+            // no note + delay: note memory (ft2_delay_note_memory.xm)
+            let xc = &self.p.xc_data[chn];
+            if key == 0 {
+                key = if xc.key_memory != 0 { xc.key_memory } else { xc.key + 1 };
+            }
+            // key off + no ins# + delay + volume column pan: ignore the pan
+            if ft2bugs && key == XMP_KEY_OFF as i32 && ev.ins == 0 && ev.f2t == FX_SETPAN {
+                ev.f2t = 0;
+                ev.f2p = 0;
+            }
+            is_delayed = true;
+        }
+
+        if Self::is_toneporta_fx(ev.fxt) || Self::is_toneporta_fx(ev.f2t) {
+            is_toneporta = true;
+            // Mx + 3xx/5xy: 3xx uses the rate of the volume column
+            if ft2bugs && ev.fxt == FX_TONEPORTA && Self::is_toneporta_fx(ev.f2t) {
+                ev.fxp = 0;
+            }
+        }
+
+        // FT2 deletes K00 and, without volume column toneporta, turns the note
+        // into a key off (ft2_k00_is_note_off.xm)
+        if ev.fxt == FX_KEYOFF && ev.fxp == 0 {
+            ev.fxt = 0;
+            if !is_toneporta {
+                key = XMP_KEY_OFF as i32;
+            }
+        }
+
+        // instrument: only a new valid note without toneporta/K00 changes it
+        if ev.ins != 0 {
+            let xc = &mut self.p.xc_data[chn];
+            xc.set(NEW_INS);
+            xc.per_flags = 0;
+        }
+        if Self::is_valid_note(key - 1) && !is_toneporta {
+            // a note without instrument loads the last referenced one
+            let ins = if ev.ins != 0 { ev.ins as i32 } else { self.p.xc_data[chn].old_ins };
+            let mut smp = -1;
+            let mut n = key - 1;
+            self.p.xc_data[chn].key_memory = key;
+            let mut rls = None;
+            if self.is_valid_instrument(ins - 1) {
+                rls = Some(self.m.module.xxi[(ins - 1) as usize].rls);
+                if let Some(s) = self.get_subinstrument(ins - 1, key - 1) {
+                    n += self.m.module.xxi[(ins - 1) as usize].map[(key - 1) as usize].xpo as i32;
+                    n += s.xpo;
+                    smp = s.sid;
+                }
+            }
+            // the fade needs an ins# (ft2_instrument_fade_update.xm)
+            if ev.ins != 0 {
+                self.p.xc_data[chn].ins_fade = rls.unwrap_or(0x80 << 1);
+            }
+            // B-(-1) updates key/instrument/sample but not the note; notes
+            // past A#9 or below B-(-1) act as no key (ft2_note_range.xm)
+            if (FT2_NOTE_BN1..=FT2_NOTE_AS9).contains(&n) {
+                let vins = self.is_valid_instrument(ins - 1);
+                let vsmp = self.is_valid_sample(smp);
+                let xc = &mut self.p.xc_data[chn];
+                if n >= FT2_NOTE_C0 {
+                    xc.note = n;
+                }
+                xc.key = key - 1;
+                xc.ins = if vins { ins - 1 } else { -1 };
+                xc.smp = if vsmp { smp } else { -1 };
+            } else {
+                key = 0;
+            }
+        }
+        // the new instrument, or the one FT2 keeps
+        let (ins, k) = (self.p.xc_data[chn].ins, self.p.xc_data[chn].key);
+        let sub = self.get_subinstrument(ins, k);
+
+        // note: none for toneporta
+        if key != 0 {
+            self.p.xc_data[chn].set(NEW_NOTE);
+        }
+        if Self::is_valid_note(key - 1) && !is_toneporta {
+            self.p.xc_data[chn].reset_note(NOTE_END);
+            // sent even for an invalid sample, which cuts the channel
+            let xc = &self.p.xc_data[chn];
+            let (i, s, n) = (xc.ins, xc.smp, xc.note);
+            self.set_patch(chn, i, s, n);
+            note = self.p.xc_data[chn].note;
+        }
+
+        // key off and envelopes
+        if key == XMP_KEY_OFF as i32 {
+            let ins = self.p.xc_data[chn].ins;
+            let env = if self.is_valid_instrument(ins) { Some(self.m.module.xxi[ins as usize].aei) } else { None };
+            let xc = &mut self.p.xc_data[chn];
+            match env {
+                Some(env) if env.flg & XMP_ENVELOPE_ON != 0 => {
+                    if Self::sustain_check(&env, xc.v_idx) {
+                        // a release that takes effect in the next frame (OpenMPT EnvOff.xm)
+                        xc.set_note(NOTE_SUSEXIT);
+                    } else {
+                        xc.set_note(NOTE_RELEASE);
+                    }
+                }
+                // no volume envelope: volume cut (ft2_note_off_fade.xm)
+                _ => Self::set_channel_volume(xc, 0),
+            }
+            // a key off always starts the fadeout
+            xc.set_note(NOTE_FADEOUT);
+        }
+        if (ev.ins != 0 && key != XMP_KEY_OFF as i32) || is_delayed {
+            // ins# without key off/K00, and delayed rows, reset release/fadeout
+            {
+                let xc = &mut self.p.xc_data[chn];
+                xc.fadeout = 0x10000;
+                xc.reset_note(NOTE_FADEOUT);
+                xc.reset_note(NOTE_RELEASE | NOTE_SUSEXIT);
+            }
+            if sub.is_some() {
+                // only with a valid active instrument (ft2_envelope_invalid_ins.xm)
+                self.reset_envelopes(chn);
+            }
+            // the tremor count resets with the fadeout (ft2_tremor_reset.xm)
+            self.p.xc_data[chn].tremor.count = TREMOR_SUPPRESS;
+        }
+
+        self.set_effect_defaults(note, sub, chn, is_toneporta);
+
+        if ev.ins != 0 {
+            // any ins#: the active sample's defaults, volume 0 / pan 0x80 if
+            // invalid (ft2_invalid_ins_defaults.xm)
+            let xc = &mut self.p.xc_data[chn];
+            Self::set_channel_volume(xc, sub.map_or(0, |s| s.vol));
+            Self::set_channel_pan(xc, sub.map_or(0x80, |s| s.pan));
+        }
+
+        Self::set_channel_volume(&mut self.p.xc_data[chn], ev.vol as i32 - 1);
+
+        // FT2 always resets the sample offset
+        self.p.xc_data[chn].offset.val = 0;
+
+        self.process_fx(chn, &ev, 1);
+        self.process_fx(chn, &ev, 0);
+        self.set_period_ft2(key, note, sub, chn, is_toneporta);
+
+        if self.p.xc_data[chn].test(NEW_VOL) {
+            // tremor is overridden by volume changes (OpenMPT TremorRecover.xm)
+            self.p.xc_data[chn].tremor.count |= TREMOR_SUPPRESS;
+        }
+
+        if note >= 0 {
+            // the offset needs a valid note + 9xx + no toneporta; its memory is
+            // set only then, and offsets past the end cut (ft2_offset_memory.xm)
+            if ft2bugs && self.p.xc_data[chn].test(OFFSET) {
+                let (smp, off) = (self.p.xc_data[chn].smp, self.p.xc_data[chn].offset.val);
+                self.p.xc_data[chn].offset.memory = (off & 0xff00) >> 8;
+                if !self.is_valid_sample(smp) || off >= self.m.module.xxs[smp as usize].len {
+                    self.virt_resetchannel(chn as i32);
+                }
+            }
+            let off = self.p.xc_data[chn].offset.val as f64;
+            self.virt_voicepos(chn as i32, off);
+        }
+    }
+
+    /// `read_event_st3`: Scream Tracker 3's note and instrument handling.
+    fn read_event_st3(&mut self, e: &Event, chn: usize) {
+        self.p.xc_data[chn].flags = 0;
+        let mut note = -1;
+        let mut not_same_ins = false;
+        let mut is_toneporta = Self::is_toneporta_fx(e.fxt) || Self::is_toneporta_fx(e.f2t);
+
+        if self.virt_mapchannel(chn as i32) < 0 && self.p.xc_data[chn].ins != e.ins as i32 - 1 {
+            is_toneporta = false;
+        }
+
+        // instrument
+        if Self::is_valid_note(e.note as i32 - 1) && !is_toneporta {
+            self.p.xc_data[chn].key = e.note as i32 - 1;
+        }
+        if e.ins != 0 {
+            let ins = e.ins as i32 - 1;
+            {
+                let xc = &mut self.p.xc_data[chn];
+                xc.set(NEW_INS);
+                xc.fadeout = 0x10000;
+                xc.per_flags = 0;
+                xc.offset.val = 0;
+                xc.reset_note(NOTE_RELEASE | NOTE_FADEOUT);
+            }
+            if self.is_valid_instrument(ins) {
+                if self.p.xc_data[chn].ins != ins {
+                    not_same_ins = true;
+                    if !is_toneporta {
+                        let rls = self.m.module.xxi[ins as usize].rls;
+                        let xc = &mut self.p.xc_data[chn];
+                        xc.ins = ins;
+                        xc.ins_fade = rls;
+                    }
+                }
+                // the new instrument's volume
+                let key = self.p.xc_data[chn].key;
+                if let Some(s) = self.get_subinstrument(ins, key) {
+                    if e.note != XMP_KEY_OFF {
+                        let xc = &mut self.p.xc_data[chn];
+                        Self::set_channel_volume(xc, s.vol);
+                        Self::set_channel_pan(xc, s.pan);
+                    }
+                }
+            } else {
+                // invalid instruments are ignored
+                self.p.xc_data[chn].flags = 0;
+            }
+        }
+
+        // note
+        if e.note != 0 {
+            self.p.xc_data[chn].set(NEW_NOTE);
+            if e.note == XMP_KEY_OFF {
+                self.p.xc_data[chn].set_note(NOTE_RELEASE);
+            } else if is_toneporta {
+                // always retrig in tone portamento (7spirits.s3m, mod.Biomechanoid)
+                if not_same_ins {
+                    self.p.xc_data[chn].offset.val = 0;
+                }
+            } else if Self::is_valid_note(e.note as i32 - 1) {
+                self.p.xc_data[chn].reset_note(NOTE_END);
+                let (ins, key) = (self.p.xc_data[chn].ins, self.p.xc_data[chn].key);
+                if let Some(s) = self.get_subinstrument(ins, key) {
+                    let transp = self.m.module.xxi[ins as usize].map[key as usize].xpo as i32;
+                    note = key + s.xpo + transp;
+                    let mut smp = s.sid;
+                    if !self.is_valid_sample(smp) {
+                        smp = -1;
+                    }
+                    if smp >= 0 && (smp as usize) < self.m.module.smp {
+                        self.set_patch(chn, ins, smp, note);
+                        self.p.xc_data[chn].smp = smp;
+                    }
+                } else {
+                    self.p.xc_data[chn].flags = 0;
+                }
+            }
+        }
+
+        // the playing subinstrument, which may not be e.ins's with toneporta
+        let (ins, key) = (self.p.xc_data[chn].ins, self.p.xc_data[chn].key);
+        let sub = self.get_subinstrument(ins, key);
+
+        self.set_effect_defaults(note, sub, chn, is_toneporta);
+        if e.ins != 0 && sub.is_some() {
+            self.reset_envelopes(chn);
+        }
+
+        Self::set_channel_volume(&mut self.p.xc_data[chn], e.vol as i32 - 1);
+
+        self.process_fx(chn, e, 1);
+        self.process_fx(chn, e, 0);
+        self.set_period(note, sub, chn, is_toneporta);
+
+        if sub.is_none() {
+            return;
+        }
+
+        if note >= 0 {
+            self.p.xc_data[chn].note = note;
+            let off = self.p.xc_data[chn].offset.val as f64;
+            self.virt_voicepos(chn as i32, off);
+        }
+
+        if self.has_quirk(QUIRK_ST3BUGS) && self.p.xc_data[chn].test(NEW_VOL) {
+            let (gvol, volbase) = (self.p.gvol, self.m.volbase);
+            let xc = &mut self.p.xc_data[chn];
+            xc.volume = xc.volume * gvol / volbase;
+        }
+    }
+
+    /// `libxmp_read_event`. The ProTracker-style (`read_event_mod`), FT2 and ST3
+    /// handlings are ported; the IT and MED ones come with the loaders that
     /// select them, and until then play as MOD.
     pub fn read_event(&mut self, e: &Event, chn: usize) {
         let xc = &mut self.p.xc_data[chn];
@@ -2266,6 +2588,8 @@ impl Context {
             xc.set_note(NOTE_END);
         }
         match self.m.read_event_type {
+            ReadEvent::Ft2 => self.read_event_ft2(e, chn),
+            ReadEvent::St3 => self.read_event_st3(e, chn),
             _ => self.read_event_mod(e, chn),
         }
     }

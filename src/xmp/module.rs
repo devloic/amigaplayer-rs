@@ -64,6 +64,13 @@ pub const MAX_SEQUENCES: usize = 255;
 pub const NO_SEQUENCE: u8 = MAX_SEQUENCES as u8;
 pub const MAX_SAMPLE_SIZE: i32 = 0x1000_0000;
 pub const MAX_SAMPLES: usize = 1024;
+/// `MAX_INSTRUMENTS` of common.h.
+pub const MAX_INSTRUMENTS: usize = 255;
+
+// period.h: the FT2 note range
+pub const FT2_NOTE_BN1: i32 = 11;
+pub const FT2_NOTE_C0: i32 = 12;
+pub const FT2_NOTE_AS9: i32 = 130;
 
 // Quirks
 pub const QUIRK_S3MLOOP: i32 = 1 << 0;
@@ -657,6 +664,15 @@ impl ModuleData {
         self.module.xxi = vec![Instrument::default(); ins];
         self.module.xxs = vec![Sample::default(); smp];
         self.xtra = vec![ExtraSample { c5spd: self.c4rate as f64, sus: 0, sue: 0 }; smp];
+    }
+
+    /// `libxmp_realloc_samples`: `n` samples, the new ones empty with the
+    /// module's current `c4rate`.
+    pub fn realloc_samples(&mut self, n: usize) {
+        let c5spd = self.c4rate as f64;
+        self.module.xxs.resize(n, Sample::default());
+        self.xtra.resize(n, ExtraSample { c5spd, sus: 0, sue: 0 });
+        self.module.smp = n;
     }
 }
 

@@ -53,7 +53,13 @@
 //! * the writes are spaced as the original's code spaces them (`At::cost`,
 //!   fitted to the Eagleplayer's write logs), from the timer to the end of the
 //!   Eagleplayer's interrupt, where it takes the audio interrupts that came in
-//!   the meantime.
+//!   the meantime. The Eagleplayer's calls in place of the location, length,
+//!   volume and period writes take longer the higher the voice (the `*_CH`
+//!   tables), a note's setup varies with the sample (looped or not, its
+//!   portamento, the volume clamp), and the "9x" version has its own costs
+//!   (`At::cost9`); all fitted to the timings seen across the modules;
+//! * the audio interrupt handler takes the interrupt bits as they stood at the
+//!   player's last register write, as deliplayer passes them to 68k handlers.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -173,6 +179,9 @@ struct Layout {
     /// leaves the voice's register base in d4, which the final volume slide's
     /// setup stores after it as its step.
     d4_patched: bool,
+    /// SetupSample clears the voice's portamento word itself (`clr.w $a(a1)`
+    /// after the period), which takes its time.
+    setup_clr: bool,
 }
 
 /// StopSound's register writes (`moveq #n,d0`, `move.w d0,$x(a6)` and
@@ -199,6 +208,18 @@ fn stop_writes(d: &[u8], mut o: usize) -> Vec<(u32, u16)> {
         }
     }
     out
+}
+
+/// Does SetupSample (from its period's two `mulu`, to its return) clear a
+/// word at `$a(a1)`?
+fn setup_clr(d: &[u8]) -> bool {
+    let Some(o) = find(d, 0, d.len().saturating_sub(4), |o| w(d, o) == 0xc2c0 && w(d, o + 2) == 0xc0d3) else {
+        return false;
+    };
+    (o..(o + 0x100).min(d.len().saturating_sub(4)))
+        .step_by(2)
+        .take_while(|&o| !matches!(w(d, o), 0x4e73 | 0x4e75))
+        .any(|o| w(d, o) == 0x4269 && w(d, o + 2) == 0x000a)
 }
 
 /// NostalgicPlayer's identification (its feature search), and the rest of what
@@ -420,6 +441,7 @@ fn layout(d: &[u8]) -> Option<Layout> {
         stop: stop_writes(d, pcrel(d, init + 2)),
         // the Eagleplayer's search: from the start, $281 words
         d4_patched: find(d, 0, 0x504, |o| at_words(d, o, &[Some(0x3342), Some(0x000c), Some(0x3542), Some(0x0008)])).is_some(),
+        setup_clr: setup_clr(d),
     })
 }
 
@@ -497,7 +519,10 @@ enum At {
     WDmaOff,
     WDmaOn,
     WLoc,
-    WLen,
+    /// A note's location and length (the Eagleplayer's calls in their place
+    /// take longer the higher the voice: `SLOC_CH`, `SLEN_CH`).
+    SLoc,
+    SLen,
     WStop0,
     WStop,
     WVol,
@@ -515,6 +540,56 @@ enum At {
 }
 
 impl At {
+    /// The cost in the 9x version (Motörhead's), fitted to its own logs: its
+    /// code differs from the others' in many places.
+    fn cost9(self) -> Option<i64> {
+        use At::*;
+        Some(match self {
+            Tick => 219,
+            Fade => 44,
+            FxIdle => 30,
+            Fx => 123,
+            SamplePorta => 27,
+            SampleVib => 17,
+            LoopWait => 18,
+            LoopDec => 13,
+            LoopEnd => 0,
+            FadeOut => 16,
+            OnceWait => 33,
+            OnceDec => 12,
+            OnceEnd => 12,
+            Stop => -26,
+            Play => 30,
+            Voices => 30,
+            PortaStep => 32,
+            VolFadeStep => 96,
+            Position => 38,
+            PositionCmd => 63,
+            Track => -33,
+            Wait => 57,
+            Effect => 113,
+            Pause => 78,
+            Note => 245,
+            NotePorta => 53,
+            NoteFade => 46,
+            Setup => 24,
+            SetupEnd => 28,
+            WIntreq => 16,
+            WDmaOn => 10,
+            WLoc => 84,
+            SLoc => 79,
+            WDat => 66,
+            _ => return None,
+        })
+    }
+
+    fn cost_v(self, nine: bool) -> i64 {
+        match nine.then(|| self.cost9()).flatten() {
+            Some(c) => c,
+            None => self.cost(),
+        }
+    }
+
     fn cost(self) -> i64 {
         use At::*;
         match self {
@@ -522,7 +597,7 @@ impl At {
             Fade => 40,
             FadeStep => 60,
             FxIdle => 34,
-            Fx => 139,
+            Fx => 132,
             SamplePorta => 32,
             SampleVib => 25,
             SampleVibTurn => 24,
@@ -563,14 +638,15 @@ impl At {
             WIntreq => 18,
             WDmaOff => 8,
             WDmaOn => 13,
-            WLoc => 97,
-            WLen => 64,
-            WVol => 120,
+            WLoc => 78,
+            SLoc => 80,
+            SLen => 48,
+            WVol => 111,
             WVol0 => 16,
             WStop0 => 931,
             WStop => 6,
-            WVol2 => 280,
-            WPer => 91,
+            WVol2 => 242,
+            WPer => 73,
             WDat => 54,
             TickEnd => 165,
             Irq => 16,
@@ -580,6 +656,26 @@ impl At {
         }
     }
 }
+
+/// A note's extra colour clocks by voice: to its location's write, to its
+/// length's (the Eagleplayer's call in place of each), and from its volume 0 to
+/// its volume (by version), fitted to the Eagleplayer's write logs.
+const SLOC_CH: [i64; 4] = [0, 13, 26, 38];
+const VOL_CH: [i64; 4] = [0, 7, 20, 37];
+const FX_CH: [i64; 4] = [0, -11, -13, -22];
+const HANDLER_CH: [i64; 4] = [12, 10, 11, 10];
+const FX9_CH: [i64; 4] = [-2, -2, -2, -11];
+/// In the 9x version: an idle voice's effects, a voice's track, by voice (the
+/// last voice's code is reached without a call), and the extra costs of the
+/// portamento's and the volume fade's paths that do nothing.
+const FXIDLE9_CH: [i64; 4] = [2, 1, 1, -7];
+const VOICE9_CH: [i64; 4] = [1, 2, 2, -7];
+const HANDLER9_CH: [i64; 4] = [9, 9, 9, 9];
+const PER_CH: [i64; 4] = [0, 12, 25, 37];
+const SLEN_CH: [i64; 4] = [0, 12, 24, 37];
+const VOL2_CH: [i64; 4] = [0, 8, 20, 38];
+const VOL2_MASTER_CH: [i64; 4] = [0, 7, 20, 37];
+const VOL2_OLD_CH: [i64; 4] = [6, 20, 32, 44];
 
 /// What a playing voice runs every tick after its note (its `$20` pointer).
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
@@ -673,6 +769,11 @@ pub struct BenDaglish {
     d4: u16,
     /// Colour clocks the original's code has taken since its last write.
     pend: i64,
+    /// The writes so far (to tell the paths that write from those that do not).
+    writes: u32,
+    /// The voice whose effects run, and the writes when they started (until
+    /// its first write).
+    fx_writes: Option<(usize, u32)>,
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -705,6 +806,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         d3: 0,
         d4: 0,
         pend: 0,
+        writes: 0,
+        fx_writes: None,
     };
     r.init_song(0, &mut Hw { bus });
     Some(Box::new(r))
@@ -756,7 +859,9 @@ impl Replayer for BenDaglish {
         self.at(At::Irq);
         hw.wait(self.pend.max(0) as u64);
         self.pend = 0;
-        let bits = hw.bus.read_word(0xdff01e) & hw.bus.read_word(0xdff01c) & 0x0780;
+        // the handler's interrupt bits as they stood at the 68k's last register
+        // access, as deliplayer passes them to 68k handlers (not synced to now)
+        let bits = hw.bus.paula.intreq & hw.bus.paula.intena & 0x0780;
         if bits == 0 {
             // taken with an earlier one's
             return true;
@@ -770,10 +875,17 @@ impl Replayer for BenDaglish {
 
 impl BenDaglish {
     fn at(&mut self, e: At) {
-        self.pend += e.cost();
+        self.pend += e.cost_v(self.l.nine);
     }
 
     fn write(&mut self, hw: &mut Hw, e: At, a: u32, v: u16) {
+        // a voice's first write in its sample handler
+        if let Some((ch, w)) = self.fx_writes.take()
+            && w == self.writes
+        {
+            self.pend += if self.l.nine { HANDLER9_CH[ch] } else { HANDLER_CH[ch] };
+        }
+        self.writes = self.writes.wrapping_add(1);
         self.at(e);
         hw.wait(self.pend.max(0) as u64);
         self.pend = 0;
@@ -964,12 +1076,17 @@ impl BenDaglish {
     fn voice_effects(&mut self, ch: usize, hw: &mut Hw) {
         if self.pb[ch].delay == 0 {
             self.at(At::FxIdle);
+            self.pend += if self.l.nine { FXIDLE9_CH[ch] } else { 0 };
             return;
         }
         self.at(At::Fx);
+        let fx = if self.l.nine { FX9_CH[ch] } else { FX_CH[ch] };
+        self.pend += fx;
+        self.fx_writes = Some((ch, self.writes));
         let p = &mut self.pb[ch];
         if (p.ticks as i16) > 0 {
             p.ticks -= 1;
+            self.pend += 7;
         }
         self.sample_effects(ch, hw);
         if self.l.final_slide {
@@ -993,6 +1110,9 @@ impl BenDaglish {
         let stop = if self.l.old { p.volume == 0 } else { (p.volume as i16) <= 0 };
         if stop {
             self.at(At::Stop);
+            if self.fx_writes.take().is_some_and(|(_, w)| w == self.writes) {
+                self.pend += -fx;
+            }
             self.write(hw, At::WDat, Self::reg(ch, 0x0a), 0);
             self.write(hw, At::WDmaOff, 0xdff096, p.bit);
             self.pb[ch].delay = 0;
@@ -1008,11 +1128,18 @@ impl BenDaglish {
             && (vol as i16) > (m as i16)
         {
             vol = m;
+            if self.l.clamp == Clamp::Master {
+                let abs = matches!(self.l.fade, Some(Fade { volume: Addr::Abs(_), .. }));
+                self.pend += if abs { 8 } else { 6 };
+            }
         }
         if self.l.dma != Dma::Global {
+            self.pend += VOL_CH[ch];
+            self.fx_writes = None;
             self.write(hw, At::WVol, Self::reg(ch, 8), vol);
         }
         let per = p.period.wrapping_add(p.period_add).wrapping_add(p.porta);
+        self.pend += PER_CH[ch];
         self.write(hw, At::WPer, Self::reg(ch, 6), per);
         match self.l.dma {
             Dma::Tick => self.write(hw, At::WDmaOn, 0xdff096, 0x8000 | p.bit),
@@ -1028,14 +1155,14 @@ impl BenDaglish {
             if p.sporta == 0xffff {
                 return;
             }
-            self.pend += At::SamplePorta.cost();
+            self.pend += At::SamplePorta.cost_v(self.l.nine);
             p.period_add = p.period_add.wrapping_add(p.sporta_add);
             p.sporta -= 1;
             if p.sporta != 0 {
                 return;
             }
         }
-        self.pend += At::SampleVib.cost();
+        self.pend += At::SampleVib.cost_v(self.l.nine);
         p.period_add = p.period_add.wrapping_add(p.vib_add);
         p.vib_depth = p.vib_depth.wrapping_sub(1);
         if p.vib_depth != 0 {
@@ -1043,7 +1170,7 @@ impl BenDaglish {
         }
         let depth = hw.bus.r16(p.sample + 0x14);
         if depth != 0 {
-            self.pend += At::SampleVibTurn.cost();
+            self.pend += At::SampleVibTurn.cost_v(self.l.nine);
             p.vib_depth = depth;
             p.vib_add = p.vib_add.wrapping_neg();
         }
@@ -1075,9 +1202,11 @@ impl BenDaglish {
         let s = p.sample;
         let a = self.m(self.l.samples).wrapping_add(hw.bus.r32(s + 4));
         let len = hw.bus.r16(s + 0x0a);
+        self.pend += SLOC_CH[ch];
         self.write(hw, At::WLoc, Self::reg(ch, 0), (a >> 16) as u16);
         hw.bus.write_word(Self::reg(ch, 2), a as u16);
-        self.write(hw, At::WLen, Self::reg(ch, 4), len);
+        self.pend += SLEN_CH[ch];
+        self.write(hw, At::SLen, Self::reg(ch, 4), len);
     }
 
     fn handle_fade(&mut self, ch: usize, hw: &mut Hw) {
@@ -1126,6 +1255,7 @@ impl BenDaglish {
             return;
         }
         self.at(At::Voice);
+        self.pend += if self.l.nine { VOICE9_CH[ch] } else { 0 };
         if !self.l.old {
             self.portamento(ch);
             self.volume_fade(ch, hw);
@@ -1154,6 +1284,8 @@ impl BenDaglish {
             v.wait = v.wait.wrapping_sub(1);
             if v.wait != 0 {
                 self.at(At::Wait);
+                if hw.bus.r8(a3) & 0x80 != 0 {
+                }
                 if hw.bus.r8(a3) & 0x80 != 0 {
                     self.effect(ch, &mut a3, hw);
                 }
@@ -1354,7 +1486,7 @@ impl BenDaglish {
             let v = &mut self.v[ch];
             v.fading = v.fade_on;
             if v.fade_on != 0 {
-                self.pend += At::NoteFade.cost();
+                self.pend += At::NoteFade.cost_v(self.l.nine);
                 v.fade_speed2 = v.fade_speed;
                 v.fade_count = v.fade_speed;
                 v.fade_dur_count = v.fade_dur;
@@ -1414,8 +1546,9 @@ impl BenDaglish {
         if v.porta_on == 0 {
             return;
         }
+        self.pend += if self.l.nine { 15 } else { 0 };
         if v.porta_on & 0x80 != 0 {
-            self.pend += At::PortaCalc.cost();
+            self.pend += At::PortaCalc.cost_v(self.l.nine);
             let p = self.pb[ch].period as u32;
             let s = v.porta_step;
             let d0 = ((p * (s & 0xffff)) >> 16) as u16;
@@ -1433,12 +1566,13 @@ impl BenDaglish {
         }
         if v.porta_delay_count != 0 {
             v.porta_delay_count -= 1;
+            self.pend += if self.l.nine { 8 } else { 0 };
             return;
         }
         if v.porta_dur_count == 0 {
             return;
         }
-        self.pend += At::PortaStep.cost();
+        self.pend += At::PortaStep.cost_v(self.l.nine);
         v.porta_dur_count -= 1;
         let p = &mut self.pb[ch];
         p.porta = p.porta.wrapping_add((v.porta_step >> 16) as u16);
@@ -1449,13 +1583,17 @@ impl BenDaglish {
         self.at(At::VolFade);
         let v = &mut self.v[ch];
         if v.fading == 0 || v.fade_dur_count == 0 {
+            if v.fading != 0 {
+                self.pend += if self.l.nine { 10 } else { 0 };
+            }
             return;
         }
         v.fade_count = v.fade_count.wrapping_sub(1);
         if v.fade_count != 0 {
+            self.pend += if self.l.nine { 23 } else { 0 };
             return;
         }
-        self.pend += At::VolFadeStep.cost();
+        self.pend += At::VolFadeStep.cost_v(self.l.nine);
         v.fade_dur_count -= 1;
         v.fade_count = v.fade_speed2;
         let d2 = v.fade_value.wrapping_add(v.fade_step);
@@ -1465,6 +1603,8 @@ impl BenDaglish {
         if (d2 as i16) < 0 {
             self.v[ch].fade_dur_count = 0;
             return;
+        }
+        if (d2 as i16) > 0x40 {
         }
         let d2 = if (d2 as i16) > 0x40 { 0x40 } else { d2 };
         let (note, ticks) = (v.note, v.fade_speed2 as u16);
@@ -1484,9 +1624,11 @@ impl BenDaglish {
         let b = &mut *hw.bus;
         let a = self.m(self.l.samples).wrapping_add(b.r32(s));
         let len = b.r16(s + 8);
-        self.write(hw, At::WLoc, Self::reg(ch, 0), (a >> 16) as u16);
+        self.pend += SLOC_CH[ch];
+        self.write(hw, At::SLoc, Self::reg(ch, 0), (a >> 16) as u16);
         hw.bus.write_word(Self::reg(ch, 2), a as u16);
-        self.write(hw, At::WLen, Self::reg(ch, 4), len);
+        self.pend += SLEN_CH[ch];
+        self.write(hw, At::SLen, Self::reg(ch, 4), len);
         self.write(hw, At::WVol0, Self::reg(ch, 8), 0);
         let b = &mut *hw.bus;
         // the period: the table's long at the note (from the sample's transpose)
@@ -1513,13 +1655,30 @@ impl BenDaglish {
             pm.porta = 0;
         }
         pm.handler = if b.r16(s + 0x0e) != 0 { Handler::Loop } else { Handler::Once };
+        // from the volume 0 to the note's volume: the period, the vibrato's
+        // setup, the handler, the clamp (`At::WVol2` is the fastest path)
+        let mut x = if self.l.old { VOL2_OLD_CH[ch] } else if self.l.clamp == Clamp::Master { VOL2_MASTER_CH[ch] } else { VOL2_CH[ch] };
+        if (sporta as i16) >= 0 {
+            x += 113 + (b.r16(s + 0x14) & 1) as i64;
+        }
+        if pm.handler == Handler::Loop {
+            x -= 4;
+        }
+        if self.l.setup_clr {
+            x += 8;
+        }
         let mut vol = vol;
         if self.l.clamp == Clamp::Master {
+            // the master volume's compare (and move), slower from an absolute address
+            let abs = matches!(self.l.fade, Some(Fade { volume: Addr::Abs(_), .. }));
+            x += 11 + if abs { 2 } else { 0 };
             let m = self.master(hw);
             if (vol as i16) > (m as i16) {
                 vol = m;
+                x += 6 + if abs { 2 } else { 0 };
             }
         }
+        self.pend += x;
         self.pb[ch].volume = vol;
         self.write(hw, At::WVol2, Self::reg(ch, 8), vol);
         let pm = &mut self.pb[ch];

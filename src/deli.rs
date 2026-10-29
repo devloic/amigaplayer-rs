@@ -587,22 +587,11 @@ pub fn wait_audio_dma(m: &mut Machine) {
 }
 
 /// Reads a file a player asks for by its Amiga name (relative names are in
-/// the module's directory; case is ignored).
+/// the module's directory; case is ignored, as by `host_path`).
 pub fn read_companion(m: &Machine, name: &str) -> (PathBuf, std::io::Result<Vec<u8>>) {
     let p = m.os.host_path(name, Some(&m.deli.module_dir));
-    let d = m.os.read_file(&p).or_else(|_| find_case_insensitive(&p));
+    let d = m.os.read_file(&p);
     (p, d)
-}
-
-fn find_case_insensitive(p: &Path) -> std::io::Result<Vec<u8>> {
-    let dir = p.parent().unwrap_or(Path::new("."));
-    let want = p.file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-    for e in std::fs::read_dir(dir)?.flatten() {
-        if e.file_name().to_string_lossy().to_lowercase() == want {
-            return std::fs::read(e.path());
-        }
-    }
-    Err(std::io::ErrorKind::NotFound.into())
 }
 
 #[cfg(test)]

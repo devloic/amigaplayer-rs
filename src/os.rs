@@ -1415,7 +1415,14 @@ impl OsState {
         std::fs::read(p)
     }
 
+    /// The host path of Amiga name `name` (relative names in `current`). As
+    /// the Amiga's file systems ignore case, a path that does not exist as
+    /// named is the one that does in another case, if any.
     pub fn host_path(&self, name: &str, current: Option<&Path>) -> PathBuf {
+        any_case_path(self.host_path_as_named(name, current))
+    }
+
+    fn host_path_as_named(&self, name: &str, current: Option<&Path>) -> PathBuf {
         if let Some(rest) = name.strip_prefix("PROGDIR:").or_else(|| name.strip_prefix("progdir:")) {
             return self.progdir.join(rest);
         }
@@ -1457,6 +1464,26 @@ fn any_case(dir: &Path, name: &str) -> PathBuf {
         .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name))
         .map(|e| e.path())
         .unwrap_or(p)
+}
+
+/// `p` if it exists, else `p` with each component found in its directory in
+/// another case (an exact match first), if all of them are; else `p`.
+fn any_case_path(p: PathBuf) -> PathBuf {
+    if p.exists() {
+        return p;
+    }
+    let mut q = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::Normal(n) => {
+                let dir = if q.as_os_str().is_empty() { Path::new(".") } else { &q };
+                let found = any_case(dir, &n.to_string_lossy());
+                q = if q.as_os_str().is_empty() { PathBuf::from(found.file_name().unwrap_or(n)) } else { found };
+            }
+            c => q.push(c),
+        }
+    }
+    if q.exists() { q } else { p }
 }
 
 fn bptr_alloc(m: &mut Machine, size: u32) -> u32 {
@@ -1746,6 +1773,28 @@ mod tests {
         m.bus.paula.sync(m.bus.clock, &m.bus.ram);
     }
     use m68k::CpuType;
+
+    #[test]
+    fn host_path_ignores_case() {
+        let dir = std::env::temp_dir().join(format!("deliplayer-os-test-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Sub")).unwrap();
+        for f in ["SMP.Song", "smp.both", "SMP.BOTH", "Sub/Samples"] {
+            std::fs::write(dir.join(f), f).unwrap();
+        }
+        let os = OsState::default();
+        let at = |n: &str| os.host_path(n, Some(&dir));
+        // Richard Joseph's rjp.song asks for SMP.song
+        assert_eq!(at("SMP.song"), dir.join("SMP.Song"));
+        assert_eq!(at("smp.SONG"), dir.join("SMP.Song"));
+        // an exact match first
+        assert_eq!(at("smp.both"), dir.join("smp.both"));
+        assert_eq!(at("SMP.BOTH"), dir.join("SMP.BOTH"));
+        // directories too, and a name found in no case stays as named
+        assert_eq!(at("sub/SAMPLES"), dir.join("Sub/Samples"));
+        assert_eq!(at("smp.none"), dir.join("smp.none"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn audio_device_write_reaches_paula() {

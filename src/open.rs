@@ -2,7 +2,8 @@
 //! own player for everything else (the archive app: UADE and libxmp there). No 68k
 //! player files are loaded, so a `Song` plays only what `replay::REPLAYERS` and the
 //! built-in ProTracker (with ProWizard's conversions of packed modules) know, on the
-//! emulated Paula.
+//! emulated Paula, and the PC tracker formats of the libxmp port (`crate::xmp`) on
+//! its own mixer.
 
 use crate::engine::{Backend, Engine, Playing};
 use anyhow::{bail, Result};
@@ -20,7 +21,10 @@ pub fn detect(data: &[u8]) -> Option<String> {
     if let Some(f) = crate::protracker::ProTracker::detect(&data).filter(|f| *f != "SoundTracker") {
         return Some(f.to_string());
     }
-    crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data)).map(|o| o.name.to_string())
+    if let Some(o) = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data)) {
+        return Some(o.name.to_string());
+    }
+    crate::xmp::load_module(&data).map(|c| c.m.module.type_)
 }
 
 pub struct Song {
@@ -44,7 +48,7 @@ impl Song {
         e.open_replayers = true;
         e.play_data(path, data)?;
         match &e.playing {
-            Some(Playing { backend: Backend::Replay(_), .. }) => {}
+            Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_), .. }) => {}
             Some(Playing { backend: Backend::Native(_), format, .. }) if format != "SoundTracker" => {}
             _ => bail!("no open replayer plays this module"),
         }

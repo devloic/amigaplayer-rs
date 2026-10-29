@@ -28,6 +28,9 @@ pub enum Backend {
     Native(Box<ProTracker>),
     /// an open replayer (crate::replay)
     Replay(Box<dyn crate::replay::Replayer>),
+    /// a PC tracker module on the port of libxmp's player and mixer
+    /// (crate::xmp), which renders stereo itself: no Paula, no Amiga filters
+    Mix(Box<crate::xmp::XmpPlayer>),
 }
 
 pub struct Playing {
@@ -556,6 +559,12 @@ impl Engine {
                     return self.start_replay(r, path);
                 }
             }
+            // the PC tracker formats of libxmp's loaders
+            if let Some(x) = crate::xmp::XmpPlayer::new(&data, self.rate as u32) {
+                self.m.deli.list.clear();
+                self.m.heap.free(addr);
+                return self.start_mix(Box::new(x), path);
+            }
         }
         // 2. a custom module carries its own player
         if crate::hunk::is_hunk_file(&data) {
@@ -644,6 +653,25 @@ impl Engine {
             sub_min,
             sub_max,
             sub,
+            frames: 0,
+            custom_player: false,
+        });
+        Ok(())
+    }
+
+    fn start_mix(&mut self, x: Box<crate::xmp::XmpPlayer>, path: &Path) -> Result<()> {
+        self.m.bus.paula.reset();
+        self.intena_seen = 0;
+        self.next_timer = None;
+        let title = x.title().to_string();
+        self.playing = Some(Playing {
+            module_name: if title.is_empty() { file_name(path) } else { title },
+            format: x.format().to_string(),
+            sub_min: 0,
+            sub_max: (x.subsongs() - 1) as u16,
+            sub: 0,
+            backend: Backend::Mix(x),
+            author: String::new(),
             frames: 0,
             custom_player: false,
         });
@@ -848,6 +876,15 @@ impl Engine {
                     (*sub, *frames) = (n as u16, 0);
                     self.song_starts();
                 }
+                Some(Playing { backend: Backend::Mix(x), sub, frames, .. }) => {
+                    let n = x.subsong() as i32 + delta;
+                    if n < 0 || n >= x.subsongs() as i32 {
+                        return Ok(());
+                    }
+                    x.start(n as usize);
+                    (*sub, *frames) = (n as u16, 0);
+                    self.heard = false;
+                }
                 _ => {}
             }
             return Ok(());
@@ -900,7 +937,7 @@ impl Engine {
                     let _ = deli::call_fn(&mut self.m, self.players[*idx].globals, f, None);
                 }
             }
-            Some(Playing { backend: Backend::Replay(_), .. }) | None => {}
+            Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_), .. }) | None => {}
         }
     }
 
@@ -908,6 +945,7 @@ impl Engine {
         match &self.playing {
             Some(Playing { backend: Backend::Native(pt), .. }) => pt.songend,
             Some(Playing { backend: Backend::Replay(r), .. }) => r.songend(),
+            Some(Playing { backend: Backend::Mix(x), .. }) => x.ended(),
             Some(_) => self.m.deli.songend,
             None => false,
         }
@@ -939,6 +977,7 @@ impl Engine {
         let period = match &p.backend {
             Backend::Native(pt) => Some(pt.tick_clocks()),
             Backend::Replay(r) => Some(r.tick_clocks()),
+            Backend::Mix(_) => None,
             Backend::Deli(idx) => self
                 .m
                 .deli
@@ -1014,6 +1053,7 @@ impl Engine {
         let Some(p) = &mut self.playing else { return };
         match &mut p.backend {
             Backend::Replay(r) => r.tick(&mut crate::replay::Hw { bus: &mut self.m.bus }),
+            Backend::Mix(_) => {}
             Backend::Native(pt) => {
                 // its DMA waits run the clock on, as the 68k replay's loops do
                 pt.tick(&mut self.m.bus);
@@ -1091,6 +1131,10 @@ impl Engine {
 
     /// Fills `out` with interleaved stereo f32 frames.
     pub fn render(&mut self, out: &mut [f32]) {
+        if let Some(Playing { backend: Backend::Mix(_), .. }) = &self.playing {
+            self.render_mix(out);
+            return;
+        }
         let sep = self.settings.separation.clamp(0.0, 1.0);
         let vol = self.settings.volume;
         let filter = self.output_filter();
@@ -1144,6 +1188,29 @@ impl Engine {
             }
             let paula = &self.m.bus.paula;
             self.push_scopes([0, 1, 2, 3].map(|i| paula.output(i)));
+        }
+        self.skip_empty_subsong();
+    }
+
+    /// `render` for the libxmp mixer: its 16-bit stereo, at full scale for the
+    /// default volume (0.8), so that the 16-bit WAV the CLI writes holds libxmp's
+    /// samples unchanged. Separation is libxmp's (its mix setting 100).
+    fn render_mix(&mut self, out: &mut [f32]) {
+        let Some(Playing { backend: Backend::Mix(x), frames, .. }) = &mut self.playing else { return };
+        let gain = self.settings.volume / 0.8;
+        let mut buf = vec![0i16; out.len()];
+        let n = if self.paused { 0 } else { x.render(&mut buf) };
+        *frames += n as u64;
+        for (o, &s) in out.iter_mut().zip(buf.iter()) {
+            *o = (s as f32 / 32768.0 * gain).clamp(-1.0, 1.0);
+        }
+        self.heard |= buf[..n * 2].iter().any(|&s| s != 0);
+        if self.settings.mono {
+            for f in out.chunks_exact_mut(2) {
+                let m = (f[0] + f[1]) * 0.5;
+                f[0] = m;
+                f[1] = m;
+            }
         }
         self.skip_empty_subsong();
     }

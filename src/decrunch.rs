@@ -1,6 +1,52 @@
 //! Decrunching of packed modules. DeliTracker did this through
 //! powerpacker.library / xpkmaster.library; here PowerPacker (PP20) data is
-//! unpacked natively and anything else is passed through unchanged.
+//! unpacked natively, and so are the single-file depackers of libxmp 4.7.4
+//! (Pack-Ice, XPK SQSH, StoneCracker S404 and MMCMP, ported in the
+//! submodules with their licence notices). Anything else, and anything that
+//! only starts with a magic by chance, is passed through unchanged.
+
+mod ice;
+mod mmcmp;
+mod s404;
+mod sqsh;
+#[cfg(test)]
+mod depack_tests;
+
+/// libxmp's `LIBXMP_DEPACK_LIMIT`.
+pub(crate) const DEPACK_LIMIT: usize = 512 << 20;
+
+/// Zeroed buffer that fails instead of aborting when it cannot be allocated.
+pub(crate) fn alloc_zeroed(n: usize) -> Option<Vec<u8>> {
+    Vec::<u8>::new().try_reserve_exact(n).ok()?;
+    // calloc: pages are only touched when written.
+    Some(vec![0u8; n])
+}
+
+/// libxmp ignores files shorter than this when looking for a depacker.
+const MIN_PACKED: usize = 64;
+
+/// The libxmp depackers, in its order (sqsh, mmcmp, ice1, ice2, s404).
+fn libxmp_depack(data: &[u8]) -> Option<(&'static str, Option<Vec<u8>>)> {
+    if data.len() < MIN_PACKED {
+        return None;
+    }
+    if sqsh::test(data) {
+        return Some(("XPK SQSH", sqsh::depack(data)));
+    }
+    if mmcmp::test(data) {
+        return Some(("MMCMP", mmcmp::depack(data)));
+    }
+    if ice::test1(data) {
+        return Some(("Pack-Ice", ice::unpack1(data)));
+    }
+    if ice::test2(data) {
+        return Some(("Pack-Ice", ice::unpack2(data)));
+    }
+    if s404::test(data) {
+        return Some(("StoneCracker S404", s404::depack(data)));
+    }
+    None
+}
 
 pub fn decrunch(data: Vec<u8>) -> Vec<u8> {
     if data.len() > 12 && &data[..4] == b"PP20" {
@@ -11,6 +57,14 @@ pub fn decrunch(data: Vec<u8>) -> Vec<u8> {
             }
             None => log::warn!("PowerPacker data is corrupt; using it as is"),
         }
+    }
+    match libxmp_depack(&data) {
+        Some((name, Some(d))) if !d.is_empty() => {
+            log::info!("{}: {} -> {} bytes", name, data.len(), d.len());
+            return d;
+        }
+        Some((name, _)) => log::warn!("{} data is corrupt; using it as is", name),
+        None => {}
     }
     data
 }

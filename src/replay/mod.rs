@@ -43,6 +43,7 @@ pub mod jasonbrooke;
 pub mod jasonpage;
 pub mod jesperolsen;
 pub mod med;
+pub(crate) mod m68kdec;
 pub mod mikedavies;
 pub mod medpacker;
 pub mod musicassembler;
@@ -62,6 +63,7 @@ pub mod pumatracker;
 pub mod quadracomposer;
 mod quadracomposer_tables;
 pub mod richardjoseph;
+pub mod seanconran;
 pub mod soundplayer;
 pub mod ronklaren;
 pub mod scumm;
@@ -227,6 +229,7 @@ pub const REPLAYERS: &[Open] = &[
     jasonbrooke::OPEN,
     silmarils::OPEN,
     paulshields::OPEN,
+    seanconran::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

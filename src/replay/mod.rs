@@ -39,6 +39,7 @@ pub mod jamcracker;
 pub mod jasonpage;
 pub mod jesperolsen;
 pub mod med;
+pub mod mikedavies;
 pub mod medpacker;
 pub mod musicassembler;
 pub mod musicmaker;
@@ -203,6 +204,7 @@ pub const REPLAYERS: &[Open] = &[
     jasonpage::OPEN,
     wallybeben::OPEN,
     beathoven::OPEN,
+    mikedavies::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so
@@ -298,7 +300,8 @@ mod run_dump {
 
     /// `PK_MODULE=file PK_TICKS=n PK_LOG=out cargo test --release run_dump -- --ignored`:
     /// `n` ticks (960 samples each at 48 kHz) of the module, the log in `DELI_WRITE_LOG`'s
-    /// format, and the tick in which the song end was announced on stdout.
+    /// format, and the tick in which the song end was announced on stdout; `PK_SUBSONG=k`
+    /// first steps `k` subsongs on, as `--subsong k` does.
     #[test]
     #[ignore]
     fn dump() {
@@ -311,6 +314,9 @@ mod run_dump {
         e.open_replayers = true;
         e.m.bus.write_log = Some(Vec::new());
         e.play_data(Path::new(&file), std::fs::read(&file).unwrap()).unwrap();
+        for _ in 0..std::env::var("PK_SUBSONG").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0) {
+            e.change_subsong(1).unwrap();
+        }
         println!("format {}", e.playing.as_ref().unwrap().format);
         let mut buf = vec![0f32; 2 * 960];
         let mut end = None;

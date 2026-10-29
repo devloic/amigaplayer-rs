@@ -10,7 +10,7 @@
 //! ENPP_PokeAdr/Len/Per/Vol and ENPP_DMAMask. Where NostalgicPlayer differs, this
 //! follows the original:
 //! * the speed is the word at offset 8, the tempo byte and the speed byte
-//!   together, so a module with a tempo (byte 8 not 0) waits that many times
+//!   together, so a module with a tempo (byte 8 not 0) would wait that many times
 //!   256 ticks for a row; there is no tempo: the ticks are DeliTracker's 50 Hz;
 //! * the first row comes on the speed's tick, and a row's tick runs no effects;
 //! * a note's period is used as it is (no finetune), a note turns its voice's
@@ -35,10 +35,22 @@
 //!   are the song end; a jump on a pattern's last row also jumps after the next
 //!   row, as its flag stays set.
 //!
+//! A module with a tempo byte (byte 8 not 0) is from a newer Digital Sound Studio
+//! than the Eagleplayer's, which would leave it silent for minutes. It is decided
+//! from the header only and played as NostalgicPlayer does (`np.rs`): the tempo
+//! is a BPM tempo (the CIA's 1773447 / BPM, as ProTracker's), the speed is byte 9,
+//! and all 31 effects (finetune, volume and master volume slides, tempo, pitch
+//! control, loops, retrigger, note delay and cut, sample offset, tone portamento)
+//! are there. Nothing of the above applies to it: no fitted costs, no clearing of
+//! the samples' first long. Modules without a tempo play exactly as above, their
+//! effects 7 and up ignored.
+//!
 //! The writes are spaced by the original's code-path costs, fitted by
 //! non-negative least squares to the reference's write gaps (`Cost`), and the
 //! timer starts when the original's does, after its start's loops over the
 //! positions and samples (`start`).
+
+mod np;
 
 use super::{be16, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -96,6 +108,8 @@ pub struct DigitalSoundStudio {
     /// The start's code paths (`start`) and the colour clocks they took.
     init: [(Cost, u32); 5],
     init_wait: u64,
+    /// The newer Digital Sound Studio's player, for a module with a tempo.
+    np: Option<np::Np>,
 }
 
 /// The original's check (EP_Check5): the mark and a file longer than the song.
@@ -114,9 +128,15 @@ fn max_pattern(d: &[u8], r: impl Fn(usize) -> u8) -> u8 {
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
-    let mem = m.alloc(MIRROR_SIZE);
+    // a module with a tempo byte is from a newer Digital Sound Studio than the
+    // Eagleplayer's, and is played as NostalgicPlayer does (np.rs)
+    let tempo = d[8] != 0;
+    let mem = m.alloc(MIRROR_SIZE + if tempo { 4 } else { 0 });
     if mem == 0 {
         return None;
+    }
+    if tempo {
+        m.bus.w32(mem + MIRROR_SIZE, 0);
     }
     for (k, &p) in PERIODS.iter().chain(std::iter::repeat(&113).take(PAD)).enumerate() {
         m.bus.w16(mem + 2 * k as u32, p);
@@ -140,13 +160,19 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         counts: Vec::new(),
         init: start(d),
         init_wait: 0,
+        np: None,
     };
     // DeliTracker's timer starts after the Eagleplayer's check, EP_Get_ModuleInfo
     // and InitSound, whose loops over the positions and samples take their time
+    if tempo {
+        r.init_sound(d, &mut m.bus, false);
+        r.np = Some(np::Np::new(d, base, mem));
+        return Some(Box::new(r));
+    }
     let c: f64 = r.init.iter().map(|&(c, n)| COSTS[c as usize] * n as f64).sum();
     r.init_wait = c.max(0.0).round() as u64;
     m.bus.clock += r.init_wait;
-    r.init_sound(d, &mut m.bus);
+    r.init_sound(d, &mut m.bus, true);
     Some(Box::new(r))
 }
 
@@ -193,10 +219,17 @@ impl Replayer for DigitalSoundStudio {
     }
 
     fn songend(&self) -> bool {
-        self.songend
+        self.np.as_ref().map_or(self.songend, |n| n.songend)
+    }
+
+    fn tick_clocks(&self) -> u64 {
+        self.np.as_ref().map_or(super::DT_TICK, |n| n.tick_clocks())
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        if let Some(n) = &mut self.np {
+            return n.tick(hw);
+        }
         if let Some(f) = &mut self.fit {
             use std::io::Write;
             // the tick as if the start took no time, and the start's counts with
@@ -430,7 +463,7 @@ impl DigitalSoundStudio {
     /// loop, unless the loop is 1 word, plus its start offset, whose low bit is
     /// cleared in the module), the first long of each sample cleared, and the
     /// player's variables.
-    fn init_sound(&mut self, d: &[u8], b: &mut crate::bus::Bus) {
+    fn init_sound(&mut self, d: &[u8], b: &mut crate::bus::Bus, clear: bool) {
         let base = self.base;
         let maxp = max_pattern(d, |o| b.r8(base + o as u32)) as u32;
         let mut a = base + 0x61e + ((maxp + 1) << 10);
@@ -451,7 +484,7 @@ impl DigitalSoundStudio {
         }
         for k in 0..31u32 {
             let s = b.r32(self.mem + SAMPLES_OFF + 4 * k);
-            if s != 0 {
+            if s != 0 && clear {
                 b.w32(s, 0);
             }
         }
@@ -719,6 +752,31 @@ mod tests {
         d.extend((0..32).map(|i| i as u8 + 1));
         d.extend([0; 2]);
         d
+    }
+
+    /// With a tempo byte the module is NostalgicPlayer's: speed 2 (byte 9) at 250
+    /// BPM, so a row every 2 ticks of 1773447 / 250 CIA ticks, and effect 7+ work
+    /// (here B, set song tempo, on row 1).
+    #[test]
+    fn plays_a_module_with_a_tempo() {
+        let mut d = module();
+        d[8] = 125; // tempo byte
+        d[9] = 2; // speed
+        d[0x61e + 16..0x61e + 20].copy_from_slice(&[0, 0, 0x0b, 250]);
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new("test.dss"), d).unwrap();
+        let mut out = vec![0f32; 2 * 96000];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        assert_eq!(reg(0xDFF0A6)[0], 428);
+        assert_eq!(reg(0xDFF0A8)[0], 48);
+        assert!(out.iter().any(|&s| s != 0.0), "no sound");
+        // the pattern's 128 ticks take 2.56 s at 125 BPM, about 1.3 s once row 1 has
+        // set 250: the note on row 0 comes again within the 2 s
+        assert!(reg(0xDFF0A6).len() >= 2, "{:?}", reg(0xDFF0A6));
     }
 
     #[test]

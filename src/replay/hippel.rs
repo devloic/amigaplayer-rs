@@ -1213,8 +1213,6 @@ struct Build {
     init_at: u64,
     led_gap: u64,
     init_stop: bool,
-    /// The Eagleplayer's start is this much shorter for a module saved with a song playing.
-    dead_adj: u64,
     /// From the LED write to InitSound's DMA off, less what depends on the song
     /// data (9 colour clocks per sample and 58.4 per subsong: InitPlayer's loops),
     /// 0 where it is `led_gap` alone.
@@ -1291,7 +1289,6 @@ const A94: Build = Build {
     init_at: 58358,
     led_gap: 5409,
     init_stop: false,
-    dead_adj: 0,
     init_k: 0,
     init_tail: 0,
     sub_step: 4,
@@ -1345,7 +1342,6 @@ const EARLY: Build = Build {
     init_at: 51887,
     led_gap: 0,
     init_stop: false,
-    dead_adj: 3550,
     init_k: 8563,
     init_tail: 0,
     sub_step: 6,
@@ -1387,7 +1383,6 @@ const MIDDLE: Build = Build {
     init_at: 55862,
     led_gap: 346,
     init_stop: true,
-    dead_adj: 3550,
     init_k: 8289,
     init_tail: 0,
     sub_step: 6,
@@ -2276,7 +2271,9 @@ pub struct Tfmx {
     /// The counts InitPlayer loops over.
     subsongs_n: u64,
     samples_n: u64,
-    /// The module was saved with a song playing (see `Build::song_var`).
+    /// The module was saved with a song playing (see `Build::song_var`): played as
+    /// UADE's player plays it, the song started as for any module, without the
+    /// Eagleplayer's first stop, and a subsong change silencing the four voices.
     dead: bool,
     periods: u32,
     empty: u32,
@@ -2360,12 +2357,6 @@ const POLL_TO_LOOP: u64 = 20;
 
 fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let (ver, t) = tfmx_version(d)?;
-    // A module saved with a song playing starts no song under the Eagleplayer, so
-    // the port would play it silent; refused, it goes on to a player that plays its
-    // music (UADE's Hippel in the archive app)
-    if ver.song_var && be16(d, t - 6) != 0 {
-        return None;
-    }
     let h = |o: usize| be16(d, t + o) as u32;
     // InitPlayer: the parts' addresses from the counts in the header
     let freqs = base + t as u32 + 0x20;
@@ -2431,7 +2422,7 @@ fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     p.trace.timing = Some(ver.timing);
     let mut hw = Hw { bus: &mut m.bus };
-    hw.wait(ver.init_at - if p.dead { ver.dead_adj } else { 0 });
+    hw.wait(ver.init_at);
     p.init(1, &mut hw);
     Some(Box::new(p))
 }
@@ -2455,7 +2446,19 @@ impl Replayer for Tfmx {
     }
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
-        if self.ver.init_stop {
+        if self.dead {
+            // UADE's player stops the DMA and silences all four voices
+            // (measured from its logs)
+            self.trace.write(hw, "dma");
+            hw.dmacon(0x000f);
+            hw.wait(8);
+            for ch in 0..4 {
+                self.trace.write(hw, "vol");
+                hw.vol(ch, 0);
+                hw.wait(6);
+            }
+            hw.wait(1160);
+        } else if self.ver.init_stop {
             // the stop the Eagleplayer asks for first
             self.trace.write(hw, "dma");
             hw.dmacon(0x000f);
@@ -2628,7 +2631,7 @@ impl Tfmx {
             } else {
                 // InitPlayer's loops over the subsongs and samples
                 let total = self.ver.init_k + 9 * self.samples_n + (584 * self.subsongs_n + 5) / 10;
-                if self.ver.init_stop {
+                if self.ver.init_stop && !self.dead {
                     // the stop the Eagleplayer asks for first
                     hw.wait(self.ver.led_gap);
                     self.trace.write(hw, "dma");
@@ -2644,7 +2647,6 @@ impl Tfmx {
             return;
         }
         self.sub = n;
-        let same = self.dead;
         // the subsong's start, end and speed: the replayer steps through its
         // table of 6-byte entries by 4 bytes, so a subsong past the first reads
         // the words of two entries
@@ -2709,17 +2711,6 @@ impl Tfmx {
         }
         if first {
             hw.wait(self.ver.init_tail);
-        }
-        if same {
-            // the saved variable says a song is playing: not started
-            for v in self.voices.iter_mut() {
-                v.track_transpose = 0;
-                v.env_transpose = 0;
-            }
-            self.speed = 0;
-            self.counter = 0;
-            self.stopped = false;
-            return;
         }
         self.counter = if self.ver.counter_from_speed { self.speed } else { 1 };
         self.stopped = false;

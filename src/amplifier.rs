@@ -543,6 +543,12 @@ pub fn start(m: &mut Machine, n: usize, structs: u32, flags: u32) -> bool {
     start_with(m, n, structs, flags, None, 100)
 }
 
+/// `start` with the boost at `gain` percent of the default's, for a player whose
+/// original mixes louder than the 8 Bit Amplifier's factory settings.
+pub fn start_gain(m: &mut Machine, n: usize, structs: u32, flags: u32, gain: u32) -> bool {
+    start_with(m, n, structs, flags, None, gain)
+}
+
 /// The same for poked voices whose sides the player chooses: `pans[v]` positive
 /// left, negative right, 0 the Amiga LRRL side of voice `v`; `gain` is the boost
 /// in percent of the default's (100: as `start`), for a player whose mix is not

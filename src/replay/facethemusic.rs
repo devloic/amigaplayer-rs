@@ -275,7 +275,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         m.bus.w16(structs + v as u32 * crate::amplifier::aus::SIZE + crate::amplifier::aus::PAN, if left { 1 } else { 0xFFFF });
     }
     use crate::eagle::epamb;
-    if !crate::amplifier::start(m, 8, structs, epamb::DIRECT | epamb::BIT8 | epamb::CHIP_RAM) {
+    // the Eagleplayer, two tracks to each of Paula's four channels, plays 11.8 dB
+    // (median of 55 modules) louder than the amplifier's factory boost does with
+    // its one channel a side; 360 percent of it puts the port at -0.5 dB (-5.3 to
+    // +2.0), at the cost of the 8-bit mix clipping in 4 of them (1 in the original)
+    if !crate::amplifier::start_gain(m, 8, structs, epamb::DIRECT | epamb::BIT8 | epamb::CHIP_RAM, 360) {
         return None;
     }
 

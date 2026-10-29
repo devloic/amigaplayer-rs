@@ -7,12 +7,16 @@
 
 pub mod amf;
 pub mod c669;
+pub mod gal4;
+pub mod gal5;
 pub mod gdm;
 pub mod mgt;
 pub mod masi;
 pub mod masi16;
+pub mod mdl;
 pub mod mfp;
 pub mod mtm;
+pub mod muse;
 pub mod ult;
 pub mod rtm;
 pub mod stx;

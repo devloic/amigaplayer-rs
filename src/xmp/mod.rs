@@ -14,6 +14,7 @@
 
 pub mod effects;
 pub mod iff;
+pub mod inflate;
 pub mod load;
 pub mod loaders;
 pub mod mixer;
@@ -38,11 +39,15 @@ pub struct Loader {
 pub static LOADERS: &[Loader] = &[
     Loader { name: "STMIK 0.2", test: loaders::stx::test, load: loaders::stx::load },
     Loader { name: "MultiTracker", test: loaders::mtm::test, load: loaders::mtm::load },
+    Loader { name: "Digitrakker", test: loaders::mdl::test, load: loaders::mdl::load },
     Loader { name: "Ultra Tracker", test: loaders::ult::test, load: loaders::ult::load },
     Loader { name: "General Digital Music", test: loaders::gdm::test, load: loaders::gdm::load },
     Loader { name: "Megatracker", test: loaders::mgt::test, load: loaders::mgt::load },
     Loader { name: "Epic MegaGames MASI", test: loaders::masi::test, load: loaders::masi::load },
     Loader { name: "Epic MegaGames MASI 16", test: loaders::masi16::test, load: loaders::masi16::load },
+    Loader { name: "MUSE container", test: loaders::muse::test, load: loaders::muse::load },
+    Loader { name: "Galaxy Music System 5.0 (J2B)", test: loaders::gal5::test, load: loaders::gal5::load },
+    Loader { name: "Galaxy Music System 4.0", test: loaders::gal4::test, load: loaders::gal4::load },
     Loader { name: "DSMI Advanced Module Format", test: loaders::amf::test, load: loaders::amf::load },
     Loader { name: "Real Tracker", test: loaders::rtm::test, load: loaders::rtm::load },
     Loader { name: "Composer 669", test: loaders::c669::test, load: loaders::c669::load },

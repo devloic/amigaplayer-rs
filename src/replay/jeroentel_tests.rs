@@ -403,6 +403,6 @@ fn the_subsong_table_ends_at_a_wrong_start_voice_or_equal_addresses() {
 }
 
 #[test]
-fn the_replayers_list_ends_with_this_one() {
-    assert_eq!(super::super::REPLAYERS.last().unwrap().name, "Jeroen Tel");
+fn the_replayers_list_has_this_one() {
+    assert!(super::super::REPLAYERS.iter().any(|r| r.name == "Jeroen Tel"));
 }

@@ -76,6 +76,7 @@ pub mod soundtracker;
 pub mod synthesis;
 pub mod synthpack;
 pub mod tfmx;
+pub mod timfollin;
 pub mod tcbtracker;
 pub mod tme;
 pub mod wallybeben;
@@ -215,6 +216,7 @@ pub const REPLAYERS: &[Open] = &[
     soundimages::OPEN,
     andrewparton::OPEN,
     soundmaster::OPEN,
+    timfollin::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

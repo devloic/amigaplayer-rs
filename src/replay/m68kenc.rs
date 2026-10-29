@@ -230,6 +230,38 @@ pub fn move_b_pcidx_disp(dm: u16, at: usize, target: usize, ar: u16, disp: i16) 
 pub fn add_w_pcidx_d(dm: u16, at: usize, target: usize, n: u16) -> Vec<u16> {
     vec![0xD << 12 | n << 9 | 1 << 6 | 7 << 3 | 3, dm << 12 | ((target as i64 - (at as i64 + 2)) as i8 as u8 as u16)]
 }
+/// `cmpi.w #imm,(an)`.
+pub fn cmpi_w_ind(imm: u16, n: u16) -> Vec<u16> {
+    vec![6 << 9 | 1 << 6 | 2 << 3 | n, imm]
+}
+/// `tst.b dn`.
+pub fn tst_b_d(n: u16) -> Vec<u16> {
+    vec![0x4A << 8 | n]
+}
+/// `move.b #imm,dn`.
+pub fn move_b_imm_d(imm: u8, n: u16) -> Vec<u16> {
+    vec![MB << 12 | n << 9 | IMM, imm as u16]
+}
+/// `btst #bit,d16(an)`.
+pub fn btst_imm_disp(bit: u8, n: u16, disp: i16) -> Vec<u16> {
+    vec![4 << 9 | 5 << 3 | n, bit as u16, disp as u16]
+}
+/// `lsr.w #count,dn`.
+pub fn lsr_w_imm(count: u16, n: u16) -> Vec<u16> {
+    vec![0xE << 12 | count << 9 | 1 << 6 | 1 << 3 | n]
+}
+/// `addi.b #imm,dn`.
+pub fn addi_b_d(imm: u8, n: u16) -> Vec<u16> {
+    vec![3 << 9 | n, imm as u16]
+}
+/// `move.l #imm,d16(an)`.
+pub fn move_l_imm_disp(imm: u32, n: u16, disp: i16) -> Vec<u16> {
+    [&[ML << 12 | n << 9 | 5 << 6 | IMM][..], &l(imm), &[disp as u16]].concat()
+}
+/// `rte`.
+pub fn rte() -> Vec<u16> {
+    vec![0x4E << 8 | 0x73]
+}
 /// `move.<size> #imm,abs.l` for word and long are `move_w_imm_abs`, `move_l_imm_abs`.
 pub fn size_code(s: u16) -> u16 {
     mv_size(s)
@@ -384,6 +416,28 @@ mod tests {
         assert_eq!((i.k, i.size), (K::Move, 4));
         let i = dec(movea_l_imm(3, 0x1000));
         assert_eq!((i.k, i.dst), (K::Movea, Ea::A(3)));
+        let i = dec(lea_pc(2, -2));
+        assert_eq!((i.k, i.src, i.dst), (K::Lea, Ea::Pc(0), Ea::A(2)));
+        let i = dec(cmpi_w_ind(1, 0));
+        assert_eq!((i.k, i.size, i.dst), (K::Imm(6), 2, Ea::Ind(0)));
+        assert!(matches!(i.src, Ea::Imm { val: 1, .. }));
+        let i = dec(tst_b_d(1));
+        assert_eq!((i.k, i.size, i.dst), (K::Tst, 1, Ea::D(1)));
+        let i = dec(move_b_imm_d(1, 1));
+        assert_eq!((i.k, i.size, i.dst), (K::Move, 1, Ea::D(1)));
+        assert!(matches!(i.src, Ea::Imm { val: 1, .. }));
+        let i = dec(btst_imm_disp(6, 6, 28));
+        assert_eq!((i.k, i.dst), (K::Bit(0), Ea::Disp(6, 28)));
+        assert!(matches!(i.src, Ea::Imm { val: 6, .. }));
+        let i = dec(lsr_w_imm(7, 0));
+        assert_eq!((i.k, i.size, i.data, i.left, i.shk, i.dst), (K::Shift, 2, 7, false, 1, Ea::D(0)));
+        let i = dec(addi_b_d(12, 0));
+        assert_eq!((i.k, i.size, i.dst), (K::Imm(3), 1, Ea::D(0)));
+        assert!(matches!(i.src, Ea::Imm { val: 12, .. }));
+        let i = dec(move_l_imm_disp(0x1234, 4, 160));
+        assert_eq!((i.k, i.size, i.dst), (K::Move, 4, Ea::Disp(4, 160)));
+        assert!(matches!(i.src, Ea::Imm { val: 0x1234, .. }));
+        assert_eq!(dec(rte()).k, K::Rte);
         assert_eq!(dec(lsr_b_imm(1, 2)).k, K::Shift);
         assert_eq!(dec(cmp_b_imm_d(3, 2)).k, K::Cmp);
         assert_eq!(dec(tst_b_abs(0x10)).k, K::Tst);

@@ -68,6 +68,7 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Real Tracker", test: loaders::rtm::test, load: loaders::rtm::load },
     Loader { name: "Digital Tracker", test: loaders::dt::test, load: loaders::dt::load },
     Loader { name: "Farandole Composer", test: loaders::far::test, load: loaders::far::load },
+    Loader { name: "Epic Games UMX", test: loaders::umx::test, load: loaders::umx::load },
     Loader { name: "Coconizer", test: loaders::coco::test, load: loaders::coco::load },
     Loader { name: "Images Music System", test: loaders::ims::test, load: loaders::ims::load },
     Loader { name: "Composer 669", test: loaders::c669::test, load: loaders::c669::load },

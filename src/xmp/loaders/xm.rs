@@ -442,6 +442,12 @@ fn load_instruments(m: &mut ModuleData, version: u16, mpt_ins_headers: &mut bool
 }
 
 pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
+    load_at(m, f, 0)
+}
+
+/// `xm_load` for a module that starts at `start` in `f`.
+pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> {
+    f.seek(start);
     let mut buf = [0u8; 80];
     if f.read(&mut buf) != 80 {
         return Err(());
@@ -534,7 +540,7 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
     m.module.type_ = format!("{} {vstr}", String::from_utf8_lossy(&tn));
 
     // the header size, honoured
-    f.seek(headersz as usize + 60);
+    f.seek(start + headersz as usize + 60);
 
     let mut mpt_ins_headers = false;
     // XM 1.02/1.03: instruments before patterns

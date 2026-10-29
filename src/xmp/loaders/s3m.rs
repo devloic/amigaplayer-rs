@@ -200,6 +200,12 @@ fn tracker(m: &mut ModuleData, h: &[u8]) -> String {
 }
 
 pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
+    load_at(m, f, 0)
+}
+
+/// `s3m_load` for a module that starts at `start` in `f`.
+pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> {
+    f.seek(start);
     let mut h = [0u8; 96];
     if f.read(&mut h) != 96 {
         return Err(());
@@ -321,7 +327,7 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
         if pp_pat[i] == 0 {
             continue;
         }
-        f.seek(pp_pat[i] * 16);
+        f.seek(start + pp_pat[i] * 16);
         let mut r = 0;
         let mut pat_len = f.read16l() as i32 - 2;
         while pat_len >= 0 && r < 64 {
@@ -360,7 +366,7 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
     m.init_instrument();
     let mut buf = [0u8; 80];
     for i in 0..insnum {
-        f.seek(pp_ins[i] * 16);
+        f.seek(start + pp_ins[i] * 16);
         if f.read(&mut buf) != 80 {
             return Err(());
         }
@@ -422,7 +428,7 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
         xxi.name = copy_adjust(&buf[48..76], 28);
         xxi.sub = vec![sub];
 
-        f.seek(16 * (memseg + (memseg_hi << 16)));
+        f.seek(start + 16 * (memseg + (memseg_hi << 16)));
         load_sample(m, f, load_flags, i, None)?;
     }
 

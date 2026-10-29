@@ -102,7 +102,7 @@ struct InsHeader {
 
 /// `libxmp_copy_name_for_fopen`: the instrument name as a relative file name,
 /// or None for one that could reach outside the directory.
-fn name_for_fopen(name: &str, n: usize) -> Option<String> {
+pub(crate) fn name_for_fopen(name: &str, n: usize) -> Option<String> {
     let b = name.as_bytes();
     if name == "." || name.contains("..") || b.is_empty() || matches!(b[0], b'\\' | b'/' | b':') {
         return None;
@@ -131,7 +131,7 @@ fn name_for_fopen(name: &str, n: usize) -> Option<String> {
 /// `libxmp_find_instrument_file` + `hio_open`: the sample file `name` in
 /// `XMP_INSTRUMENT_PATH`, else in the song's directory. libxmp matches the
 /// directory entry ignoring case, then opens the name as given.
-fn read_instrument_file(m: &ModuleData, name: &str) -> Option<Vec<u8>> {
+pub(crate) fn read_instrument_file(m: &ModuleData, name: &str) -> Option<Vec<u8>> {
     let probe = |dir: &str| -> Option<Vec<u8>> {
         let dir = if dir.is_empty() { "." } else { dir };
         let found = std::fs::read_dir(dir).ok()?.flatten().any(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name));

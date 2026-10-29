@@ -504,6 +504,9 @@ pub fn disable_continue_fx(e: &mut Event) {
             0x01 | 0x02 | 0x0a => e.fxt = 0x00,
             _ => {}
         }
+    } else if e.fxt == 0x0e && (e.fxp == 0xa0 || e.fxp == 0xb0) {
+        e.fxt = 0;
+        e.fxp = 0;
     }
 }
 
@@ -555,4 +558,18 @@ pub fn schism_tracker_string(s_ver: i32, l_ver: i32) -> String {
     } else {
         format!("Schism Tracker 0.{s_ver:x}")
     }
+}
+
+/// `libxmp_decode_noisetracker_event`: a four-byte NoiseTracker event (no
+/// effects 7-9 and E).
+pub fn decode_noisetracker_event(e: &mut Event, b: &[u8]) {
+    *e = Event::default();
+    e.note = super::player::period_to_note(((lsn(b[0]) as i32) << 8) + b[1] as i32) as u8;
+    e.ins = (msn(b[0]) << 4) | msn(b[2]);
+    let fxt = lsn(b[2]);
+    if fxt <= 0x06 || (fxt >= 0x0a && fxt != 0x0e) {
+        e.fxt = fxt;
+        e.fxp = b[3];
+    }
+    disable_continue_fx(e);
 }

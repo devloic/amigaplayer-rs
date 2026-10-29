@@ -93,6 +93,7 @@ pub mod soundmaster;
 pub mod soundmon;
 pub mod soundtracker;
 pub mod st26;
+pub mod synthdream;
 pub mod synthesis;
 pub mod synthpack;
 pub mod tfmx;
@@ -257,6 +258,7 @@ pub const REPLAYERS: &[Open] = &[
     fashiontracker::OPEN,
     ems::OPEN,
     steveturner::OPEN,
+    synthdream::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

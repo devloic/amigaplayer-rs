@@ -560,7 +560,7 @@ impl Engine {
                 }
             }
             // the PC tracker formats of libxmp's loaders
-            if let Some(x) = crate::xmp::XmpPlayer::new(&data, self.rate as u32) {
+            if let Some(x) = crate::xmp::XmpPlayer::open(&data, self.rate as u32, Some(path)) {
                 self.m.deli.list.clear();
                 self.m.heap.free(addr);
                 return self.start_mix(Box::new(x), path);

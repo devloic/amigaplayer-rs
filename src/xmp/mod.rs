@@ -13,6 +13,7 @@
 //! epilogue, scan and player on it and renders 16-bit stereo at any rate.
 
 pub mod effects;
+pub mod iff;
 pub mod load;
 pub mod loaders;
 pub mod mixer;
@@ -39,7 +40,11 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Ultra Tracker", test: loaders::ult::test, load: loaders::ult::load },
     Loader { name: "General Digital Music", test: loaders::gdm::test, load: loaders::gdm::load },
     Loader { name: "Megatracker", test: loaders::mgt::test, load: loaders::mgt::load },
+    Loader { name: "Epic MegaGames MASI", test: loaders::masi::test, load: loaders::masi::load },
+    Loader { name: "Epic MegaGames MASI 16", test: loaders::masi16::test, load: loaders::masi16::load },
+    Loader { name: "DSMI Advanced Module Format", test: loaders::amf::test, load: loaders::amf::load },
     Loader { name: "Composer 669", test: loaders::c669::test, load: loaders::c669::load },
+    Loader { name: "Magnetic Fields Packer", test: loaders::mfp::test, load: loaders::mfp::load },
 ];
 
 /// The loader that claims `data`, if any.
@@ -49,8 +54,18 @@ pub fn detect(data: &[u8]) -> Option<&'static Loader> {
 
 /// `xmp_load_module`: the module in `data`, checked and scanned.
 pub fn load_module(data: &[u8]) -> Option<Context> {
+    load_module_at(data, None)
+}
+
+/// `load_module` for a module read from `path`: the loaders that need a
+/// companion file (Magnetic Fields Packer's `smp.*`) look for it next to it.
+pub fn load_module_at(data: &[u8], path: Option<&std::path::Path>) -> Option<Context> {
     let loader = detect(data)?;
     let mut m = ModuleData::default();
+    if let Some(p) = path {
+        m.dirname = p.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+        m.basename = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    }
     (loader.load)(&mut m, &mut Hio::new(data)).ok()?;
     load::load_epilogue(&mut m).ok()?;
     let mut ctx = Context::new(m);
@@ -72,7 +87,12 @@ pub struct XmpPlayer {
 impl XmpPlayer {
     /// Loads `data` and starts it at `rate` Hz, sequence 0.
     pub fn new(data: &[u8], rate: u32) -> Option<XmpPlayer> {
-        let ctx = load_module(data)?;
+        XmpPlayer::open(data, rate, None)
+    }
+
+    /// `new` for a module read from `path` (companion files are looked for there).
+    pub fn open(data: &[u8], rate: u32, path: Option<&std::path::Path>) -> Option<XmpPlayer> {
+        let ctx = load_module_at(data, path)?;
         let mut p = XmpPlayer { ctx, rate: rate as i32, pending: Vec::new(), at: 0, ended: false, subsong: 0 };
         p.start(0);
         Some(p)

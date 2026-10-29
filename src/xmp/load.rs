@@ -38,12 +38,35 @@ impl<'a> Hio<'a> {
         self.pos
     }
 
+    /// `hio_seek(f, pos, SEEK_SET)`: clamped to the end, clears an end-of-file error.
     pub fn seek(&mut self, pos: usize) {
-        self.pos = pos;
+        self.pos = pos.min(self.data.len());
+        self.error = false;
+    }
+
+    /// `hio_seek(f, off, SEEK_CUR)`: false if it would go before the start.
+    pub fn seek_cur(&mut self, off: i64) -> bool {
+        let ofs = self.pos as i64 + off;
+        if ofs < 0 {
+            self.error = true;
+            return false;
+        }
+        self.seek(ofs as usize);
+        true
+    }
+
+    /// `hio_error`: the error flag, cleared.
+    pub fn take_error(&mut self) -> bool {
+        std::mem::replace(&mut self.error, false)
+    }
+
+    /// `hio_eof`.
+    pub fn eof(&self) -> bool {
+        self.pos >= self.data.len()
     }
 
     pub fn skip(&mut self, n: usize) {
-        self.pos = self.pos.saturating_add(n);
+        self.seek(self.pos.saturating_add(n));
     }
 
     pub fn read8(&mut self) -> u8 {
@@ -54,7 +77,7 @@ impl<'a> Hio<'a> {
             }
             None => {
                 self.error = true;
-                0
+                0xff
             }
         }
     }
@@ -82,7 +105,7 @@ impl<'a> Hio<'a> {
         if self.data.len().saturating_sub(self.pos) < N {
             self.error = true;
             self.pos = self.data.len();
-            return [0; N];
+            return [0xff; N];
         }
         b.copy_from_slice(&self.data[self.pos..self.pos + N]);
         self.pos += N;
@@ -418,4 +441,29 @@ pub fn c2spd_to_note(c2spd: i32) -> (i32, i32) {
     }
     let c = (1536.0 * (c2spd as f64 / 8363.0).ln() / std::f64::consts::LN_2) as i32;
     (c / 128, c % 128)
+}
+
+/// `libxmp_disable_continue_fx`.
+pub fn disable_continue_fx(e: &mut Event) {
+    if e.fxp == 0 {
+        match e.fxt {
+            0x05 => e.fxt = 0x03,
+            0x06 => e.fxt = 0x04,
+            0x01 | 0x02 | 0x0a => e.fxt = 0x00,
+            _ => {}
+        }
+    }
+}
+
+/// `libxmp_decode_protracker_event`: a four-byte ProTracker event.
+pub fn decode_protracker_event(e: &mut Event, b: &[u8]) {
+    let fxt = lsn(b[2]);
+    *e = Event::default();
+    e.note = super::player::period_to_note(((lsn(b[0]) as i32) << 8) + b[1] as i32) as u8;
+    e.ins = (msn(b[0]) << 4) | msn(b[2]);
+    if fxt != 0x08 {
+        e.fxt = fxt;
+        e.fxp = b[3];
+    }
+    disable_continue_fx(e);
 }

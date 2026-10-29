@@ -588,6 +588,10 @@ pub struct ModuleData {
     pub seq_data: [Sequence; MAX_SEQUENCES],
     pub xtra: Vec<ExtraSample>,
     pub compare_vblank: bool,
+    /// Where the module was loaded from (`m->dirname`, `m->basename`), for the
+    /// loaders that look for a companion file; empty for a module in memory.
+    pub dirname: String,
+    pub basename: String,
     /// Scan counters, a row each per order (`m->scan_cnt`).
     pub scan_cnt: Vec<Vec<u8>>,
 }
@@ -618,6 +622,8 @@ impl Default for ModuleData {
             seq_data: [Sequence::default(); MAX_SEQUENCES],
             xtra: Vec::new(),
             compare_vblank: false,
+            dirname: String::new(),
+            basename: String::new(),
             scan_cnt: Vec::new(),
         };
         for i in 0..XMP_MAX_CHANNELS {

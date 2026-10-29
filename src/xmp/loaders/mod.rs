@@ -5,8 +5,12 @@
 //! `test` takes the whole file, `load` fills a `ModuleData` left as
 //! `libxmp_load_prologue` sets it, and is registered in `xmp::LOADERS`.
 
+pub mod amf;
 pub mod c669;
 pub mod gdm;
 pub mod mgt;
+pub mod masi;
+pub mod masi16;
+pub mod mfp;
 pub mod mtm;
 pub mod ult;

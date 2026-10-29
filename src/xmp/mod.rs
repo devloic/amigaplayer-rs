@@ -47,6 +47,7 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Imago Orpheus v1.0", test: loaders::imf::test, load: loaders::imf::load },
     Loader { name: "Ultra Tracker", test: loaders::ult::test, load: loaders::ult::load },
     Loader { name: "Liquid Tracker", test: loaders::liq::test, load: loaders::liq::load },
+    Loader { name: "Liquid Tracker NO", test: loaders::no::test, load: loaders::no::load },
     Loader { name: "General Digital Music", test: loaders::gdm::test, load: loaders::gdm::load },
     Loader { name: "Megatracker", test: loaders::mgt::test, load: loaders::mgt::load },
     Loader { name: "Epic MegaGames MASI", test: loaders::masi::test, load: loaders::masi::load },

@@ -76,13 +76,12 @@ pub fn detect(data: &[u8]) -> Option<&'static Loader> {
 
 /// The loaders (by name) whose formats the open chain — `open::detect`, which
 /// gates the wasm, and the engine with `open_replayers` — leaves to the players
-/// that had them before the port: XM goes to the 68k FastTracker_2.0 player
-/// natively and, in the archive's web app, past the open replayers to UADE and
-/// then ft2play. Remove "Fast Tracker II" to play XMs on the libxmp port there.
-/// S3M and STM likewise go natively to the 68k ScreamTracker_3.0 Eagleplayer and,
-/// in the web app, to st3play; remove "Scream Tracker 3" / "Scream Tracker 2" to
-/// play them on the port.
-pub const LEFT_TO_OTHER_PLAYERS: &[&str] = &["Fast Tracker II", "Scream Tracker 3", "Scream Tracker 2"];
+/// that had them before the port. Empty: XM, S3M and STM, which went natively to
+/// the 68k FastTracker_2.0 player and ScreamTracker_3.0 Eagleplayer and, in the
+/// archive's web app, past the open replayers to UADE and ft2play / st3play, play
+/// on the libxmp port. Add a loader's name ("Fast Tracker II", "Scream Tracker 3",
+/// "Scream Tracker 2") to hand its format back to those players.
+pub const LEFT_TO_OTHER_PLAYERS: &[&str] = &[];
 
 /// `detect`, for the open chain: None for a format in `LEFT_TO_OTHER_PLAYERS`.
 pub fn detect_open(data: &[u8]) -> Option<&'static Loader> {

@@ -59,7 +59,7 @@
 //!   portamento, the volume clamp), and the "9x" version has its own costs
 //!   (`At::cost9`); all fitted to the timings seen across the modules;
 //! * the audio interrupt handler takes the interrupt bits as they stood at the
-//!   player's last register write, as deliplayer passes them to 68k handlers.
+//!   player's last register write, as amigaplayer-rs passes them to 68k handlers.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -860,7 +860,7 @@ impl Replayer for BenDaglish {
         hw.wait(self.pend.max(0) as u64);
         self.pend = 0;
         // the handler's interrupt bits as they stood at the 68k's last register
-        // access, as deliplayer passes them to 68k handlers (not synced to now)
+        // access, as amigaplayer-rs passes them to 68k handlers (not synced to now)
         let bits = hw.bus.paula.intreq & hw.bus.paula.intena & 0x0780;
         if bits == 0 {
             // taken with an earlier one's

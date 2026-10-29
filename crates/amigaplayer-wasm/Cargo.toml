@@ -1,6 +1,6 @@
 [package]
-name = "deliplayer-wasm"
-description = "The open replayers for the browser: deliplayer's engine with no 68k player files, behind a small C ABI (see src/lib.rs and deliplayer.mjs)."
+name = "amigaplayer-wasm"
+description = "The open replayers for the browser: amigaplayer-rs's engine with no 68k player files, behind a small C ABI (see src/lib.rs and amigaplayer.mjs)."
 edition = "2024"
 version = "0.1.0"
 license = "GPL-2.0-or-later"
@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # No SDL window, and none of the players recompiled from the user's own files.
-deliplayer = { path = "../..", default-features = false }
+amigaplayer-rs = { path = "../..", default-features = false }
 
 [profile.release]
 opt-level = 3

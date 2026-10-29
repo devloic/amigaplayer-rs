@@ -49,7 +49,7 @@ pub const OPEN: Open = Open { name: "AMOS Music Bank", detect, new };
 /// The arpeggio's periods. The original's table is followed by two zero words
 /// and the end of its hunk; an arpeggio that goes more than two steps past its
 /// last period (113) reads on past it, into what the host loaded next (in
-/// deliplayer the next DeliPlayer's hunk header and code), where this reads
+/// amigaplayer-rs the next DeliPlayer's hunk header and code), where this reads
 /// zeros, as NostalgicPlayer.
 const PERIODS: [u16; 36] = [
     856, 808, 762, 720, 678, 640, 604, 570, 538, 508, 480, 453, 428, 404, 381, 360, 339, 320, 302, 285, 269,

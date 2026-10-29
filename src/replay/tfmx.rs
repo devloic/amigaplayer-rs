@@ -1,7 +1,7 @@
 //! TFMX (Chris Hülsbeck), ported from NostalgicPlayer's TFMX player
 //! (Copyright (c) 2023 Thomas Neumann, MIT licence: see LICENSE-NostalgicPlayer),
 //! whose engine is NostalgicPlayer's port of libTfmxAudioDecoder (GPL-2.0-or-later),
-//! so this file is GPL-2.0-or-later, like the rest of deliplayer (see LICENSE).
+//! so this file is GPL-2.0-or-later, like the rest of amigaplayer-rs (see LICENSE).
 //!
 //! A TFMX song is two files: `mdat.NAME` (the song: tracks, patterns, macros)
 //! and `smpl.NAME` (the samples). NostalgicPlayer plays all three kinds (1.5,
@@ -5081,7 +5081,7 @@ mod tests {
 
     /// `play` with the samples in the file `smpl_name`.
     fn play_smpl(name: &str, mdat: Vec<u8>, smpl_name: &str) -> (String, Vec<(u32, u16, u64)>) {
-        let dir = std::env::temp_dir().join(format!("deliplayer-tfmx-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amigaplayer-tfmx-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let smpl: Vec<u8> = (0..64).map(|i| if i < 32 { 0x40 } else { 0xc0 }).collect();
         std::fs::write(dir.join(smpl_name), smpl).unwrap();
@@ -5226,7 +5226,7 @@ mod tests {
 
     #[test]
     fn seven_voices_mixes_voices_4_to_7() {
-        let dir = std::env::temp_dir().join(format!("deliplayer-tfmx-test-7v4-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amigaplayer-tfmx-test-7v4-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let smpl: Vec<u8> = (0..64).map(|i| if i < 32 { 0x40 } else { 0xc0 }).collect();
         std::fs::write(dir.join("smpl.test"), smpl).unwrap();

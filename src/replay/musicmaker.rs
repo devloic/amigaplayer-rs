@@ -9,7 +9,7 @@
 //! The 8-voice songs are in `musicmaker8.rs`, which shares the module reading.
 //!
 //! Checked against the original as UADE runs it (`MusicMaker-4V`, built from
-//! that source; DeliTracker's Eagleplayer of it stays silent in deliplayer), and
+//! that source; DeliTracker's Eagleplayer of it stays silent in amigaplayer-rs), and
 //! timed as UADE's run takes: every write within a few colour clocks of it.
 //!
 //! The replayer runs on its own CIA-B timer B, one-shot, re-armed at the start

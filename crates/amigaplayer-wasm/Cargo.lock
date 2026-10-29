@@ -12,6 +12,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "amigaplayer-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "m68k",
+ "m68k-rc",
+ "players-native",
+]
+
+[[package]]
+name = "amigaplayer-wasm"
+version = "0.1.0"
+dependencies = [
+ "amigaplayer-rs",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -108,25 +127,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71958f69fb2de856c5dd51ac9377e986ca1aa5919f931bf5395a807277f889a0"
 dependencies = [
  "thiserror",
-]
-
-[[package]]
-name = "deliplayer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "m68k",
- "m68k-rc",
- "players-native",
-]
-
-[[package]]
-name = "deliplayer-wasm"
-version = "0.1.0"
-dependencies = [
- "deliplayer",
 ]
 
 [[package]]

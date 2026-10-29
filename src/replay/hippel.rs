@@ -436,7 +436,7 @@ include!("hippel_tables.rs");
 
 /// A note's period. The original's table (PERIODS) ends its code hunk with one
 /// word after it, $2443; notes past that (up to 127) read whatever memory
-/// follows the hunk. In deliplayer that is the next Eagleplayer loaded, so
+/// follows the hunk. In amigaplayer-rs that is the next Eagleplayer loaded, so
 /// the reference writes periods such as $0001 and $456c there (26 of the
 /// corpus's modules); on an Amiga it is any memory, and the port reads 0.
 fn note_period(n: u8) -> u16 {

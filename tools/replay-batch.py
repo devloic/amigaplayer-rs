@@ -1,7 +1,7 @@
 """Check an open replayer against a 68k player on many modules.
 
     python3 -I tools/replay-batch.py --player 'SIDMon 2.0' --format SidMon2 \
-        --out DIR [--seconds 20] [--bin target/release/deliplayer] [--in-place]
+        --out DIR [--seconds 20] [--bin target/release/amigaplayer-rs] [--in-place]
         [--tick-gap CLOCKS] [--eagleplayers DIR] LIST
 
 LIST has one module path per line (a missing file is also looked for as
@@ -25,7 +25,7 @@ ap.add_argument('--player', required=True)
 ap.add_argument('--format', required=True)
 ap.add_argument('--out', required=True)
 ap.add_argument('--seconds', default='20')
-ap.add_argument('--bin', default=os.path.join(HERE, '..', 'target', 'release', 'deliplayer'))
+ap.add_argument('--bin', default=os.path.join(HERE, '..', 'target', 'release', 'amigaplayer-rs'))
 ap.add_argument('--in-place', action='store_true')
 ap.add_argument('--tick-gap')
 ap.add_argument('--eagleplayers', help='Eagleplayer directory for the reference run (the port runs with none)')

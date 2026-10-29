@@ -1,6 +1,6 @@
 mod ui;
 
-use deliplayer::{default_eagleplayers_dir, default_genies_dir, default_players_dir, engine, SAMPLE_RATE};
+use amigaplayer_rs::{default_eagleplayers_dir, default_genies_dir, default_players_dir, engine, SAMPLE_RATE};
 
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -22,18 +22,18 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: deliplayer [--players DIR] [--eagleplayers DIR] [--player NAME] [--open-replayers]\n\
+        "usage: amigaplayer-rs [--players DIR] [--eagleplayers DIR] [--player NAME] [--open-replayers]\n\
          \x20                 [--genies DIR] [--genie NAME]... [--noteplayer NAME]\n\
          \x20                 [--wav OUT.wav [--seconds N] [--subsong N] [--led on|off] [--volume V]]\n\
          \x20                 [FILES/DIRS...]\n\
          \n\
          Without --wav the SDL3 player window opens with FILES as the module list.\n\
          --players DIR holds the original 68k DeliPlayers (default: $DELIPLAYERS,\n\
-         ~/.config/deliplayer/DeliPlayers, ./DeliPlayers), --eagleplayers DIR the\n\
-         Eagleplayers (default: $EAGLEPLAYERS, ~/.config/deliplayer/Eagleplayers,\n\
+         ~/.config/amigaplayer-rs/DeliPlayers, ./DeliPlayers), --eagleplayers DIR the\n\
+         Eagleplayers (default: $EAGLEPLAYERS, ~/.config/amigaplayer-rs/Eagleplayers,\n\
          ./Eagleplayers); DeliPlayers are tried first. --player NAME tries only the\n\
          player of that name. --genies DIR holds the DeliGenies (default: $DELIGENIES,\n\
-         ~/.config/deliplayer/DeliGenies, ./DeliGenies); --genie NAME runs one, and a\n\
+         ~/.config/amigaplayer-rs/DeliGenies, ./DeliGenies); --genie NAME runs one, and a\n\
          NotePlayer genie (--noteplayer NAME) plays the notes of _note players\n\
          (default: 4Voices-NotePlayer when installed; --noteplayer builtin has the\n\
          built-in renderer play them). --open-replayers plays the formats the\n\
@@ -198,7 +198,7 @@ fn main() {
         )
     };
     if let Err(e) = r {
-        eprintln!("deliplayer: {e:#}");
+        eprintln!("amigaplayer-rs: {e:#}");
         std::process::exit(1);
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the archive's web player with the open replayers: rebuilds deliplayer.wasm
+# Runs the archive's web player with the open replayers: rebuilds amigaplayer.wasm
 # when the Rust sources are newer, copies it into the web app, and starts the web
 # app's server.
 #
@@ -34,19 +34,19 @@ fi
 
 # The wasm build stays on the internal disk, away from the USB drives.
 target="${DELI_WASM_TARGET:-$HOME/.devcache/cargo-target-wasm}"
-wasm="$target/wasm32-unknown-unknown/release/deliplayer_wasm.wasm"
-dest="$app/webapp/static/uade/deliplayer.wasm"
+wasm="$target/wasm32-unknown-unknown/release/amigaplayer_wasm.wasm"
+dest="$app/webapp/static/uade/amigaplayer.wasm"
 
-newer=$(find "$here/src" "$here/crates/deliplayer-wasm/src" "$here/Cargo.toml" \
-             "$here/crates/deliplayer-wasm/Cargo.toml" -newer "$dest" -print -quit 2>/dev/null || true)
+newer=$(find "$here/src" "$here/crates/amigaplayer-wasm/src" "$here/Cargo.toml" \
+             "$here/crates/amigaplayer-wasm/Cargo.toml" -newer "$dest" -print -quit 2>/dev/null || true)
 if [ ! -f "$dest" ] || [ -n "$newer" ]; then
-    echo "building deliplayer.wasm..."
-    (cd "$here/crates/deliplayer-wasm" &&
+    echo "building amigaplayer.wasm..."
+    (cd "$here/crates/amigaplayer-wasm" &&
         cargo build --release --target wasm32-unknown-unknown --target-dir "$target")
     cp "$wasm" "$dest"
     echo "copied $(du -h "$dest" | cut -f1) to $dest"
 else
-    echo "deliplayer.wasm is up to date"
+    echo "amigaplayer.wasm is up to date"
 fi
 
 echo "web player: http://127.0.0.1:$port/"

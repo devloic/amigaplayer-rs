@@ -1,14 +1,14 @@
 #!/bin/sh
 # Downloads Eagleplayer 2.06 from Aminet and installs its 68k Eagleplayers
-# where deliplayer looks for them (~/.config/deliplayer/Eagleplayers).
+# where amigaplayer-rs looks for them (~/.config/amigaplayer-rs/Eagleplayers).
 #
-#   tools/fetch-eagleplayers.sh [DEST]      (default DEST: ~/.config/deliplayer)
+#   tools/fetch-eagleplayers.sh [DEST]      (default DEST: ~/.config/amigaplayer-rs)
 #   EP_ARCHIVE=/path/Eagleplayer.lha tools/fetch-eagleplayers.sh   (skip download)
 #
 # Needs curl and lhasa.
 set -eu
 
-dest="${1:-$HOME/.config/deliplayer}"
+dest="${1:-$HOME/.config/amigaplayer-rs}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 

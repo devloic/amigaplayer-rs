@@ -440,7 +440,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     m.bus.w8(base + 3, 0);
 
     // the block goes where the reference's lies, 0x400 bytes past the module
-    // in deliplayer's heap: an empty track's parameter, read 64 KB past the
+    // in amigaplayer-rs's heap: an empty track's parameter, read 64 KB past the
     // tracks, can land in it. The voice buffers are in chip memory, at the
     // heap's top.
     let top = std::mem::replace(&mut m.alloc_top, false);

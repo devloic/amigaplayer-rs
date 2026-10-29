@@ -1,8 +1,8 @@
 //! SDL3 front end: transport controls, module info, oscilloscopes and a
 //! module list (files can be dropped onto the window or picked in a dialog).
 
-use deliplayer::engine::Engine;
-use deliplayer::SAMPLE_RATE;
+use amigaplayer_rs::engine::Engine;
+use amigaplayer_rs::SAMPLE_RATE;
 use anyhow::{anyhow, Result};
 use sdl3::audio::{AudioCallback, AudioFormat, AudioSpec, AudioStream};
 use sdl3::event::Event;
@@ -678,7 +678,7 @@ pub fn run(
             // stay on this module; clear the flag so it can end again
             let mut e = app.engine.lock().unwrap();
             e.m.deli.songend = false;
-            if let Some(deliplayer::engine::Playing { backend: deliplayer::engine::Backend::Native(pt), .. }) = &mut e.playing {
+            if let Some(amigaplayer_rs::engine::Playing { backend: amigaplayer_rs::engine::Backend::Native(pt), .. }) = &mut e.playing {
                 pt.songend = false;
             }
         }

@@ -1776,7 +1776,7 @@ mod tests {
 
     #[test]
     fn host_path_ignores_case() {
-        let dir = std::env::temp_dir().join(format!("deliplayer-os-test-case-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amigaplayer-os-test-case-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Sub")).unwrap();
         for f in ["SMP.Song", "smp.both", "SMP.BOTH", "Sub/Samples"] {

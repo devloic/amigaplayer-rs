@@ -1,15 +1,15 @@
 #!/bin/sh
 # Downloads DeliTracker 2.32 from Aminet and installs its 68k DeliPlayers and
-# DeliGenies where deliplayer looks for them (~/.config/deliplayer/DeliPlayers,
-# ~/.config/deliplayer/DeliGenies).
+# DeliGenies where amigaplayer-rs looks for them (~/.config/amigaplayer-rs/DeliPlayers,
+# ~/.config/amigaplayer-rs/DeliGenies).
 #
-#   tools/fetch-deliplayers.sh [DEST]      (default DEST: ~/.config/deliplayer)
+#   tools/fetch-deliplayers.sh [DEST]      (default DEST: ~/.config/amigaplayer-rs)
 #   DT_ARCHIVE=/path/DeliTracker232.lha tools/fetch-deliplayers.sh   (skip download)
 #
 # Needs curl and lhasa.
 set -eu
 
-dest="${1:-$HOME/.config/deliplayer}"
+dest="${1:-$HOME/.config/amigaplayer-rs}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 

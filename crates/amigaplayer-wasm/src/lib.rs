@@ -1,5 +1,5 @@
 //! The open replayers for the browser, behind a C ABI a few lines of JavaScript can
-//! drive (deliplayer.mjs). The shape is libxmp's shim in the archive's web player:
+//! drive (amigaplayer.mjs). The shape is libxmp's shim in the archive's web player:
 //! open decodes the whole tune into memory, then the page copies the PCM out.
 //!
 //! ```text
@@ -13,7 +13,7 @@
 //! The PCM is interleaved stereo s16le. A tune ends where its replayer says, after
 //! 10 s of silence, or at `max_bytes` (truncated): many Amiga players loop for ever.
 
-use deliplayer::open::{self, Song};
+use amigaplayer_rs::open::{self, Song};
 use std::path::PathBuf;
 
 /// The module's directory: companions are added beside it, as `/mod/smpl.x` or

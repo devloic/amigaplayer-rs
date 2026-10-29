@@ -1,5 +1,5 @@
 [package]
-name = "deliplayer"
+name = "amigaplayer-rs"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-2.0-or-later"
@@ -23,10 +23,10 @@ ui = ["dep:sdl3"]
 native = ["players-native/gen"]
 
 [lib]
-name = "deliplayer"
+name = "amigaplayer_rs"
 path = "src/lib.rs"
 
 [[bin]]
-name = "deliplayer"
+name = "amigaplayer-rs"
 path = "src/main.rs"
 required-features = ["ui"]

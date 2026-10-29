@@ -64,6 +64,7 @@ pub mod richardjoseph;
 pub mod soundplayer;
 pub mod ronklaren;
 pub mod scumm;
+pub mod silmarils;
 pub mod sidmon1;
 pub mod sidmon2;
 pub mod soundcontrol;
@@ -223,6 +224,7 @@ pub const REPLAYERS: &[Open] = &[
     dsc::OPEN,
     scumm::OPEN,
     jasonbrooke::OPEN,
+    silmarils::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so
@@ -319,7 +321,8 @@ mod run_dump {
     /// `PK_MODULE=file PK_TICKS=n PK_LOG=out [PK_SUBSONG=k] cargo test --release run_dump -- --ignored`:
     /// `n` ticks (960 samples each at 48 kHz) of the module, the log in `DELI_WRITE_LOG`'s
     /// format, and the tick in which the song end was announced on stdout; `PK_SUBSONG=k`
-    /// first steps `k` subsongs on, as `--subsong k` does.
+    /// first steps `k` subsongs on, as `--subsong k` does; `PK_SKEW=c` lets `c` colour clocks pass
+    /// first (to give the ticks the reference run's phase within the raster line).
     #[test]
     #[ignore]
     fn dump() {
@@ -331,6 +334,9 @@ mod run_dump {
         let mut e = Engine::new(48000.0);
         e.open_replayers = true;
         e.m.bus.write_log = Some(Vec::new());
+        if let Some(c) = std::env::var("PK_SKEW").ok().and_then(|s| s.parse::<u64>().ok()) {
+            e.m.bus.clock += c;
+        }
         e.play_data(Path::new(&file), std::fs::read(&file).unwrap()).unwrap();
         let sub: u32 = std::env::var("PK_SUBSONG").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
         for _ in 0..sub {

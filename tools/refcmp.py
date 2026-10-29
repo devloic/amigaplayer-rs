@@ -393,6 +393,47 @@ def render_oracle(ctx, mod):
     return (raw if os.path.exists(raw) else None), open(inf).read()
 
 
+def _norm(t):
+    return re.sub(r'[^a-z0-9]', '', t.lower())
+
+
+def verified_players(readme=os.path.join(HERE, '..', 'README.md')):
+    """{normalised format: player name}: the original each open replayer was checked
+    against, from the README's open-replayers table (its reference column starts with
+    the player's name and "(Eagleplayer" or "(DeliPlayer")."""
+    out = {}
+    try:
+        lines = open(readme, encoding='utf-8').read().splitlines()
+    except OSError:
+        return out
+    for l in lines:
+        c = [x.strip() for x in l.split('|')]
+        if not l.startswith('| ') or len(c) < 5:
+            continue
+        m = re.match(r'^`?([^`(;,]+?)`?\s*\((?:Eagleplayer|DeliPlayer)', c[3])
+        if m:
+            out[_norm(re.split(r'[(,]', c[1])[0])] = m.group(1)
+    return out
+
+
+VERIFIED = verified_players()
+
+
+def special_reference(mod, fmt):
+    """A per-module original where one player does not cover the format: Digital Sound
+    Studio modules with a tempo byte play on UADE's DSS 1.0-3.0 player (V1.2), as the
+    V1.71 Eagleplayer the port follows for the others reads the tempo as part of the speed."""
+    if fmt == 'digitalsoundstudio':
+        try:
+            with open(mod, 'rb') as fh:
+                d = fh.read(10)
+        except OSError:
+            return None
+        if len(d) == 10 and d[8] != 0:
+            return [('uade+tempo', UADE_PLAYERS, ('--player', 'Digital Sound Studio'))]
+    return None
+
+
 def find_reference(ctx, mod, po):
     """The original's render for a file whose port output line parses to `po`:
     dict(kind 'engine'|'libxmp'|'none', wav (path), data ((rate, samples)), out, led, player, o, note, noref)."""
@@ -405,9 +446,15 @@ def find_reference(ctx, mod, po):
             return dict(none, note='oracle: ' + info[:100], noref=False)
         return dict(kind='libxmp', wav=raw, data=read_raw(raw), out='libxmp 4.7.4 ' + info.replace('\t', ' '),
                     led='', player='libxmp 4.7.4 (oracle)', o={}, note='')
-    want = re.sub(r'[^a-z0-9]', '', po.get('format', '').lower())
+    want = _norm(po.get('format', ''))
     dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
-    tries = [(t, d, ()) for t, d in dirs]
+    # the player the port was verified against comes first, then the generic search
+    verified = VERIFIED.get(want)
+    tries = special_reference(mod, want) or []
+    if verified:
+        tries += [(t + '+verified', d, ('--player', verified)) for t, d in dirs]
+    first = len(tries)
+    tries += [(t, d, ()) for t, d in dirs]
     pn = po.get('player', '')
     names = [pn, pn.replace('_', ' '), pn.replace('_', '-')]
     if po.get('backend') == 'builtin-protracker':
@@ -417,7 +464,7 @@ def find_reference(ctx, mod, po):
         tries += [(t + '+player', d, ('--player', variant)) for t, d in dirs]
     fallback = None
     bads = []
-    for tag, eagle, extra in tries:
+    for i, (tag, eagle, extra) in enumerate(tries):
         rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, eagle, extra)
         o = parse_output(rout)
         if not (rw and rplay and o.get('backend') == '68k'):
@@ -434,7 +481,7 @@ def find_reference(ctx, mod, po):
         if bad:
             bads.append(cand)
             continue
-        if want and (want in got or got in want):
+        if i < first or (want and (want in got or got in want)):
             fallback = cand
             break
         fallback = fallback or cand

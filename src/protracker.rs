@@ -239,6 +239,12 @@ impl ProTracker {
 
     /// The module `d`, loaded at `base` in guest memory.
     pub fn new(d: &[u8], base: u32) -> Option<Self> {
+        Self::new_at(d, base, None)
+    }
+
+    /// The same with the sample data at `sample_at` in guest memory instead of after
+    /// the patterns (a module laid out as a ProTracker one from another format's).
+    pub fn new_at(d: &[u8], base: u32, sample_at: Option<u32>) -> Option<Self> {
         let format = Self::detect(d)?;
         let nsamp = if format == "SoundTracker" { 15 } else { 31 };
         let hdr = 20 + nsamp * 30;
@@ -253,7 +259,7 @@ impl ProTracker {
             ((word(d, o) as u32) << 16) | word(d, o + 2) as u32
         });
         let mut samples = [Sample::default(); 32];
-        let mut addr = base + (pat_start + npat * 1024) as u32;
+        let mut addr = sample_at.unwrap_or(base + (pat_start + npat * 1024) as u32);
         for (i, s) in samples[1..=nsamp].iter_mut().enumerate() {
             let o = 20 + i * 30;
             let length = word(d, o + 22);

@@ -81,6 +81,7 @@ pub mod specialfx;
 pub mod soundmaster;
 pub mod soundmon;
 pub mod soundtracker;
+pub mod st26;
 pub mod synthesis;
 pub mod synthpack;
 pub mod tfmx;
@@ -191,6 +192,8 @@ pub const REPLAYERS: &[Open] = &[
     soundtracker::OPEN_ST9,
     soundtracker::OPEN_MST,
     soundtracker::OPEN_ST2X,
+    st26::OPEN_ST26,
+    st26::OPEN_ICE,
     multimod::OPEN,
     multimod::OPEN_FLT8,
     quadracomposer::OPEN,

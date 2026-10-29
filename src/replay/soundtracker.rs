@@ -82,6 +82,7 @@ pub fn variant(d: &[u8]) -> Option<Var> {
     if &d[0..4] == b"FORM" && &d[8..12] == b"MODL" {
         return None;
     }
+    // SoundTracker 2.6 and IceTracker (`st26`)
     if &d[1464..1468] == b"MTN\0" || &d[1464..1468] == b"IT10" {
         return None;
     }

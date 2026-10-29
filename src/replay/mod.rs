@@ -42,6 +42,7 @@ pub mod jamcracker;
 pub mod jasonbrooke;
 pub mod jasonpage;
 pub mod jesperolsen;
+pub mod kh;
 pub mod med;
 pub(crate) mod m68kdec;
 pub mod mikedavies;
@@ -230,6 +231,7 @@ pub const REPLAYERS: &[Open] = &[
     silmarils::OPEN,
     paulshields::OPEN,
     seanconran::OPEN,
+    kh::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -154,6 +154,8 @@ pub const REPLAYERS: &[Open] = &[
     deltamusic1::OPEN,
     sonicarranger::OPEN,
     sidmon1::OPEN,
+    // before TFMX 1.5, which takes any "TFMX" but "TFMX-SONG", and Hippel COSO
+    hippel::OPEN_7V,
     tfmx::OPEN_PRO,
     tfmx::OPEN_15,
     tfmx::OPEN_7V,

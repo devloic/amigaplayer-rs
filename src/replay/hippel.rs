@@ -3316,6 +3316,1295 @@ impl Tfmx {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hippel 7V: seven voices, three on Paula and four mixed in software
+// ---------------------------------------------------------------------------
+
+pub const OPEN_7V: Open = Open { name: "Hippel 7V", detect: detect_7v, new: new_7v };
+
+/// NostalgicPlayer's TestModuleFor7Voices: the song data's "TFMX" header at the
+/// file's start ("TFMX" and no blank after it), after a COSO header, or after a
+/// game's replayer (the first `lea x(pc),a0` in the file's first 32 KB that
+/// points at a "TFMX"); then the 7-voice layout (`has_7v_tfmx`, `has_7v_coso`).
+/// The header's offset, and whether it is a COSO module.
+fn find_7v(d: &[u8]) -> Option<(usize, bool)> {
+    if d.len() < 1024 || d.starts_with(b"SC68") {
+        return None;
+    }
+    let mut buf = d[..d.len().min(32768)].to_vec();
+    buf.resize(32768, 0);
+    if &buf[0..4] == b"TFMX" && buf[4] != b' ' {
+        return has_7v_tfmx(d, 0).then_some((0, false));
+    }
+    if &buf[0..4] == b"COSO" && &buf[32..36] == b"TFMX" {
+        return has_7v_coso(d).then_some((0, true));
+    }
+    let n = buf.len();
+    for i in (0..n - 4).step_by(2) {
+        if buf[i] == 0x41 && buf[i + 1] == 0xfa {
+            let at = i16::from_be_bytes([buf[i + 2], buf[i + 3]]) as i64 + i as i64 + 2;
+            if at < 0 || at >= (n - 4) as i64 {
+                return None;
+            }
+            let at = at as usize;
+            if &buf[at..at + 4] == b"TFMX" {
+                return has_7v_tfmx(d, at).then_some((at, false));
+            }
+        }
+    }
+    None
+}
+
+/// Has7VoicesStructures: past the song data of 7-voice positions (28 bytes),
+/// an empty subsong entry (8 bytes of 0), then a sample name.
+fn has_7v_tfmx(d: &[u8], h: usize) -> bool {
+    let w = |o: usize| be16(d, h + o) as usize;
+    let off = 0x20 + (w(4) + 1) * 64 + (w(6) + 1) * 64 + (w(8) + 1) * w(0xc) + (w(0xa) + 1) * 28 + w(0x10) * 8;
+    let a = h + off;
+    if a >= d.len() || be32(d, a) != 0 || be32(d, a + 4) != 0 {
+        return false;
+    }
+    let c = |o: usize| d.get(a + o).copied().unwrap_or(0);
+    (0x20..=0x7f).contains(&c(8)) && (0x20..=0x7f).contains(&c(9))
+}
+
+/// Has7VoicesStructuresInCoso: samples, and the empty subsong entry right
+/// before the sample infos.
+fn has_7v_coso(d: &[u8]) -> bool {
+    let subs = be32(d, 20) as i32 as i64 + be16(d, 48) as i64 * 8;
+    let info = be32(d, 24) as i32 as i64;
+    if subs < 0 || subs >= d.len() as i64 || be16(d, 50) == 0 || subs + 8 > d.len() as i64 {
+        return false;
+    }
+    let s = subs as usize;
+    be32(d, s) == 0 && be32(d, s + 4) == 0 && subs + 8 == info
+}
+
+fn detect_7v(d: &[u8]) -> bool {
+    find_7v(d).is_some()
+}
+
+/// The voices' Paula channels: voice 0 on channel 3, 1 on 1, 2 on 2 (3-6 are
+/// mixed into channel 0).
+const CH7: [usize; 3] = [3, 1, 2];
+
+/// The Eagleplayer's mixing rate in kHz: its configuration file as UADE has it
+/// (EP-Hippel_7V.cfg, 24; the player's own default is 16).
+const RATE7: u16 = 24;
+
+/// The mixer's period for `khz` kHz (1 to 29): the NTSC clock's, as the
+/// player's table has them.
+fn mix_period7(khz: u16) -> u16 {
+    if khz == 0 {
+        return 0;
+    }
+    let k = khz as u32 * 1000;
+    ((3_579_545 + k / 2) / k) as u16
+}
+
+/// Colour clocks the original's code takes between its writes (from the
+/// reference's write times, on UADE's 68020).
+mod c7 {
+    /// From the interrupt to channel 0's location, and its length.
+    pub const IRQ: u64 = 10;
+    pub const IRQ_LEN: u64 = 16;
+    /// The tick's start, before the first voice's effects.
+    pub const START: u64 = 72;
+    /// A row (and the next position).
+    pub const ROW: u64 = 80;
+    pub const ROW_POS: u64 = 150;
+    /// A voice's effects: to its first command, from a sample's DMA off to its
+    /// location, length and period, after a sample's writes, and to the
+    /// period and volume.
+    pub const FX: u64 = 100;
+    pub const OFF_LOC: u64 = 116;
+    pub const LOC_LEN: u64 = 6;
+    pub const LEN_PER: u64 = 8;
+    pub const CMD_TAIL: u64 = 128;
+    pub const FX_END: u64 = 438;
+    /// The mixed voices' loops, and what follows the DMA on to the loops.
+    pub const MIX_SETUP: u64 = 550;
+    pub const LOOPS: u64 = 330;
+    pub const LOOP_NEXT: u64 = 6;
+    /// The mixer: its voices' steps, then each byte.
+    pub const STEPS: u64 = 226;
+    pub const BYTE: u64 = 77;
+    /// From the INTENA on to channel 0's volume.
+    pub const VOL0: u64 = 12;
+}
+
+/// The original's voice structure ($56 bytes), the fields it uses.
+#[derive(Default, Clone, Copy)]
+struct V7 {
+    /// The position list (this voice's column) at the song's start and end,
+    /// and the next position's offset.
+    pos: u32,
+    pos_end: u32,
+    pos_off: u16,
+    /// The sample's loop, written after the DMA on.
+    loop_addr: u32,
+    loop_len: u16,
+    /// The envelope and the frequency table, and the positions in them.
+    env: u32,
+    env_pos: u16,
+    freq: u32,
+    freq_pos: u16,
+    /// The track and the row's offset in it (a COSO track: the next byte, and
+    /// the track's end).
+    track: u32,
+    track_end: u32,
+    row: u16,
+    porta: u16,
+    /// The sample slide (E5): the sample's offset and end, position, step and
+    /// length in words, whether it moved, its delay.
+    slide_start: u32,
+    slide_end: u32,
+    slide_pos: u16,
+    slide_delta: u16,
+    slide_len: u16,
+    slide_moved: bool,
+    slide_counter: u8,
+    slide_speed: u8,
+    slide_on: bool,
+    slide_done: bool,
+    /// The voice's DMA bit (Paula's, or the mixer's for voices 3-6).
+    dma: u16,
+    vib_delta: u8,
+    note: u8,
+    info: u8,
+    env_transpose: u8,
+    env_counter: u8,
+    env_speed: u8,
+    sustain: u8,
+    freq_wait: u8,
+    vib_speed: u8,
+    vib_depth: u8,
+    vib_delay: u8,
+    prev_info: u8,
+    /// The sample last started by E7 ($FF: none).
+    sample: u8,
+    transpose: u8,
+    track_transpose: u8,
+    volume: u8,
+    vib_flag: u8,
+    fade: u8,
+    var_depth: u8,
+    variation: u8,
+    /// A COSO track's row counter and its reload.
+    counter: u8,
+    speed: u8,
+}
+
+/// One of the mixer's four voices: the registers the replayer writes (as
+/// Paula's), and where the mixer plays.
+#[derive(Default, Clone, Copy)]
+struct Mix7 {
+    loc: u32,
+    len: u16,
+    per: u16,
+    vol: u16,
+    /// The loop the mixer takes at the end: its end and its length in bytes.
+    loop_end: u32,
+    loop_len: u16,
+    /// A restart is due (the voice's DMA went off).
+    restart: bool,
+    /// The step, the integer in the low word and the fraction in the high one;
+    /// the volume's table; the position: the end of the part playing, and the
+    /// fraction above a negative offset from it.
+    step: u32,
+    tab: u8,
+    end: u32,
+    pos: u32,
+}
+
+/// Jochen Hippel's 7-voice modules (Amberstar, Ghost Battle, Lethal Xcess),
+/// as the Eagleplayer "Jochen Hippel 7V" (V1.3, Wanted Team) plays them, which
+/// UADE has. Its replayer is NostalgicPlayer's "Hippel 7V"; voices 0-2 play
+/// on Paula's channels 3, 1 and 2, voices 3-6 are mixed in software into a
+/// buffer that channel 0 plays. The mixer runs in channel 0's audio interrupt
+/// and the replayer's tick with it, so the buffer's length sets the tempo: at
+/// 24 kHz (the Eagleplayer's configuration as UADE has it) 20 bytes a
+/// millisecond... times (256 + the song's tempo) / 256. Where it differs from
+/// NostalgicPlayer, this follows the original:
+/// * a tick reads the rows of voices 3-6, runs the effects of voices 0-2 (each
+///   voice's period and volume written as it is done) and of 3-6, sets the
+///   mixer's voices up, then after a 9-line wait the DMA on, after 9 more each
+///   Paula voice's loop, then the rows of voices 0-2 (when the speed counter
+///   was reloaded this tick);
+/// * a sample start (E2, E7, E9) turns the voice off, and writes its location
+///   and length and a period of 4; E5 the period 4; a mixed voice restarts
+///   from its sample's start at the tick's end;
+/// * the frequency and envelope tables run on in memory (no table numbers),
+///   E0 loops the table without masking its position, envelope commands E1-E7
+///   stop it;
+/// * the tempo command (position command D, and the first position's first
+///   column at the start) sets the mixer's buffer length; position command F
+///   with 0 sets the fade to 100 (NostalgicPlayer: 64); 8 stops the player
+///   (DMA off, so the mixer's interrupt stops with it);
+/// * the subsongs are all the entries of the table, numbered from 1; the song
+///   end comes as a voice wraps its positions;
+/// * the mixer: each voice holds a sample for `period` colour clocks of the
+///   mixing rate (no interpolation), through a volume table of 64 levels (64
+///   plays as 63); the four are summed, and clipped to a byte if the first
+///   position's first column has a command byte, else divided by 4. A loop of
+///   16 words or less plays silence.
+///
+/// A note past the period table reads the mixer's variables (72-83) or the
+/// original's code (84-127); the port reads the variables, and 0 for the code.
+///
+/// COSO 7V modules (NostalgicPlayer's) play with the same replayer, their
+/// tracks read as NostalgicPlayer reads them; the Eagleplayer does not take
+/// them.
+pub struct Hip7 {
+    coso: bool,
+    module: u32,
+    freqs: u32,
+    envs: u32,
+    tracks: u32,
+    track_size: u16,
+    /// A COSO module's tracks (each ends where the next starts, the last at
+    /// the positions).
+    track_count: u32,
+    positions: u32,
+    subsongs_at: u32,
+    sample_info: u32,
+    samples: u32,
+    subsong_count: u16,
+    sub: u16,
+    /// The speed counter and its reload.
+    counter: u16,
+    speed: u16,
+    stopped: bool,
+    random: u16,
+    /// Paula's DMA bits turned off this tick; the mixer's voices on, and those
+    /// to restart.
+    dma_acc: u16,
+    mix_on: u16,
+    mix_restart: u16,
+    voices: [V7; 7],
+    mix: [Mix7; 4],
+    /// The mixing rate (kHz), Paula's period for it (and that times 2048), the
+    /// buffer's length in words; whether the mix clips.
+    rate: u16,
+    mix_per: u16,
+    mix_words: u16,
+    clip: bool,
+    /// The buffers: the one Paula gets next, the other; silence and the empty
+    /// table's sample.
+    bufs: u32,
+    buf_next: u32,
+    buf_other: u32,
+    silence: u32,
+    empty: u32,
+    vol_tab: Vec<[u8; 256]>,
+    led_done: bool,
+    songend: bool,
+}
+
+fn new_7v(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    let (h, coso) = find_7v(d)?;
+    let hdr = if coso { 0x20 } else { h };
+    let w = |o: usize| be16(d, hdr + o) as u32;
+    let (freqs, envs, tracks, positions, subsongs_at, sample_info, mut samples);
+    if coso {
+        let off = |k: usize| base.wrapping_add(be32(d, 4 * k));
+        freqs = off(1);
+        envs = off(2);
+        tracks = off(3);
+        positions = off(4);
+        subsongs_at = off(5);
+        sample_info = off(6);
+        samples = off(7);
+    } else {
+        freqs = base + h as u32 + 0x20;
+        envs = freqs + ((w(4) + 1) << 6);
+        tracks = envs + ((w(6) + 1) << 6);
+        positions = tracks + (w(8) + 1) * w(0xc);
+        subsongs_at = positions + (w(0xa) + 1) * 28;
+        sample_info = subsongs_at + (w(0x10) + 1) * 8;
+        samples = sample_info + w(0x12) * 30;
+    }
+    if coso && be32(d, 28) as usize == d.len() {
+        // the samples in NAME.samp, as NostalgicPlayer loads them
+        let name = m.bus.read_cstr(m.deli.file_buf);
+        let dot = name.rfind('.')?;
+        let s = crate::deli::read_companion(m, &format!("{}samp", &name[..=dot])).1.ok()?;
+        let a = m.alloc(s.len() as u32 + 1024);
+        if a == 0 {
+            return None;
+        }
+        m.bus.write_bytes(a, &s);
+        samples = a;
+    }
+    // the mixer's buffers (two of up to 383 / 256 * 480 bytes), silence, the
+    // empty table's sample
+    let bufs = m.alloc(2 * 0x400 + 0x100 + 0x10);
+    if bufs == 0 {
+        return None;
+    }
+    let vol_tab = (0..64)
+        .map(|vol: i32| {
+            let mut t = [0u8; 256];
+            for (b, e) in t.iter_mut().enumerate() {
+                *e = ((b as u8 as i8 as i32 * vol / 63) as u8).wrapping_add(0x80);
+            }
+            t
+        })
+        .collect();
+    let mut p = Hip7 {
+        coso,
+        module: base,
+        freqs,
+        envs,
+        tracks,
+        track_size: w(0xc) as u16,
+        track_count: w(8) + 1,
+        positions,
+        subsongs_at,
+        sample_info,
+        samples,
+        subsong_count: w(0x10) as u16,
+        sub: 1,
+        counter: 0,
+        speed: 0,
+        stopped: false,
+        random: 0,
+        dma_acc: 0,
+        mix_on: 0,
+        mix_restart: 0,
+        voices: Default::default(),
+        mix: Default::default(),
+        rate: RATE7,
+        mix_per: 0,
+        mix_words: 0,
+        clip: false,
+        bufs,
+        buf_next: bufs + 0x400,
+        buf_other: bufs,
+        silence: bufs + 0x800,
+        empty: bufs + 0x900,
+        vol_tab,
+        led_done: false,
+        songend: false,
+    };
+    for (i, v) in p.voices.iter_mut().enumerate() {
+        v.dma = if i < 3 { 1 << CH7[i] } else { 1 << i };
+    }
+    let mut hw = Hw { bus: &mut m.bus };
+    p.init_sound(1, &mut hw);
+    p.start_int(&mut hw);
+    Some(Box::new(p))
+}
+
+impl Replayer for Hip7 {
+    fn format(&self) -> &'static str {
+        "Hippel 7V"
+    }
+
+    fn title(&self) -> String {
+        String::new()
+    }
+
+    /// The tick comes with channel 0's interrupt, not DeliTracker's timer.
+    fn tick(&mut self, _hw: &mut Hw) {}
+
+    fn songend(&self) -> bool {
+        self.songend
+    }
+
+    fn subsongs(&self) -> (u16, u16, u16) {
+        (1, self.subsong_count, self.sub)
+    }
+
+    /// StopInt, EndSound, then InitSound and StartInt for the new subsong.
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        hw.dmacon(0x0001);
+        hw.bus.write_word(0xdff09a, 0x0080);
+        hw.bus.write_word(0xdff09c, 0x0080);
+        hw.dmacon(0x000f);
+        for ch in 0..4 {
+            hw.vol(ch, 0);
+        }
+        self.init_sound(n, hw);
+        self.start_int(hw);
+    }
+
+    fn audio_irq_ch(&mut self, ch: usize, hw: &mut Hw) -> bool {
+        if ch != 0 {
+            return false;
+        }
+        self.interrupt(hw);
+        true
+    }
+}
+
+impl Hip7 {
+    /// InitSound for subsong `n` (from 1): InitPlayer's LED off the first time,
+    /// the voices, the tempo and the mixer.
+    fn init_sound(&mut self, n: u16, hw: &mut Hw) {
+        if !self.led_done {
+            self.led_done = true;
+            let v = hw.bus.read_byte(0xbfe001);
+            hw.bus.write_byte(0xbfe001, v | 2);
+        }
+        self.sub = n;
+        let e = self.subsongs_at.wrapping_add((n as u32).wrapping_sub(1) * 8);
+        let (start, end) = (hw.bus.r16(e) as u32, hw.bus.r16(e + 2) as u32);
+        self.speed = hw.bus.r16(e + 6);
+        hw.dmacon(0x000f);
+        hw.bus.write_word(0xdff09a, 0x0780);
+        hw.wait(300);
+        for i in 0..7 {
+            let first = if self.coso {
+                self.module.wrapping_add(hw.bus.r16(self.tracks) as i16 as i32 as u32)
+            } else {
+                self.tracks
+            };
+            let v = &mut self.voices[i];
+            v.env = 0;
+            v.freq = 0;
+            v.track = first;
+            v.env_counter = 1;
+            v.env_speed = 1;
+            v.sustain = 0;
+            v.env_pos = 0;
+            v.freq_wait = 0;
+            v.vib_speed = 0;
+            v.vib_depth = 0;
+            v.slide_on = false;
+            v.vib_delta = 0;
+            v.vib_delay = 0;
+            v.prev_info = 0;
+            v.fade = 100;
+            v.sample = 0xff;
+            v.row = self.track_size;
+            v.transpose = 0;
+            v.volume = 0;
+            v.freq_pos = 0;
+            v.porta = 0;
+            v.loop_len = 0;
+            v.counter = 0;
+            v.speed = 0;
+            let col = 4 * i as u32;
+            v.pos = self.positions + start * 28 + col;
+            v.pos_end = self.positions + (end + 1) * 28 + col;
+            v.pos_off = 0;
+            // a COSO voice starts at its first track's end, reading the first
+            // position at once
+            v.track_end = first;
+            if i < 3 {
+                let ch = CH7[i];
+                hw.loc(ch, self.empty);
+                hw.wait(6);
+                hw.len(ch, 1);
+                hw.wait(6);
+                hw.per(ch, 0);
+                hw.wait(4);
+                hw.vol(ch, 0);
+                hw.wait(300);
+            } else {
+                let m = &mut self.mix[i - 3];
+                m.loc = self.empty;
+                m.len = 1;
+                m.per = 0;
+                m.vol = 0;
+            }
+        }
+        self.counter = 1;
+        self.stopped = false;
+        // the tempo and the mixer's rounding from the first position
+        let (tempo, cmd) = (hw.bus.r8(self.positions + 2), hw.bus.r8(self.positions + 3));
+        self.clip = cmd != 0;
+        hw.wait(1400);
+        hw.dmacon(0x0001);
+        self.set_tempo(hw, tempo);
+        for m in &mut self.mix {
+            m.loop_len = 0xd0;
+            m.step = 0;
+            m.restart = false;
+            m.pos = 0xfff0;
+            m.end = self.silence + 0x10;
+            m.tab = 0;
+        }
+        self.mix_on = 0;
+        for a in 0..0x800 {
+            hw.bus.w8(self.bufs + a, 0);
+        }
+        // Paula starts on the first buffer, the interrupt gives it the second
+        self.buf_other = self.bufs;
+        self.buf_next = self.bufs + 0x400;
+        hw.vol(0, 0x40);
+        hw.wait(10);
+        hw.loc(0, self.buf_other);
+        hw.wait(10);
+        hw.len(0, 2);
+    }
+
+    /// StartInt: channel 0's interrupt on, its DMA on.
+    fn start_int(&mut self, hw: &mut Hw) {
+        hw.wait(300);
+        hw.bus.write_word(0xdff09a, 0x8080);
+        hw.wait(10);
+        hw.dmacon(0x8001);
+    }
+
+    /// The tempo: the buffer's length at the mixing rate, times (256 + `t`) /
+    /// 256; Paula's period for the rate.
+    fn set_tempo(&mut self, hw: &mut Hw, t: u8) {
+        let bytes = ((self.rate as u32 * 20) * (t as i8 as i32 + 256) as u32) >> 8;
+        self.mix_words = (bytes as u16) >> 1;
+        self.mix_per = mix_period7(self.rate);
+        hw.per(0, self.mix_per);
+    }
+
+    /// Channel 0's interrupt (a buffer started): the next buffer to Paula, the
+    /// replayer's tick, the mix of voices 3-6 into that buffer.
+    fn interrupt(&mut self, hw: &mut Hw) {
+        hw.bus.write_word(0xdff09a, 0x0080);
+        hw.bus.write_word(0xdff09c, 0x0080);
+        hw.wait(c7::IRQ);
+        hw.loc(0, self.buf_next);
+        hw.wait(c7::IRQ_LEN);
+        hw.len(0, self.mix_words);
+        self.tick7(hw);
+        hw.wait(c7::STEPS);
+        for k in 0..4 {
+            let m = &mut self.mix[k];
+            if m.per == 0 {
+                continue;
+            }
+            m.tab = (m.vol & 0xff).min(63) as u8;
+            let d3 = (self.mix_per as u32) << 11;
+            let q = d3 / m.per as u32;
+            let d1 = if q > 0xffff { d3 } else { q };
+            m.step = ((d1 & 0xffff) << 5).rotate_left(16);
+        }
+        std::mem::swap(&mut self.buf_next, &mut self.buf_other);
+        self.mix(hw, self.buf_other);
+        hw.bus.write_word(0xdff09a, 0x8080);
+        hw.wait(c7::VOL0);
+        hw.vol(0, 0x40);
+    }
+
+    /// The mixing loop: each voice's sample through its volume's table, the
+    /// four summed, clipped to a byte or divided by 4.
+    fn mix(&mut self, hw: &mut Hw, out: u32) {
+        let n = 2 * self.mix_words as u32;
+        for j in 0..n {
+            let mut sum = 0u16;
+            for m in &self.mix {
+                let b = hw.bus.r8(m.end.wrapping_add(m.pos as u16 as i16 as i32 as u32));
+                sum += self.vol_tab[m.tab as usize][b as usize] as u16;
+            }
+            let o = if !self.clip {
+                (0x80 + (sum >> 2)) as u8
+            } else {
+                match sum {
+                    0..=0x17f => 0x80,
+                    0x180..=0x27f => (sum - 0x100) as u8,
+                    _ => 0x7f,
+                }
+            };
+            hw.bus.w8(out + j, o);
+            for m in &mut self.mix {
+                let (p, x) = m.pos.overflowing_add(m.step);
+                let low = (p as u16).wrapping_add(x as u16);
+                m.pos = (p & 0xffff_0000) | low as u32;
+                if (low as i16) >= 0 {
+                    m.end = m.loop_end;
+                    m.pos = (m.pos & 0xffff_0000) | low.wrapping_sub(m.loop_len) as u32;
+                }
+            }
+        }
+        hw.wait(c7::BYTE * n as u64);
+    }
+
+    /// The replayer's tick.
+    fn tick7(&mut self, hw: &mut Hw) {
+        if self.stopped {
+            hw.dmacon(0x000f);
+            for ch in 0..4 {
+                hw.vol(ch, 0);
+            }
+            self.songend = true;
+            return;
+        }
+        hw.wait(c7::START);
+        self.counter = self.counter.wrapping_sub(1);
+        if self.counter == 0 {
+            self.counter = self.speed;
+            for i in 3..7 {
+                self.row(i, hw);
+            }
+        }
+        self.dma_acc = 0;
+        for i in 0..3 {
+            let (per, vol) = self.effects(i, hw);
+            let ch = CH7[i];
+            hw.per(ch, per);
+            hw.vol(ch, vol & 0x7f);
+        }
+        for i in 3..7 {
+            let (per, vol) = self.effects(i, hw);
+            let m = &mut self.mix[i - 3];
+            m.per = per;
+            m.vol = vol;
+        }
+        hw.wait(c7::MIX_SETUP);
+        self.mix_state();
+        self.mix_on |= self.mix_restart;
+        self.mix_state();
+        for k in 0..4 {
+            let v = self.voices[3 + k];
+            self.mix[k].loc = v.loop_addr;
+            self.mix[k].len = v.loop_len;
+        }
+        wait_lines(hw, 9);
+        hw.dmacon(0x8000 | self.dma_acc);
+        wait_lines(hw, 9);
+        self.mix_state();
+        hw.wait(c7::LOOPS);
+        for i in 0..3 {
+            let v = self.voices[i];
+            hw.loc(CH7[i], v.loop_addr);
+            hw.wait(c7::LOOP_NEXT);
+            hw.len(CH7[i], v.loop_len);
+            hw.wait(c7::LOOP_NEXT);
+        }
+        if self.counter == self.speed {
+            for i in 0..3 {
+                self.row(i, hw);
+            }
+        }
+    }
+
+    /// The mixer's voices from their registers: one turned off stops and
+    /// restarts at its location; a length of 16 words or less is silence.
+    fn mix_state(&mut self) {
+        for k in 0..4 {
+            let m = &mut self.mix[k];
+            if self.mix_on & 1 << (k + 3) == 0 {
+                m.step = 0;
+                m.restart = true;
+                continue;
+            }
+            if m.len & 0x3fff <= 0x10 {
+                m.loc = self.silence;
+                m.len = 0x80;
+            }
+            let l = 2 * (m.len & 0x3fff) as u32;
+            m.loop_end = m.loc.wrapping_add(l);
+            m.loop_len = l as u16;
+            if m.restart {
+                m.restart = false;
+                m.end = m.loc.wrapping_add(l);
+                m.pos = l.wrapping_neg();
+            }
+        }
+    }
+
+    /// A note's period: the table, then the mixer's steps and volumes (as the
+    /// original reads past its table), then 0 for its code.
+    fn note_period(&self, n: u8) -> u16 {
+        match n as usize {
+            i if i < PERIODS.len() => PERIODS[i],
+            i if i < 80 => {
+                let s = self.mix[(i - 72) / 2].step;
+                if i & 1 == 0 {
+                    (s >> 16) as u16
+                } else {
+                    s as u16
+                }
+            }
+            i if i < 84 => (self.mix[i - 80].tab as u16 + 4) << 8,
+            _ => 0,
+        }
+    }
+
+    /// A voice's DMA off: Paula's (and the bit kept for the DMA on), or the
+    /// mixer's (and the restart).
+    fn voice_off(&mut self, i: usize, hw: &mut Hw) {
+        let b = self.voices[i].dma;
+        if i < 3 {
+            self.dma_acc |= b;
+            hw.dmacon(b);
+        } else {
+            self.mix_restart |= b;
+            self.mix_on &= !b;
+        }
+    }
+
+    fn set_loc(&mut self, i: usize, hw: &mut Hw, a: u32) {
+        if i < 3 {
+            hw.loc(CH7[i], a);
+        } else {
+            self.mix[i - 3].loc = a;
+        }
+    }
+
+    fn set_len(&mut self, i: usize, hw: &mut Hw, l: u16) {
+        if i < 3 {
+            hw.len(CH7[i], l);
+        } else {
+            self.mix[i - 3].len = l;
+        }
+    }
+
+    fn set_per(&mut self, i: usize, hw: &mut Hw, p: u16) {
+        if i < 3 {
+            hw.per(CH7[i], p);
+        } else {
+            self.mix[i - 3].per = p;
+        }
+    }
+
+    /// Sample `n`'s start, length in words, loop start in bytes and loop length.
+    fn sample_info(&self, hw: &Hw, n: u8) -> (u32, u16, u16, u16) {
+        let bus = &*hw.bus;
+        if self.coso {
+            let i = self.sample_info + n as u32 * 10;
+            (bus.r32(i), bus.r16(i + 4), bus.r16(i + 6), bus.r16(i + 8))
+        } else {
+            let i = self.sample_info + n as u32 * 30;
+            (bus.r32(i + 0x12), bus.r16(i + 0x16), bus.r16(i + 0x1a), bus.r16(i + 0x1c))
+        }
+    }
+
+    /// E2/E7: the sample's start and length, a period of 4, its loop kept.
+    fn play(&mut self, i: usize, hw: &mut Hw, n: u8) {
+        let (off, len, ls, ll) = self.sample_info(hw, n);
+        let s = off.wrapping_add(self.samples);
+        hw.wait(c7::OFF_LOC);
+        self.set_loc(i, hw, s);
+        hw.wait(c7::LOC_LEN);
+        self.set_len(i, hw, len);
+        hw.wait(c7::LEN_PER);
+        self.set_per(i, hw, 4);
+        hw.wait(c7::CMD_TAIL);
+        let v = &mut self.voices[i];
+        v.loop_addr = s.wrapping_add(ls as u32);
+        v.loop_len = ll;
+    }
+
+    /// A voice's effects: the frequency table, the slide, the envelope; the
+    /// period and volume to write.
+    fn effects(&mut self, i: usize, hw: &mut Hw) -> (u16, u16) {
+        hw.wait(c7::FX);
+        loop {
+            if self.voices[i].freq_wait != 0 {
+                self.voices[i].freq_wait -= 1;
+                break;
+            }
+            if !self.freq_table(i, hw) {
+                break;
+            }
+        }
+        self.slide(i, hw);
+        self.envelope(i, hw);
+        let per = self.period(i);
+        let vol = self.volume(i);
+        hw.wait(c7::FX_END);
+        (per, vol)
+    }
+
+    /// Reads the frequency table to a transpose or a stop; true after E8.
+    fn freq_table(&mut self, i: usize, hw: &mut Hw) -> bool {
+        loop {
+            let v = self.voices[i];
+            let a = v.freq.wrapping_add(v.freq_pos as u32);
+            let c = self.r8(hw, a);
+            let b = self.r8(hw, a + 1);
+            if c < 0xe0 {
+                let v = &mut self.voices[i];
+                v.transpose = c;
+                v.freq_pos = v.freq_pos.wrapping_add(1);
+                return false;
+            }
+            match c {
+                0xe0 => self.voices[i].freq_pos = b as u16,
+                0xe2 => {
+                    let v = &mut self.voices[i];
+                    v.var_depth = 0;
+                    v.sample = 0xff;
+                    self.voice_off(i, hw);
+                    self.play(i, hw, b);
+                    let v = &mut self.voices[i];
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                    v.slide_on = false;
+                }
+                0xe3 => {
+                    let d = self.r8(hw, a + 2);
+                    let v = &mut self.voices[i];
+                    v.freq_pos = v.freq_pos.wrapping_add(3);
+                    v.vib_speed = b;
+                    v.vib_depth = d;
+                }
+                0xe4 => {
+                    let (off, len, ls, ll) = self.sample_info(hw, b);
+                    let s = off.wrapping_add(self.samples);
+                    self.set_loc(i, hw, s);
+                    hw.wait(c7::LOC_LEN);
+                    self.set_len(i, hw, len);
+                    let v = &mut self.voices[i];
+                    v.loop_addr = s.wrapping_add(ls as u32);
+                    v.loop_len = ll;
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                    v.slide_on = false;
+                }
+                0xe5 => {
+                    self.voices[i].var_depth = 0;
+                    self.voice_off(i, hw);
+                    hw.wait(c7::OFF_LOC);
+                    self.set_per(i, hw, 4);
+                    let (start, len, _, _) = self.sample_info(hw, b);
+                    let word = |s: &Self, hw: &Hw, k: u32| (s.r8(hw, a + k) as u16) << 8 | s.r8(hw, a + k + 1) as u16;
+                    let mut pos = word(self, hw, 2);
+                    if pos == 0xffff {
+                        pos = len;
+                    }
+                    let (sl, sd, ss) = (word(self, hw, 4), word(self, hw, 6), self.r8(hw, a + 8));
+                    let v = &mut self.voices[i];
+                    v.slide_start = start;
+                    v.slide_end = start.wrapping_add(2 * len as u32);
+                    v.slide_pos = pos;
+                    v.slide_len = sl;
+                    v.slide_delta = sd;
+                    v.slide_counter = 0;
+                    v.slide_speed = ss;
+                    v.slide_done = false;
+                    v.slide_moved = false;
+                    v.slide_on = true;
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(9);
+                }
+                0xe6 => {
+                    let word = |s: &Self, hw: &Hw, k: u32| (s.r8(hw, a + k) as u16) << 8 | s.r8(hw, a + k + 1) as u16;
+                    let (sl, sd, ss) = (word(self, hw, 1), word(self, hw, 3), self.r8(hw, a + 5));
+                    let v = &mut self.voices[i];
+                    v.slide_len = sl;
+                    v.slide_delta = sd;
+                    v.slide_counter = 0;
+                    v.slide_speed = ss;
+                    v.slide_moved = false;
+                    v.slide_done = false;
+                    v.freq_pos = v.freq_pos.wrapping_add(6);
+                }
+                0xe7 => {
+                    if b != self.voices[i].sample {
+                        let v = &mut self.voices[i];
+                        v.var_depth = 0;
+                        v.sample = b;
+                        self.voice_off(i, hw);
+                        self.play(i, hw, b);
+                    }
+                    let v = &mut self.voices[i];
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                    v.slide_on = false;
+                }
+                0xe8 => {
+                    let v = &mut self.voices[i];
+                    v.freq_wait = b;
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                    return true;
+                }
+                0xe9 => {
+                    let v = &mut self.voices[i];
+                    v.var_depth = 0;
+                    v.sample = 0xff;
+                    self.voice_off(i, hw);
+                    self.sub_sample(i, hw, a);
+                    let v = &mut self.voices[i];
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(3);
+                    v.slide_on = false;
+                }
+                0xea => {
+                    let v = &mut self.voices[i];
+                    v.var_depth = b;
+                    v.variation = 0;
+                    v.freq_pos = v.freq_pos.wrapping_add(2);
+                }
+                // E1 stops the table (and $EB-$FF jump through the original's
+                // code past its jump table; here they stop it too)
+                _ => return false,
+            }
+        }
+    }
+
+    /// E9: sub-sample `n` of an "SSMP" sample, with a loop of one word (its
+    /// first byte doubled).
+    fn sub_sample(&mut self, i: usize, hw: &mut Hw, a: u32) {
+        let n = self.r8(hw, a + 1);
+        let k = self.r8(hw, a + 2) as u32;
+        let (off, _, _, _) = self.sample_info(hw, n);
+        let bus = &mut *hw.bus;
+        let s = off.wrapping_add(self.samples);
+        let count = bus.r16(s + 4) as u32;
+        let skip = (bus.r16(s + 6) << 2) as i16 as i32 as u32;
+        let headers = s.wrapping_add(8);
+        let data = headers.wrapping_add(count * 24).wrapping_add(skip);
+        let h = headers.wrapping_add(k * 24);
+        let start = bus.r32(h) & !1;
+        let end = bus.r32(h + 4) & !1;
+        let len = (end.wrapping_sub(start) >> 1) as u16;
+        let at = start.wrapping_add(data);
+        hw.wait(c7::OFF_LOC);
+        self.set_loc(i, hw, at);
+        hw.wait(c7::LOC_LEN);
+        self.set_len(i, hw, len);
+        hw.wait(c7::LEN_PER);
+        self.set_per(i, hw, 4);
+        hw.wait(c7::CMD_TAIL);
+        let b = hw.bus.r8(at);
+        hw.bus.w8(at.wrapping_add(1), b);
+        let v = &mut self.voices[i];
+        v.loop_addr = at;
+        v.loop_len = 1;
+    }
+
+    /// The sample slide (E5): every `speed + 1` ticks the loop moves by its step
+    /// within the sample, and is written.
+    fn slide(&mut self, i: usize, hw: &mut Hw) {
+        let v = &mut self.voices[i];
+        if !v.slide_on || v.slide_done {
+            return;
+        }
+        v.slide_counter = v.slide_counter.wrapping_sub(1);
+        if (v.slide_counter as i8) >= 0 {
+            return;
+        }
+        v.slide_counter = v.slide_speed;
+        let mut pos = v.slide_pos as u32;
+        let delta = v.slide_delta as i16 as i32 as u32;
+        let len = v.slide_len;
+        if !v.slide_moved {
+            v.slide_moved = true;
+        } else {
+            pos = pos.wrapping_add(delta);
+            if (pos as i32) < 0 {
+                v.slide_done = true;
+                pos = pos.wrapping_sub(delta);
+            } else {
+                let end = v.slide_start.wrapping_add(2 * pos).wrapping_add(2 * len as u32);
+                if end as i32 > v.slide_end as i32 {
+                    v.slide_done = true;
+                    pos = pos.wrapping_sub(delta);
+                }
+            }
+        }
+        v.slide_pos = pos as u16;
+        let a = v.slide_start.wrapping_add(self.samples).wrapping_add(2 * pos);
+        v.loop_len = len;
+        v.loop_addr = a;
+        self.set_loc(i, hw, a);
+        hw.wait(c7::LOC_LEN);
+        self.set_len(i, hw, len);
+    }
+
+    /// The volume envelope.
+    fn envelope(&mut self, i: usize, hw: &mut Hw) {
+        loop {
+            let v = &mut self.voices[i];
+            if v.sustain != 0 {
+                v.sustain -= 1;
+                return;
+            }
+            v.env_counter = v.env_counter.wrapping_sub(1);
+            if v.env_counter != 0 {
+                return;
+            }
+            v.env_counter = v.env_speed;
+            loop {
+                let v = self.voices[i];
+                let a = v.env.wrapping_add(v.env_pos as u32);
+                let c = self.r8(hw, a);
+                match c {
+                    0xe0 => {
+                        let p = (self.r8(hw, a + 1) as u16).wrapping_sub(5);
+                        self.voices[i].env_pos = p;
+                    }
+                    0xe8 => {
+                        let s = self.r8(hw, a + 1);
+                        let v = &mut self.voices[i];
+                        v.sustain = s;
+                        v.env_pos = v.env_pos.wrapping_add(2);
+                        break;
+                    }
+                    0xe1..=0xff => return,
+                    _ => {
+                        let v = &mut self.voices[i];
+                        v.volume = c;
+                        v.env_pos = v.env_pos.wrapping_add(1);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The period: the note, vibrato and portamento.
+    fn period(&mut self, i: usize) -> u16 {
+        let v = self.voices[i];
+        let mut n = v.transpose;
+        if (n as i8) >= 0 {
+            n = n.wrapping_add(v.note).wrapping_add(v.track_transpose);
+        }
+        let mut per = self.note_period(n & 0x7f);
+        let v = &mut self.voices[i];
+        if v.vib_delay != 0 {
+            v.vib_delay -= 1;
+        } else {
+            let mut d1 = v.vib_delta as i16;
+            let depth = v.vib_depth as i16;
+            let speed = v.vib_speed as i16;
+            let mut flag = v.vib_flag;
+            if flag & 0x20 == 0 {
+                d1 -= speed;
+                if d1 < 0 {
+                    flag |= 0x20;
+                    d1 = 0;
+                }
+            } else {
+                d1 += speed;
+                if d1 > depth {
+                    flag &= !0x20;
+                    d1 = depth;
+                }
+            }
+            v.vib_delta = d1 as u8;
+            v.vib_flag = flag;
+            let d1 = d1.wrapping_sub(depth >> 1);
+            per = per.wrapping_add(((d1 as i32 * per as i16 as i32) >> 10) as u16);
+        }
+        if v.info & 0x20 != 0 {
+            let b = v.prev_info;
+            if (b as i8) >= 0 {
+                v.porta = v.porta.wrapping_add(b as u16);
+                per = per.wrapping_sub(((v.porta as u32 * per as u32) >> 10) as u16);
+            } else {
+                v.porta = v.porta.wrapping_add(b.wrapping_neg() as u16);
+                per = per.wrapping_add(((v.porta as u32 * per as u32) >> 10) as u16);
+            }
+        }
+        per
+    }
+
+    /// The volume: the envelope's, faded, less a random variation (once).
+    fn volume(&mut self, i: usize) -> u16 {
+        let mut d1 = self.voices[i].fade as i16;
+        if self.voices[i].var_depth != 0 {
+            let mut d4 = self.voices[i].variation as u16;
+            if d4 == 0 {
+                let depth = self.voices[i].var_depth as u32;
+                self.voices[i].var_depth = 0;
+                let r = self.random() as u32 & 0xff;
+                let q = (depth * r / 0xff) as u16;
+                self.voices[i].variation = q as u8;
+                d4 = q;
+            }
+            d1 = d1.wrapping_sub(d4 as i16);
+        }
+        if d1 < 0 {
+            d1 = 0;
+        }
+        (self.voices[i].volume as u32 * d1 as u32 / 100) as u16
+    }
+
+    fn random(&mut self) -> u16 {
+        let v = self.random.wrapping_add(0x4793);
+        self.random = v.rotate_right(6) ^ v;
+        self.random
+    }
+
+    /// A byte of a frequency table (address 0: the empty table, the original's).
+    fn r8(&self, hw: &Hw, a: u32) -> u8 {
+        if a < 8 {
+            return EMPTY_TABLE[a as usize];
+        }
+        hw.bus.r8(a)
+    }
+
+    /// The next position of voice `i` (at the end, the first, and the song
+    /// end) and its command; the track's number.
+    fn next_position(&mut self, i: usize, hw: &mut Hw) -> u8 {
+        hw.wait(c7::ROW_POS);
+        let v = &mut self.voices[i];
+        let mut p = v.pos.wrapping_add(v.pos_off as i16 as i32 as u32);
+        if p == v.pos_end {
+            self.songend = true;
+            v.pos_off = 0;
+            p = v.pos;
+        }
+        let bus = &*hw.bus;
+        let (t, tt, et, cmd) = (bus.r8(p), bus.r8(p + 1), bus.r8(p + 2), bus.r8(p + 3));
+        let v = &mut self.voices[i];
+        v.track_transpose = tt;
+        v.env_transpose = et;
+        let arg = cmd & 0x0f;
+        match cmd >> 4 {
+            // the tempo, from the next column's command byte
+            0xd => {
+                let t = hw.bus.r8(p + 7);
+                self.set_tempo(hw, t);
+            }
+            0xf => v.fade = if arg == 0 { 100 } else { (16 - arg) * 6 },
+            0x8 => self.stopped = true,
+            0xe => self.speed = arg as u16,
+            _ => {}
+        }
+        let v = &mut self.voices[i];
+        v.pos_off = v.pos_off.wrapping_add(28);
+        t
+    }
+
+    /// A note's envelope and frequency table.
+    fn note_env(&mut self, i: usize, hw: &mut Hw, info: u8, prev: u8) {
+        let n = (info & 0x1f).wrapping_add(self.voices[i].env_transpose);
+        let e = if self.coso {
+            self.module.wrapping_add(hw.bus.r16(self.envs.wrapping_add(2 * n as u32)) as i16 as i32 as u32)
+        } else {
+            self.envs.wrapping_add((n as u32) << 6)
+        };
+        let bus = &*hw.bus;
+        let (sp, f, vs, dp, dl) = (bus.r8(e), bus.r8(e + 1), bus.r8(e + 2), bus.r8(e + 3), bus.r8(e + 4));
+        let v = &mut self.voices[i];
+        v.env_pos = 0;
+        v.env_counter = sp;
+        v.env_speed = sp;
+        v.vib_speed = vs;
+        v.vib_flag = 0x40;
+        v.vib_depth = dp;
+        v.vib_delta = dp;
+        v.vib_delay = dl;
+        v.env = e.wrapping_add(5);
+        v.sustain = 0;
+        if f == 0x80 {
+            return;
+        }
+        let f = if info & 0x40 != 0 { prev } else { f };
+        let fr = if self.coso {
+            self.module.wrapping_add(hw.bus.r16(self.freqs.wrapping_add(2 * f as u32)) as i16 as i32 as u32)
+        } else {
+            self.freqs.wrapping_add((f as u32) << 6)
+        };
+        let v = &mut self.voices[i];
+        v.freq = fr;
+        v.freq_pos = 0;
+        v.freq_wait = 0;
+    }
+
+    /// The next row of voice `i`: at the track's end (or a note of 1) the next
+    /// position, then a note with its envelope and frequency table.
+    fn row(&mut self, i: usize, hw: &mut Hw) {
+        if self.coso {
+            self.row_coso(i, hw);
+            return;
+        }
+        hw.wait(c7::ROW);
+        let size = self.track_size;
+        let v = self.voices[i];
+        let c = hw.bus.r8(v.track.wrapping_add(v.row as u32)) & 0x7f;
+        if c == 1 || v.row == size {
+            let t = self.next_position(i, hw);
+            let v = &mut self.voices[i];
+            v.row = 0;
+            v.track = self.tracks.wrapping_add(t as u32 * size as u32);
+        }
+        let v = self.voices[i];
+        let a = v.track.wrapping_add(v.row as u32);
+        let c = hw.bus.r8(a);
+        let n = c & 0x7f;
+        if n != 0 {
+            // the info byte of the row before (of the track's last row at its start)
+            let before = if v.row == 0 { a + 1 + size as u32 } else { a + 1 } - 2;
+            let prev = hw.bus.r8(before);
+            let info = hw.bus.r8(a + 1);
+            let v = &mut self.voices[i];
+            v.porta = 0;
+            v.note = n;
+            v.prev_info = prev;
+            v.info = info;
+            if c & 0x80 == 0 {
+                self.note_env(i, hw, info, prev);
+            }
+        }
+        let v = &mut self.voices[i];
+        v.row = v.row.wrapping_add(2);
+    }
+
+    /// A COSO track's next row, as NostalgicPlayer reads it: $FF (or the
+    /// track's end) the next position, $FE and $FD the voice's row speed ($FD
+    /// ends the row), else a note, its info and (with info bits 5-7) the info
+    /// byte for the portamento and frequency table.
+    fn row_coso(&mut self, i: usize, hw: &mut Hw) {
+        hw.wait(c7::ROW);
+        let v = &mut self.voices[i];
+        v.counter = v.counter.wrapping_sub(1);
+        if (v.counter as i8) >= 0 {
+            return;
+        }
+        v.counter = v.speed;
+        loop {
+            let v = self.voices[i];
+            let a = v.track;
+            let c = if a == v.track_end { 0xff } else { hw.bus.r8(a) };
+            match c {
+                0xff => {
+                    let t = self.next_position(i, hw) as u32;
+                    let off = |k: u32| hw.bus.r16(self.tracks.wrapping_add(2 * k)) as i16 as i32 as u32;
+                    let start = self.module.wrapping_add(off(t));
+                    let end = if t + 1 < self.track_count { self.module.wrapping_add(off(t + 1)) } else { self.positions };
+                    let v = &mut self.voices[i];
+                    v.track = start;
+                    v.track_end = end;
+                }
+                0xfe | 0xfd => {
+                    let s = hw.bus.r8(a + 1);
+                    let v = &mut self.voices[i];
+                    v.speed = s;
+                    v.counter = s;
+                    v.track = a.wrapping_add(2);
+                    if c == 0xfd {
+                        return;
+                    }
+                }
+                _ => {
+                    let info = hw.bus.r8(a + 1);
+                    let v = &mut self.voices[i];
+                    v.note = c;
+                    v.info = info;
+                    if info & 0xe0 != 0 {
+                        v.prev_info = hw.bus.r8(a + 2);
+                        v.track = a.wrapping_add(3);
+                    } else {
+                        v.track = a.wrapping_add(2);
+                    }
+                    v.porta = 0;
+                    let prev = v.prev_info;
+                    if c < 0x80 {
+                        self.note_env(i, hw, info, prev);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// The original's wait for `n` raster lines: it polls VHPOSR's line byte until
+/// it has changed `n` times, and leaves the loop about 31 colour clocks into
+/// the line (27 to 35 in the reference's DMA-on writes).
+fn wait_lines(hw: &mut Hw, n: u64) {
+    let now = hw.bus.clock;
+    hw.wait((now / LINE + n) * LINE + 31 - now);
+}
+
 #[cfg(test)]
 mod tests {
     use crate::engine::Engine;
@@ -3496,5 +4785,165 @@ mod tests {
         assert!(reg(0xDFF0A8).contains(&64));
         assert!(reg(0xDFF096).contains(&0x800F));
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
+    }
+
+    /// A 7-voice TFMX module at the file's start: one frequency table,
+    /// envelope, track (one row) and position (seven columns), one subsong,
+    /// one sample of 64 words looped whole. Every voice plays note 24.
+    const S: usize = 0x20;
+    const SENV: usize = S + 64;
+    const STRACK: usize = SENV + 64;
+    const SPOS: usize = STRACK + 2;
+    const SSUBS: usize = SPOS + 28;
+    const SINFO: usize = SSUBS + 16;
+    const SSAMPLES: usize = SINFO + 30;
+
+    fn square() -> impl Iterator<Item = u8> {
+        (0..128).map(|i| if i < 64 { 0x40 } else { 0xc0 })
+    }
+
+    fn tfmx7_module() -> Vec<u8> {
+        let mut d = b"TFMX".to_vec();
+        // one of each, rows of 2 bytes, one subsong, one sample
+        d.extend([0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 1]);
+        d.resize(S, 0);
+        d.extend([0xe2, 0, 0, 0xe1]); // play sample 0, no transpose, stop
+        d.resize(SENV, 0);
+        d.extend([1, 0, 0, 0, 0, 0x40, 0xe1]); // speed 1, frequency table 0; volume 64
+        d.resize(STRACK, 0);
+        d.extend([24, 0]); // note 24 with envelope 0
+        d.extend([0; 28]); // every voice on track 0; tempo 0, the sum divided by 4
+        d.extend([0, 0, 0, 0, 0, 0, 0, 3]); // positions 0 to 0, speed 3
+        d.extend([0; 8]); // the empty subsong entry
+        d.extend(b"SQUARE");
+        d.resize(SINFO + 0x16, 0); // the sample at the samples' start
+        d.extend([0, 64, 0, 0, 0, 0, 0, 64]); // 64 words, looped whole
+        assert_eq!(d.len(), SSAMPLES);
+        d.extend(square());
+        d.resize(1024, 0);
+        d
+    }
+
+    /// The same song as a COSO module: offset tables for the frequency
+    /// tables, envelopes and tracks, a $FF-ended track, 10-byte sample infos.
+    const CFREQS: usize = 0x40;
+    const CPOS: usize = 0x48;
+    const CSUBS: usize = CPOS + 28;
+    const CINFO: usize = CSUBS + 16;
+    const CFREQ0: usize = CINFO + 10;
+    const CENV0: usize = CFREQ0 + 4;
+    const CTRACK0: usize = CENV0 + 7;
+    const CSAMPLES: usize = CTRACK0 + 3;
+
+    fn coso7_module() -> Vec<u8> {
+        let mut d = b"COSO".to_vec();
+        for at in [CFREQS, CFREQS + 2, CFREQS + 4, CPOS, CSUBS, CINFO, CSAMPLES] {
+            d.extend((at as u32).to_be_bytes());
+        }
+        d.extend(b"TFMX");
+        d.extend([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1]); // one subsong, one sample
+        d.resize(CFREQS, 0);
+        for at in [CFREQ0, CENV0, CTRACK0] {
+            d.extend((at as u16).to_be_bytes());
+        }
+        d.resize(CPOS, 0);
+        d.extend([0; 28]);
+        d.extend([0, 0, 0, 0, 0, 0, 0, 3]);
+        d.extend([0; 8]);
+        d.extend([0, 0, 0, 0, 0, 64, 0, 0, 0, 64]);
+        d.extend([0xe2, 0, 0, 0xe1]);
+        d.extend([1, 0, 0, 0, 0, 0x40, 0xe1]);
+        d.extend([24, 0, 0xff]); // note 24 with envelope 0, then the next position
+        assert_eq!(d.len(), CSAMPLES);
+        d.extend(square());
+        d.resize(1024, 0);
+        d
+    }
+
+    /// Plays `data` for 0.2 s as a "Hippel 7V" module of one subsong: the
+    /// engine (its write log kept in `write_log`) and the module's base.
+    fn play7(name: &str, data: Vec<u8>) -> (Engine, u32) {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new(name), data).unwrap();
+        let p = e.playing.as_ref().unwrap();
+        assert_eq!(p.format, "Hippel 7V");
+        assert_eq!((p.sub_min, p.sub_max), (1, 1));
+        let base = e.m.deli.list.first().unwrap().0;
+        let mut out = vec![0f32; 2 * 9600];
+        e.render(&mut out);
+        assert!(out.iter().any(|&s| s != 0.0), "no sound");
+        (e, base)
+    }
+
+    /// Voices 0-2 on Paula channels 3, 1 and 2; voices 3-6 mixed into channel
+    /// 0's two buffers at 24 kHz, a buffer of 240 words a tick.
+    fn check7(e: &Engine, samples: u32) {
+        let log = e.m.bus.write_log.as_ref().unwrap();
+        let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        assert_eq!(reg(0xDFF0A6)[0], 149);
+        assert!(reg(0xDFF0A4).iter().filter(|&&l| l == 240).count() > 10);
+        assert!(reg(0xDFF096).contains(&0x8001));
+        for ch in [1u32, 2, 3] {
+            let r = 0xDFF0A0 + 16 * ch;
+            assert!(reg(r + 2).contains(&(samples as u16)), "channel {ch} has no sample");
+            assert!(reg(r + 4).contains(&64));
+            assert!(reg(r + 6).contains(&super::PERIODS[24]));
+            assert!(reg(r + 8).contains(&64));
+        }
+        // the note turns the three voices' DMA off, then on together
+        let dma = reg(0xDFF096);
+        assert!(dma.contains(&0x0008) && dma.contains(&0x0002) && dma.contains(&0x0004) && dma.contains(&0x800E));
+        // the mixer's buffers hold the four voices' sum
+        let mut bufs: Vec<u32> = Vec::new();
+        let mut hi = 0;
+        for w in log.iter() {
+            match w.0 {
+                0xDFF0A0 => hi = w.1 as u32,
+                0xDFF0A2 if !bufs.contains(&((hi << 16) | w.1 as u32)) => bufs.push((hi << 16) | w.1 as u32),
+                _ => {}
+            }
+        }
+        assert_eq!(bufs.len(), 2);
+        assert_eq!(bufs[1].wrapping_sub(bufs[0]), 0x400);
+        // the square's 64 at volume 64 (played as 63), four voices divided by 4
+        let mixed: Vec<u8> = (0..480).map(|i| e.m.bus.r8(bufs[0] + i)).collect();
+        assert!(mixed.contains(&0x40) && mixed.contains(&0xc0), "the buffer holds no square");
+    }
+
+    #[test]
+    fn plays_seven_tfmx_voices() {
+        let d = tfmx7_module();
+        assert!(super::detect_7v(&d));
+        let (e, base) = play7("test.hip7", d);
+        check7(&e, base + SSAMPLES as u32);
+    }
+
+    #[test]
+    fn plays_seven_coso_voices() {
+        let d = coso7_module();
+        assert!(super::detect_7v(&d));
+        let (e, base) = play7("test.hipc", d);
+        check7(&e, base + CSAMPLES as u32);
+    }
+
+    #[test]
+    fn seven_voices_leave_four_voice_modules() {
+        assert!(!super::detect_7v(&module()));
+        assert!(!super::detect_7v(&tfmx_module()));
+        assert!(!super::detect_7v(&early_module()));
+        // a 4-voice layout after the TFMX header: no empty subsong entry where
+        // the 7-voice positions would end
+        let mut d = tfmx7_module();
+        d[SSUBS + 8] = 1;
+        assert!(!super::detect_7v(&d));
+    }
+
+    #[test]
+    fn seven_voice_mixer_period() {
+        assert_eq!(super::mix_period7(24), 149);
+        assert_eq!(super::mix_period7(16), 224);
+        assert_eq!(super::mix_period7(0), 0);
     }
 }

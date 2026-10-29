@@ -5,9 +5,9 @@
 //! Ported from libxmp 4.7.4, MIT licence, Copyright (C) 1996-2026 Claudio Matsuoka
 //! and Hipolito Carraro Jr (see LICENSE-libxmp).
 //!
-//! Not ported yet: the FAR tempo handling (`far_extras`), which comes with the
-//! FAR loader.
 
+use super::extras::ModuleExtra;
+use super::far_extras::far_translate_tempo;
 use super::module::*;
 use super::player::*;
 
@@ -40,6 +40,14 @@ impl Context {
         let mut speed = self.m.module.spd;
         let base_time = self.m.rrate as i32;
         let mut st26_speed = 0;
+        let (mut far_tempo_coarse, mut far_tempo_fine, mut far_tempo_mode) = (4, 0, 1);
+        if let ModuleExtra::Far(me) = self.m.extra {
+            far_tempo_coarse = me.coarse_tempo;
+            if let Some((s, b)) = far_translate_tempo(far_tempo_mode, 0, far_tempo_coarse, &mut far_tempo_fine) {
+                speed = s;
+                bpm = b;
+            }
+        }
         let has_marker = self.m.has_quirk(QUIRK_MARKER);
         let mut ord = ep - 1;
         let (mut gvol_memory, mut row_count, mut row_count_total, mut frame_count) = (0, 0, 0, 0);
@@ -199,7 +207,38 @@ impl Context {
                         if f1 == FX_ICE_SPEED && p1 != 0 {
                             st26_speed = if p1 & 0xf != 0 { ((p1 >> 4) << 8) | (p1 & 0xf) } else { p1 >> 4 };
                         }
-                        // FAR tempo: not ported yet (comes with the FAR loader)
+                        // FAR tempo processing
+                        if f1 == FX_FAR_TEMPO || f1 == FX_FAR_F_TEMPO {
+                            let mut fine_change = 0;
+                            if f1 == FX_FAR_TEMPO {
+                                if p1 >> 4 != 0 {
+                                    far_tempo_mode = (p1 >> 4) - 1;
+                                } else {
+                                    far_tempo_coarse = p1 & 0xf;
+                                }
+                            }
+                            if f1 == FX_FAR_F_TEMPO {
+                                if p1 >> 4 != 0 {
+                                    far_tempo_fine += p1 >> 4;
+                                    fine_change = p1 >> 4;
+                                } else if p1 & 0xf != 0 {
+                                    far_tempo_fine -= p1 & 0xf;
+                                    fine_change = -(p1 & 0xf);
+                                } else {
+                                    far_tempo_fine = 0;
+                                }
+                            }
+                            if let Some((far_speed, far_bpm)) =
+                                far_translate_tempo(far_tempo_mode, fine_change, far_tempo_coarse, &mut far_tempo_fine)
+                            {
+                                frame_count += row_count * speed;
+                                row_count = 0;
+                                time += tf * frame_count as f64 * base_time as f64 / bpm as f64;
+                                frame_count = 0;
+                                speed = far_speed;
+                                bpm = far_bpm;
+                            }
+                        }
                         if f1 == FX_ULT_TEMPO || f2 == FX_ULT_TEMPO {
                             let (mut parm, mut parm2) = (0, 0);
                             for (ff, pp) in [(f2, p2), (f1, p1)] {

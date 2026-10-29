@@ -6,7 +6,7 @@
 //! including the 8-bit truncation of the parameter.
 //!
 //! Not ported yet (the hooks are marked): the format "extras" (`libxmp_extras_process_fx`,
-//! used by MED, HMN and FAR), and the IT NNA functions of `FX_IT_INSTFUNC` 0-6.
+//! used by MED and HMN; FAR is in `far_extras.rs`), and the IT NNA functions of `FX_IT_INSTFUNC` 0-6.
 
 use super::module::*;
 use super::player::*;
@@ -932,7 +932,7 @@ impl Context {
                         continue;
                     }
                     _ => {
-                        // libxmp_extras_process_fx: no extras yet
+                        self.extras_process_fx(&mut xc, note as u8, fxt, fxp as u8);
                     }
                 },
             }

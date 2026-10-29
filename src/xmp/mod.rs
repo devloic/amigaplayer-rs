@@ -13,6 +13,8 @@
 //! epilogue, scan and player on it and renders 16-bit stereo at any rate.
 
 pub mod effects;
+pub mod extras;
+pub mod far_extras;
 pub mod iff;
 pub mod inflate;
 pub mod load;
@@ -50,6 +52,8 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Galaxy Music System 4.0", test: loaders::gal4::test, load: loaders::gal4::load },
     Loader { name: "DSMI Advanced Module Format", test: loaders::amf::test, load: loaders::amf::load },
     Loader { name: "Real Tracker", test: loaders::rtm::test, load: loaders::rtm::load },
+    Loader { name: "Digital Tracker", test: loaders::dt::test, load: loaders::dt::load },
+    Loader { name: "Farandole Composer", test: loaders::far::test, load: loaders::far::load },
     Loader { name: "Composer 669", test: loaders::c669::test, load: loaders::c669::load },
     Loader { name: "Magnetic Fields Packer", test: loaders::mfp::test, load: loaders::mfp::load },
 ];

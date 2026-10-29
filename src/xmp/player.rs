@@ -256,6 +256,7 @@ pub struct NoteSlide {
 /// `struct channel_data`: a track's (or a virtual channel's) player state.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ChannelData {
+    pub extra: super::extras::ChannelExtra,
     pub flags: i32,
     pub per_flags: i32,
     pub note_flags: i32,
@@ -505,6 +506,18 @@ pub fn period_to_note(p: i32) -> i32 {
     libxmp_round(12.0 * (PERIOD_BASE / p as f64).ln() / std::f64::consts::LN_2) as i32 + 1
 }
 
+/// `libxmp_gus_frequency_steps`: a Gravis Ultrasound frequency offset in Hz for
+/// a number of steps. The card's rate is 44100 up to 14 active channels and
+/// round(14 * 44100 / active_channels) for 15 to 32.
+pub fn gus_frequency_steps(num_steps: i32, num_channels_active: i32) -> f64 {
+    const GUS_RATES: [f64; 19] = [
+        44100.0, 41160.0, 38587.5, 36317.65, 34300.0, 32494.74, 30870.0, 29400.0, 28063.64, 26843.48, 25725.0, 24696.0, 23746.15,
+        22866.67, 22050.0, 21289.66, 20580.0, 19916.13, 19294.75,
+    ];
+    let n = num_channels_active.clamp(14, 32);
+    (num_steps as f64 * GUS_RATES[(n - 14) as usize]) / 1024.0
+}
+
 /// `libxmp_note_to_period`.
 pub fn note_to_period(m: &ModuleData, n: i32, f: i32, adj: f64) -> f64 {
     let d = n as f64 + f as f64 / 128.0;
@@ -675,7 +688,7 @@ impl Context {
         (x as u32 as usize) < self.m.module.smp && self.m.module.xxs[x as usize].data.is_some()
     }
 
-    fn is_valid_note(x: i32) -> bool {
+    pub(crate) fn is_valid_note(x: i32) -> bool {
         (x as u32 as usize) < XMP_MAX_KEYS
     }
 
@@ -815,12 +828,14 @@ impl Context {
 
     fn reset_channels(&mut self) {
         let volbase = self.m.volbase;
+        let extra = self.m.extra.new_channel_extras();
         for xc in self.p.xc_data.iter_mut() {
             *xc = ChannelData::default();
             xc.ins = -1;
             xc.old_ins = 0;
             xc.key = -1;
             xc.volume = volbase;
+            xc.extra = extra;
         }
         let chn = self.m.module.chn;
         for i in 0..self.p.virt.num_tracks as usize {
@@ -1053,8 +1068,7 @@ impl Context {
             return;
         }
 
-        // libxmp_extras_get_volume: no extras yet
-        let mut finalvol = self.p.xc_data[chn].volume;
+        let mut finalvol = self.extras_get_volume(chn);
         if self.m.read_event_type == ReadEvent::It {
             let xc = &self.p.xc_data[chn];
             finalvol = xc.volume * (100 - xc.rvv) / 100;
@@ -1163,7 +1177,7 @@ impl Context {
         }
 
         let mut period = self.p.xc_data[chn].period;
-        // + libxmp_extras_get_period: no extras yet
+        period += self.extras_get_period(chn) as f64;
         if self.has_quirk(QUIRK_ST3BUGS) && period < 0.25 {
             self.virt_resetchannel(chn as i32);
         }
@@ -1212,7 +1226,7 @@ impl Context {
             }
         }
 
-        // + libxmp_extras_get_linear_bend: no extras yet
+        linear_bend += self.extras_get_linear_bend(chn);
 
         let mut final_period = note_to_period_mix(note, linear_bend);
         if self.has_quirk(QUIRK_ST3BUGS) && final_period < 16.239270 {
@@ -1488,7 +1502,7 @@ impl Context {
             return;
         }
 
-        // libxmp_play_extras: no extras yet
+        self.play_extras(chn);
 
         if self.p.xc_data[chn].test(RETRIG) {
             let s3mrtg = self.has_quirk(QUIRK_S3MRTG);

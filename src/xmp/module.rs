@@ -60,6 +60,8 @@ pub const NTSC_RATE: f64 = 208.0;
 pub const C4_PAL_RATE: i32 = 8287;
 pub const C4_NTSC_RATE: i32 = 8363;
 pub const DEFAULT_TIME_FACTOR: f64 = 10.0;
+/// See `far_extras.c`.
+pub const FAR_TIME_FACTOR: f64 = 4.01373;
 pub const MAX_SEQUENCES: usize = 255;
 pub const NO_SEQUENCE: u8 = MAX_SEQUENCES as u8;
 pub const MAX_SAMPLE_SIZE: i32 = 0x1000_0000;
@@ -595,6 +597,8 @@ pub struct ModuleData {
     pub seq_data: [Sequence; MAX_SEQUENCES],
     pub xtra: Vec<ExtraSample>,
     pub compare_vblank: bool,
+    /// The format extras (`m->extra`).
+    pub extra: super::extras::ModuleExtra,
     /// Where the module was loaded from (`m->dirname`, `m->basename`), for the
     /// loaders that look for a companion file; empty for a module in memory.
     pub dirname: String,
@@ -629,6 +633,7 @@ impl Default for ModuleData {
             seq_data: [Sequence::default(); MAX_SEQUENCES],
             xtra: Vec::new(),
             compare_vblank: false,
+            extra: Default::default(),
             dirname: String::new(),
             basename: String::new(),
             scan_cnt: Vec::new(),

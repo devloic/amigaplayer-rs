@@ -13,6 +13,7 @@
 //! `period_type`, `c4rate` and the rest. [`XmpPlayer`] then runs libxmp's
 //! epilogue, scan and player on it and renders 16-bit stereo at any rate.
 
+pub mod aormath;
 pub mod effects;
 pub mod extras;
 pub mod far_extras;
@@ -27,6 +28,7 @@ pub mod player;
 pub mod scan;
 mod spline_lut;
 pub mod virt;
+pub mod vorbis;
 
 use load::Hio;
 use module::ModuleData;
@@ -41,6 +43,7 @@ pub struct Loader {
 
 /// The loaders, in libxmp's order (`format_loaders` of `format.c`).
 pub static LOADERS: &[Loader] = &[
+    Loader { name: "Fast Tracker II", test: loaders::xm::test, load: loaders::xm::load },
     Loader { name: "STMIK 0.2", test: loaders::stx::test, load: loaders::stx::load },
     Loader { name: "MultiTracker", test: loaders::mtm::test, load: loaders::mtm::load },
     Loader { name: "Digitrakker", test: loaders::mdl::test, load: loaders::mdl::load },
@@ -67,6 +70,18 @@ pub static LOADERS: &[Loader] = &[
 /// The loader that claims `data`, if any.
 pub fn detect(data: &[u8]) -> Option<&'static Loader> {
     LOADERS.iter().find(|l| (l.test)(data))
+}
+
+/// The loaders (by name) whose formats the open chain — `open::detect`, which
+/// gates the wasm, and the engine with `open_replayers` — leaves to the players
+/// that had them before the port: XM goes to the 68k FastTracker_2.0 player
+/// natively and, in the archive's web app, past the open replayers to UADE and
+/// then ft2play. Remove "Fast Tracker II" to play XMs on the libxmp port there.
+pub const LEFT_TO_OTHER_PLAYERS: &[&str] = &["Fast Tracker II"];
+
+/// `detect`, for the open chain: None for a format in `LEFT_TO_OTHER_PLAYERS`.
+pub fn detect_open(data: &[u8]) -> Option<&'static Loader> {
+    detect(data).filter(|l| !LEFT_TO_OTHER_PLAYERS.contains(&l.name))
 }
 
 /// `xmp_load_module`: the module in `data`, checked and scanned.

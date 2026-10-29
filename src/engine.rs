@@ -559,8 +559,11 @@ impl Engine {
                     return self.start_replay(r, path);
                 }
             }
-            // the PC tracker formats of libxmp's loaders
-            if let Some(x) = crate::xmp::XmpPlayer::open(&data, self.rate as u32, Some(path)) {
+            // the PC tracker formats of libxmp's loaders (those the open chain
+            // takes: see xmp::LEFT_TO_OTHER_PLAYERS)
+            if let Some(x) =
+                crate::xmp::detect_open(&data).and_then(|_| crate::xmp::XmpPlayer::open(&data, self.rate as u32, Some(path)))
+            {
                 self.m.deli.list.clear();
                 self.m.heap.free(addr);
                 return self.start_mix(Box::new(x), path);

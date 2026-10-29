@@ -26,3 +26,4 @@ pub mod muse;
 pub mod ult;
 pub mod rtm;
 pub mod stx;
+pub mod xm;

@@ -475,11 +475,11 @@ pub struct Context {
     pub playing: bool,
 }
 
-/// `pow`, kept a call to the C library's `pow` (and not folded into `exp2` by
-/// the compiler) as libxmp's is.
+/// libxmp's `pow(2, x)`, with glibc's pow (see aormath) so that wasm gets the
+/// native bits.
 #[inline]
 pub(crate) fn pow2(x: f64) -> f64 {
-    std::hint::black_box(2.0f64).powf(x)
+    super::aormath::pow(2.0, x)
 }
 
 fn libxmp_round(val: f64) -> f64 {
@@ -498,7 +498,7 @@ pub fn c2spd_to_note(c2spd: i32) -> (i32, i32) {
     if c2spd <= 0 {
         return (0, 0);
     }
-    let c = (1536.0 * (c2spd as f64 / 8363.0).ln() / std::f64::consts::LN_2) as i32;
+    let c = (1536.0 * super::aormath::log(c2spd as f64 / 8363.0) / std::f64::consts::LN_2) as i32;
     (c / 128, c % 128)
 }
 
@@ -507,7 +507,7 @@ pub fn period_to_note(p: i32) -> i32 {
     if p <= 0 {
         return 0;
     }
-    libxmp_round(12.0 * (PERIOD_BASE / p as f64).ln() / std::f64::consts::LN_2) as i32 + 1
+    libxmp_round(12.0 * super::aormath::log(PERIOD_BASE / p as f64) / std::f64::consts::LN_2) as i32 + 1
 }
 
 /// `libxmp_gus_frequency_steps`: a Gravis Ultrasound frequency offset in Hz for
@@ -545,11 +545,11 @@ pub fn period_to_bend(m: &ModuleData, p: f64, n: i32, adj: f64) -> i32 {
         PeriodType::Linear => (100.0 * (8.0 * (((240 - n) * 16) as f64 - p))) as i32,
         PeriodType::Cspd => {
             let d = note_to_period(m, n, 0, adj);
-            libxmp_round(100.0 * (1536.0 / std::f64::consts::LN_2) * (p / d).ln()) as i32
+            libxmp_round(100.0 * (1536.0 / std::f64::consts::LN_2) * super::aormath::log(p / d)) as i32
         }
         _ => {
             let d = note_to_period(m, n, 0, adj);
-            libxmp_round(100.0 * (1536.0 / std::f64::consts::LN_2) * (d / p).ln()) as i32
+            libxmp_round(100.0 * (1536.0 / std::f64::consts::LN_2) * super::aormath::log(d / p)) as i32
         }
     }
 }
@@ -671,9 +671,14 @@ fn check_envelope_fade(env: &Envelope, x: i32) -> i32 {
     0
 }
 
+/// The RNG's state at the start (random LFO waveforms). libxmp seeds it from
+/// `time()` in `xmp_create_context`; a fixed seed keeps the output reproducible,
+/// and this one is the libxmp oracle's.
+pub const RNG_SEED: u32 = 0x2545_f491;
+
 impl Context {
     pub fn new(m: ModuleData) -> Context {
-        Context { m, p: PlayerData::default(), s: MixerData::default(), rng: 0, playing: false }
+        Context { m, p: PlayerData::default(), s: MixerData::default(), rng: RNG_SEED, playing: false }
     }
 
     fn has_quirk(&self, q: i32) -> bool {

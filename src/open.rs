@@ -24,6 +24,7 @@ pub fn detect(data: &[u8]) -> Option<String> {
     if let Some(o) = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data)) {
         return Some(o.name.to_string());
     }
+    crate::xmp::detect_open(&data)?;
     crate::xmp::load_module(&data).map(|c| c.m.module.type_)
 }
 

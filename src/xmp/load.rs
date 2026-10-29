@@ -16,6 +16,8 @@ pub const SAMPLE_FLAG_BIGEND: i32 = 0x0040;
 pub const SAMPLE_FLAG_VIDC: i32 = 0x0080;
 pub const SAMPLE_FLAG_INTERLEAVED: i32 = 0x0100;
 pub const SAMPLE_FLAG_FULLREP: i32 = 0x0200;
+/// ADPCM4: a 16-byte delta table, then two 4-bit table indices a byte (ModPlug).
+pub const SAMPLE_FLAG_ADPCM: i32 = 0x4000;
 
 /// `HIO_HANDLE` over a module in memory: reads past the end give 0 and set the
 /// error flag, as hio's memory reader does.
@@ -169,8 +171,20 @@ pub fn load_sample(m: &mut ModuleData, f: &mut Hio, flags: i32, i: usize, buffer
             return Ok(());
         }
         let remaining = file_len - file_pos;
-        if bytelen > remaining {
+        let mut over = false;
+        if flags & SAMPLE_FLAG_ADPCM != 0 {
+            if remaining < 16 {
+                return Ok(());
+            }
+            if 16 + ((bytelen + 1) >> 1) > remaining {
+                over = true;
+                bytelen = (remaining - 16) << 1;
+            }
+        } else if bytelen > remaining {
+            over = true;
             bytelen = remaining;
+        }
+        if over {
             bytelen -= bytelen & (framelen - 1);
             xxs.len = bytelen as i32;
             if xxs.flg & XMP_SAMPLE_16BIT != 0 {
@@ -212,6 +226,17 @@ pub fn load_sample(m: &mut ModuleData, f: &mut Hio, flags: i32, i: usize, buffer
             let b = buffer.unwrap_or(&[]);
             let n = b.len().min(bytelen);
             dest[..n].copy_from_slice(&b[..n]);
+        } else if flags & SAMPLE_FLAG_ADPCM != 0 {
+            let x2 = (bytelen + 1) >> 1;
+            let mut table = [0u8; 16];
+            if f.read(&mut table) != 16 {
+                return Err(());
+            }
+            let mut packed = vec![0u8; x2];
+            if f.read(&mut packed) != x2 {
+                return Err(());
+            }
+            adpcm4_decoder(&packed, dest, &table);
         } else {
             // a short read leaves zeros
             let avail = f.size().saturating_sub(f.tell()).min(bytelen);
@@ -287,6 +312,31 @@ pub fn load_sample(m: &mut ModuleData, f: &mut Hio, flags: i32, i: usize, buffer
     }
     xxs.data = Some(data);
     Ok(())
+}
+
+/// `libxmp_apply_mpt_preamp` (`loaders/common.c`): ModPlug's pre-amp by channel
+/// count, folded into the master volume (OpenMPT's table).
+pub fn apply_mpt_preamp(m: &mut ModuleData) {
+    const PREAMP_TABLE: [i32; 16] = [0x60, 0x60, 0x60, 0x70, 0x80, 0x88, 0x90, 0x98, 0xa0, 0xa4, 0xa8, 0xb0, 0xb4, 0xb8, 0xbc, 0xc0];
+    let chn = (m.module.chn as i32).clamp(1, 31);
+    m.mvol = (m.mvol * 96) / PREAMP_TABLE[(chn >> 1) as usize];
+}
+
+/// `adpcm4_decoder`: two nibbles a byte, each a delta-table index, low first.
+/// An odd length decodes one more value, which libxmp writes into the extra
+/// frames after the sample (overwritten by them later); it is dropped here.
+fn adpcm4_decoder(inp: &[u8], out: &mut [u8], tab: &[u8; 16]) {
+    let mut delta = 0u8;
+    let mut k = 0;
+    for &b in inp {
+        for nib in [b & 0x0f, b >> 4] {
+            delta = delta.wrapping_add(tab[nib as usize]);
+            if k < out.len() {
+                out[k] = delta;
+            }
+            k += 1;
+        }
+    }
 }
 
 fn convert_delta(p: &mut [u8], frames: usize, is_16bit: bool, channels: usize) {
@@ -441,7 +491,7 @@ pub fn c2spd_to_note(c2spd: i32) -> (i32, i32) {
     if c2spd <= 0 {
         return (0, 0);
     }
-    let c = (1536.0 * (c2spd as f64 / 8363.0).ln() / std::f64::consts::LN_2) as i32;
+    let c = (1536.0 * super::aormath::log(c2spd as f64 / 8363.0) / std::f64::consts::LN_2) as i32;
     (c / 128, c % 128)
 }
 

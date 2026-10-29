@@ -70,6 +70,7 @@ pub mod soundimages;
 pub mod sonicarranger;
 pub mod sonix;
 pub mod specialfx;
+pub mod soundmaster;
 pub mod soundmon;
 pub mod soundtracker;
 pub mod synthesis;
@@ -213,6 +214,7 @@ pub const REPLAYERS: &[Open] = &[
     cinemaware::OPEN,
     soundimages::OPEN,
     andrewparton::OPEN,
+    soundmaster::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

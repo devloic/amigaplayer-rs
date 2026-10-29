@@ -16,6 +16,7 @@ pub mod ahx;
 pub mod artofnoise;
 pub mod bendaglish;
 pub mod beathoven;
+pub mod cinemaware;
 mod beathoven_tables;
 pub mod davelowe;
 mod davelowe_tables;
@@ -207,6 +208,7 @@ pub const REPLAYERS: &[Open] = &[
     beathoven::OPEN,
     mikedavies::OPEN,
     synthpack::OPEN,
+    cinemaware::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -158,7 +158,7 @@ impl Cx<'_> {
     /// The place a data-location operand names (inside the file).
     fn loc(&self, e: Ea) -> Option<usize> {
         let p = match e {
-            Ea::Pc(t) => t as i64,
+            Ea::Pc(t) => t as isize as i64,
             Ea::Disp(r, dd) if r == self.pr => self.p + dd as i64,
             _ => return None,
         };
@@ -174,7 +174,7 @@ impl Cx<'_> {
     }
     /// A load of P into the pointer-base register.
     fn p_load(&self, i: &Insn) -> bool {
-        i.k == K::Lea && i.dst == Ea::A(self.pr) && matches!(i.src, Ea::Pc(t) if t as i64 == self.p)
+        i.k == K::Lea && i.dst == Ea::A(self.pr) && matches!(i.src, Ea::Pc(t) if t as isize as i64 == self.p)
     }
     /// A move of `sz` bytes to a data location: (place, source kind).
     fn store(&self, i: &Insn, sz: u8) -> Option<(usize, Src)> {

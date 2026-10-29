@@ -185,7 +185,7 @@ fn find(d: &[u8]) -> Option<Found> {
     if prev.k != K::Lea || prev.len != 4 {
         return None;
     }
-    let pbase = pb as i64 as i32;
+    let pbase = pb as isize as i32;
     let preg = match prev.dst {
         Ea::A(r) => r,
         _ => return None,

@@ -923,3 +923,17 @@ fn engine_picks_the_player_from_the_content() {
     }
     assert!(e.songend());
 }
+
+/// The six corpus modules, when the folder is present, are recognised (this runs the whole
+/// locator on real code, as `detect` does for the engine).
+#[test]
+fn detects_the_real_modules_when_present() {
+    let dir = Path::new("/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b15-opus/sb/mods");
+    let mut n = 0;
+    for name in ["Kelly_X", "MUNGOMUSIC", "Artificial_Dreams", "Advanced_Ski_Simulator", "scape", "Street_Fighter"] {
+        let Ok(d) = std::fs::read(dir.join(format!("sb.{name}"))) else { continue };
+        assert!(detect(&d), "{name} not recognised");
+        n += 1;
+    }
+    eprintln!("{n} real modules recognised");
+}

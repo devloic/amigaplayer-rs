@@ -65,6 +65,7 @@ pub mod sidmon2;
 pub mod soundcontrol;
 pub mod soundfactory;
 pub mod soundfx;
+pub mod soundimages;
 pub mod sonicarranger;
 pub mod sonix;
 pub mod specialfx;
@@ -209,6 +210,7 @@ pub const REPLAYERS: &[Open] = &[
     mikedavies::OPEN,
     synthpack::OPEN,
     cinemaware::OPEN,
+    soundimages::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

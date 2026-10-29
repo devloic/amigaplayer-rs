@@ -7,13 +7,16 @@
 //! structure of the corpus files), and this player was written from it alone and
 //! checked against those writes.
 //!
-//! Two builds are specified and verified (A: Battleships, B: Gold Runner); a third
-//! (Jupiter Probe) is not, and is refused. The module is the driver's code image
+//! Three builds are specified and verified (A: Battleships, B: Gold Runner, C: Jupiter
+//! Probe). Build C differs: its restart runs only when channel 3's interrupt bit is
+//! set (read from the engine's Paula; the acknowledge clears it), channel 3 is
+//! rewritten every frame as a silent timer, channel 1 always plays the table sample
+//! and the output also runs while stopped. The module is the driver's code image
 //! with its data behind it: three voice records, a song table, track lists of
 //! offsets to pattern streams, envelope streams and a period table. The file
 //! carries no header, so the builds are told apart by the interrupt-acknowledge
-//! value the driver's code writes each frame (found by decoding the instructions)
-//! and confirmed by the song table at the build's offset.
+//! value the driver's code writes each frame (found by decoding the instructions;
+//! C also by the `lea` at 318 and the length) and confirmed by the song table at the build's offset.
 //!
 //! Three voices play at 50 Hz: every frame restarts a one-word-pair sample on
 //! channel 3 and acknowledges, then (while playing) runs a tick whose row
@@ -42,10 +45,24 @@ struct Build {
     /// Whether the voice-1 sweep and the stopped-state silence of voice 2 exist, and
     /// whether the voice-2 effect gates the output.
     a: bool,
+    /// Build C (Jupiter Probe): the restart is gated by channel 3's interrupt bit, channel 1
+    /// always plays the table sample, the tail rewrites channel 3, and the output runs
+    /// even when stopped.
+    c: bool,
 }
 
-const BUILD_A: Build = Build { ack: 64, song: 2338, env: 1928, per: 1736, smp2: 412, a: true };
-const BUILD_B: Build = Build { ack: 4, song: 2356, env: 1946, per: 1754, smp2: 202, a: false };
+const BUILD_A: Build = Build { ack: 64, song: 2338, env: 1928, per: 1736, smp2: 412, a: true, c: false };
+const BUILD_B: Build = Build { ack: 4, song: 2356, env: 1946, per: 1754, smp2: 202, a: false, c: false };
+const BUILD_C: Build = Build { ack: 1024, song: 2312, env: 1836, per: 1644, smp2: 0, a: false, c: true };
+
+/// Build C's sample offsets: channel 1's table sample (after the host's sample fix) and
+/// channel 3's tail sample, which lies below the module.
+const SMP_C_TABLE: u32 = 52;
+const SMP_C_TAIL: i32 = -916;
+const CH3_BIT: u16 = 0x0400;
+/// Colour clocks the first play call is held back after the init (fitted: the restart
+/// frames follow from where channel 3's blocks fall against the frames).
+const C_DMA_LEAD: u64 = 1260;
 
 /// Sample offsets common to the builds.
 const SMP_V1: u32 = 8;
@@ -117,6 +134,16 @@ fn ack_value(d: &[u8]) -> Option<u16> {
     found
 }
 
+/// The displacement of the `lea d16(pc),An` whose extension word is at file offset
+/// `pos`, found by decoding the instruction (build C's sample-fix site).
+fn pc_disp_at(d: &[u8], pos: usize) -> Option<u16> {
+    let i = decode(d, pos - 2)?;
+    match (i.k, i.src) {
+        (K::Lea, Ea::Pc(t)) if i.len == 4 => Some(t.wrapping_sub(pos) as u16),
+        _ => None,
+    }
+}
+
 fn build_of(d: &[u8]) -> Option<&'static Build> {
     if !(2500..=8192).contains(&d.len()) {
         return None;
@@ -124,10 +151,14 @@ fn build_of(d: &[u8]) -> Option<&'static Build> {
     let b = match ack_value(d)? {
         64 => &BUILD_A,
         4 => &BUILD_B,
+        1024 => &BUILD_C,
         _ => return None,
     };
+    if b.c && (d.len() != 4566 || pc_disp_at(d, 320) != Some(64300)) {
+        return None;
+    }
     let songs = be32(d, b.song) as usize / 12;
-    if be32(d, b.song) % 12 != 0 || !(1..=16).contains(&songs) || be16(d, b.per) != 3421 {
+    if be32(d, b.song) % 12 != 0 || !(1..=16).contains(&songs) || be16(d, b.per) != if b.c { 3822 } else { 3421 } {
         return None;
     }
     for i in 0..3 * songs {
@@ -199,6 +230,8 @@ pub struct RobHubbardSt {
     flag397: u8,
     vols: [u8; 3],
     songend: bool,
+    /// Build C: the first-call counter (the tail is skipped while it is not negative).
+    first: i16,
     subsong: usize,
     songs: usize,
     /// Events of the tick in progress, for its running time.
@@ -221,7 +254,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     let mut v = [Voice::default(); 3];
     for (i, vo) in v.iter_mut().enumerate() {
-        vo.vmask = [9, 18, 36][i];
+        vo.vmask = if b.c { 0 } else { [9, 18, 36][i] };
     }
     let mut r = RobHubbardSt {
         d: d.to_vec(),
@@ -244,12 +277,18 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         flag397: 0,
         vols: [0; 3],
         songend: false,
+        first: 0,
         subsong: 0,
         songs,
         ev: [0; NEV],
     };
     let mut hw = Hw { bus: &mut m.bus };
     r.init(0, &mut hw);
+    if b.c {
+        // The host switches channel 3's DMA on this long before its first play call; the
+        // engine's first call comes one frame after the init, so the difference is added.
+        hw.wait(C_DMA_LEAD);
+    }
     Some(Box::new(r))
 }
 
@@ -296,6 +335,9 @@ impl RobHubbardSt {
         for i in 0..3 {
             let base = s + be32(&self.d, s + 12 * n + 4 * i) as usize;
             let vo = &mut self.v[i];
+            if self.b.c {
+                *vo = Voice::default();
+            }
             vo.base = base;
             vo.countdown = 1;
             vo.flags = 0;
@@ -566,6 +608,43 @@ impl RobHubbardSt {
         self.vols[i] = v;
     }
 
+    /// Build C's output: channel 1 always plays the table sample.
+    fn output_c(&mut self, hw: &mut Hw) {
+        let vol = |v: u8| ((v as u16) << 2) & 63;
+        hw.vol(0, vol(self.vols[0]));
+        hw.wait(56);
+        hw.per(0, self.per[0] << 2);
+        hw.wait(98);
+        hw.vol(1, if self.vols[1] & 0x80 != 0 { 0 } else { vol(self.vols[1]) });
+        hw.wait(62);
+        hw.loc(1, self.base + SMP_C_TABLE);
+        hw.wait(20);
+        hw.per(1, (((self.mode396 as u16 + 4) & 255) * 16) << 2);
+        hw.wait(14);
+        hw.len(1, 1000);
+        hw.wait(102);
+        hw.vol(2, vol(self.vols[2]));
+        hw.wait(58);
+        hw.per(2, self.per[2] << 2);
+    }
+
+    /// Build C's channel-3 tail: a silent timer whose long block raises the interrupt
+    /// bit about once in seven frames. Skipped on the first call after the load.
+    fn tail_c(&mut self, hw: &mut Hw) {
+        if self.first >= 0 {
+            self.first -= 1;
+            return;
+        }
+        hw.wait(40);
+        hw.vol(3, 0);
+        hw.wait(12);
+        hw.loc(3, self.base.wrapping_add(SMP_C_TAIL as u32));
+        hw.wait(10);
+        hw.per(3, 2550);
+        hw.wait(10);
+        hw.len(3, 100);
+    }
+
     fn output(&mut self, hw: &mut Hw) {
         let vol = |v: u8| ((v as u16) << 2) & 63;
         let base = self.base;
@@ -659,11 +738,15 @@ impl Replayer for RobHubbardSt {
 
     fn tick(&mut self, hw: &mut Hw) {
         hw.wait(T_FIRST);
-        hw.loc(3, self.base + SMP_RESTART);
-        hw.wait(T_ACK);
-        hw.len(3, 4);
-        hw.wait(T_ACK);
-        hw.bus.write_word(INTREQ, self.b.ack);
+        // Build C restarts only when Paula has raised channel 3's interrupt bit (read from
+        // the real Paula state); the acknowledge clears it. A and B always restart.
+        if !self.b.c || hw.bus.read_word(0xDFF01E) & CH3_BIT != 0 {
+            hw.loc(3, self.base + SMP_RESTART);
+            hw.wait(T_ACK);
+            hw.len(3, 4);
+            hw.wait(T_ACK);
+            hw.bus.write_word(INTREQ, self.b.ack);
+        }
         self.ev = [0; NEV];
         if self.started != 0 {
             self.dmode = self.gmode;
@@ -687,9 +770,19 @@ impl Replayer for RobHubbardSt {
                 self.mode396 = self.dmode;
             }
             hw.wait(if live { self.cost() } else { T_ABANDON });
-            self.output(hw);
+            if !self.b.c {
+                self.output(hw);
+            }
         }
-        self.tail(hw);
+        if self.b.c {
+            if self.started == 0 {
+                hw.wait(T_ABANDON);
+            }
+            self.output_c(hw);
+            self.tail_c(hw);
+        } else {
+            self.tail(hw);
+        }
     }
 }
 

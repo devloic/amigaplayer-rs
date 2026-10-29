@@ -1,4 +1,4 @@
-use super::super::m68kenc::move_w_imm_abs;
+use super::super::m68kenc::{lea_pc, move_w_imm_abs};
 use super::*;
 use crate::engine::Engine;
 use std::path::Path;
@@ -204,4 +204,77 @@ fn envelope_decays_and_gates_by_the_release() {
 fn detection_is_not_tripped_by_other_content() {
     assert!(!detect(&vec![0u8; 3000]));
     assert!(!detect(&vec![0xA5; 4000]));
+}
+
+const SONG_C: usize = 2312;
+
+/// A synthetic build C module (4566 bytes): the interrupt write of 1024 at 230, the
+/// sample-fix site at 318 (a `lea` whose displacement reaches 916 bytes below the
+/// module), the period table, one envelope stream and one subsong.
+fn module_c(streams: [&[u8]; 3], disp: i16) -> Vec<u8> {
+    let mut d = vec![0u8; 4566];
+    let code = words(&move_w_imm_abs(1024, 0xDFF09C));
+    d[230..230 + code.len()].copy_from_slice(&code);
+    let lea = words(&lea_pc(1, disp));
+    d[318..318 + lea.len()].copy_from_slice(&lea);
+    for i in 0..96 {
+        d[1644 + 2 * i..1644 + 2 * i + 2].copy_from_slice(&(3822 - 20 * i as u16).to_be_bytes());
+    }
+    for (i, off) in [44u32, 46, 49, 52].into_iter().enumerate() {
+        put32(&mut d, 1836 + 4 * i, off);
+    }
+    d[1836 + 44] = 0;
+    d[1836 + 45] = 135;
+    put32(&mut d, SONG_C, 12);
+    let mut at = SONG_C + 12 + 3 * 8;
+    for (v, s) in streams.iter().enumerate() {
+        let list = SONG_C + 12 + 8 * v;
+        put32(&mut d, SONG_C + 4 * v, (list - SONG_C) as u32);
+        put32(&mut d, list, (at - SONG_C) as u32);
+        d[at..at + s.len()].copy_from_slice(s);
+        at += s.len() + 2;
+    }
+    d
+}
+
+fn plain_c() -> Vec<u8> {
+    module_c([&[208 + 10, 0, 0, 3, 224 + 1, 12, 128 + 15], &[224 + 2, 128 + 15], &[224 + 2, 128 + 15]], -1236)
+}
+
+#[test]
+fn build_c_is_recognised_by_its_two_marks() {
+    assert!(detect(&plain_c()));
+    // without the sample-fix site's displacement, or at another length
+    assert!(!detect(&module_c([IDLE, IDLE, IDLE], -1000)));
+    let mut d = plain_c();
+    d.push(0);
+    assert!(!detect(&d));
+    // its acknowledge value in another build's layout is still refused
+    assert!(!detect(&plain(true, 1024, IDLE)));
+}
+
+#[test]
+fn build_c_restarts_when_channel_3_raised_its_bit_and_always_writes_output() {
+    let (log, _) = run(plain_c(), 12).unwrap();
+    let acks = reg(&log, 0xDFF09C).iter().filter(|&&v| v == 1024).count();
+    // the first frames restart (the init's 4-word blocks), then roughly one frame in seven
+    assert!((3..=6).contains(&acks), "acks {acks}");
+    assert!(reg(&log, 0xDFF0D4).iter().filter(|&&v| v == 4).count() >= acks);
+    // channel 1 always plays the 1000-word table sample at offset 52
+    assert!(reg(&log, 0xDFF0B4).iter().skip(4).all(|&v| v == 1000 || v == 4));
+    assert_eq!(reg(&log, 0xDFF0B4).last(), Some(&1000));
+    // the tail: channel 3 volume 0, period 2550, length 100, from the second frame on
+    assert!(reg(&log, 0xDFF0D6).iter().filter(|&&v| v == 2550).count() >= 9);
+    assert_eq!(reg(&log, 0xDFF0D4).last(), Some(&100));
+    // the note: period of table entry 12, times 4, on channel 0
+    assert!(reg(&log, 0xDFF0A6).contains(&((3822u16 - 240) << 2)));
+}
+
+#[test]
+fn build_c_first_play_call_has_no_tail_and_channel_1_period_follows_mode() {
+    let (log, _) = run(plain_c(), 2).unwrap();
+    // frame 0 skips the tail: only one tail period write for two frames
+    assert_eq!(reg(&log, 0xDFF0D6).iter().filter(|&&v| v == 2550).count(), 1);
+    // byte 500 = 0 in the first frame: period (0 + 4) * 16 * 4
+    assert_eq!(reg(&log, 0xDFF0B6).iter().filter(|&&v| v == 256).count().min(1), 1);
 }

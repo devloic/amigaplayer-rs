@@ -55,6 +55,7 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Galaxy Music System 5.0 (J2B)", test: loaders::gal5::test, load: loaders::gal5::load },
     Loader { name: "Galaxy Music System 4.0", test: loaders::gal4::test, load: loaders::gal4::load },
     Loader { name: "DSMI Advanced Module Format", test: loaders::amf::test, load: loaders::amf::load },
+    Loader { name: "Asylum Music Format v1.0", test: loaders::asylum::test, load: loaders::asylum::load },
     Loader { name: "Real Tracker", test: loaders::rtm::test, load: loaders::rtm::load },
     Loader { name: "Digital Tracker", test: loaders::dt::test, load: loaders::dt::load },
     Loader { name: "Farandole Composer", test: loaders::far::test, load: loaders::far::load },

@@ -9,6 +9,7 @@
 
 pub mod actionamics;
 pub mod alcatrazpacker;
+pub mod andrewparton;
 pub mod agi;
 pub mod activisionpro;
 pub mod amosmusicbank;
@@ -211,6 +212,7 @@ pub const REPLAYERS: &[Open] = &[
     synthpack::OPEN,
     cinemaware::OPEN,
     soundimages::OPEN,
+    andrewparton::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

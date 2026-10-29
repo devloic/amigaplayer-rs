@@ -3,9 +3,8 @@
 //!
 //! Ported from libxmp 4.7.4, MIT licence, Copyright (C) 1996-2026 Claudio Matsuoka
 //! and Hipolito Carraro Jr (see LICENSE-libxmp).
-//!
-//! Not ported yet: duplicate check (`check_dct`), `libxmp_virt_setnna` and
-//! `libxmp_virt_pastnote`, which only IT-style loaders (QUIRK_VIRTUAL) need.
+//! The IT parts (duplicate check, `libxmp_virt_setnna`, `libxmp_virt_pastnote`)
+//! only act for the loaders that set QUIRK_VIRTUAL or pass a duplicate check.
 
 use super::mixer::*;
 use super::module::*;
@@ -203,16 +202,74 @@ impl Context {
         }
     }
 
+    /// `libxmp_virt_setnna`: the new note action of the voice playing `chn`.
+    pub fn virt_setnna(&mut self, chn: i32, nna: i32) {
+        if self.m.quirk & QUIRK_VIRTUAL == 0 {
+            return;
+        }
+        let voc = self.map_virt_channel(chn);
+        if voc >= 0 {
+            self.p.virt.voice_array[voc as usize].act = nna;
+        }
+    }
+
+    /// `check_dct`: IT's duplicate check of voice `i` against a new note on `chn`.
+    #[allow(clippy::too_many_arguments)]
+    fn check_dct(&mut self, i: usize, chn: i32, ins: i32, smp: i32, key: i32, nna: i32, dct: i32, dca: i32) {
+        let voc = self.p.virt.virt_channel[chn as usize].map;
+        let vi = &mut self.p.virt.voice_array[i];
+        if vi.root == chn && vi.ins == ins {
+            if nna == XMP_INST_NNA_CUT {
+                self.virt_resetvoice(i as i32, true);
+                return;
+            }
+            vi.act = nna;
+            if dct == XMP_INST_DCT_INST || (dct == XMP_INST_DCT_SMP && vi.smp == smp) || (dct == XMP_INST_DCT_NOTE && vi.key == key) {
+                if nna == XMP_INST_NNA_OFF && dca == XMP_INST_DCA_FADE {
+                    vi.act = VIRT_ACTION_OFF;
+                } else if dca != 0 {
+                    if i as i32 != voc || vi.act != 0 {
+                        vi.act = dca;
+                    }
+                } else {
+                    self.virt_resetvoice(i as i32, true);
+                }
+            }
+        }
+    }
+
+    /// `libxmp_virt_pastnote`: a past note action on the background voices of `chn`.
+    pub fn virt_pastnote(&mut self, chn: i32, act: i32) {
+        for c in self.p.virt.num_tracks..self.p.virt.virt_channels {
+            let voc = self.map_virt_channel(c);
+            if voc < 0 {
+                continue;
+            }
+            if self.p.virt.voice_array[voc as usize].root == chn {
+                match act {
+                    VIRT_ACTION_CUT => self.virt_resetvoice(voc, true),
+                    VIRT_ACTION_OFF => self.p.xc_data[c as usize].set_note(NOTE_RELEASE),
+                    VIRT_ACTION_FADE => self.p.xc_data[c as usize].set_note(NOTE_FADEOUT),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// `libxmp_virt_setpatch`.
     #[allow(clippy::too_many_arguments)]
-    pub fn virt_setpatch(&mut self, mut chn: i32, ins: i32, mut smp: i32, note: i32, key: i32, nna: i32, _dct: i32, _dca: i32) -> i32 {
+    pub fn virt_setpatch(&mut self, mut chn: i32, ins: i32, mut smp: i32, note: i32, key: i32, nna: i32, dct: i32, dca: i32) -> i32 {
         if chn as u32 >= self.p.virt.virt_channels as u32 {
             return -1;
         }
         if ins < 0 {
             smp = -1;
         }
-        // duplicate check (IT): not ported yet
+        if dct != 0 {
+            for i in 0..self.p.virt.maxvoc as usize {
+                self.check_dct(i, chn, ins, smp, key, nna, dct, dca);
+            }
+        }
         let mut voc = self.p.virt.virt_channel[chn as usize].map;
         if voc > FREE {
             if self.p.virt.voice_array[voc as usize].act != 0 {

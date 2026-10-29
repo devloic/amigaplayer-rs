@@ -38,6 +38,9 @@ pub const XMP_INST_DCT_OFF: i32 = 0;
 pub const XMP_INST_DCT_NOTE: i32 = 1;
 pub const XMP_INST_DCT_SMP: i32 = 2;
 pub const XMP_INST_DCT_INST: i32 = 3;
+pub const XMP_INST_DCA_CUT: i32 = XMP_INST_NNA_CUT;
+pub const XMP_INST_DCA_OFF: i32 = XMP_INST_NNA_OFF;
+pub const XMP_INST_DCA_FADE: i32 = XMP_INST_NNA_FADE;
 
 pub const XMP_SAMPLE_16BIT: i32 = 1 << 0;
 pub const XMP_SAMPLE_LOOP: i32 = 1 << 1;
@@ -571,6 +574,23 @@ pub struct Sequence {
     pub duration: i32,
 }
 
+/// `struct midi_macro`: one IT MIDI macro, a NUL-terminated string.
+pub type MidiMacro = [u8; 32];
+
+/// `struct midi_macro_data`: an IT module's parameterized (SFx) and fixed (Zxx)
+/// MIDI macros.
+#[derive(Clone, Debug)]
+pub struct MidiMacroData {
+    pub param: [MidiMacro; 16],
+    pub fixed: [MidiMacro; 128],
+}
+
+impl Default for MidiMacroData {
+    fn default() -> Self {
+        MidiMacroData { param: [[0; 32]; 16], fixed: [[0; 32]; 128] }
+    }
+}
+
 /// `struct module_data`: the module and how it is to be played.
 #[derive(Clone, Debug)]
 pub struct ModuleData {
@@ -605,6 +625,8 @@ pub struct ModuleData {
     pub basename: String,
     /// Scan counters, a row each per order (`m->scan_cnt`).
     pub scan_cnt: Vec<Vec<u8>>,
+    /// The IT MIDI macros (`m->midi`), when the module has its own.
+    pub midi: Option<Box<MidiMacroData>>,
 }
 
 impl Default for ModuleData {
@@ -637,6 +659,7 @@ impl Default for ModuleData {
             dirname: String::new(),
             basename: String::new(),
             scan_cnt: Vec::new(),
+            midi: None,
         };
         for i in 0..XMP_MAX_CHANNELS {
             let pan = (((i as i32 + 1) / 2) % 2) * 0xff;

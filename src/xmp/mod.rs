@@ -44,6 +44,7 @@ pub struct Loader {
 /// The loaders, in libxmp's order (`format_loaders` of `format.c`).
 pub static LOADERS: &[Loader] = &[
     Loader { name: "Fast Tracker II", test: loaders::xm::test, load: loaders::xm::load },
+    Loader { name: "Impulse Tracker", test: loaders::it::test, load: loaders::it::load },
     Loader { name: "Scream Tracker 3", test: loaders::s3m::test, load: loaders::s3m::load },
     Loader { name: "Scream Tracker 2", test: loaders::stm::test, load: loaders::stm::load },
     Loader { name: "STMIK 0.2", test: loaders::stx::test, load: loaders::stx::load },
@@ -80,7 +81,10 @@ pub fn detect(data: &[u8]) -> Option<&'static Loader> {
 /// the 68k FastTracker_2.0 player and ScreamTracker_3.0 Eagleplayer and, in the
 /// archive's web app, past the open replayers to UADE and ft2play / st3play, play
 /// on the libxmp port. Add a loader's name ("Fast Tracker II", "Scream Tracker 3",
-/// "Scream Tracker 2") to hand its format back to those players.
+/// "Scream Tracker 2") to hand its format back to those players. IT, which
+/// nothing played natively and the web app sent to UADE and then it2play
+/// (libopenmpt and libxmp for the ITs it2play refuses), plays on the port too;
+/// add "Impulse Tracker" to hand it back.
 pub const LEFT_TO_OTHER_PLAYERS: &[&str] = &[];
 
 /// `detect`, for the open chain: None for a format in `LEFT_TO_OTHER_PLAYERS`.

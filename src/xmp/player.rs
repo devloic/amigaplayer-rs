@@ -14,6 +14,9 @@ use super::mixer::{
 };
 use super::module::*;
 
+#[path = "it.rs"]
+mod it;
+
 // channel flags (player.h)
 pub const VOL_SLIDE: i32 = 1 << 0;
 pub const PAN_SLIDE: i32 = 1 << 1;
@@ -1523,7 +1526,8 @@ impl Context {
             }
         }
 
-        // IT MIDI macros (QUIRK_FILTER) are not ported yet.
+        // IT MIDI macros update whatever the voice state
+        self.update_midi_macro(chn);
 
         let act = self.virt_cstat(chn as i32);
         if act == VIRT_INVALID {
@@ -2629,9 +2633,9 @@ impl Context {
         }
     }
 
-    /// `libxmp_read_event`. The ProTracker-style (`read_event_mod`), FT2 and ST3
-    /// handlings are ported; the IT and MED ones come with the loaders that
-    /// select them, and until then play as MOD.
+    /// `libxmp_read_event`. The ProTracker-style (`read_event_mod`), FT2, ST3 and
+    /// IT (`it.rs`) handlings are ported; MED's comes with its loader, and until
+    /// then plays as MOD.
     pub fn read_event(&mut self, e: &Event, chn: usize) {
         let xc = &mut self.p.xc_data[chn];
         if e.ins != 0 {
@@ -2643,6 +2647,7 @@ impl Context {
         match self.m.read_event_type {
             ReadEvent::Ft2 => self.read_event_ft2(e, chn),
             ReadEvent::St3 => self.read_event_st3(e, chn),
+            ReadEvent::It => self.read_event_it(e, chn),
             _ => self.read_event_mod(e, chn),
         }
     }

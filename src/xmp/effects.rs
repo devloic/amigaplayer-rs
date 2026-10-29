@@ -6,7 +6,7 @@
 //! including the 8-bit truncation of the parameter.
 //!
 //! Not ported yet (the hooks are marked): the format "extras" (`libxmp_extras_process_fx`,
-//! used by MED and HMN; FAR is in `far_extras.rs`), and the IT NNA functions of `FX_IT_INSTFUNC` 0-6.
+//! used by MED and HMN; FAR is in `far_extras.rs`).
 
 use super::module::*;
 use super::player::*;
@@ -63,6 +63,9 @@ impl Context {
         let mut pair_volume: Option<(usize, i32)> = None;
         let mut flow_op: Option<(u8, i32)> = None;
         let mut reverse: Option<i32> = None;
+        // FX_IT_INSTFUNC 0-6: past note actions and NNA changes, which only
+        // touch the voices and the background channels
+        let mut instfunc: Option<i32> = None;
 
         if self.m.read_event_type != ReadEvent::It {
             xc.key_porta = xc.key;
@@ -691,8 +694,7 @@ impl Context {
                         continue;
                     }
                     FX_IT_INSTFUNC => match fxp {
-                        // 0-6: past note actions and NNA changes, with the IT
-                        // virtual channel handling (not ported yet)
+                        0..=6 => instfunc = Some(fxp),
                         7 => xc.per_flags |= VENV_PAUSE,
                         8 => xc.per_flags &= !VENV_PAUSE,
                         9 => xc.per_flags |= PENV_PAUSE,
@@ -955,6 +957,16 @@ impl Context {
         }
         if let Some(r) = reverse {
             self.virt_reverse(chn as i32, r);
+        }
+        match instfunc {
+            Some(0) => self.virt_pastnote(chn as i32, VIRT_ACTION_CUT),
+            Some(1) => self.virt_pastnote(chn as i32, VIRT_ACTION_OFF),
+            Some(2) => self.virt_pastnote(chn as i32, VIRT_ACTION_FADE),
+            Some(3) => self.virt_setnna(chn as i32, XMP_INST_NNA_CUT),
+            Some(4) => self.virt_setnna(chn as i32, XMP_INST_NNA_CONT),
+            Some(5) => self.virt_setnna(chn as i32, XMP_INST_NNA_OFF),
+            Some(6) => self.virt_setnna(chn as i32, XMP_INST_NNA_FADE),
+            _ => {}
         }
     }
 }

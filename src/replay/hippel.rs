@@ -2360,6 +2360,12 @@ const POLL_TO_LOOP: u64 = 20;
 
 fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let (ver, t) = tfmx_version(d)?;
+    // A module saved with a song playing starts no song under the Eagleplayer, so
+    // the port would play it silent; refused, it goes on to a player that plays its
+    // music (UADE's Hippel in the archive app)
+    if ver.song_var && be16(d, t - 6) != 0 {
+        return None;
+    }
     let h = |o: usize| be16(d, t + o) as u32;
     // InitPlayer: the parts' addresses from the counts in the header
     let freqs = base + t as u32 + 0x20;

@@ -318,8 +318,6 @@ mod run_dump {
         e.open_replayers = true;
         e.m.bus.write_log = Some(Vec::new());
         e.play_data(Path::new(&file), std::fs::read(&file).unwrap()).unwrap();
-        for _ in 0..std::env::var("PK_SUBSONG").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0) {
-        // PK_SUBSONG=n: the n-th subsong after the first
         let sub: u32 = std::env::var("PK_SUBSONG").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
         for _ in 0..sub {
             e.change_subsong(1).unwrap();

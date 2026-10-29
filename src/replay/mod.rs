@@ -62,6 +62,7 @@ mod quadracomposer_tables;
 pub mod richardjoseph;
 pub mod soundplayer;
 pub mod ronklaren;
+pub mod scumm;
 pub mod sidmon1;
 pub mod sidmon2;
 pub mod soundcontrol;
@@ -219,6 +220,7 @@ pub const REPLAYERS: &[Open] = &[
     soundmaster::OPEN,
     timfollin::OPEN,
     dsc::OPEN,
+    scumm::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

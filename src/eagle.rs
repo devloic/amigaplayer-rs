@@ -85,6 +85,10 @@ pub mod epg {
     pub const SUB_SONGS: u32 = 0x162;
     pub const ARGN: u32 = 0x122;
     pub const ARG1: u32 = 0x126;
+    pub const ARG2: u32 = 0x12A;
+    pub const ARG3: u32 = 0x12E;
+    pub const ARG4: u32 = 0x132;
+    pub const ARG5: u32 = 0x136;
     pub const PLAYER_TAG_LIST: u32 = 0x16C;
     pub const MODULE_SIZE: u32 = 0x1BC;
     pub const AMPLIFIER_TAG_LIST: u32 = 0x1D8;
@@ -114,6 +118,7 @@ const ENPP_GET_LIST_DATA: u16 = 10;
 const ENPP_WAIT_AUDIO_DMA: u16 = 22;
 const ENPP_SAVE_MEM: u16 = 23;
 const ENPP_LOAD_EXECUTABLE: u16 = 26;
+const ENPP_MODULE_CHANGE: u16 = 35;
 const ENPP_NEW_LOAD_FILE: u16 = 27;
 const ENPP_DMA_MASK: u16 = 40;
 const ENPP_POKE_ADR: u16 = 41;
@@ -278,6 +283,50 @@ fn load_executable(m: &mut Machine) {
     }
 }
 
+/// ENPP_ModuleChange in search mode: EPG_ARG1 = start and EPG_ARG2 = length of
+/// the code to patch, EPG_ARG3 = a patch table of (code offset, word count - 1,
+/// patch offset) word triples (offsets from the table) ended by a zero word.
+/// Each place in the code where a table entry's code is found is replaced by a
+/// `JSR` to the entry's patch (which runs the replaced code and returns),
+/// padded with NOPs.
+fn module_change(m: &mut Machine) {
+    let g = m.deli.eagle.globals;
+    let (start, len, table) = (m.bus.r32(g + epg::ARG1), m.bus.r32(g + epg::ARG2), m.bus.r32(g + epg::ARG3));
+    let (mode, arg5) = (m.bus.r32(g + epg::ARG4), m.bus.r32(g + epg::ARG5));
+    log::debug!("ENPP_ModuleChange: {start:#x} {len} table {table:#x} mode {mode} arg5 {arg5:#x} n {}", m.bus.r32(g + epg::ARGN));
+    if mode != 1 || arg5 != 0xFFFF_FFFE {
+        // only the search mode of the Wanted Team players is known
+        m.set_d0(0);
+        return;
+    }
+    let mut hits = 0;
+    let mut t = table;
+    while m.bus.r16(t) != 0 {
+        let (code, words, patch) = (table + m.bus.r16(t) as u32, m.bus.r16(t + 2) as u32 + 1, table + m.bus.r16(t + 4) as u32);
+        t += 6;
+        let n = words * 2;
+        if n < 6 || len < n {
+            continue;
+        }
+        let mut a = start;
+        while a + n <= start + len {
+            if (0..words).all(|i| m.bus.r16(a + 2 * i) == m.bus.r16(code + 2 * i)) {
+                m.bus.w16(a, 0x4EB9);
+                m.bus.w32(a + 2, patch);
+                for i in 3..words {
+                    m.bus.w16(a + 2 * i, 0x4E71);
+                }
+                hits += 1;
+                a += n;
+            } else {
+                a += 2;
+            }
+        }
+    }
+    log::debug!("ENPP_ModuleChange: {hits} places patched");
+    m.set_d0(0);
+}
+
 fn custom_w16(m: &mut Machine, reg: u32, v: u16) {
     m.bus.write_word(0xDFF000 + reg, v);
 }
@@ -290,6 +339,7 @@ pub fn host_call(m: &mut Machine, f: u16) {
         ENPP_GET_LIST_DATA..=ENPP_WAIT_AUDIO_DMA => deli::host_call(m, f - ENPP_GET_LIST_DATA),
         ENPP_NEW_LOAD_FILE => deli::host_call(m, 1),
         ENPP_LOAD_EXECUTABLE => load_executable(m),
+        ENPP_MODULE_CHANGE => module_change(m),
         ENPP_ALLOC_SAMPLE_STRUCT => {
             let a = m.alloc(SAMPLE_STRUCT_SIZE);
             if a != 0 {

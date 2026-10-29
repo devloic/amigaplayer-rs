@@ -355,6 +355,7 @@ def find_reference(ctx, mod, po):
     for variant in dict.fromkeys(names):
         tries += [(t + '+player', d, ('--player', variant)) for t, d in dirs]
     fallback = None
+    bads = []
     for tag, eagle, extra in tries:
         rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, eagle, extra)
         o = parse_output(rout)
@@ -362,10 +363,21 @@ def find_reference(ctx, mod, po):
             continue
         got = re.sub(r'[^a-z0-9]', '', o.get('format', '').lower())
         cand = dict(kind='engine', wav=rw, data=None, out=rout, led=rled or '', player=f'{tag}: {rplay}', o=o, note='')
+        # an Eagleplayer that numbers its subsongs from 0xF00 (EP206's Sean Conran) plays no real
+        # subsong, and a render that ends within a quarter second of a longer run is a player the
+        # engine could not run (or a different song set): try the next original first
+        m = re.search(r'subsongs (\d+)\.\.(\d+)', rplay)
+        with wave.open(rw, 'rb') as w:
+            short = w.getnframes() < w.getframerate() // 4 and ctx.secs >= 5
+        bad = short or (m and int(m.group(1)) > 1 and int(m.group(2)) > 255)
+        if bad:
+            bads.append(cand)
+            continue
         if want and (want in got or got in want):
             fallback = cand
             break
         fallback = fallback or cand
+    fallback = fallback or (bads[0] if bads else None)
     if not fallback:
         return dict(none, note='no original player plays it in the engine')
     fallback['data'] = read_wav(fallback['wav'])

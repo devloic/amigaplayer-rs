@@ -1480,11 +1480,18 @@ impl Replayer for SeanConran {
     }
 }
 
-fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
+fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !header(d) {
         return None;
     }
     let lay = layout(d)?;
+    // the LED bit its init and play routines write (bset: the filter off) is set before
+    // the first sample plays: the original's start-up (the song's precalculation,
+    // seconds on a 68000) is over by then, with the init and a first run of the
+    // play routine behind it
+    if lay.initev.iter().any(|e| matches!(e, InitEv::Led)) || lay.led == Some(true) {
+        m.bus.ciaa.pra |= 2;
+    }
     Some(Box::new(SeanConran {
         lay,
         pristine: d.to_vec(),

@@ -42,7 +42,6 @@
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
-use m68k::AddressBus;
 
 pub const OPEN: Open = Open { name: "AMOS Music Bank", detect, new };
 
@@ -584,11 +583,10 @@ impl AmosMusicBank {
                         }
                     }
                     6 | 7 => {
-                        // the filter: bit 1 of CIA-A's port A (clear: on)
-                        let on = (d0 >> 8) & 0x7f == 6;
+                        // the filter commands: the Eagleplayer, which converts the bank
+                        // to ProTracker's effects, has none for them (and no E0x), so
+                        // the LED bit stays as it is
                         self.at(hw, 24);
-                        let x = hw.bus.read_byte(0xbfe001);
-                        hw.bus.write_byte(0xbfe001, if on { x & !2 } else { x | 2 });
                         self.c(10);
                     }
                     8 => {

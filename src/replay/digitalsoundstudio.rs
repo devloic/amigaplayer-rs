@@ -719,6 +719,15 @@ impl DigitalSoundStudio {
                     }
                 }
             }
+            7 => {
+                // bset.b #1,$bfe001 for 0 (filter off), bclr for the rest
+                self.t(Cost::FxRowNone);
+                if arg == 0 {
+                    hw.bus.ciaa.pra |= 2;
+                } else {
+                    hw.bus.ciaa.pra &= !2;
+                }
+            }
             _ => self.t(Cost::FxRowNone),
         }
         self.t(Cost::VoiceReturn);

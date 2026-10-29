@@ -26,7 +26,7 @@
 //!   table (a mixed voice whose note is above the table stops); with the
 //!   amplifier the note stops at the table's bottom, with Paula written directly
 //!   it goes below it;
-//! - the LED filter is left as the engine has it until an F effect.
+//! - the F (filter) effect does nothing: the Eagleplayer never touches the LED bit.
 //!
 //! The mixed channels' notes reach the amplifier's buffers as the original's do
 //! only when the ticks have the original's phase against them. That depends on
@@ -729,18 +729,9 @@ impl Oktalyzer {
                 }
                 self.play_moved(hw, c);
             }
-            // filter
-            15 => {
-                // the LED filter stays as the engine has it (on, at the start) until the song
-                // turns it off or on
-                if sc == 0 {
-                    if arg != 0 {
-                        hw.bus.ciaa.pra &= !2;
-                    } else {
-                        hw.bus.ciaa.pra |= 2;
-                    }
-                }
-            }
+            // filter: the Eagleplayer neither writes $BFE001 nor calls ENPP_PokeCommand, so
+            // the LED bit is not touched
+            15 => {}
             // position jump
             25 => {
                 if sc == 0 {

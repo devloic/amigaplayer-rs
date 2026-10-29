@@ -108,7 +108,7 @@ fn text(d: &[u8], o: usize, n: usize) -> String {
     s[..end].iter().map(|&c| c as char).collect::<String>().trim_end().to_string()
 }
 
-fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
+fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect(d) {
         return None;
     }
@@ -228,6 +228,8 @@ fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
         visited: vec![false; n],
     };
     q.visited[0] = true;
+    // the init routine sets the LED bit of CIA-A's port: the filter is off
+    m.bus.ciaa.pra |= 2;
     Some(Box::new(q))
 }
 

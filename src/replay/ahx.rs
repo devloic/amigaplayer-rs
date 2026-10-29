@@ -486,6 +486,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     hw.wait(start_clocks(d));
     p.init_sub_song(0, &mut hw);
     hw.wait(INIT_TO_TIMER);
+    // the init routine sets the LED bit of CIA-A's port: the filter is off
+    m.bus.ciaa.pra |= 2;
     Some(Box::new(p))
 }
 

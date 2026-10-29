@@ -880,7 +880,16 @@ impl DaveLowe {
                     self.stop(vi, hw);
                     return;
                 }
-                9 | 10 | 11 | 12 => pos += 2,
+                9 | 10 => pos += 2,
+                // bclr / bset.b #1,$bfe001: the LED filter on, off
+                11 => {
+                    hw.bus.ciaa.pra &= !2;
+                    pos += 2;
+                }
+                12 => {
+                    hw.bus.ciaa.pra |= 2;
+                    pos += 2;
+                }
                 13 => {
                     self.v[vi].boost = true;
                     pos += 2;

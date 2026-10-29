@@ -1041,6 +1041,8 @@ impl Replayer for BuildB {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        // every play routine of build B opens with bset.b #1,$bfe001: the LED filter off
+        hw.bus.ciaa.pra |= 2;
         if !self.started {
             // a fresh image, as the host loads the module for every song
             self.img.copy_from_slice(&self.pristine);

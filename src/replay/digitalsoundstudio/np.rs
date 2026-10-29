@@ -10,7 +10,7 @@
 //! loops the tail; here the sample's `length` words are played and the loop
 //! registers written after the row's DMA, as the Eagleplayer does. A sample
 //! without a loop is played once: its loop is a word of silence. The filter
-//! effect (7) has no Paula register here and is ignored; arpeggio is
+//! effect (7) sets the LED bit of the CIA port, off for 0; arpeggio is
 //! NostalgicPlayer's, which looks the note up but never adds the offset (so it
 //! only rewrites the current period).
 
@@ -469,7 +469,14 @@ impl Np {
                     self.jump = true;
                 }
             }
-            FILTER => {}
+            // bset.b #1,$bfe001 for 0 (filter off), bclr for the rest
+            FILTER => {
+                if arg == 0 {
+                    hw.bus.ciaa.pra |= 2;
+                } else {
+                    hw.bus.ciaa.pra &= !2;
+                }
+            }
             PITCH_UP | PITCH_DOWN => {
                 if arg != 0 {
                     let keep = self.voices[i].tone_slide;

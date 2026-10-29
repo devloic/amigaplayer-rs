@@ -393,6 +393,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let mut hw = Hw { bus: &mut m.bus };
     p.init_sound(0, &mut hw);
     p.init_sound(0, &mut hw);
+    // the later player's InitPlayer ends with bset.b #1,$bfe001: the LED filter off
+    // (the older player never writes it, except for an E effect)
+    if p.newer {
+        hw.bus.ciaa.pra |= 2;
+    }
     Some(Box::new(p))
 }
 
@@ -829,8 +834,9 @@ impl SonicArranger {
                 b.w16(va + SCOPE_VOL, vol << 2);
             }
             0xd => self.row = self.rows,
-            // ENPP_PokeCommand 1 (the filter): 0 turns it off
-            0xe if arg as u8 == 0 => b.ciaa.pra |= 2,
+            // the older player's ENPP_PokeCommand 1 (the filter): 0 turns it off; the later
+            // player's bclr / bset on $BFE001 does the opposite: 0 turns it on
+            0xe if (arg as u8 == 0) != self.newer => b.ciaa.pra |= 2,
             0xe => b.ciaa.pra &= !2,
             0xf if (arg as i8) > 0 && (arg as i8) <= 16 => self.speed = arg,
             _ => {}

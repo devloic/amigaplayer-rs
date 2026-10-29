@@ -345,6 +345,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         f.init_voice_with_latest(i);
     }
     f.visited[0] = true;
+    // the init routine sets the LED bit of CIA-A's port: the filter is off
+    m.bus.ciaa.pra |= 2;
     Some(Box::new(f))
 }
 

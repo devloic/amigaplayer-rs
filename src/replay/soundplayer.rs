@@ -215,6 +215,9 @@ impl Sjs {
     fn command(&mut self, ch: usize, c: u8, hw: &mut Hw) {
         let v = &mut self.v[ch];
         match c {
+            // bset / bclr #1,$bfe001: the LED filter off, on
+            0x01 => hw.bus.ciaa.pra |= 2,
+            0x02 => hw.bus.ciaa.pra &= !2,
             0x03..=0x42 => {
                 v.vol = c - 3;
                 hw.vol(ch, v.vol as u16);
@@ -258,7 +261,7 @@ impl Sjs {
             }
             0xDF..=0xE4 => hw.bus.write_word(0xDFF09E, [0x8001, 0x8002, 0x8004, 0x8010, 0x8020, 0x8040][(c - 0xDF) as usize]),
             0xF9..=0xFD => hw.bus.write_word(0xDFF09E, [0x0001, 0x0002, 0x0004, 0x0010, 0x0020][(c - 0xF9) as usize]),
-            // filter, sync flags and the unused values change no Paula register
+            // sync flags and the unused values change no Paula register
             _ => {}
         }
     }

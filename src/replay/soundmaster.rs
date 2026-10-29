@@ -922,6 +922,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let n = if lay.build == Build::B { 64 } else { 46 };
     let periods = (0..n).map(|k| be16(d, lay.periods + 2 * k)).collect();
     let title = m.bus.read_cstr(m.deli.file_buf);
+    // the init routine sets the LED bit of CIA-A's port: the filter is off
+    m.bus.ciaa.pra |= 2;
     Some(Box::new(Sm {
         img: d.to_vec(),
         base,

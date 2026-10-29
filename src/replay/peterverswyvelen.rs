@@ -407,7 +407,10 @@ impl Replayer for Pvp {
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let title = m.bus.read_cstr(m.deli.file_buf);
     let mut hw = Hw { bus: &mut m.bus };
-    Some(Box::new(Pvp::new(d, base, title, Some(&mut hw))?))
+    let p = Pvp::new(d, base, title, Some(&mut hw))?;
+    // the init routine sets the LED bit of CIA-A's port: the filter is off
+    m.bus.ciaa.pra |= 2;
+    Some(Box::new(p))
 }
 
 #[cfg(test)]

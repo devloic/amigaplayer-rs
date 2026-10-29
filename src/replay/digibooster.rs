@@ -264,7 +264,6 @@ pub struct DigiBooster {
     visited: [bool; 256],
     songend: bool,
     row_out: bool,
-    filter: Option<u8>,
     title: String,
 }
 
@@ -299,7 +298,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         visited: [false; 256],
         songend: false,
         row_out: false,
-        filter: None,
         title,
         song,
     };
@@ -355,13 +353,6 @@ impl DigiBooster {
             let pat = self.song.orders[(self.song_pos & 0x7f) as usize] as usize;
             if let Some(p) = self.song.patterns.get(pat) {
                 self.row = p[(self.pattern_pos.clamp(0, 63)) as usize];
-            }
-        }
-        if let Some(f) = self.filter.take() {
-            if f == 0 {
-                hw.bus.ciaa.pra &= !2;
-            } else if f == 1 {
-                hw.bus.ciaa.pra |= 2;
             }
         }
         let mut dma_on = 0u32;
@@ -723,8 +714,8 @@ impl DigiBooster {
                 arg &= 0x0f;
                 match x {
                     X_FILTER => {
-                        // the LED filter
-                        self.filter = Some(arg);
+                        // the LED filter: the Eagleplayer neither writes $BFE001 nor calls
+                        // ENPP_PokeCommand, so the LED bit is not touched
                     }
                     X_CHANNEL_ON_OFF => {
                         if arg == 0 {

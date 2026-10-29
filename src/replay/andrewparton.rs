@@ -338,6 +338,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // one-shot samples loop on the first long of the module, which the player clears
     m.bus.w32(base, 0);
     let title = m.bus.read_cstr(m.deli.file_buf);
+    // the init routine sets the LED bit of CIA-A's port: the filter is off
+    m.bus.ciaa.pra |= 2;
     Some(Box::new(Parton {
         d: d.to_vec(),
         base,

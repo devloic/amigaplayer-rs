@@ -216,7 +216,9 @@ struct SubSong {
     channels: usize,
     play_transp: i16,
     slide1st: bool,
-    filter: bool,
+    /// The LED filter the player's start sets: only SoundStudio's player sets it, and
+    /// only for a song in mix mode (flags2 bit 7); then on when the filter flag is set.
+    led: Option<bool>,
     track_vol: [u8; MAX_TRACKS],
     track_pan: [i8; MAX_TRACKS],
     master_vol: i32,
@@ -483,7 +485,7 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
             channels: 4,
             play_transp: 0,
             slide1st: false,
-            filter: r8(d, s + 0x2ff) & 1 != 0,
+            led: (r8(d, s + 0x300) & 0x80 != 0).then_some(r8(d, s + 0x2ff) & 1 != 0),
             track_vol: [64; MAX_TRACKS],
             track_pan: [0; MAX_TRACKS],
             master_vol: 64,
@@ -1254,10 +1256,21 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
         first_tick: true,
     };
     p.play_song(0);
+    p.init_led(&mut Hw { bus: &mut m.bus });
     Some(Box::new(p))
 }
 
 impl OctaMed {
+    /// The start's write of the LED bit (before the first tick, as the player's
+    /// InitSound makes it).
+    fn init_led(&self, hw: &mut Hw) {
+        if !self.old {
+            if let Some(on) = self.song.subs[self.sub].led {
+                set_filter(hw, on);
+            }
+        }
+    }
+
     fn play_song(&mut self, sub: usize) {
         self.sub = sub.min(self.song.subs.len() - 1);
         self.td = vec![Track::default(); MAX_TRACKS];
@@ -2648,14 +2661,14 @@ impl Replayer for OctaMed {
         (0, self.song.subs.len() as u16 - 1, self.sub as u16)
     }
 
-    fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
         self.play_song(n as usize);
+        self.init_led(hw);
     }
 
     fn tick(&mut self, hw: &mut Hw) {
         if self.first_tick {
             self.first_tick = false;
-            set_filter(hw, self.song.subs[self.sub].filter);
             hw.voice_dma(u32::MAX >> (32 - self.total), false);
             for v in 0..self.total {
                 hw.voice_loc_byte(v, self.silence);

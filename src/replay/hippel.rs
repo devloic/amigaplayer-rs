@@ -13,6 +13,14 @@
 //!   variation, the third vibrato and second portamento). It plays from the
 //!   module in guest memory, as this port does, and writes Paula through the
 //!   host's ENPP_ calls.
+//! * "Hippel" (the Eagleplayer, 2.06) calls the replayer a "TFMX" module carries
+//!   itself, one of the 13 builds of it listed in `BUILDS` and `A94` (told apart
+//!   by a hash of their code). They share the song data and differ in the effects
+//!   their code has, as NostalgicPlayer reads them from it, and in how they order
+//!   their Paula writes (see `Build`). The port is checked against the
+//!   Eagleplayer's register writes tick by tick; the builds' timing (the cost of
+//!   each code path, between `GENERATED-COSTS` markers) was fitted to those logs
+//!   by non-negative least squares, the line-poll constants by a search.
 //!
 //! Where the original's register writes differ from what NostalgicPlayer asks of
 //! its mixer, the port follows the original (see `Coso`).
@@ -1165,19 +1173,156 @@ impl Coso {
 
 pub const OPEN: Open = Open { name: "Hippel TFMX", detect: detect_tfmx, new: new_tfmx };
 
-/// The replayer versions the port plays, told apart by their code (an FNV-1a
-/// hash of the bytes before the song data, with the bytes the versions of a
-/// family differ in left out). Other versions are refused.
+/// Which set of code-path costs a build's interrupt takes (`Tp::cost`).
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Ver {
-    /// The replayers with the song data at $A94 (Leaving Teramis, Wings of
-    /// Death and others): rows first, then the voices' effects, each voice's
-    /// period and volume in one long write; E2/E7/E9 turn the DMA off and
-    /// write the location and length; after the voices, if any DMA was turned
-    /// off, three line waits, the DMA on, a line wait, every voice's loop.
-    /// `wait_skips_slide`: a frequency table wait skips the sample slide too.
-    A94 { wait_skips_slide: bool },
+enum Timing {
+    A94,
+    /// Song data at $962, $98E and $9A6.
+    E962,
+    E98e,
+    E9a6,
+    E8d6,
+    E8e6,
+    Ea4c,
+    Ea50,
+    /// $A2C (the two versions of its code), $A58, $B02.
+    Middle,
+    Ma2cb,
+    Ma58,
+    Mb02,
 }
+
+/// How a replayer build writes Paula and which effects its code has (the
+/// effect set as NostalgicPlayer reads it from the code). The builds the port
+/// plays are told apart by a hash of their code (`fnv`, with the bytes that
+/// differ between modules of one build, the saved variables, left out); other
+/// builds are refused.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Build {
+    /// The code-path costs.
+    timing: Timing,
+    /// The replayer keeps a word six bytes before the song data that is not 0 in
+    /// a module saved while a song played (it holds that song's number). The
+    /// Eagleplayer's run of such a module never starts a song: InitSound sets the
+    /// voices up, but reads no positions and leaves the speed counter at 0.
+    song_var: bool,
+    /// The Eagleplayer's start: colour clocks from the module's load to the
+    /// replayer's LED write, from that to its first DMA off, and (some builds
+    /// turn the DMA off once more first) to InitSound's own, and the wait at
+    /// InitSound's end that puts the interrupts' phase right.
+    init_at: u64,
+    led_gap: u64,
+    init_stop: bool,
+    /// The Eagleplayer's start is this much shorter for a module saved with a song playing.
+    dead_adj: u64,
+    /// From the LED write to InitSound's DMA off, less what depends on the song
+    /// data (9 colour clocks per sample and 58.4 per subsong: InitPlayer's loops),
+    /// 0 where it is `led_gap` alone.
+    init_k: u64,
+    init_tail: u64,
+    /// The subsong table's step in bytes (the A94 build reads 6-byte entries by 4).
+    sub_step: u32,
+    /// Line waits before the DMA on and after it (interleaved builds), and the
+    /// polling's first read and delay to the DMA on in this build.
+    waits: u8,
+    waits_after: u8,
+    poll_from: u64,
+    poll_to: i64,
+    /// A new note with an envelope turns the voice's DMA off.
+    mute: bool,
+    /// A row's info bit 6 takes the frequency table from the row before.
+    freq_prev: bool,
+    /// E5: 0 not there, 1 plays a sample from an offset, 2 the sample slide.
+    e5: u8,
+    /// E6 changes the slide.
+    e6: bool,
+    /// E7: 1 switches the frequency table, 2 plays a sample.
+    e7: u8,
+    /// E9 plays a sub-sample.
+    e9: bool,
+    /// E9 makes the sub-sample's bounds even and copies its first byte over
+    /// the second (else the bounds are used as they are, and the sample must
+    /// begin with SSMP).
+    e9_even: bool,
+    /// After a sample or vibrato command the table goes on with the next
+    /// command, else the next byte is the transpose.
+    effloop: bool,
+    /// The vibrato's version (NostalgicPlayer's 1 or 2).
+    vib: u8,
+    /// A frequency table wait skips the sample slide too.
+    wait_skips_slide: bool,
+    /// Where the writes go: per voice the effects, then its period and volume
+    /// (false), or the effects of all voices, the DMA on and the loops, then
+    /// every voice's period and volume (true).
+    split: bool,
+    /// Voices whose period and volume are written, and whose loops.
+    voices: usize,
+    /// The voice after those gets a period and volume of 0 every tick.
+    silent_last: bool,
+    loop_voices: usize,
+    /// The DMA on is written every tick, not only after a DMA off.
+    dma_always: bool,
+    /// The voices' fields InitSound leaves alone are read from the replayer's
+    /// variables ($52 bytes each after the empty table), as the A94 build keeps them.
+    saved_vars: bool,
+    /// The loops left pending in the early builds' variables ($4A bytes per
+    /// voice from 6A after the empty table: loop length, address, pending).
+    early_vars: bool,
+    /// The speed counter starts at the subsong's speed (else at 1).
+    counter_from_speed: bool,
+    /// Voices InitSound sets up.
+    init_voices: usize,
+    /// InitSound points the voices at this offset from the empty table (else at
+    /// their own register), with this length, period and volume.
+    init_loc: Option<u32>,
+    init_len: u16,
+    init_per: u16,
+    init_vol: u16,
+}
+
+/// The replayers with the song data at $A94 (Leaving Teramis, Wings of
+/// Death and others): rows first, then the voices' effects, each voice's
+/// period and volume in one long write; E2/E7/E9 turn the DMA off and
+/// write the location and length; after the voices, if any DMA was turned
+/// off, three line waits, the DMA on, a line wait, every voice's loop.
+const A94: Build = Build {
+    timing: Timing::A94,
+    song_var: false,
+    init_at: 58358,
+    led_gap: 5409,
+    init_stop: false,
+    dead_adj: 0,
+    init_k: 0,
+    init_tail: 0,
+    sub_step: 4,
+    waits: 3,
+    waits_after: 1,
+    poll_from: 168,
+    poll_to: 18,
+    mute: false,
+    freq_prev: true,
+    e5: 2,
+    e6: true,
+    e7: 2,
+    e9: true,
+    e9_even: true,
+    effloop: true,
+    vib: 2,
+    wait_skips_slide: false,
+    split: false,
+    voices: 4,
+    silent_last: false,
+    loop_voices: 4,
+    dma_always: false,
+    counter_from_speed: false,
+    saved_vars: true,
+    early_vars: false,
+    init_voices: 4,
+    init_loc: None,
+    init_len: 1,
+    init_per: 0,
+    init_vol: 0,
+};
 
 fn fnv(d: &[u8], skip: &[std::ops::Range<usize>]) -> u32 {
     let mut h = 0x811c_9dc5u32;
@@ -1189,21 +1334,135 @@ fn fnv(d: &[u8], skip: &[std::ops::Range<usize>]) -> u32 {
     h
 }
 
-/// The version of the module's replayer, and where the song data starts.
-fn tfmx_version(d: &[u8]) -> Option<(Ver, usize)> {
+/// The early builds (song data at $8D6 to $A50): a new note turns its voice's
+/// DMA off, E7 switches the frequency table, no sample slide or E9, the older
+/// vibrato; per tick the effects of every voice, the DMA on, the loops of the
+/// voices that started a sample the tick before, then every voice's period
+/// and volume.
+const EARLY: Build = Build {
+    timing: Timing::E962,
+    song_var: true,
+    init_at: 51887,
+    led_gap: 0,
+    init_stop: false,
+    dead_adj: 3550,
+    init_k: 8563,
+    init_tail: 0,
+    sub_step: 6,
+    waits: 0,
+    waits_after: 0,
+    poll_from: 0,
+    poll_to: 0,
+    mute: true,
+    freq_prev: false,
+    e5: 0,
+    e6: false,
+    e7: 1,
+    e9: false,
+    e9_even: false,
+    effloop: false,
+    vib: 1,
+    wait_skips_slide: false,
+    split: true,
+    voices: 4,
+    silent_last: false,
+    loop_voices: 4,
+    dma_always: true,
+    counter_from_speed: true,
+    saved_vars: false,
+    early_vars: true,
+    init_voices: 4,
+    init_loc: Some(0x18),
+    init_len: 0x100,
+    init_per: 0,
+    init_vol: 0,
+};
+
+/// The middle builds ($A2C to $B02): no mute, E5 plays a sample from an offset,
+/// E7 a sample, the older vibrato; per voice its effects and its period and
+/// volume, then every tick the DMA on and all loops.
+const MIDDLE: Build = Build {
+    timing: Timing::Middle,
+    song_var: true,
+    init_at: 55862,
+    led_gap: 346,
+    init_stop: true,
+    dead_adj: 3550,
+    init_k: 8289,
+    init_tail: 0,
+    sub_step: 6,
+    waits: 1,
+    waits_after: 1,
+    poll_from: 219,
+    poll_to: 18,
+    mute: false,
+    freq_prev: true,
+    e5: 1,
+    e6: false,
+    e7: 2,
+    e9: true,
+    e9_even: false,
+    effloop: false,
+    vib: 1,
+    wait_skips_slide: false,
+    split: false,
+    voices: 4,
+    silent_last: false,
+    loop_voices: 4,
+    dma_always: true,
+    counter_from_speed: false,
+    saved_vars: false,
+    early_vars: false,
+    init_voices: 4,
+    init_loc: None,
+    init_len: 1,
+    init_per: 0,
+    init_vol: 0,
+};
+
+/// The builds the port plays by the hash of their code up to the empty table
+/// (see `fnv`).
+const BUILDS: &[(u32, Build)] = &[
+    // song data at $8D6: three voices
+    (0x8e22_6fe7, Build { timing: Timing::E8d6, init_at: 48865, led_gap: 345, init_stop: true, init_k: 8295, voices: 3, loop_voices: 3, init_voices: 3, ..EARLY }),
+    // $8E6: two voices
+    (0x300e_934a, Build { timing: Timing::E8e6, init_at: 49252, led_gap: 345, init_stop: true, init_k: 8295, voices: 2, loop_voices: 2, ..EARLY }),
+    // $962, $98E, $9A6
+    (0xc7c7_ab3c, EARLY),
+    (0x9ab5_f1f4, Build { timing: Timing::E98e, init_at: 52817, led_gap: 345, init_stop: true, init_k: 8294, ..EARLY }),
+    (0x88cc_aff4, Build { timing: Timing::E9a6, init_at: 53301, led_gap: 345, init_stop: true, init_k: 8109, ..EARLY }),
+    // $A4C, $A50
+    (0x0e4a_0a89, Build { timing: Timing::Ea4c, init_at: 56909, led_gap: 346, init_stop: true, init_k: 8303, ..EARLY }),
+    (0xa3a1_0c0a, Build { timing: Timing::Ea50, init_at: 56975, led_gap: 346, init_stop: true, init_k: 8303, voices: 3, silent_last: true, ..EARLY }),
+    // $A2C (two versions); the $A3A build, whose volumes differ, is not played
+    (0x688a_532a, MIDDLE),
+    (0x7d97_d238, Build { timing: Timing::Ma2cb, init_at: 55872, waits: 2, poll_from: 195, poll_to: 13, ..MIDDLE }),
+    // $B02: three voices
+    (0xaf7d_cbe8, Build { timing: Timing::Mb02, init_at: 60566, led_gap: 345, init_stop: true, init_k: 8298, voices: 3, waits: 3, waits_after: 3, poll_from: 273, poll_to: -1, ..MIDDLE }),
+    // $A58
+    (0x91ba_7e51, Build { timing: Timing::Ma58, init_at: 56454, led_gap: 348, init_stop: true, init_k: 8291, dma_always: false, waits: 3, waits_after: 3, poll_from: 144, poll_to: 40, init_loc: Some(0), init_per: 0xc0, init_vol: 0x40, ..MIDDLE }),
+];
+
+/// The build of the module's replayer, and where the song data starts.
+fn tfmx_version(d: &[u8]) -> Option<(Build, usize)> {
     let t = (0..d.len().saturating_sub(4)).step_by(2).find(|&i| &d[i..i + 4] == b"TFMX")?;
-    if t != 0xa94 || d.get(0..2) != Some(&[0x60, 0x00]) {
-        return None;
+    if t == 0xa94 && d.get(0..2) == Some(&[0x60, 0x00]) {
+        // the code, to the replayer's variables at $866 (the empty table, the voices)
+        if fnv(&d[..0x866], &[0x406..0x40a]) != A94_CODE && !synthetic(d) {
+            return None;
+        }
+        let wait_skips_slide = be32(d, 0x406) == 0x6000_0336;
+        if !wait_skips_slide && be32(d, 0x406) != 0x6000_02b2 {
+            return None;
+        }
+        return Some((Build { wait_skips_slide, ..A94 }, t));
     }
-    // the code, to the replayer's variables at $866 (the empty table, the voices)
-    if fnv(&d[..0x866], &[0x406..0x40a]) != A94_CODE && !synthetic(d) {
-        return None;
+    if synthetic_early(d) {
+        return Some((EARLY, t));
     }
-    let wait_skips_slide = be32(d, 0x406) == 0x6000_0336;
-    if !wait_skips_slide && be32(d, 0x406) != 0x6000_02b2 {
-        return None;
-    }
-    Some((Ver::A94 { wait_skips_slide }, t))
+    let empty = (0..t).find(|&i| d[i..i + 8] == [1, 0, 0, 0, 0, 0, 0, 0xe1])?;
+    let h = fnv(&d[..empty], &[]);
+    BUILDS.iter().find(|b| b.0 == h).map(|b| (b.1, t))
 }
 
 /// The hash of the $A94 version's code (see `fnv`).
@@ -1217,6 +1476,17 @@ fn synthetic(d: &[u8]) -> bool {
 
 #[cfg(not(test))]
 fn synthetic(_: &[u8]) -> bool {
+    false
+}
+
+/// The same for a unit test of an early build.
+#[cfg(test)]
+fn synthetic_early(d: &[u8]) -> bool {
+    d.get(2..10) == Some(b"SYNTHEAR")
+}
+
+#[cfg(not(test))]
+fn synthetic_early(_: &[u8]) -> bool {
     false
 }
 
@@ -1297,10 +1567,30 @@ enum Tp {
     LineOn,
     OnLoc,
     OnLen,
+    PerStart,
+    PerStart0,
+    WriteVol,
 }
 
 impl Tp {
-    fn cost(self) -> u64 {
+    fn cost(self, t: Timing) -> u64 {
+        match t {
+            Timing::A94 => self.cost_a94(),
+            Timing::E962 => self.cost_e962(),
+            Timing::E98e => self.cost_e98e(),
+            Timing::E9a6 => self.cost_e9a6(),
+            Timing::E8d6 => self.cost_e8d6(),
+            Timing::E8e6 => self.cost_e8e6(),
+            Timing::Ea4c => self.cost_ea4c(),
+            Timing::Ea50 => self.cost_ea50(),
+            Timing::Middle => self.cost_middle(),
+            Timing::Ma2cb => self.cost_ma2cb(),
+            Timing::Ma58 => self.cost_ma58(),
+            Timing::Mb02 => self.cost_mb02(),
+        }
+    }
+
+    fn cost_a94(self) -> u64 {
         use Tp::*;
         match self {
             Start => 23,
@@ -1373,8 +1663,541 @@ impl Tp {
             LineOn => 0,
             OnLoc => 8,
             OnLen => 6,
+            PerStart => 0,
+            PerStart0 => 0,
+            WriteVol => 0,
         }
     }
+
+    // GENERATED-COSTS-BEGIN
+    fn cost_e962(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 56,
+            E2Len => 18,
+            E2Loc => 86,
+            E2Off => 0,
+            E3 => 19,
+            EnvRead => 0,
+            EnvStop => 67,
+            EnvVol => 89,
+            EnvWait => 12,
+            FreqLoop => 0,
+            FreqNote => 104,
+            FreqRead => 31,
+            FreqStop => 0,
+            Fx => 154,
+            LineOn => 9,
+            Loops => 209,
+            OnLen => 8,
+            OnLoc => 55,
+            PerStart => 26,
+            PerStart0 => 59,
+            Period => 0,
+            Porta => 0,
+            Row => 0,
+            RowEmpty => 0,
+            RowEnd => 104,
+            RowEnv => 0,
+            RowNext => 161,
+            RowNote => 243,
+            RowTrack => 0,
+            Rows => 10,
+            SlideOff => 0,
+            VibDelay => 0,
+            VibDown => 85,
+            VibDownTurn => 99,
+            VibUp => 84,
+            VibUpTurn => 93,
+            Write => 8,
+            WriteVol => 8,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_e98e(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 16,
+            E2Len => 18,
+            E2Loc => 86,
+            E2Off => 43,
+            E3 => 38,
+            E4End => 0,
+            E4Len => 18,
+            E4Loc => 109,
+            E8 => 89,
+            EnvLoop => 28,
+            EnvRead => 48,
+            EnvStop => 0,
+            EnvVol => 26,
+            EnvWait => 0,
+            FreqLoop => 0,
+            FreqNote => 104,
+            FreqRead => 31,
+            FreqStop => 0,
+            FreqWait => 23,
+            Fx => 124,
+            LineOn => 7,
+            Loops => 219,
+            OnLen => 8,
+            OnLoc => 59,
+            PerStart => 31,
+            PerStart0 => 61,
+            Period => 0,
+            Porta => 0,
+            PortaUp => 41,
+            Row => 0,
+            RowEmpty => 0,
+            RowEnd => 103,
+            RowEnv => 201,
+            RowNext => 159,
+            RowNote => 37,
+            RowTrack => 0,
+            Rows => 15,
+            SlideOff => 45,
+            VibDelay => 0,
+            VibDown => 74,
+            VibDownTurn => 97,
+            VibUp => 81,
+            VibUpTurn => 91,
+            Write => 8,
+            WriteVol => 8,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_e9a6(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 45,
+            E2Len => 18,
+            E2Loc => 86,
+            E2Off => 15,
+            E4End => 0,
+            E4Len => 18,
+            E4Loc => 110,
+            E8 => 0,
+            EnvRead => 0,
+            EnvStop => 0,
+            EnvVol => 20,
+            FreqNote => 187,
+            FreqRead => 106,
+            FreqStop => 79,
+            Fx => 73,
+            LineOn => 0,
+            Loops => 205,
+            OnLen => 8,
+            OnLoc => 55,
+            PerStart => 6,
+            PerStart0 => 68,
+            Period => 0,
+            Porta => 0,
+            Row => 0,
+            RowEmpty => 0,
+            RowEnd => 98,
+            RowEnv => 0,
+            RowNext => 158,
+            RowNote => 252,
+            RowTrack => 0,
+            Rows => 35,
+            SlideOff => 0,
+            VibDelay => 0,
+            VibDown => 76,
+            VibDownTurn => 92,
+            VibUp => 78,
+            VibUpTurn => 86,
+            Write => 8,
+            WriteVol => 8,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_e8d6(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 18,
+            E2Len => 18,
+            E2Loc => 86,
+            E2Off => 33,
+            E4End => 0,
+            E4Len => 18,
+            E4Loc => 100,
+            EnvRead => 49,
+            EnvStop => 0,
+            EnvVol => 27,
+            EnvWait => 0,
+            FreqLoop => 0,
+            FreqNote => 136,
+            FreqRead => 40,
+            FreqStop => 25,
+            Fx => 117,
+            LineOn => 0,
+            Loops => 724,
+            OnLen => 8,
+            OnLoc => 39,
+            PerStart => 36,
+            PerStart0 => 52,
+            Period => 0,
+            Porta => 0,
+            Row => 0,
+            RowEmpty => 0,
+            RowEnd => 104,
+            RowEnv => 0,
+            RowNext => 158,
+            RowNote => 241,
+            RowTrack => 0,
+            Rows => 10,
+            SlideOff => 0,
+            VibDelay => 0,
+            VibDown => 97,
+            VibDownTurn => 111,
+            VibUp => 96,
+            VibUpTurn => 106,
+            Write => 8,
+            WriteVol => 8,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_e8e6(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 15,
+            E2Len => 18,
+            E2Loc => 86,
+            E2Off => 40,
+            E4End => 0,
+            E4Len => 18,
+            E4Loc => 111,
+            EnvRead => 0,
+            EnvStop => 0,
+            EnvVol => 35,
+            FreqLoop => 0,
+            FreqNote => 106,
+            FreqRead => 42,
+            FreqStop => 0,
+            Fx => 105,
+            LineOn => 2,
+            Loops => 158,
+            OnLen => 8,
+            OnLoc => 55,
+            PerStart => 10,
+            PerStart0 => 35,
+            Period => 88,
+            Porta => 0,
+            Row => 0,
+            RowEmpty => 0,
+            RowEnd => 104,
+            RowEnv => 0,
+            RowNext => 162,
+            RowNote => 242,
+            RowTrack => 0,
+            Rows => 10,
+            SlideOff => 0,
+            VibDelay => 0,
+            VibDown => 68,
+            VibDownTurn => 84,
+            VibUp => 77,
+            VibUpTurn => 85,
+            Write => 8,
+            WriteVol => 8,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_ea4c(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 47,
+            E2Len => 18,
+            E2Loc => 86,
+            E2Off => 0,
+            E4End => 36,
+            E4Len => 18,
+            E4Loc => 82,
+            EnvRead => 0,
+            EnvStop => 43,
+            EnvVol => 68,
+            EnvWait => 0,
+            FreqLoop => 0,
+            FreqNote => 118,
+            FreqRead => 45,
+            FreqStop => 0,
+            Fx => 102,
+            LineOn => 0,
+            Loops => 242,
+            OnLen => 8,
+            OnLoc => 56,
+            PerStart => 30,
+            PerStart0 => 68,
+            Period => 51,
+            Porta => 0,
+            PortaUp => 60,
+            Row => 0,
+            RowEmpty => 0,
+            RowEnd => 79,
+            RowEnv => 221,
+            RowNext => 129,
+            RowNote => 53,
+            RowTrack => 0,
+            Rows => 0,
+            SlideOff => 0,
+            VibDelay => 0,
+            VibDown => 83,
+            VibDownTurn => 88,
+            VibUp => 76,
+            VibUpTurn => 90,
+            Write => 8,
+            WriteVol => 8,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_ea50(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 0,
+            E2Len => 18,
+            E2Loc => 86,
+            E2Off => 48,
+            EnvRead => 67,
+            EnvStop => 0,
+            EnvVol => 13,
+            EnvWait => 0,
+            FreqNote => 115,
+            FreqRead => 0,
+            FreqStop => 0,
+            Fx => 164,
+            LineOn => 0,
+            Loops => 267,
+            OnLen => 8,
+            OnLoc => 55,
+            PerStart => 50,
+            PerStart0 => 68,
+            Period => 0,
+            Porta => 0,
+            Row => 0,
+            RowEmpty => 0,
+            RowEnd => 106,
+            RowEnv => 0,
+            RowNext => 159,
+            RowNote => 241,
+            RowTrack => 0,
+            Rows => 1,
+            SlideOff => 21,
+            VibDelay => 0,
+            VibDown => 79,
+            VibDownTurn => 92,
+            VibUp => 77,
+            VibUpTurn => 86,
+            Write => 8,
+            WriteVol => 8,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_middle(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 5,
+            E2Len => 30,
+            E2Loc => 65,
+            E2Off => 0,
+            E4End => 0,
+            E4Len => 30,
+            E4Loc => 62,
+            E7End => 22,
+            E7Len => 30,
+            E7Loc => 57,
+            E7Off => 59,
+            E7Same => 33,
+            EnvLoop => 0,
+            EnvRead => 71,
+            EnvStop => 0,
+            EnvVol => 23,
+            EnvWait => 17,
+            FreqLoop => 37,
+            FreqNote => 197,
+            FreqRead => 0,
+            FreqStop => 83,
+            Fx => 102,
+            OnLen => 6,
+            OnLoc => 8,
+            Period => 0,
+            Porta => 0,
+            PortaUp => 54,
+            Row => 99,
+            RowAlt => 12,
+            RowEmpty => 0,
+            RowEnd => 0,
+            RowEnv => 174,
+            RowNext => 141,
+            RowNote => 53,
+            RowTrack => 0,
+            Rows => 0,
+            SlideOff => 0,
+            VibDelay => 0,
+            VibDown => 70,
+            VibDownTurn => 92,
+            VibUp => 77,
+            VibUpTurn => 86,
+            Write => 0,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_ma2cb(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 13,
+            E2Len => 30,
+            E2Loc => 65,
+            E2Off => 0,
+            E4End => 0,
+            E4Len => 30,
+            E4Loc => 59,
+            E7End => 17,
+            E7Len => 30,
+            E7Loc => 57,
+            E7Off => 56,
+            E7Same => 33,
+            E9End => 0,
+            E9Len => 6,
+            E9Loc => 207,
+            E9Off => 9,
+            EnvLoop => 0,
+            EnvRead => 72,
+            EnvStop => 0,
+            EnvVol => 23,
+            EnvWait => 20,
+            FreqLoop => 0,
+            FreqNote => 117,
+            FreqRead => 27,
+            FreqStop => 0,
+            Fx => 79,
+            OnLen => 6,
+            OnLoc => 8,
+            Period => 0,
+            Porta => 0,
+            Row => 100,
+            RowAlt => 5,
+            RowEmpty => 0,
+            RowEnd => 0,
+            RowEnv => 170,
+            RowNext => 142,
+            RowNote => 53,
+            RowTrack => 0,
+            Rows => 0,
+            SlideOff => 77,
+            VibDelay => 0,
+            VibDown => 77,
+            VibDownTurn => 94,
+            VibUp => 79,
+            VibUpTurn => 88,
+            Write => 0,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_ma58(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 7,
+            E2Len => 30,
+            E2Loc => 65,
+            E2Off => 0,
+            E4End => 0,
+            E4Len => 30,
+            E4Loc => 61,
+            E7End => 24,
+            E7Len => 30,
+            E7Loc => 57,
+            E7Off => 59,
+            E7Same => 35,
+            EnvLoop => 0,
+            EnvRead => 73,
+            EnvStop => 0,
+            EnvVol => 19,
+            EnvWait => 17,
+            FreqLoop => 0,
+            FreqNote => 114,
+            FreqRead => 38,
+            FreqStop => 0,
+            Fx => 64,
+            OnLen => 6,
+            OnLoc => 8,
+            Period => 92,
+            Porta => 0,
+            PortaUp => 54,
+            Row => 99,
+            RowAlt => 9,
+            RowEmpty => 0,
+            RowEnd => 0,
+            RowEnv => 177,
+            RowNext => 142,
+            RowNote => 52,
+            RowTrack => 0,
+            Rows => 0,
+            SlideOff => 0,
+            VibDelay => 0,
+            VibDown => 71,
+            VibDownTurn => 93,
+            VibUp => 77,
+            VibUpTurn => 88,
+            Write => 0,
+            _ => self.cost_a94(),
+        }
+    }
+
+    fn cost_mb02(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 5,
+            E2Len => 30,
+            E2Loc => 65,
+            E2Off => 19,
+            E7End => 8,
+            E7Len => 30,
+            E7Loc => 57,
+            E7Off => 71,
+            E7Same => 41,
+            E9End => 0,
+            E9Len => 6,
+            E9Loc => 207,
+            E9Off => 33,
+            EnvRead => 0,
+            EnvStop => 0,
+            EnvVol => 16,
+            FreqLoop => 0,
+            FreqNote => 106,
+            FreqRead => 37,
+            FreqStop => 0,
+            Fx => 54,
+            OnLen => 6,
+            OnLoc => 8,
+            Period => 0,
+            Porta => 0,
+            Row => 0,
+            RowAlt => 6,
+            RowEmpty => 0,
+            RowEnd => 101,
+            RowEnv => 226,
+            RowNext => 143,
+            RowNote => 0,
+            RowTrack => 0,
+            Rows => 0,
+            SlideOff => 175,
+            VibDelay => 0,
+            VibDown => 76,
+            VibDownTurn => 85,
+            VibUp => 72,
+            VibUpTurn => 78,
+            Write => 0,
+            _ => self.cost_a94(),
+        }
+    }
+    // GENERATED-COSTS-END
 }
 
 /// A TFMX replayer's voice structure ($52 bytes), the fields it uses.
@@ -1394,6 +2217,8 @@ struct TVoice {
     env: u32,
     env_pos: u16,
     freq: u32,
+    /// The row's table, which E0 returns to when E7 switched tables.
+    freq_orig: u32,
     freq_pos: u16,
     /// The track and the row's offset in it.
     track: u32,
@@ -1434,9 +2259,9 @@ struct TVoice {
 /// calls the module's code: its first entry with the subsong, its second at
 /// every tick). The port follows that code, not NostalgicPlayer, where they
 /// differ:
-/// * the rows are read before the effects, and a voice's period and volume are
-///   written together; the DMA on comes after three line waits, the loops after
-///   one more;
+/// * (the $A94 build) the rows are read before the effects, and a voice's
+///   period and volume are written together; the DMA on comes after three line
+///   waits, the loops after one more; other builds differ (see `Build`);
 /// * the tables are read from the module (the periods from the replayer's code,
 ///   so a note past them reads the song data after them), and the empty table
 ///   is the replayer's own;
@@ -1447,7 +2272,12 @@ struct TVoice {
 /// * frequency table commands past E9, and envelope commands past E8, jump
 ///   through data in the original; the port stops the table there.
 pub struct Tfmx {
-    ver: Ver,
+    ver: Build,
+    /// The counts InitPlayer loops over.
+    subsongs_n: u64,
+    samples_n: u64,
+    /// The module was saved with a song playing (see `Build::song_var`).
+    dead: bool,
     periods: u32,
     empty: u32,
     freqs: u32,
@@ -1465,6 +2295,10 @@ pub struct Tfmx {
     stopped: bool,
     led_done: bool,
     dma_acc: u16,
+    /// Loops to write after the next tick's DMA on, and those set this tick.
+    pend: [bool; 4],
+    pend_now: [bool; 4],
+    out: [(u16, u16); 4],
     voices: [TVoice; 4],
     trace: TTrace,
 }
@@ -1474,6 +2308,7 @@ pub struct Tfmx {
 struct TTrace {
     out: Option<std::io::BufWriter<std::fs::File>>,
     pend: Vec<Tp>,
+    timing: Option<Timing>,
 }
 
 impl TTrace {
@@ -1481,11 +2316,11 @@ impl TTrace {
         let out = std::env::var_os("HIPPEL_TRACE")
             .and_then(|p| std::fs::File::create(p).ok())
             .map(std::io::BufWriter::new);
-        TTrace { out, pend: Vec::new() }
+        TTrace { out, pend: Vec::new(), timing: None }
     }
 
     fn at(&mut self, hw: &mut Hw, e: Tp) {
-        hw.wait(e.cost());
+        hw.wait(e.cost(self.timing.unwrap_or(Timing::A94)));
         if self.out.is_some() {
             self.pend.push(e);
         }
@@ -1512,15 +2347,14 @@ fn poll_line(first: u64) -> u64 {
     first + (next - first).div_ceil(P) * P
 }
 
-/// The polling's other times, in CPU cycles from the last voice's write to the
-/// first wait's first read, and from one wait's end to the next one's first
-/// read; in colour clocks from the third wait's end to the DMA on; in CPU
-/// cycles from the DMA on to the last wait's first read, and in colour clocks
-/// from its end to the first loop's write. Fitted to the reference's writes:
-/// 74% of 2603 DMA ons come at the same colour clock, 23% one later.
-const POLL_FROM_WRITE: u64 = 168;
+/// The polling's times, in CPU cycles from the last voice's write to the first
+/// wait's first read (`Build::poll_from`) and from one wait's end to the next
+/// one's first read; in colour clocks from the last wait's end to the DMA on
+/// (`Build::poll_to`); in CPU cycles from the DMA on to the first wait's first
+/// read, and in colour clocks from the last wait's end to the first loop's
+/// write. Fitted to the reference's writes: in the $A94 build 74% of 2603 DMA
+/// ons come at the same colour clock, 23% one later.
 const POLL_AGAIN: u64 = 52;
-const POLL_TO_DMA: u64 = 18;
 const POLL_FROM_DMA: u64 = 44;
 const POLL_TO_LOOP: u64 = 20;
 
@@ -1541,6 +2375,9 @@ fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let empty = base + find(&[1, 0, 0, 0, 0, 0, 0, 0xe1])? as u32;
     let mut p = Tfmx {
         ver,
+        subsongs_n: h(0x10) as u64 + 1,
+        samples_n: h(0x12) as u64,
+        dead: ver.song_var && be16(d, t - 6) != 0,
         periods,
         empty,
         freqs,
@@ -1558,12 +2395,15 @@ fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         stopped: false,
         led_done: false,
         dma_acc: 0,
+        pend: [false; 4],
+        pend_now: [false; 4],
+        out: [(0, 0); 4],
         voices: Default::default(),
         trace: TTrace::open(),
     };
     // the voices' fields InitSound leaves as they are, from the replayer's
     // variables (a module saved from a game's memory has them set)
-    for (ch, v) in p.voices.iter_mut().enumerate() {
+    for (ch, v) in p.voices.iter_mut().enumerate().filter(|_| ver.saved_vars) {
         let a = empty + 0x24 + 0x52 * ch as u32;
         let bus = &m.bus;
         v.loop_addr = bus.r32(a + 0x10);
@@ -1574,17 +2414,22 @@ fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         v.info = bus.r8(a + 0x43);
         v.vib_flag = bus.r8(a + 0x51);
     }
+    if ver.early_vars {
+        for ch in 0..ver.voices {
+            let a = empty + 0x6a + 0x4a * ch as u32;
+            let bus = &m.bus;
+            p.voices[ch].loop_len = bus.r16(a);
+            p.voices[ch].loop_addr = bus.r32(a + 2);
+            p.pend[ch] = bus.r16(a + 6) != 0;
+        }
+    }
+    p.trace.timing = Some(ver.timing);
     let mut hw = Hw { bus: &mut m.bus };
-    hw.wait(TFMX_INIT);
+    hw.wait(ver.init_at - if p.dead { ver.dead_adj } else { 0 });
     p.init(1, &mut hw);
     Some(Box::new(p))
 }
 
-/// From the module's start to the replayer's first write, as in the reference.
-const TFMX_INIT: u64 = 58358;
-
-/// From InitPlayer's LED write to InitSound's first (measured).
-const TFMX_LED: u64 = 5409;
 
 impl Replayer for Tfmx {
     fn format(&self) -> &'static str {
@@ -1604,12 +2449,42 @@ impl Replayer for Tfmx {
     }
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        if self.ver.init_stop {
+            // the stop the Eagleplayer asks for first
+            self.trace.write(hw, "dma");
+            hw.dmacon(0x000f);
+            hw.wait(451);
+        }
         self.init(n, hw);
     }
 
     fn tick(&mut self, hw: &mut Hw) {
         self.trace.write(hw, "tick");
         self.trace.at(hw, Tp::Start);
+        if self.stopped && self.ver.split {
+            // stopped: the DMA off, each voice's last period and volume 0
+            self.trace.at(hw, Tp::Stopped);
+            self.trace.write(hw, "dma");
+            hw.dmacon(0x000f);
+            for ch in 0..self.ver.voices {
+                self.trace.at(hw, Tp::Write);
+                self.trace.write(hw, "per");
+                hw.per(ch, self.out[ch].0);
+                self.trace.at(hw, Tp::WriteVol);
+                self.trace.write(hw, "vol");
+                hw.vol(ch, 0);
+            }
+            if self.ver.silent_last {
+                self.trace.at(hw, Tp::Write);
+                self.trace.write(hw, "per");
+                hw.per(self.ver.voices, 0);
+                self.trace.at(hw, Tp::WriteVol);
+                self.trace.write(hw, "vol");
+                hw.vol(self.ver.voices, 0);
+            }
+            self.trace.write(hw, "end");
+            return;
+        }
         if self.stopped {
             self.trace.at(hw, Tp::Stopped);
             self.trace.write(hw, "dma");
@@ -1622,16 +2497,20 @@ impl Replayer for Tfmx {
             self.trace.write(hw, "end");
             return;
         }
+        self.dma_acc = 0;
         self.counter = self.counter.wrapping_sub(1);
         if self.counter == 0 {
             self.counter = self.speed;
             self.trace.at(hw, Tp::Rows);
-            for ch in 0..4 {
+            for ch in 0..self.ver.voices {
                 self.row(ch, hw);
             }
         }
-        self.dma_acc = 0;
-        for ch in 0..4 {
+        if self.ver.split {
+            self.tick_split(hw);
+            return;
+        }
+        for ch in 0..self.ver.voices {
             let (per, vol) = self.effects(ch, hw);
             self.trace.at(hw, Tp::Write);
             self.trace.write(hw, "per");
@@ -1639,7 +2518,7 @@ impl Replayer for Tfmx {
             self.trace.write(hw, "vol");
             hw.vol(ch, vol);
         }
-        if self.dma_acc == 0 {
+        if self.dma_acc == 0 && !self.ver.dma_always {
             self.trace.at(hw, Tp::NoDma);
             self.trace.write(hw, "end");
             return;
@@ -1647,15 +2526,21 @@ impl Replayer for Tfmx {
         // the loops into registers, three line waits, the DMA on, one more
         self.trace.at(hw, Tp::Loops);
         let c = hw.bus.clock;
-        let t = poll_line(poll_line(poll_line(2 * c + POLL_FROM_WRITE) + POLL_AGAIN) + POLL_AGAIN);
-        hw.wait(t / 2 + POLL_TO_DMA - c);
+        let mut t = poll_line(2 * c + self.ver.poll_from);
+        for _ in 1..self.ver.waits {
+            t = poll_line(t + POLL_AGAIN);
+        }
+        hw.wait(((t / 2) as i64 + self.ver.poll_to - c as i64).max(0) as u64);
         self.trace.write(hw, "dma");
         hw.dmacon(0x8000 | self.dma_acc);
         let c = hw.bus.clock;
-        let t = poll_line(2 * c + POLL_FROM_DMA);
+        let mut t = poll_line(2 * c + POLL_FROM_DMA);
+        for _ in 1..self.ver.waits_after {
+            t = poll_line(t + POLL_AGAIN);
+        }
         hw.wait(t / 2 + POLL_TO_LOOP - c);
         self.trace.at(hw, Tp::LineOn);
-        for ch in 0..4 {
+        for ch in 0..self.ver.loop_voices {
             let v = self.voices[ch];
             if ch > 0 {
                 self.trace.at(hw, Tp::OnLoc);
@@ -1671,25 +2556,93 @@ impl Replayer for Tfmx {
 }
 
 impl Tfmx {
+    /// A tick of the builds that write the DMA on and the loops after all the
+    /// voices' effects, and the periods and volumes after those.
+    fn tick_split(&mut self, hw: &mut Hw) {
+        let n = self.ver.voices;
+        for ch in 0..n {
+            let (per, vol) = self.effects(ch, hw);
+            self.out[ch] = (per, vol);
+        }
+        self.trace.at(hw, Tp::Loops);
+        self.trace.write(hw, "dma");
+        hw.dmacon(0x8000 | self.dma_acc);
+        self.trace.at(hw, Tp::LineOn);
+        let mut looped = false;
+        for ch in 0..n {
+            // a voice that restarted its DMA or set a sample this tick has its loop
+            // written now, and so has one the saved variables left pending
+            let (restarted, touched) = (self.dma_acc & (1 << ch) != 0, self.pend_now[ch]);
+            if restarted || touched || self.pend[ch] {
+                self.pend[ch] = false;
+                self.pend_now[ch] = false;
+                looped = true;
+                let v = self.voices[ch];
+                self.trace.at(hw, Tp::OnLoc);
+                self.trace.write(hw, "adr");
+                hw.loc(ch, v.loop_addr);
+                self.trace.at(hw, Tp::OnLen);
+                self.trace.write(hw, "len");
+                hw.len(ch, v.loop_len);
+            }
+        }
+        self.pend_now = [false; 4];
+        self.trace.at(hw, if looped { Tp::PerStart } else { Tp::PerStart0 });
+        for ch in 0..n {
+            let (per, vol) = self.out[ch];
+            self.trace.at(hw, Tp::Write);
+            self.trace.write(hw, "per");
+            hw.per(ch, per);
+            self.trace.at(hw, Tp::WriteVol);
+            self.trace.write(hw, "vol");
+            hw.vol(ch, vol);
+        }
+        if self.ver.silent_last {
+            self.trace.at(hw, Tp::Write);
+            self.trace.write(hw, "per");
+            hw.per(n, 0);
+            self.trace.at(hw, Tp::WriteVol);
+            self.trace.write(hw, "vol");
+            hw.vol(n, 0);
+        }
+        self.trace.write(hw, "end");
+    }
+
     /// The module's first entry: InitPlayer once (the LED off), then with
     /// subsong `n` the subsong's speed and InitSound, or with 0 the stop.
     fn init(&mut self, n: u16, hw: &mut Hw) {
+        let first = !self.led_done;
         if !self.led_done {
             self.led_done = true;
             use m68k::AddressBus;
             let v = hw.bus.read_byte(0xbfe001);
             hw.bus.write_byte(0xbfe001, v | 2);
-            hw.wait(TFMX_LED);
+            if self.ver.init_k == 0 {
+                hw.wait(self.ver.led_gap);
+            } else {
+                // InitPlayer's loops over the subsongs and samples
+                let total = self.ver.init_k + 9 * self.samples_n + (584 * self.subsongs_n + 5) / 10;
+                if self.ver.init_stop {
+                    // the stop the Eagleplayer asks for first
+                    hw.wait(self.ver.led_gap);
+                    self.trace.write(hw, "dma");
+                    hw.dmacon(0x000f);
+                    hw.wait(total - self.ver.led_gap);
+                } else {
+                    hw.wait(total);
+                }
+            }
         }
         if n == 0 {
             self.stopped = true;
             return;
         }
         self.sub = n;
+        let same = self.dead;
         // the subsong's start, end and speed: the replayer steps through its
         // table of 6-byte entries by 4 bytes, so a subsong past the first reads
         // the words of two entries
-        let e = self.subsongs_at.wrapping_add((n as u32 - 1) * 4);
+        let e = self.subsongs_at.wrapping_add((n as u32 - 1) * self.ver.sub_step);
         let (start, end) = (hw.bus.r16(e) as u32, hw.bus.r16(e + 2) as u32);
         self.speed = hw.bus.r16(e + 4);
         self.trace.write(hw, "dma");
@@ -1697,9 +2650,10 @@ impl Tfmx {
         hw.wait(8);
         hw.bus.write_word(0xdff09a, 0x0780);
         hw.wait(377);
-        for ch in 0..4 {
+        for ch in 0..self.ver.init_voices {
             let v = &mut self.voices[ch];
             v.freq = self.empty;
+            v.freq_orig = self.empty;
             v.env = self.empty;
             v.env_counter = 1;
             v.env_speed = 1;
@@ -1718,22 +2672,27 @@ impl Tfmx {
             v.volume = 0;
             v.freq_pos = 0;
             v.porta = 0;
-            v.loop_len = 0;
+            if !self.ver.early_vars {
+                v.loop_len = 0;
+            }
             v.dma = 1 << ch;
             let col = 3 * ch as u32;
             v.pos = self.positions + start * 12 + col;
             v.pos_end = self.positions + (end + 1) * 12 + col;
             v.pos_off = 12;
             let p = v.pos;
-            // each voice at its own register, 1 word
-            let r = 0xdff0a0 + 16 * ch as u32;
+            // each voice at its own register, 1 word, or at the empty table
+            let (r, l) = match self.ver.init_loc {
+                Some(o) => (self.empty + o, self.ver.init_len),
+                None => (0xdff0a0 + 16 * ch as u32, self.ver.init_len),
+            };
             hw.loc(ch, r);
             hw.wait(6);
-            hw.len(ch, 1);
+            hw.len(ch, l);
             hw.wait(4);
-            hw.per(ch, 0);
+            hw.per(ch, self.ver.init_per);
             hw.wait(4);
-            hw.vol(ch, 0);
+            hw.vol(ch, self.ver.init_vol);
             let bus = &*hw.bus;
             let (t, tt, et) = (bus.r8(p), bus.r8(p + 1), bus.r8(p + 2));
             let v = &mut self.voices[ch];
@@ -1742,7 +2701,21 @@ impl Tfmx {
             v.env_transpose = et;
             hw.wait(495 - 14);
         }
-        self.counter = 1;
+        if first {
+            hw.wait(self.ver.init_tail);
+        }
+        if same {
+            // the saved variable says a song is playing: not started
+            for v in self.voices.iter_mut() {
+                v.track_transpose = 0;
+                v.env_transpose = 0;
+            }
+            self.speed = 0;
+            self.counter = 0;
+            self.stopped = false;
+            return;
+        }
+        self.counter = if self.ver.counter_from_speed { self.speed } else { 1 };
         self.stopped = false;
     }
 
@@ -1801,7 +2774,11 @@ impl Tfmx {
             v.info = info;
             if c & 0x80 == 0 {
                 self.trace.at(hw, Tp::RowEnv);
-                let e = self.envs + ((((info & 0x1f).wrapping_add(v.env_transpose)) as u32 & 0xffff) << 6);
+                let et = self.voices[ch].env_transpose;
+                if self.ver.mute {
+                    self.dma_off(ch, hw);
+                }
+                let e = self.envs + ((((info & 0x1f).wrapping_add(et)) as u32 & 0xffff) << 6);
                 let bus = &*hw.bus;
                 let (sp, f, vs, dp, dl) = (bus.r8(e), bus.r8(e + 1), bus.r8(e + 2), bus.r8(e + 3), bus.r8(e + 4));
                 let v = &mut self.voices[ch];
@@ -1814,7 +2791,7 @@ impl Tfmx {
                 v.vib_delta = dp as u16;
                 v.vib_delay = dl;
                 v.env = e + 5;
-                let f = if info & 0x40 != 0 {
+                let f = if self.ver.freq_prev && info & 0x40 != 0 {
                     self.trace.at(hw, Tp::RowAlt);
                     prev
                 } else {
@@ -1822,6 +2799,7 @@ impl Tfmx {
                 };
                 let v = &mut self.voices[ch];
                 v.freq = self.freqs + ((f as u32) << 6);
+                v.freq_orig = v.freq;
                 v.freq_pos = 0;
                 v.freq_wait = 0;
                 v.sustain = 0;
@@ -1836,7 +2814,7 @@ impl Tfmx {
     /// period and volume to write.
     fn effects(&mut self, ch: usize, hw: &mut Hw) -> (u16, u16) {
         self.trace.at(hw, Tp::Fx);
-        let Ver::A94 { wait_skips_slide } = self.ver;
+        let wait_skips_slide = self.ver.wait_skips_slide;
         let mut slide = true;
         loop {
             if self.voices[ch].freq_wait != 0 {
@@ -1878,6 +2856,18 @@ impl Tfmx {
         let v = &mut self.voices[ch];
         v.loop_addr = s.wrapping_add(ls as u32);
         v.loop_len = ll;
+        self.pend_now[ch] = true;
+    }
+
+    /// The byte at the table's position is the transpose.
+    fn transpose_next(&mut self, ch: usize, hw: &mut Hw) -> bool {
+        self.trace.at(hw, Tp::FreqNote);
+        let v = self.voices[ch];
+        let c = hw.bus.r8(v.freq.wrapping_add(v.freq_pos as u32));
+        let v = &mut self.voices[ch];
+        v.transpose = c;
+        v.freq_pos = v.freq_pos.wrapping_add(1);
+        false
     }
 
     /// Reads the frequency table to a transpose or a stop; true after E8.
@@ -1895,10 +2885,27 @@ impl Tfmx {
                 v.freq_pos = v.freq_pos.wrapping_add(1);
                 return false;
             }
+            let enabled = match c {
+                0xe5 => self.ver.e5 != 0,
+                0xe6 => self.ver.e6,
+                0xe7 => self.ver.e7 != 0,
+                0xe9 => self.ver.e9,
+                _ => true,
+            };
+            if !enabled {
+                return self.transpose_next(ch, hw);
+            }
             match c {
                 0xe0 => {
                     self.trace.at(hw, Tp::FreqLoop);
-                    self.voices[ch].freq_pos = b as u16;
+                    let v = &mut self.voices[ch];
+                    if self.ver.e7 == 1 {
+                        // back to the row's table, whatever E7 switched to
+                        v.freq = v.freq_orig;
+                        v.freq_pos = (b & 0x3f) as u16;
+                    } else {
+                        v.freq_pos = b as u16;
+                    }
                 }
                 0xe2 => {
                     self.voices[ch].sample = 0xff;
@@ -1911,6 +2918,9 @@ impl Tfmx {
                     v.env_counter = 1;
                     v.freq_pos = v.freq_pos.wrapping_add(2);
                     v.slide_on = false;
+                    if !self.ver.effloop {
+                        return self.transpose_next(ch, hw);
+                    }
                 }
                 0xe3 => {
                     self.trace.at(hw, Tp::E3);
@@ -1919,6 +2929,9 @@ impl Tfmx {
                     v.freq_pos = v.freq_pos.wrapping_add(3);
                     v.vib_speed = b;
                     v.vib_depth = d;
+                    if !self.ver.effloop {
+                        return self.transpose_next(ch, hw);
+                    }
                 }
                 0xe4 => {
                     self.sample(ch, hw, b, [Tp::E4Loc, Tp::E4Len]);
@@ -1926,6 +2939,36 @@ impl Tfmx {
                     let v = &mut self.voices[ch];
                     v.freq_pos = v.freq_pos.wrapping_add(2);
                     v.slide_on = false;
+                    if !self.ver.effloop {
+                        return self.transpose_next(ch, hw);
+                    }
+                }
+                0xe5 if self.ver.e5 == 1 => {
+                    // plays the sample's loop part from an offset
+                    self.trace.at(hw, Tp::E2Off);
+                    self.dma_off(ch, hw);
+                    let i = self.info(b);
+                    let bus = &*hw.bus;
+                    let idx = bus.r8(a + 2) as u32;
+                    let s = bus.r32(i + 0x12).wrapping_add(self.samples);
+                    let (ls, ll) = (bus.r16(i + 0x1a) as u32, bus.r16(i + 0x1c) as u32);
+                    let at = s.wrapping_add(ls).wrapping_add(idx * ll * 2);
+                    self.trace.at(hw, Tp::E2Loc);
+                    self.trace.write(hw, "adr");
+                    hw.loc(ch, at);
+                    self.trace.at(hw, Tp::E2Len);
+                    self.trace.write(hw, "len");
+                    hw.len(ch, ll as u16);
+                    self.trace.at(hw, Tp::E2End);
+                    let v = &mut self.voices[ch];
+                    v.loop_addr = at;
+                    v.loop_len = ll as u16;
+                    self.pend_now[ch] = true;
+                    let v = &mut self.voices[ch];
+                    v.env_pos = 0;
+                    v.env_counter = 1;
+                    v.freq_pos = v.freq_pos.wrapping_add(3);
+                    return self.transpose_next(ch, hw);
                 }
                 0xe5 => {
                     self.trace.at(hw, Tp::E5Off);
@@ -1970,6 +3013,14 @@ impl Tfmx {
                     v.slide_done = false;
                     v.freq_pos = v.freq_pos.wrapping_add(6);
                 }
+                0xe7 if self.ver.e7 == 1 => {
+                    // switches to another frequency table
+                    self.trace.at(hw, Tp::E8);
+                    let v = &mut self.voices[ch];
+                    v.freq = self.freqs + ((b as u32) << 6);
+                    v.freq_orig = v.freq;
+                    v.freq_pos = 0;
+                }
                 0xe7 => {
                     if b == self.voices[ch].sample {
                         self.trace.at(hw, Tp::E7Same);
@@ -1985,6 +3036,9 @@ impl Tfmx {
                     v.env_counter = 1;
                     v.freq_pos = v.freq_pos.wrapping_add(2);
                     v.slide_on = false;
+                    if !self.ver.effloop {
+                        return self.transpose_next(ch, hw);
+                    }
                 }
                 0xe8 => {
                     self.trace.at(hw, Tp::E8);
@@ -1995,15 +3049,24 @@ impl Tfmx {
                 }
                 0xe9 => {
                     self.voices[ch].sample = 0xff;
-                    self.trace.at(hw, Tp::E9Off);
-                    self.dma_off(ch, hw);
-                    self.sub_sample(ch, hw, a);
-                    self.trace.at(hw, Tp::E9End);
+                    let i = self.info(b);
+                    let ssmp = self.ver.e9_even || hw.bus.r32(hw.bus.r32(i + 0x12).wrapping_add(self.samples)) == 0x5353_4d50;
+                    if ssmp {
+                        self.trace.at(hw, Tp::E9Off);
+                        self.dma_off(ch, hw);
+                        self.sub_sample(ch, hw, a);
+                        self.trace.at(hw, Tp::E9End);
+                    }
                     let v = &mut self.voices[ch];
-                    v.env_pos = 0;
-                    v.env_counter = 1;
+                    if ssmp {
+                        v.env_pos = 0;
+                        v.env_counter = 1;
+                        v.slide_on = false;
+                    }
                     v.freq_pos = v.freq_pos.wrapping_add(3);
-                    v.slide_on = false;
+                    if !self.ver.effloop {
+                        return self.transpose_next(ch, hw);
+                    }
                 }
                 // E1 stops the table; past E9 the original jumps through data
                 _ => {
@@ -2025,12 +3088,15 @@ impl Tfmx {
         let headers = s + 8;
         let data = headers.wrapping_add(count * 0x18).wrapping_add(skip);
         let h = headers.wrapping_add(bus.r8(a + 2) as u32 * 0x18);
-        let start = bus.r32(h) & !1;
-        let end = bus.r32(h + 4) & !1;
+        let mask = if self.ver.e9_even { !1 } else { !0 };
+        let start = bus.r32(h) & mask;
+        let end = bus.r32(h + 4) & mask;
         let len = (end.wrapping_sub(start) >> 1) as u16;
         let at = start.wrapping_add(data);
-        let b = bus.r8(at);
-        bus.w8(at.wrapping_add(1), b);
+        if self.ver.e9_even {
+            let b = bus.r8(at);
+            bus.w8(at.wrapping_add(1), b);
+        }
         self.trace.at(hw, Tp::E9Loc);
         self.trace.write(hw, "adr");
         hw.loc(ch, at);
@@ -2151,7 +3217,52 @@ impl Tfmx {
         }
         let mut per = hw.bus.r16(self.periods + 2 * (n & 0x7f) as u32);
         let v = &mut self.voices[ch];
-        if v.vib_delay != 0 {
+        if self.ver.vib == 1 {
+            // the older vibrato: a step in the note's scale, every other tick
+            let mut flag = v.vib_flag;
+            let mut at = Tp::VibDelay;
+            if v.vib_delay == 0 {
+                let depth = v.vib_depth as i32;
+                let depth2 = 2 * depth;
+                let mut delta = v.vib_delta as u8 as i32;
+                at = Tp::VibSkip;
+                if flag & 0x80 == 0 || flag & 1 == 0 {
+                    if flag & 0x20 == 0 {
+                        delta -= v.vib_speed as i32;
+                        if delta < 0 {
+                            flag |= 0x20;
+                            delta = 0;
+                            at = Tp::VibDownTurn;
+                        } else {
+                            at = Tp::VibDown;
+                        }
+                    } else {
+                        delta += v.vib_speed as i32;
+                        if delta >= depth2 {
+                            flag &= !0x20;
+                            delta = depth2;
+                            at = Tp::VibUpTurn;
+                        } else {
+                            at = Tp::VibUp;
+                        }
+                    }
+                    v.vib_delta = delta as u8 as u16;
+                }
+                let mut d = delta - depth;
+                if d != 0 {
+                    let mut value = (n & 0x7f) as i32 * 2 + 160;
+                    while value < 256 {
+                        d += d;
+                        value += 24;
+                    }
+                    per = per.wrapping_add(d as u16);
+                }
+            } else {
+                v.vib_delay -= 1;
+            }
+            v.vib_flag = flag ^ 1;
+            self.trace.at(hw, at);
+        } else if v.vib_delay != 0 {
             v.vib_delay -= 1;
             self.trace.at(hw, Tp::VibDelay);
         } else {
@@ -2317,6 +3428,50 @@ mod tests {
         d.resize(TSAMPLES, 0);
         d.extend((0..64).map(|i| if i < 32 { 0x40 } else { 0xc0 }));
         d
+    }
+
+    /// The same song as an early build's module: the replayer's code is a
+    /// marker, the period table and the empty table.
+    fn early_module() -> Vec<u8> {
+        let mut d = tfmx_module();
+        d[0..2].copy_from_slice(&[0x60, 0x02]);
+        d[2..10].copy_from_slice(b"SYNTHEAR");
+        d[0x406..0x40a].fill(0);
+        d[0x866..0x86e].fill(0);
+        d[0x700..0x708].copy_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0xe1]);
+        d
+    }
+
+    #[test]
+    fn plays_an_early_build_note_on_paula() {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new("test.hip"), early_module()).unwrap();
+        let p = e.playing.as_ref().unwrap();
+        assert_eq!(p.format, "Hippel TFMX");
+        let base = e.m.deli.list.first().unwrap().0;
+        let mut out = vec![0f32; 2 * 9600];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        // InitSound points every voice at the empty table, 256 words
+        assert_eq!(reg(0xDFF096)[0], 0x000F);
+        assert_eq!(reg(0xDFF0A2)[0], (base + 0x700 + 0x18) as u16);
+        assert_eq!(reg(0xDFF0A4)[0], 0x100);
+        // the first row comes after the song's speed (3) ticks: the new note
+        // turns each voice's DMA off, the sample starts, the DMA goes on, then
+        // the periods and volumes follow
+        let dma = reg(0xDFF096);
+        assert!(dma.contains(&0x0001) && dma.contains(&0x0008) && dma.contains(&0x800F));
+        assert!(reg(0xDFF0A2).contains(&((base + TSAMPLES as u32) as u16)));
+        assert!(reg(0xDFF0A6).contains(&super::PERIODS[24]));
+        assert!(reg(0xDFF0A8).contains(&64));
+        // the loop follows one tick after the DMA on
+        let on = log.iter().position(|w| w.0 == 0xDFF096 && w.1 == 0x800F).unwrap();
+        let loops = log.iter().skip(on).filter(|w| w.0 == 0xDFF0A4 && w.1 == 32).count();
+        assert!(loops >= 1, "no loop written after the DMA on");
+        assert!(out.iter().any(|&s| s != 0.0), "no sound");
     }
 
     #[test]

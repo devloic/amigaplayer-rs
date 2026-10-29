@@ -178,6 +178,58 @@ pub fn add_w_dd(n: u16, m: u16) -> Vec<u16> {
 pub fn move_w_idx_d(n: u16, m: u16, k: u16) -> Vec<u16> {
     vec![3 << 12 | k << 9 | 6 << 3 | n, m << 12]
 }
+/// `movem.l d0-d7/a0-a6,-(sp)`.
+pub fn movem_l_save_all() -> Vec<u16> {
+    vec![0x48 << 8 | 0x80 | 1 << 6 | 4 << 3 | 7, !1]
+}
+/// `move.w #imm,dn`.
+pub fn move_w_imm_d(imm: u16, n: u16) -> Vec<u16> {
+    vec![3 << 12 | n << 9 | IMM, imm]
+}
+/// `lea d16(pc),an` placed at `at`, for the target `target`.
+pub fn lea_pc_at(n: u16, at: usize, target: usize) -> Vec<u16> {
+    vec![0x4 << 12 | n << 9 | 7 << 6 | 7 << 3 | 2, (target as i64 - (at as i64 + 2)) as i16 as u16]
+}
+/// `move.b (an,dm.w),d16(ar)`.
+pub fn move_b_idx_disp(an: u16, dm: u16, ar: u16, disp: i16) -> Vec<u16> {
+    vec![MB << 12 | ar << 9 | 5 << 6 | 6 << 3 | an, dm << 12, disp as u16]
+}
+/// `move.l (an,dm.w),d16(ar)`.
+pub fn move_l_idx_disp(an: u16, dm: u16, ar: u16, disp: i16) -> Vec<u16> {
+    vec![ML << 12 | ar << 9 | 5 << 6 | 6 << 3 | an, dm << 12, disp as u16]
+}
+/// `mulu.w #imm,dn`.
+pub fn mulu_imm_d(imm: u16, n: u16) -> Vec<u16> {
+    vec![0xC << 12 | n << 9 | 3 << 6 | IMM, imm]
+}
+/// `adda.l d16(an),am`.
+pub fn adda_l_disp(an: u16, disp: i16, am: u16) -> Vec<u16> {
+    vec![0xD << 12 | am << 9 | 7 << 6 | 5 << 3 | an, disp as u16]
+}
+/// `move.w d16(an),dn`.
+pub fn move_w_disp_d(an: u16, disp: i16, n: u16) -> Vec<u16> {
+    vec![3 << 12 | n << 9 | 5 << 3 | an, disp as u16]
+}
+/// `move.l d16(an),dn`.
+pub fn move_l_disp_d(an: u16, disp: i16, n: u16) -> Vec<u16> {
+    vec![ML << 12 | n << 9 | 5 << 3 | an, disp as u16]
+}
+/// `move.l d16(pc),dn` placed at `at`, for the target `target`.
+pub fn move_l_pc_d(n: u16, at: usize, target: usize) -> Vec<u16> {
+    vec![ML << 12 | n << 9 | 7 << 3 | 2, (target as i64 - (at as i64 + 2)) as i16 as u16]
+}
+/// `cmpi.b #imm,(an)`.
+pub fn cmpi_b_ind(imm: u8, n: u16) -> Vec<u16> {
+    vec![6 << 9 | 2 << 3 | n, imm as u16]
+}
+/// `move.b d8(pc,dm.w),d16(ar)` placed at `at`, for the table `target`.
+pub fn move_b_pcidx_disp(dm: u16, at: usize, target: usize, ar: u16, disp: i16) -> Vec<u16> {
+    vec![MB << 12 | ar << 9 | 5 << 6 | 7 << 3 | 3, dm << 12 | ((target as i64 - (at as i64 + 2)) as i8 as u8 as u16), disp as u16]
+}
+/// `add.w d8(pc,dm.w),dn` placed at `at`, for the table `target`.
+pub fn add_w_pcidx_d(dm: u16, at: usize, target: usize, n: u16) -> Vec<u16> {
+    vec![0xD << 12 | n << 9 | 1 << 6 | 7 << 3 | 3, dm << 12 | ((target as i64 - (at as i64 + 2)) as i8 as u8 as u16)]
+}
 /// `move.<size> #imm,abs.l` for word and long are `move_w_imm_abs`, `move_l_imm_abs`.
 pub fn size_code(s: u16) -> u16 {
     mv_size(s)
@@ -337,6 +389,41 @@ mod tests {
         assert_eq!(dec(tst_b_abs(0x10)).k, K::Tst);
         assert_eq!(dec(move_b_dd(0, 2)).k, K::Move);
         assert_eq!(dec(asl_b_imm(1, 2)).k, K::Shift);
+    }
+
+    #[test]
+    fn forms_of_the_ashley_hogg_scans_decode_to_the_intended_instructions() {
+        let i = dec(movem_l_save_all());
+        assert_eq!((i.k, i.dst), (K::Movem, Ea::Pre(7)));
+        assert_eq!(movem_l_save_all()[1], !1);
+        let i = dec(move_w_imm_d(0, 0));
+        assert_eq!((i.k, i.size, i.src, i.dst), (K::Move, 2, Ea::Imm { val: 0, pos: 2 }, Ea::D(0)));
+        let i = dec(lea_pc_at(5, 0, 100));
+        assert_eq!((i.k, i.src, i.dst), (K::Lea, Ea::Pc(100), Ea::A(5)));
+        let i = dec(move_b_idx_disp(0, 0, 4, 47));
+        assert_eq!((i.k, i.size, i.dst), (K::Move, 1, Ea::Disp(4, 47)));
+        assert!(matches!(i.src, Ea::Idx(0, 0, _)));
+        let i = dec(move_l_idx_disp(3, 1, 0, 54));
+        assert_eq!((i.k, i.size, i.dst), (K::Move, 4, Ea::Disp(0, 54)));
+        assert!(matches!(i.src, Ea::Idx(3, 0, _)));
+        let i = dec(mulu_imm_d(44, 1));
+        assert_eq!((i.k, i.src, i.dst), (K::Mulu, Ea::Imm { val: 44, pos: 2 }, Ea::D(1)));
+        let i = dec(adda_l_disp(0, 32, 3));
+        assert_eq!((i.k, i.size, i.src, i.dst), (K::Adda, 4, Ea::Disp(0, 32), Ea::A(3)));
+        let i = dec(move_w_disp_d(0, 6, 6));
+        assert_eq!((i.k, i.size, i.src, i.dst), (K::Move, 2, Ea::Disp(0, 6), Ea::D(6)));
+        let i = dec(move_l_disp_d(0, 58, 0));
+        assert_eq!((i.k, i.size, i.src, i.dst), (K::Move, 4, Ea::Disp(0, 58), Ea::D(0)));
+        let i = dec(move_l_pc_d(6, 0, 200));
+        assert_eq!((i.k, i.size, i.src, i.dst), (K::Move, 4, Ea::Pc(200), Ea::D(6)));
+        let i = dec(cmpi_b_ind(130, 2));
+        assert_eq!((i.k, i.size, i.src, i.dst), (K::Imm(6), 1, Ea::Imm { val: 130, pos: 3 }, Ea::Ind(2)));
+        let i = dec(move_b_pcidx_disp(1, 0, 40, 1, 17));
+        assert_eq!((i.k, i.size, i.dst), (K::Move, 1, Ea::Disp(1, 17)));
+        assert!(matches!(i.src, Ea::PcIdx(40, _)));
+        let i = dec(add_w_pcidx_d(1, 0, 60, 4));
+        assert_eq!((i.k, i.size, i.dst), (K::Add, 2, Ea::D(4)));
+        assert!(matches!(i.src, Ea::PcIdx(60, _)));
     }
 
     fn be16_of(ws: &[u16]) -> u16 {

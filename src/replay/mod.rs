@@ -11,6 +11,7 @@ pub mod actionamics;
 pub mod amcomposer;
 pub mod alcatrazpacker;
 pub mod andrewparton;
+pub mod ashleyhogg;
 pub mod agi;
 pub mod activisionpro;
 pub mod amosmusicbank;
@@ -263,6 +264,7 @@ pub const REPLAYERS: &[Open] = &[
     synthdream::OPEN,
     robhubbardst::OPEN,
     stevebarrett::OPEN,
+    ashleyhogg::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

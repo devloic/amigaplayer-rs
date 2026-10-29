@@ -29,6 +29,7 @@ pub mod digitalsoundstudio;
 pub mod dsc;
 pub mod deltamusic1;
 pub mod deltamusic2;
+pub mod desire;
 pub mod facethemusic;
 mod facethemusic_tables;
 pub mod fred;
@@ -249,6 +250,7 @@ pub const REPLAYERS: &[Open] = &[
     jankomrsicflogel::OPEN,
     paulrobotham::OPEN,
     dirkbialluch::OPEN,
+    desire::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

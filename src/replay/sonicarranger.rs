@@ -220,6 +220,7 @@ pub struct SonicArranger {
     loop_pending: [bool; 4],
     speed: u16,
     rows: u16,
+    first: u16,
     last: u16,
     restart: u16,
     timer: u16,
@@ -313,6 +314,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         loop_pending: [false; 4],
         speed: 0,
         rows: 0,
+        first: 0,
         last: 0,
         restart: 0,
         timer: TIMER as u16,
@@ -545,6 +547,7 @@ impl SonicArranger {
         self.timer = if prod / 50 > 0xffff { prod as u16 } else { (prod / 50) as u16 };
         self.speed = speed;
         self.rows = rows;
+        self.first = first;
         self.last = last;
         self.restart = restart;
         self.counter = speed;
@@ -587,13 +590,20 @@ impl SonicArranger {
             self.row = 0;
             self.pos = self.pos.wrapping_add(1);
             self.pend += t::POSITION;
-            // the original signals the end on entering the last position, which
-            // cuts that position off (a one-position song ends at once); this
-            // signals it when the last one is over, as the later SonicArranger
-            // Eagleplayer does. Only the song end moves: the writes are the same.
+            // the original signals the end on entering the last position, as the
+            // Eagleplayer 2.06's songs end there in its write logs; the position
+            // after the last one wraps to the restart. A one-position song would
+            // end after its first row, so for that one the end comes when the
+            // position is over (the later SonicArranger Eagleplayer's).
+            let one = self.first as i16 == self.last as i16;
+            if self.last as i16 == self.pos as i16 && !one {
+                self.signal_songend();
+            }
             if !(self.last as i16 >= self.pos as i16) {
                 self.pos = self.restart;
-                self.signal_songend();
+                if one {
+                    self.signal_songend();
+                }
             }
             let e = self.positions.wrapping_add((self.pos as u32) << 4);
             for v in 0..4 {
@@ -1382,20 +1392,27 @@ mod tests {
     /// A "SOARV1.0" module: one subsong of two rows, one position, one sample
     /// instrument with no loop, played by voice 0's first row.
     fn module() -> Vec<u8> {
+        module_of(1)
+    }
+
+    /// `module` with `positions` identical positions.
+    fn module_of(positions: u16) -> Vec<u8> {
         let mut d = b"SOARV1.0".to_vec();
         let chunk = |d: &mut Vec<u8>, mark: &[u8], count: u32| {
             d.extend(mark);
             d.extend(count.to_be_bytes());
         };
         chunk(&mut d, b"STBL", 1);
-        // speed 3, 2 rows, positions 0 to 0, restart 0, tempo 50
-        for w in [3u16, 2, 0, 0, 0, 50] {
+        // speed 3, 2 rows, positions 0 to the last, restart 0, tempo 50
+        for w in [3u16, 2, 0, positions - 1, 0, 50] {
             d.extend(w.to_be_bytes());
         }
-        chunk(&mut d, b"OVTB", 1);
+        chunk(&mut d, b"OVTB", positions as u32);
         // voice 0 from row 0, the others from row 2 (both empty)
-        for start in [0u32, 2, 2, 2] {
-            d.extend((start << 16).to_be_bytes());
+        for _ in 0..positions {
+            for start in [0u32, 2, 2, 2] {
+                d.extend((start << 16).to_be_bytes());
+            }
         }
         chunk(&mut d, b"NTBL", 4);
         // note 25 with instrument 1
@@ -1439,6 +1456,22 @@ mod tests {
         // the other voices stay silent
         assert!(reg(0xDFF0B8).iter().all(|&v| v == 0));
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
+    }
+
+    #[test]
+    fn signals_the_song_end_on_entering_the_last_position() {
+        // 6 ticks a position, the first row a few ticks in: 9 ticks enter the
+        // second of two positions (the second of three is not the last), 15
+        // the third of three; a lone position ends when it is over, by 9
+        let cases = [(2u16, 5, false), (2, 9, true), (3, 9, false), (3, 15, true), (1, 5, false), (1, 9, true)];
+        for (positions, ticks, end) in cases {
+            let mut e = Engine::new(48000.0);
+            e.open_replayers = true;
+            e.play_data(Path::new("test.sa"), module_of(positions)).unwrap();
+            let mut out = vec![0f32; 2 * 960 * ticks];
+            e.render(&mut out);
+            assert_eq!(e.songend(), end, "{positions} positions, {ticks} ticks");
+        }
     }
 
     /// A compiled module (the eight offsets alone) of `subsongs` identical

@@ -7,7 +7,11 @@
 //! and order of operations (the float arithmetic included), so the output can be
 //! compared with libxmp's sample for sample.
 
-use super::mixer::{MixerData, MixerVoice, PAN_SURROUND};
+use super::filter::filter_setup;
+use super::mixer::{
+    DSP_EFFECT_CUTOFF, DSP_EFFECT_FILTER_A0, DSP_EFFECT_FILTER_B0, DSP_EFFECT_FILTER_B1, DSP_EFFECT_RESONANCE, MixerData, MixerVoice,
+    PAN_SURROUND,
+};
 use super::module::*;
 
 // channel flags (player.h)
@@ -1234,7 +1238,37 @@ impl Context {
         }
         self.virt_setperiod(chn as i32, final_period);
         self.p.xc_data[chn].info_pitchbend = linear_bend >> 7;
-        // The IT filter (QUIRK_FILTER) is not ported yet.
+
+        // Process filter
+        if !self.has_quirk(QUIRK_FILTER) {
+            return;
+        }
+        let cutoff;
+        {
+            let xc = &mut self.p.xc_data[chn];
+            if xc.f_idx >= 0 && fei.flg & XMP_ENVELOPE_FLT != 0 {
+                if frq_envelope < 0xfe {
+                    xc.filter.envelope = frq_envelope;
+                }
+                cutoff = ((xc.filter.cutoff * xc.filter.envelope) >> 8).min(0xff);
+            } else {
+                cutoff = xc.filter.cutoff.min(0xff);
+            }
+        }
+        let resonance = self.p.xc_data[chn].filter.resonance;
+        // IT: cutoff 127 + resonance 0 turns off the filter, but this is only
+        // applied when playing a new note without toneporta. All other
+        // combinations take effect immediately. See OpenMPT filter-reset.it,
+        // filter-reset-carry.it
+        if cutoff < 0xfe || resonance > 0 || self.p.xc_data[chn].filter.can_disable != 0 {
+            let (a0, b0, b1) = filter_setup(self.s.freq, cutoff, resonance);
+            self.virt_seteffect(chn as i32, DSP_EFFECT_FILTER_A0, a0);
+            self.virt_seteffect(chn as i32, DSP_EFFECT_FILTER_B0, b0);
+            self.virt_seteffect(chn as i32, DSP_EFFECT_FILTER_B1, b1);
+            self.virt_seteffect(chn as i32, DSP_EFFECT_RESONANCE, resonance);
+            self.virt_seteffect(chn as i32, DSP_EFFECT_CUTOFF, cutoff);
+            self.p.xc_data[chn].filter.can_disable = 0;
+        }
     }
 
     fn process_pan(&mut self, chn: usize, act: i32) {

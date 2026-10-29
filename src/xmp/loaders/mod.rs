@@ -12,6 +12,8 @@ pub mod gal5;
 pub mod dt;
 pub mod far;
 pub mod gdm;
+pub mod imf;
+pub mod liq;
 pub mod mgt;
 pub mod masi;
 pub mod masi16;

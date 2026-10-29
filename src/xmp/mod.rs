@@ -1,7 +1,8 @@
 //! A port of libxmp's player core and software mixer, for the PC tracker
 //! formats that only libxmp (or OpenMPT) plays: a format-independent module
 //! model (`module`), the loader helpers (`load`), the player (`player`,
-//! `effects`, `virt`, `scan`), the 16-bit stereo mixer (`mixer`) and one loader
+//! `effects`, `virt`, `scan`), the 16-bit stereo mixer (`mixer`) with its
+//! resonant filter (`filter`) and one loader
 //! per format (`loaders`).
 //!
 //! Ported from libxmp 4.7.4, MIT licence, Copyright (C) 1996-2026 Claudio Matsuoka
@@ -15,6 +16,7 @@
 pub mod effects;
 pub mod extras;
 pub mod far_extras;
+pub mod filter;
 pub mod iff;
 pub mod inflate;
 pub mod load;
@@ -42,7 +44,9 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "STMIK 0.2", test: loaders::stx::test, load: loaders::stx::load },
     Loader { name: "MultiTracker", test: loaders::mtm::test, load: loaders::mtm::load },
     Loader { name: "Digitrakker", test: loaders::mdl::test, load: loaders::mdl::load },
+    Loader { name: "Imago Orpheus v1.0", test: loaders::imf::test, load: loaders::imf::load },
     Loader { name: "Ultra Tracker", test: loaders::ult::test, load: loaders::ult::load },
+    Loader { name: "Liquid Tracker", test: loaders::liq::test, load: loaders::liq::load },
     Loader { name: "General Digital Music", test: loaders::gdm::test, load: loaders::gdm::load },
     Loader { name: "Megatracker", test: loaders::mgt::test, load: loaders::mgt::load },
     Loader { name: "Epic MegaGames MASI", test: loaders::masi::test, load: loaders::masi::load },

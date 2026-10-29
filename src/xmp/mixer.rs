@@ -1,14 +1,15 @@
 //! libxmp's software mixer (`mixer.c` and the stereo-output mixers of
 //! `mix_all.c`): 16-bit stereo output with full panning, nearest, linear and
-//! cubic spline interpolation, volume ramping and Hipolito's anticlick.
+//! cubic spline interpolation, the resonant filter mixers (`QUIRK_FILTER`),
+//! volume ramping and Hipolito's anticlick.
 //!
 //! Ported from libxmp 4.7.4, MIT licence, Copyright (C) 1996-2026 Claudio Matsuoka
 //! and Hipolito Carraro Jr (see LICENSE-libxmp). It is independent of the Paula
 //! emulation the Amiga replayers use.
 //!
-//! Not ported yet: the IT resonant filter mixers (`FLAG_FILTER`, used by IT
-//! modules with `QUIRK_FILTER`), mono output, and libxmp's sound-effect samples.
+//! Not ported yet: mono output, and libxmp's sound-effect samples.
 
+use super::filter::FILTER_SHIFT;
 use super::module::*;
 use super::player::*;
 use super::spline_lut::*;
@@ -36,7 +37,25 @@ pub const SAMPLE_PAUSED: i32 = 1 << 6;
 const FLAG_16_BITS: i32 = 0x01;
 const FLAG_STEREO: i32 = 0x02;
 const FLAG_STEREOOUT: i32 = 0x04;
+const FLAG_FILTER: i32 = 0x08;
 const FLAG_ACTIVE: i32 = 0x10;
+
+/// `XMP_DSP_LOWPASS` (`xmp.h`): the filter effect, on by default.
+pub const XMP_DSP_LOWPASS: i32 = 1 << 0;
+
+// libxmp_mixer_seteffect's types (common.h)
+pub const DSP_EFFECT_CUTOFF: i32 = 0x02;
+pub const DSP_EFFECT_RESONANCE: i32 = 0x03;
+pub const DSP_EFFECT_FILTER_A0: i32 = 0xb0;
+pub const DSP_EFFECT_FILTER_B0: i32 = 0xb1;
+pub const DSP_EFFECT_FILTER_B1: i32 = 0xb2;
+
+/// Sample pre-amplification of the filtered mixers (`PREAMP_BITS`, mix_all.c),
+/// against filter rounding errors at high rates.
+const PREAMP_BITS: i32 = 15;
+/// IT's WAV output driver clamp (`FILTER_MIN`, `FILTER_MAX`).
+const FILTER_MIN: i32 = -65536 * (1 << PREAMP_BITS);
+const FILTER_MAX: i32 = 65535 * (1 << PREAMP_BITS);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Interp {
@@ -71,6 +90,22 @@ pub struct MixerVoice {
     /// `sptr != NULL`: the voice has sample data.
     pub has_data: bool,
     pub queued_smp: i32,
+    pub filter: VoiceFilter,
+}
+
+/// The `filter` of `struct mixer_voice`: the state and coefficients of the
+/// voice's resonant filter.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct VoiceFilter {
+    pub r1: i32,
+    pub r2: i32,
+    pub l1: i32,
+    pub l2: i32,
+    pub a0: i32,
+    pub b0: i32,
+    pub b1: i32,
+    pub cutoff: i32,
+    pub resonance: i32,
 }
 
 /// `struct mixer_data` (stereo 16-bit output only).
@@ -80,6 +115,8 @@ pub struct MixerData {
     pub amplify: i32,
     pub mix: i32,
     pub interp: Interp,
+    /// `XMP_DSP_*` effects.
+    pub dsp: i32,
     pub numvoc: i32,
     pub ticksize: i32,
     pub total_size: i32,
@@ -96,6 +133,7 @@ impl Default for MixerData {
             amplify: 1,
             mix: 100,
             interp: Interp::Linear,
+            dsp: XMP_DSP_LOWPASS,
             numvoc: SMIX_NUMVOC,
             ticksize: 0,
             total_size: 0,
@@ -299,12 +337,13 @@ fn loop_reposition(vi: &mut MixerVoice, xxs: &Sample, xtra: Option<&ExtraSample>
 }
 
 /// The `libxmp_mix_stereoout_*` handlers: mixes `count` output frames of the
-/// voice into `buf` (interleaved stereo).
+/// voice into `buf` (interleaved stereo), through the voice's resonant filter
+/// with `FILTER` (the `*_filter` handlers, which the nearest mixers lack).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn mix_voice<const B16: bool, const STEREO: bool>(
+fn mix_voice<const B16: bool, const STEREO: bool, const FILTER: bool>(
     interp: Interp,
-    vi: &MixerVoice,
+    vi: &mut MixerVoice,
     d: &[u8],
     buf: &mut [i32],
     count: i32,
@@ -352,11 +391,26 @@ fn mix_voice<const B16: bool, const STEREO: bool>(
     };
     // Volume ramping (no ramp in the nearest mixers)
     let ramp = if interp == Interp::Nearest { count } else { ramp };
+    // VAR_FILTER_MONO, VAR_FILTER_STEREO
+    let (mut fl1, mut fl2, mut fr1, mut fr2) = (vi.filter.l1, vi.filter.l2, vi.filter.r1, vi.filter.r2);
+    let (a0, b0, b1) = (vi.filter.a0 as i64, vi.filter.b0 as i64, vi.filter.b1 as i64);
+    // FILTER_LEFT, FILTER_RIGHT
+    let filter = |smp: i32, f1: &mut i32, f2: &mut i32| -> i32 {
+        let s64 = (a0 * (smp.wrapping_shl(PREAMP_BITS as u32)) as i64 + b0 * *f1 as i64 + b1 * *f2 as i64) >> FILTER_SHIFT;
+        let s = s64.clamp(FILTER_MIN as i64, FILTER_MAX as i64) as i32;
+        *f2 = *f1;
+        *f1 = s;
+        s >> PREAMP_BITS
+    };
     let mut count = count;
     let mut o = 0usize;
     while count > 0 {
-        let smpl = sample(pos, frac, 0);
-        let smpr = if STEREO { sample(pos, frac, 1) } else { smpl };
+        let mut smpl = sample(pos, frac, 0);
+        let mut smpr = if STEREO { sample(pos, frac, 1) } else { smpl };
+        if FILTER {
+            smpl = filter(smpl, &mut fl1, &mut fl2);
+            smpr = if STEREO { filter(smpr, &mut fr1, &mut fr2) } else { smpl };
+        }
         let (l, r) = if count > ramp { (old_vl >> 8, old_vr >> 8) } else { (vl, vr) };
         if let Some(b) = buf.get_mut(o..o + 2) {
             b[0] = b[0].wrapping_add(smpl.wrapping_mul(l));
@@ -371,6 +425,13 @@ fn mix_voice<const B16: bool, const STEREO: bool>(
         pos += (frac >> SMIX_SHIFT) * chn;
         frac &= SMIX_MASK;
         count -= 1;
+    }
+    if FILTER {
+        // SAVE_FILTER_MONO copies the left state to the right
+        vi.filter.l1 = fl1;
+        vi.filter.l2 = fl2;
+        vi.filter.r1 = if STEREO { fr1 } else { fl1 };
+        vi.filter.r2 = if STEREO { fr2 } else { fl2 };
     }
 }
 
@@ -615,11 +676,20 @@ impl Context {
                             let buf = &mut self.s.buf32[buf_pos..];
                             let st = (step_dir * (1 << SMIX_SHIFT) as f64) as i32;
                             let (vl, vr) = (vol_l >> 8, vol_r >> 8);
-                            match (vi.fidx & FLAG_16_BITS != 0, vi.fidx & FLAG_STEREO != 0) {
-                                (false, false) => mix_voice::<false, false>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
-                                (true, false) => mix_voice::<true, false>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
-                                (false, true) => mix_voice::<false, true>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
-                                (true, true) => mix_voice::<true, true>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
+                            // See OpenMPT env-flt-max.it; the nearest mixers
+                            // have no filtered versions
+                            let filter = vi.fidx & FLAG_FILTER != 0
+                                && !(vi.filter.cutoff >= 0xfe && vi.filter.resonance == 0)
+                                && interp != Interp::Nearest;
+                            match (vi.fidx & FLAG_16_BITS != 0, vi.fidx & FLAG_STEREO != 0, filter) {
+                                (false, false, false) => mix_voice::<false, false, false>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
+                                (true, false, false) => mix_voice::<true, false, false>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
+                                (false, true, false) => mix_voice::<false, true, false>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
+                                (true, true, false) => mix_voice::<true, true, false>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
+                                (false, false, true) => mix_voice::<false, false, true>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
+                                (true, false, true) => mix_voice::<true, false, true>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
+                                (false, true, true) => mix_voice::<false, true, true>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
+                                (true, true, true) => mix_voice::<true, true, true>(interp, vi, d, buf, samples, vl, vr, st, rsize, delta_l, delta_r),
                             }
                         }
                         buf_pos += mix_size;
@@ -753,9 +823,13 @@ impl Context {
             vi.fidx = FLAG_STEREOOUT;
         }
         self.set_sample_end(voc, false);
+        let filter = self.m.quirk & QUIRK_FILTER != 0 && self.s.dsp & XMP_DSP_LOWPASS != 0;
         let vi = &mut self.p.virt.voice_array[voc];
         vi.has_data = has_data;
         vi.fidx |= FLAG_ACTIVE;
+        if filter {
+            vi.fidx |= FLAG_FILTER;
+        }
         if b16 {
             vi.fidx |= FLAG_16_BITS;
         }
@@ -783,6 +857,19 @@ impl Context {
         vi.flags |= ANTICLICK;
         vi.old_vl = 0;
         vi.old_vr = 0;
+    }
+
+    /// `libxmp_mixer_seteffect`: a filter parameter of the voice.
+    pub fn mixer_seteffect(&mut self, voc: usize, type_: i32, val: i32) {
+        let f = &mut self.p.virt.voice_array[voc].filter;
+        match type_ {
+            DSP_EFFECT_CUTOFF => f.cutoff = val,
+            DSP_EFFECT_RESONANCE => f.resonance = val,
+            DSP_EFFECT_FILTER_A0 => f.a0 = val,
+            DSP_EFFECT_FILTER_B0 => f.b0 = val,
+            DSP_EFFECT_FILTER_B1 => f.b1 = val,
+            _ => {}
+        }
     }
 
     /// `libxmp_mixer_setvol`.
@@ -855,7 +942,7 @@ mod tests {
         let d = sample8(&[0, 64, 64, 64]);
         let mut buf = vec![0i32; 4];
         // pos 0.5, step 0: both frames read halfway between 0 and 64 << 8
-        mix_voice::<false, false>(Interp::Linear, &voice(0.5), &d, &mut buf, 2, 2, 3, 0, 2, 0, 0);
+        mix_voice::<false, false, false>(Interp::Linear, &mut voice(0.5), &d, &mut buf, 2, 2, 3, 0, 2, 0, 0);
         assert_eq!(buf, vec![32 * 256 * 2, 32 * 256 * 3, 32 * 256 * 2, 32 * 256 * 3]);
     }
 
@@ -864,7 +951,7 @@ mod tests {
         let d = sample8(&[10, 20, 30, 40]);
         let mut buf = vec![0i32; 6];
         // start 0.6 rounds to frame 1; step 1.0
-        mix_voice::<false, false>(Interp::Nearest, &voice(0.6), &d, &mut buf, 3, 1, 1, 1 << 16, 0, 0, 0);
+        mix_voice::<false, false, false>(Interp::Nearest, &mut voice(0.6), &d, &mut buf, 3, 1, 1, 1 << 16, 0, 0, 0);
         assert_eq!(buf, vec![20 << 8, 20 << 8, 30 << 8, 30 << 8, 40 << 8, 40 << 8]);
     }
 
@@ -880,7 +967,7 @@ mod tests {
         vi.old_vl = 0;
         vi.old_vr = 256 * 10;
         // two ramped frames (count 4 > ramp 2), then fixed volumes 5 / 7
-        mix_voice::<true, false>(Interp::Linear, &vi, &d, &mut buf, 4, 5, 7, 1 << 16, 2, 256, -256);
+        mix_voice::<true, false, false>(Interp::Linear, &mut vi, &d, &mut buf, 4, 5, 7, 1 << 16, 2, 256, -256);
         assert_eq!(buf, vec![0, 10000, 1000, 9000, 5000, 7000, 5000, 7000]);
     }
 
@@ -893,8 +980,30 @@ mod tests {
         }
         d.extend([0u8; 16]);
         let mut buf = vec![0i32; 4];
-        mix_voice::<true, true>(Interp::Linear, &voice(1.0), &d, &mut buf, 2, 1, 1, 1 << 16, 2, 0, 0);
+        mix_voice::<true, true, false>(Interp::Linear, &mut voice(1.0), &d, &mut buf, 2, 1, 1, 1 << 16, 2, 0, 0);
         assert_eq!(buf, vec![100, -100, 200, -200]);
+    }
+
+    #[test]
+    fn filter_runs_the_two_pole_recursion() {
+        let mut d = vec![0u8; SAMPLE_GUARD];
+        for v in [1000i16, 1000, 1000, 0] {
+            d.extend(v.to_le_bytes());
+        }
+        d.extend([0u8; 8]);
+        let mut buf = vec![0i32; 6];
+        let mut vi = voice(0.0);
+        // y[n] = x[n] / 2 + y[n-1] / 4 (a0 = 0.5, b0 = 0.25, b1 = 0), in the
+        // pre-amplified domain
+        vi.filter.a0 = 1 << (FILTER_SHIFT - 1);
+        vi.filter.b0 = 1 << (FILTER_SHIFT - 2);
+        mix_voice::<true, false, true>(Interp::Linear, &mut vi, &d, &mut buf, 3, 1, 1, 1 << 16, 3, 0, 0);
+        let y1 = 1000 << 14;
+        let y2 = (1000 << 14) + (y1 >> 2);
+        let y3 = (1000 << 14) + (y2 >> 2);
+        assert_eq!(buf, vec![y1 >> 15, y1 >> 15, y2 >> 15, y2 >> 15, y3 >> 15, y3 >> 15]);
+        // the state is kept, the right copies the left for a mono sample
+        assert_eq!((vi.filter.l1, vi.filter.l2, vi.filter.r1, vi.filter.r2), (y3, y2, y3, y2));
     }
 
     #[test]

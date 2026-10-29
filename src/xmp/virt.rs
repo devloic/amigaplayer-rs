@@ -180,6 +180,14 @@ impl Context {
         }
     }
 
+    /// `libxmp_virt_seteffect`.
+    pub fn virt_seteffect(&mut self, chn: i32, type_: i32, val: i32) {
+        let voc = self.map_virt_channel(chn);
+        if voc >= 0 {
+            self.mixer_seteffect(voc as usize, type_, val);
+        }
+    }
+
     pub fn virt_getvoicepos(&self, chn: i32) -> f64 {
         let voc = self.map_virt_channel(chn);
         if voc < 0 {

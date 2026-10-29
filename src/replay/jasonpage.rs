@@ -248,8 +248,11 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let mut hw = Hw { bus: &mut m.bus };
     hw.dmacon(0x000F);
     r.start(0, &mut hw, true);
-    // the init routine sets the LED bit of CIA-A's port: the filter is off
-    m.bus.ciaa.pra |= 2;
+    // the Realms player's init sets the LED bit of CIA-A's port (the filter off); the
+    // other layout's player never touches it
+    if f3 {
+        m.bus.ciaa.pra |= 2;
+    }
     Some(Box::new(r))
 }
 

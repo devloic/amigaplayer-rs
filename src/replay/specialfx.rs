@@ -644,6 +644,7 @@ impl Voice {
 }
 
 struct Sfx {
+    led_init: bool,
     lay: Lay,
     rt: Vec<u8>,
     base: u32,
@@ -730,6 +731,9 @@ impl Sfx {
 
     /// Starts subsong `n` (1-based).
     fn init(&mut self, n: usize, hw: &mut Hw) {
+        if self.led_init {
+            hw.bus.ciaa.pra |= 2;
+        }
         if n == 0 || n > self.lay.nsongs {
             self.stop(hw);
             return;
@@ -1236,9 +1240,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let title = m.bus.read_cstr(m.deli.file_buf);
     let rt = build(d, &lay);
     let unguarded = lay.four;
-    // the init routine sets the LED bit of CIA-A's port: the filter is off
-    m.bus.ciaa.pra |= 2;
+    // the module's init routine: clr.w / bset.b #1,$bfe001 / subq.w #1,d0: the LED
+    // filter off (a module's stream command of the same bset is not this)
+    let led_init = d.windows(10).any(|w| w == [0x08, 0xF9, 0x00, 0x01, 0x00, 0xBF, 0xE0, 0x01, 0x53, 0x40]);
+    if led_init {
+        m.bus.ciaa.pra |= 2;
+    }
     Some(Box::new(Sfx {
+        led_init,
         lay,
         rt,
         base,

@@ -1034,9 +1034,9 @@ impl ActivisionPro {
             Iop::Led => {
                 hw.wait(self.pend + 12);
                 self.pend = 0;
-                // through the CIA (r8/w8 reach only RAM): the filter off
-                let x = hw.bus.read_byte(0xbfe001);
-                hw.bus.write_byte(0xbfe001, x | 2);
+                // the Eagleplayer's ENPP_ModuleChange patch replaces the module's bset.b
+                // #1,$bfe001 with a call that leaves the LED bit alone (the original's
+                // LED stays on): only the time it takes is kept
             }
         }
     }

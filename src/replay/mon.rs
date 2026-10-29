@@ -885,7 +885,10 @@ impl Replayer for Mon {
         (0, (self.lay.nsub.max(1) - 1) as u16, self.sub)
     }
 
-    fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        if let Some(on) = led_of(&self.d, &self.lay, n) {
+            if on { hw.bus.ciaa.pra &= !2 } else { hw.bus.ciaa.pra |= 2 }
+        }
         self.sub = n;
         self.started = false;
     }
@@ -910,11 +913,20 @@ impl Replayer for Mon {
     }
 }
 
+/// The LED the song init sets for subsong `sub`: on when the
+/// byte 9 of the song's entry is not 0.
+fn led_of(d: &[u8], lay: &Layout, sub: u16) -> Option<bool> {
+    (sub < lay.nsub as u16).then(|| rb(d, lay.base + lay.esz * sub as usize + 9) != 0)
+}
+
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let lay = scan(d)?;
     let title = m.bus.read_cstr(m.deli.file_buf);
-    // the init routine sets the LED bit of CIA-A's port: the filter is off
-    m.bus.ciaa.pra |= 2;
+    let led = led_of(d, &lay, 0);
+    if let Some(on) = led {
+        // the song init: ENPP_PokeCommand 1 with the song entry's byte 9
+        if on { m.bus.ciaa.pra &= !2 } else { m.bus.ciaa.pra |= 2 }
+    }
     Some(Box::new(Mon {
         d: d.to_vec(),
         gbase: base,

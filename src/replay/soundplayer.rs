@@ -334,6 +334,16 @@ impl Replayer for Sjs {
         for ch in 0..4 {
             self.v[ch].fetched = None;
             if self.mask & (1 << ch) == 0 {
+                // a voice that is off still runs the LED command of its first row (the
+                // original's log: a command in row 1 of the fourth voice switches the LED
+                // at the first row, those of its later rows do not)
+                if self.v[ch].row == 0 {
+                    self.v[ch].row = 1;
+                    let g = self.group(1, ch);
+                    if g[2] == 1 || g[2] == 2 {
+                        self.command(ch, g[2], hw);
+                    }
+                }
                 continue;
             }
             let v = &mut self.v[ch];

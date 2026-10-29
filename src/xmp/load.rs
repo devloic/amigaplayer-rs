@@ -409,3 +409,13 @@ pub fn load_epilogue(m: &mut ModuleData) -> Result<(), ()> {
         .collect();
     Ok(())
 }
+
+/// `libxmp_c2spd_to_note` (`period.c`): the transpose and finetune that give a
+/// C-4 speed of `c2spd`.
+pub fn c2spd_to_note(c2spd: i32) -> (i32, i32) {
+    if c2spd <= 0 {
+        return (0, 0);
+    }
+    let c = (1536.0 * (c2spd as f64 / 8363.0).ln() / std::f64::consts::LN_2) as i32;
+    (c / 128, c % 128)
+}

@@ -6,4 +6,7 @@
 //! `libxmp_load_prologue` sets it, and is registered in `xmp::LOADERS`.
 
 pub mod c669;
+pub mod gdm;
+pub mod mgt;
 pub mod mtm;
+pub mod ult;

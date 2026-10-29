@@ -36,6 +36,9 @@ pub struct Loader {
 /// The loaders, in libxmp's order (`format_loaders` of `format.c`).
 pub static LOADERS: &[Loader] = &[
     Loader { name: "MultiTracker", test: loaders::mtm::test, load: loaders::mtm::load },
+    Loader { name: "Ultra Tracker", test: loaders::ult::test, load: loaders::ult::load },
+    Loader { name: "General Digital Music", test: loaders::gdm::test, load: loaders::gdm::load },
+    Loader { name: "Megatracker", test: loaders::mgt::test, load: loaders::mgt::load },
     Loader { name: "Composer 669", test: loaders::c669::test, load: loaders::c669::load },
 ];
 

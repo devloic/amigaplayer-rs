@@ -72,6 +72,7 @@ pub mod pumatracker;
 pub mod quadracomposer;
 mod quadracomposer_tables;
 pub mod richardjoseph;
+pub mod fashiontracker;
 pub mod seanconran;
 pub mod soundplayer;
 pub mod ronklaren;
@@ -251,6 +252,7 @@ pub const REPLAYERS: &[Open] = &[
     paulrobotham::OPEN,
     dirkbialluch::OPEN,
     desire::OPEN,
+    fashiontracker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

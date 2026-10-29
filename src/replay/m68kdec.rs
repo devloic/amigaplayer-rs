@@ -66,6 +66,9 @@ pub enum K {
     Ext,
     Swap,
     Movem,
+    /// `mulu.w` and `muls.w` (the source is a word, the destination a data register).
+    Mulu,
+    Muls,
     Other,
 }
 
@@ -349,6 +352,10 @@ pub fn decode(d: &[u8], at: usize) -> Option<Insn> {
                     }
                     _ => {
                         // mul/div
+                        if line == 0xC {
+                            i.k = if om == 3 { K::Mulu } else { K::Muls };
+                            i.size = 2;
+                        }
                         i.src = r.ea(mode, reg, 2)?;
                         i.dst = Ea::D(reg9 as u8);
                     }
@@ -417,6 +424,14 @@ mod tests {
     fn dec(ws: &[u16]) -> Insn {
         let b: Vec<u8> = ws.iter().flat_map(|w| w.to_be_bytes()).collect();
         decode(&b, 0).unwrap()
+    }
+
+    #[test]
+    fn multiplies() {
+        let i = dec(&[0xC0FC, 0x0400]);
+        assert_eq!((i.k, i.len, i.src, i.dst), (K::Mulu, 4, Ea::Imm { val: 0x400, pos: 2 }, Ea::D(0)));
+        assert_eq!(dec(&[0xC1FC, 0x0400]).k, K::Muls);
+        assert_eq!(dec(&[0x80FC, 0x0400]).k, K::Other);
     }
 
     #[test]

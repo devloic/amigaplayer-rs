@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod actionamics;
+pub mod amcomposer;
 pub mod alcatrazpacker;
 pub mod andrewparton;
 pub mod agi;
@@ -239,6 +240,7 @@ pub const REPLAYERS: &[Open] = &[
     seanconran::OPEN,
     kh::OPEN,
     jeroentel::OPEN,
+    amcomposer::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

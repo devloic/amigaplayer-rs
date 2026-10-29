@@ -44,6 +44,8 @@ pub struct Loader {
 /// The loaders, in libxmp's order (`format_loaders` of `format.c`).
 pub static LOADERS: &[Loader] = &[
     Loader { name: "Fast Tracker II", test: loaders::xm::test, load: loaders::xm::load },
+    Loader { name: "Scream Tracker 3", test: loaders::s3m::test, load: loaders::s3m::load },
+    Loader { name: "Scream Tracker 2", test: loaders::stm::test, load: loaders::stm::load },
     Loader { name: "STMIK 0.2", test: loaders::stx::test, load: loaders::stx::load },
     Loader { name: "MultiTracker", test: loaders::mtm::test, load: loaders::mtm::load },
     Loader { name: "Digitrakker", test: loaders::mdl::test, load: loaders::mdl::load },
@@ -77,7 +79,10 @@ pub fn detect(data: &[u8]) -> Option<&'static Loader> {
 /// that had them before the port: XM goes to the 68k FastTracker_2.0 player
 /// natively and, in the archive's web app, past the open replayers to UADE and
 /// then ft2play. Remove "Fast Tracker II" to play XMs on the libxmp port there.
-pub const LEFT_TO_OTHER_PLAYERS: &[&str] = &["Fast Tracker II"];
+/// S3M and STM likewise go natively to the 68k ScreamTracker_3.0 Eagleplayer and,
+/// in the web app, to st3play; remove "Scream Tracker 3" / "Scream Tracker 2" to
+/// play them on the port.
+pub const LEFT_TO_OTHER_PLAYERS: &[&str] = &["Fast Tracker II", "Scream Tracker 3", "Scream Tracker 2"];
 
 /// `detect`, for the open chain: None for a format in `LEFT_TO_OTHER_PLAYERS`.
 pub fn detect_open(data: &[u8]) -> Option<&'static Loader> {

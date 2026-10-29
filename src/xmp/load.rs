@@ -519,3 +519,40 @@ pub fn decode_protracker_event(e: &mut Event, b: &[u8]) {
     }
     disable_continue_fx(e);
 }
+
+/// `schism_tracker_date`: days from 0000-03-01 (OpenMPT's date algorithm).
+fn schism_tracker_date(year: i32, month: i32, day: i32) -> i32 {
+    let mm = (month + 9) % 12;
+    let mut yy = year - mm / 10;
+    yy = yy * 365 + (yy / 4) - (yy / 100) + (yy / 400);
+    let mm = (mm * 306 + 5) / 10;
+    yy + mm + (day - 1)
+}
+
+/// `libxmp_schism_tracker_string`: the Schism Tracker version a tracker ID
+/// encodes — `0.s_ver` up to 0x50, else days from 2009-10-31 (`l_ver` days
+/// when `s_ver` is 0xfff).
+pub fn schism_tracker_string(s_ver: i32, l_ver: i32) -> String {
+    if s_ver >= 0x50 {
+        let mut t = schism_tracker_date(2009, 10, 31) as i64;
+        if s_ver == 0xfff {
+            t += l_ver as i64;
+        } else {
+            t += (s_ver - 0x50) as i64;
+        }
+        let mut year = ((t * 10000 + 14780) / 3652425) as i32;
+        let yd = |y: i32| (t - (365 * y as i64 + (y / 4) as i64 - (y / 100) as i64 + (y / 400) as i64)) as i32;
+        let mut dayofyear = yd(year);
+        if dayofyear < 0 {
+            year -= 1;
+            dayofyear = yd(year);
+        }
+        let month = (100 * dayofyear + 52) / 3060;
+        let day = dayofyear - (month * 306 + 5) / 10 + 1;
+        year += (month + 2) / 12;
+        let month = (month + 2) % 12 + 1;
+        format!("Schism Tracker {year:04}-{month:02}-{day:02}")
+    } else {
+        format!("Schism Tracker 0.{s_ver:x}")
+    }
+}

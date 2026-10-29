@@ -124,6 +124,17 @@ impl<'a> Hio<'a> {
         u16::from_be_bytes(self.bytes())
     }
 
+    /// `hio_read24l`.
+    pub fn read24l(&mut self) -> u32 {
+        if self.data.len().saturating_sub(self.pos) < 3 {
+            self.error = true;
+            self.pos = self.data.len();
+            return 0xffff_ffff;
+        }
+        let b = self.bytes::<3>();
+        (b[2] as u32) << 16 | (b[1] as u32) << 8 | b[0] as u32
+    }
+
     pub fn read32l(&mut self) -> u32 {
         u32::from_le_bytes(self.bytes())
     }

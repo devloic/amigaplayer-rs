@@ -21,6 +21,7 @@ pub mod filter;
 pub mod iff;
 pub mod inflate;
 pub mod load;
+pub mod lzw;
 pub mod loaders;
 pub mod mixer;
 pub mod module;
@@ -67,6 +68,9 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Chiptracker", test: loaders::chip::test, load: loaders::chip::load },
     Loader { name: "Real Tracker", test: loaders::rtm::test, load: loaders::rtm::load },
     Loader { name: "Digital Tracker", test: loaders::dt::test, load: loaders::dt::load },
+    Loader { name: "Archimedes Tracker", test: loaders::arch::test, load: loaders::arch::load },
+    Loader { name: "Digital Symphony", test: loaders::sym::test, load: loaders::sym::load },
+    Loader { name: "DigiBooster Pro", test: loaders::dbm::test, load: loaders::dbm::load },
     Loader { name: "Farandole Composer", test: loaders::far::test, load: loaders::far::load },
     Loader { name: "Epic Games UMX", test: loaders::umx::test, load: loaders::umx::load },
     Loader { name: "Coconizer", test: loaders::coco::test, load: loaders::coco::load },
@@ -91,8 +95,13 @@ pub fn detect(data: &[u8]) -> Option<&'static Loader> {
 /// "Scream Tracker 2") to hand its format back to those players. IT, which
 /// nothing played natively and the web app sent to UADE and then it2play
 /// (libopenmpt and libxmp for the ITs it2play refuses), plays on the port too;
-/// add "Impulse Tracker" to hand it back.
-pub const LEFT_TO_OTHER_PLAYERS: &[&str] = &[];
+/// add "Impulse Tracker" to hand it back. DigiBooster Pro (DBM0) is left to the
+/// others: the 68k DigiBoosterPRO Eagleplayer claims it natively but renders silence
+/// (it needs digibooster.library), and in the archive's web app UADE gives nothing and
+/// au-replay's libdigibooster3 plays every file; take the name out to play DBM0 on
+/// the port (bit-identical to libxmp) instead. Digital Symphony and Archimedes Tracker
+/// have no other player and are always in the open chain.
+pub const LEFT_TO_OTHER_PLAYERS: &[&str] = &["DigiBooster Pro"];
 
 /// `detect`, for the open chain: None for a format in `LEFT_TO_OTHER_PLAYERS`.
 pub fn detect_open(data: &[u8]) -> Option<&'static Loader> {

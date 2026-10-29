@@ -39,6 +39,7 @@ pub mod instereo2;
 pub mod hippel;
 pub mod hvl;
 pub mod jamcracker;
+pub mod jasonbrooke;
 pub mod jasonpage;
 pub mod jesperolsen;
 pub mod med;
@@ -221,6 +222,7 @@ pub const REPLAYERS: &[Open] = &[
     timfollin::OPEN,
     dsc::OPEN,
     scumm::OPEN,
+    jasonbrooke::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

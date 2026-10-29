@@ -62,6 +62,10 @@ pub fn cmp_b_imm_d(imm: u8, n: u16) -> Vec<u16> {
 pub fn movea_l_imm(n: u16, imm: u32) -> Vec<u16> {
     [&[ML << 12 | n << 9 | 1 << 6 | IMM][..], &l(imm)].concat()
 }
+/// `lea d16(pc),an` (the displacement counts from the extension word).
+pub fn lea_pc(n: u16, disp: i16) -> Vec<u16> {
+    vec![0x4 << 12 | n << 9 | 7 << 6 | 7 << 3 | 2, disp as u16]
+}
 /// `lea abs.l,an`.
 pub fn lea_abs(n: u16, addr: u32) -> Vec<u16> {
     [&[0x4 << 12 | n << 9 | 7 << 6 | ABS_L][..], &l(addr)].concat()
@@ -268,6 +272,10 @@ mod tests {
                 Ea::A(2)
             )
         );
+        let i = dec(lea_pc(4, 0x10));
+        assert_eq!((i.k, i.src, i.dst), (K::Lea, Ea::Pc(0x12), Ea::A(4)));
+        let i = dec(lea_pc(0, -6));
+        assert_eq!((i.k, i.src, i.dst), (K::Lea, Ea::Pc(0usize.wrapping_sub(4)), Ea::A(0)));
         let i = dec(asl_w_imm(4, 1));
         assert_eq!((i.k, i.size, i.data, i.dst), (K::Shift, 2, 4, Ea::D(1)));
         assert_eq!(be16_of(&asl_w_imm(4, 1)) & 0x100, 0x100);

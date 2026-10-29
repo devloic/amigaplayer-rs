@@ -67,6 +67,7 @@ pub mod musicline;
 pub mod oktalyzer;
 pub mod paulrobotham;
 pub mod robhubbardst;
+pub mod stevebarrett;
 pub mod paulshields;
 pub mod peterverswyvelen;
 pub mod ptm;
@@ -261,6 +262,7 @@ pub const REPLAYERS: &[Open] = &[
     steveturner::OPEN,
     synthdream::OPEN,
     robhubbardst::OPEN,
+    stevebarrett::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -67,8 +67,11 @@ LENGTH_TOL_S = 0.5      # s: length difference tolerated ...
 LENGTH_TOL_PCT = 2.0    # ... or this % of the longer side, whichever is more
 SILENT_RMS = 3.0        # LSB: a 100 ms window below this is silent
 SILENT_FRAC = 0.20      # difference of the silent-window fractions for SILENT
-PITCH_PCT = 1.5         # % shift of the dominant spectral peak
-TEMPO_PCT = 8.0         # % difference of onsets per second
+PITCH_CENTS = 20        # cents: shift of the whole log-frequency spectrum for PITCH
+PITCH_GAIN = 0.02       # ... which must raise the spectra's correlation by this much over no shift
+TEMPO_DRIFT_S = 0.04    # s: drift of the loudness envelopes' alignment over the render for TEMPO
+TEMPO_SEGMENTS = 8      # segments the drift is measured over
+TEMPO_MIN_CORR = 0.3    # segments whose envelopes correlate less than this are left out
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 MUST_MATCH = ('filter', 'led', 'sep', 'mono', 'resampler', 'volume', 'interp', 'xmp-filter')
@@ -109,16 +112,74 @@ def _bands(mid, rate):
     return out, float(pk)
 
 
-def _onsets_per_s(mid, rate):
+def _envelope(mid, rate):
+    """Onset strength at 100 Hz: the rise of the 10 ms mean absolute level."""
     hop = rate // 100
     n = len(mid) // hop
-    if n < 20:
-        return 0.0
     env = np.abs(mid[:n * hop]).reshape(n, hop).mean(axis=1)
-    flux = np.maximum(np.diff(env), 0)
-    thr = flux.mean() + 2 * flux.std()
-    peaks = (flux[1:-1] > thr) & (flux[1:-1] >= flux[:-2]) & (flux[1:-1] > flux[2:])
-    return float(peaks.sum()) / (n / 100.0)
+    rise = np.maximum(np.diff(env, prepend=env[:1]), 0)
+    return np.convolve(rise, np.ones(5) / 5, mode='same')  # 50 ms, so a slight drift still correlates
+
+
+def _tempo_drift(ma, mb, rate):
+    """(drift in seconds, segments used): how far the best alignment of the two
+    loudness envelopes moves from the first usable segment to the last. A tempo
+    difference makes it grow over the render; equal tempi keep it near 0."""
+    ea, eb = _envelope(ma, rate), _envelope(mb, rate)
+    n = min(len(ea), len(eb))
+    seg = n // TEMPO_SEGMENTS
+    w = 50  # 0.5 s search either way
+    if seg < 4 * w:
+        return 0.0, 0
+    lags, prev = [], None
+    for k in range(TEMPO_SEGMENTS):
+        x = ea[k * seg:(k + 1) * seg]
+        x0 = x - x.mean()
+        if not x0.any():
+            continue
+        # the first usable segment searches 0.5 s either way, the next ones 80 ms around
+        # the last alignment, so that a rhythm's neighbouring beat is never taken instead
+        rng = range(-w, w + 1) if prev is None else range(prev - 8, prev + 9)
+        best, bl = -2.0, 0
+        for l in rng:
+            o = k * seg + l
+            if o < 0 or o + len(x) > len(eb):
+                continue
+            y0 = eb[o:o + len(x)] - eb[o:o + len(x)].mean()
+            den = np.sqrt((x0 ** 2).sum() * (y0 ** 2).sum())
+            c = (x0 * y0).sum() / den if den else -2.0
+            if c > best:
+                best, bl = c, l
+        if best >= TEMPO_MIN_CORR:
+            lags.append(bl)
+            prev = bl
+    if len(lags) < 2:
+        return 0.0, len(lags)
+    return (lags[-1] - lags[0]) / 100.0, len(lags)
+
+
+def _pitch_shift(ma, mb, rate):
+    """(cents, gain): the shift of b's log-frequency spectrum that best matches a's,
+    and how much it raises their correlation over no shift."""
+    n = 8192
+    def spec(m):
+        if len(m) < n:
+            m = np.pad(m, (0, n - len(m)))
+        nb = len(m) // n
+        fr = m[:nb * n].reshape(nb, n) * np.hanning(n)
+        return (np.abs(np.fft.rfft(fr, axis=1)) ** 2).mean(axis=0)
+    f = np.fft.rfftfreq(n, 1.0 / rate)
+    grid = 60.0 * 2 ** (np.arange(0, 7 * 120) / 120.0)  # 60 Hz to 7.7 kHz in 10-cent steps
+    la = np.log10(np.interp(grid, f, spec(ma)) + 1e-9)
+    lb = np.log10(np.interp(grid, f, spec(mb)) + 1e-9)
+    def corr(s):
+        x, y = (la[s:], lb[:len(lb) - s]) if s >= 0 else (la[:s], lb[-s:])
+        x, y = x - x.mean(), y - y.mean()
+        d = np.sqrt((x * x).sum() * (y * y).sum())
+        return (x * y).sum() / d if d else 0.0
+    c0 = corr(0)
+    best = max(range(-12, 13), key=corr)  # within ±120 cents
+    return best * 10, corr(best) - c0
 
 
 def _silent_frac(mid, rate):
@@ -181,14 +242,16 @@ def compare(a, b, rate=48000):
             r['lag'] = s
             r['lag_pct'] = round(100.0 * (1 - dd.any(axis=1).mean()), 3) if len(dd) else 0.0
             r['lag_maxabs'] = int(dd.max()) if len(dd) else 0
-    # spectrum, silence, onsets
+    # spectrum, silence, tempo drift, pitch shift
     m = min(len(ma), len(mb))
     ba, pa = _bands(ma[:m], rate)
     bb, pb = _bands(mb[:m], rate)
     r['bands_db'] = [round(float(q - p), 2) if min(p, q) > BAND_MIN_DB else None for p, q in zip(ba, bb)]
     r['peak_a'], r['peak_b'] = round(pa, 1), round(pb, 1)
     r['silent_a'], r['silent_b'] = round(_silent_frac(ma, rate), 3), round(_silent_frac(mb, rate), 3)
-    r['onsets_a'], r['onsets_b'] = round(_onsets_per_s(ma, rate), 2), round(_onsets_per_s(mb, rate), 2)
+    r['tempo_drift_s'], r['tempo_segs'] = _tempo_drift(ma[:m], mb[:m], rate)
+    r['pitch_cents'], r['pitch_gain'] = _pitch_shift(ma[:m], mb[:m], rate)
+    r['pitch_gain'] = round(r['pitch_gain'], 4)
     return r
 
 
@@ -215,11 +278,9 @@ def classify(r):
         return 'FILTER'
     if abs(lv) > LEVEL_DB:
         return 'LEVEL'
-    pa, pb = r['peak_a'], r['peak_b']
-    if pa > 0 and pb > 0 and abs(pb / pa - 1) * 100 > PITCH_PCT and not abs(np.log2(pb / pa) - round(np.log2(pb / pa))) < 0.01:
+    if abs(r['pitch_cents']) >= PITCH_CENTS and r['pitch_gain'] >= PITCH_GAIN:
         return 'PITCH'
-    oa, ob = r['onsets_a'], r['onsets_b']
-    if max(la, lb) >= 3 * 48000 and max(oa, ob) >= 0.5 and abs(ob - oa) / max(oa, ob) * 100 > TEMPO_PCT:
+    if max(la, lb) >= 3 * 48000 and abs(r['tempo_drift_s']) >= TEMPO_DRIFT_S:
         return 'TEMPO'
     if abs(lv) <= SIMILAR_DB and all(abs(v) <= SIMILAR_DB for v in db):
         return 'SIMILAR'
@@ -414,7 +475,7 @@ def process(ctx, f):
         r = compare(ra[1], rb[1], ra[0])
         row.update({k: r[k] for k in ('identical', 'first_diff', 'first_diff_s', 'pct_identical', 'maxabs',
                                       'level_db', 'lag', 'lag_pct', 'len_a', 'len_b', 'silent_a', 'silent_b',
-                                      'peak_a', 'peak_b', 'onsets_a', 'onsets_b', 'bands_db')})
+                                      'peak_a', 'peak_b', 'tempo_drift_s', 'pitch_cents', 'bands_db')})
         mm = stage_mismatch(oref, po)
         cls = classify(r)
         mm = [m for m in mm]
@@ -432,7 +493,7 @@ def process(ctx, f):
 
 # ---- reports ----------------------------------------------------------------
 COLS = ['id', 'fmt', 'cls', 'identical', 'first_diff_s', 'pct_identical', 'maxabs', 'level_db', 'lag', 'lag_pct',
-        'len_a', 'len_b', 'silent_a', 'silent_b', 'peak_a', 'peak_b', 'onsets_a', 'onsets_b', 'bands_db',
+        'len_a', 'len_b', 'silent_a', 'silent_b', 'peak_a', 'peak_b', 'tempo_drift_s', 'pitch_cents', 'bands_db',
         'note', 'path', 'ref_player', 'out_ref', 'out_port', 'led_ref', 'led_port']
 
 

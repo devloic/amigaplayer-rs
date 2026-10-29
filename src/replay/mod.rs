@@ -62,6 +62,7 @@ pub mod pretracker;
 mod pretracker_tables;
 pub mod musicline;
 pub mod oktalyzer;
+pub mod paulrobotham;
 pub mod paulshields;
 pub mod peterverswyvelen;
 pub mod ptm;
@@ -245,6 +246,7 @@ pub const REPLAYERS: &[Open] = &[
     jeroentel::OPEN,
     amcomposer::OPEN,
     jankomrsicflogel::OPEN,
+    paulrobotham::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -41,6 +41,7 @@ pub mod hvl;
 pub mod jamcracker;
 pub mod jasonbrooke;
 pub mod jasonpage;
+pub mod jeroentel;
 pub mod jesperolsen;
 pub mod kh;
 pub mod med;
@@ -237,6 +238,7 @@ pub const REPLAYERS: &[Open] = &[
     paulshields::OPEN,
     seanconran::OPEN,
     kh::OPEN,
+    jeroentel::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

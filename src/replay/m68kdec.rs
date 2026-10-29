@@ -83,6 +83,10 @@ pub struct Insn {
     pub target: usize,
     /// `moveq`/`addq`/`subq` data.
     pub data: i32,
+    /// Shifts: the direction is left, and the kind (0 arithmetic, 1 logical, 2 rotate with
+    /// extend, 3 rotate).
+    pub left: bool,
+    pub shk: u8,
 }
 
 impl Insn {
@@ -167,7 +171,7 @@ pub fn decode(d: &[u8], at: usize) -> Option<Insn> {
     let mode = (op >> 3) & 7;
     let reg = op & 7;
     let reg9 = (op >> 9) & 7;
-    let mut i = Insn { at, len: 0, k: K::Other, size: 0, src: Ea::None, dst: Ea::None, cond: 0, target: 0, data: 0 };
+    let mut i = Insn { at, len: 0, k: K::Other, size: 0, src: Ea::None, dst: Ea::None, cond: 0, target: 0, data: 0, left: false, shk: 0 };
     match op >> 12 {
         0x0 => {
             if op & 0x0100 != 0 {
@@ -382,10 +386,13 @@ pub fn decode(d: &[u8], at: usize) -> Option<Insn> {
         }
         0xE => {
             i.k = K::Shift;
+            i.left = op & 0x0100 != 0;
             if (op >> 6) & 3 == 3 {
+                i.shk = ((op >> 9) & 3) as u8;
                 i.size = 2;
                 i.dst = r.ea(mode, reg, 2)?;
             } else {
+                i.shk = ((op >> 3) & 3) as u8;
                 i.size = sz((op >> 6) & 3);
                 i.dst = Ea::D(reg as u8);
                 i.data = if op & 0x20 != 0 {
@@ -434,6 +441,12 @@ mod tests {
         assert_eq!((i.k, i.len), (K::Bit(3), 8));
         let i = dec(&[0xE449]);
         assert_eq!((i.k, i.data), (K::Shift, 2));
+        assert_eq!((i.left, i.shk), (false, 1));
+        // asl.b #1,d2 / lsr.w #2,d1 / roxl.l #3,d0: direction and kind
+        let i = dec(&[0xE302]);
+        assert_eq!((i.k, i.size, i.data, i.left, i.shk, i.dst), (K::Shift, 1, 1, true, 0, Ea::D(2)));
+        let i = dec(&[0xE7B0]);
+        assert_eq!((i.left, i.shk, i.size), (true, 2, 4));
         let i = dec(&[0x0C10, 0x0001]);
         assert_eq!((i.k, i.size, i.src), (K::Imm(6), 1, Ea::Imm { val: 1, pos: 3 }));
         let i = dec(&[0x5310]);

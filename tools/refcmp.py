@@ -528,7 +528,7 @@ def find_reference(ctx, mod, po):
     fallback = None
     bads = []
     for i, (tag, eagle, extra) in enumerate(tries):
-        rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, eagle, extra, po.get('reference-cpu') == 'fast')
+        rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, eagle, extra, fast_cpu=po.get('reference-cpu') == 'fast')
         o = parse_output(rout)
         if not (rw and rplay and o.get('backend') == '68k'):
             continue

@@ -587,7 +587,7 @@ impl m68k_rc::Bus for Bus {
     /// Guest code runs on a 68000's time: the clock follows its cycles (see `rebase`).
     #[inline(always)]
     fn cycles(&mut self, total: u64) {
-        let t = self.epoch.0 + total.saturating_sub(self.epoch.1) / CPU_CYCLES;
+        let t = self.epoch.0 + total.saturating_sub(self.epoch.1) / CPU_CYCLES.load(std::sync::atomic::Ordering::Relaxed);
         if t > self.clock {
             self.clock = t;
         }

@@ -128,6 +128,13 @@ pub trait Replayer: Send {
     fn timer_delay(&self) -> u64 {
         0
     }
+    /// Whether the original's code for this song needs more than a 68000's time to keep
+    /// up (an 8-voice Musicline's mixer takes 1 to 5 buffers' time on one): its reference
+    /// run, which counts 68000 cycles, then plays slow or repeats buffers, where UADE
+    /// (a 68020 at full speed) does not. The comparison runs it with DELI_CPU_SPEED.
+    fn needs_fast_reference_cpu(&self) -> bool {
+        false
+    }
     fn songend(&self) -> bool;
     /// The first, last and current subsong, in DeliTracker's numbering.
     fn subsongs(&self) -> (u16, u16, u16) {

@@ -13,7 +13,11 @@ pub const RAM_SIZE: usize = 0x00B0_0000;
 /// Colour clocks per frame: 313 lines (PAL, non-interlaced).
 pub const FRAME: u64 = 313 * LINE;
 /// 68000 clock cycles per colour clock (7.09 MHz, PAL).
-pub(crate) const CPU_CYCLES: u64 = 2;
+pub const CPU_CYCLES_68000: u64 = 2;
+/// The same, as the guest code's clock runs: DELI_CPU_SPEED=N makes the CPU N times as fast
+/// (UADE runs a 68020 at maximum speed, not on A500 time: a reference run that should match
+/// it, such as an 8-voice Musicline whose mixer does not fit a 68000's frame, asks for it).
+pub static CPU_CYCLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(CPU_CYCLES_68000);
 /// Colour clocks per E-clock tick.
 pub const ECLOCK_DIV: u64 = 5;
 

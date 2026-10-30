@@ -182,6 +182,10 @@ fn render_wav(args: &Args) -> Result<()> {
     e.only_player = args.only_player.clone();
     e.open_replayers = args.open_replayers;
     apply_settings(args, &mut e.settings);
+    if let Some(n) = std::env::var("DELI_CPU_SPEED").ok().and_then(|v| v.parse::<u64>().ok()) {
+        // the guest CPU's 68000 cycles per colour clock are 2; a larger speed divides them
+        amigaplayer_rs::bus::CPU_CYCLES.store(amigaplayer_rs::bus::CPU_CYCLES_68000 * n.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var_os("DELI_UADE").is_some() {
         e.set_uade_compat();
     }

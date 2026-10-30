@@ -52,6 +52,24 @@
 //! UADE's; the other one (corpus line 255) differs only where UADE itself plays a
 //! buffer twice (a late interrupt), then one shifted by part of a buffer.
 //!
+//! The original's handler does not fit a 68000's time: its code on the engine's 68000
+//! clock (the Eagleplayer, which counts instruction cycles) takes 1.0 to 5.2 buffers
+//! (100 to 360k colour clocks; 129 of 129 8-voice modules; it acknowledges once more
+//! when it returns and the next buffer is loaded in the following interrupt) so every
+//! buffer plays two to five times and the music runs at a half to a fifth of its
+//! speed. UADE runs a 68020 at full speed and plays one buffer per interrupt, as does
+//! this port; with DELI_CPU_SPEED=4 (the engine's CPU four times as fast) the
+//! reference's register writes are identical to the port's for all of module 243
+//! (corpus line 245). refcmp runs the reference that way for such modules.
+//!
+//! Not modelled: a 4-voice tune whose effects (256-byte phase, mix and resonance
+//! voices) take a tick's whole period on a 68000 makes the original's next tick late
+//! and its CIA-B timer B interrupts (the DMA restart's two waits) run after it, so a
+//! note starts two ticks late and the DMA mask is never cleared again (the voice
+//! restarts every tick, with no LOC/LEN writes). The port stretches the tick as the
+//! original does but runs the waits inside it (corpus lines 244 and 760). UADE has
+//! none of this (a faster CPU: its ticks stay on the timer's period).
+//!
 //! The tables (`musicline_tables.rs`) come from NostalgicPlayer's Tables.cs; the
 //! 68k player was used only to check them, none of its code or data is copied.
 
@@ -970,6 +988,10 @@ impl Replayer for Musicline {
 
     fn songend(&self) -> bool {
         false
+    }
+
+    fn needs_fast_reference_cpu(&self) -> bool {
+        self.eight
     }
 
     fn subsongs(&self) -> (u16, u16, u16) {

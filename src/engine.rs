@@ -1277,6 +1277,11 @@ impl Engine {
             );
         }
         o += &format!(" volume={:.2}", sx.volume);
+        if let Some(Playing { backend: Backend::Replay(r), .. }) = &self.playing {
+            if r.needs_fast_reference_cpu() {
+                o += " reference-cpu=fast";
+            }
+        }
         o
     }
 

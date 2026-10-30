@@ -394,7 +394,7 @@ class Ctx:
 def _run_cached(ctx, key, cmd, env, cwd, wav):
     """Runs cmd (writing wav) unless cached; returns (wav path or None, stderr lines)."""
     h = hashlib.sha1(json.dumps([ctx.binkey, key, cmd, sorted((k, env[k]) for k in env if k in
-                                 ('DELIPLAYERS', 'EAGLEPLAYERS', 'DELIGENIES'))]).encode()).hexdigest()[:20]
+                                 ('DELIPLAYERS', 'EAGLEPLAYERS', 'DELIGENIES', 'DELI_CPU_SPEED'))]).encode()).hexdigest()[:20]
     out = os.path.join(ctx.cache, h + '.wav')
     err = out + '.err'
     if not (os.path.exists(out) and os.path.exists(err)) and not os.path.exists(err):
@@ -409,7 +409,7 @@ def _run_cached(ctx, key, cmd, env, cwd, wav):
     return (out if os.path.exists(out) else None), lines
 
 
-def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None):
+def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None, fast_cpu=False):
     deli = ctx.empty
     if isinstance(eagle, tuple):   # ('deli', DeliPlayer directory)
         deli, eagle = eagle[1], None
@@ -418,6 +418,9 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None):
     if 'PreTracker' in extra:
         # UADE's PreTracker player has no check: the engine accepts a checkless player for it
         env['DELI_CHECKLESS'] = '1'
+    if fast_cpu:
+        # the port says its original's code does not fit a 68000's time (see needs_fast_reference_cpu)
+        env['DELI_CPU_SPEED'] = '8'
     cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else []), *ctx.flags, *extra,
            '--wav', '@WAV@', '--seconds', str(ctx.secs), mod]
     wav, lines = _run_cached(ctx, mod, cmd, env, os.path.dirname(mod), None)
@@ -429,7 +432,7 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None):
         # a `_note` player the engine played through its own NotePlayer renderer: the original
         # plays it through DeliTracker's NotePlayer genie (the engine picks the cheapest that
         # has enough voices), so give it the genies
-        return render_engine(ctx, mod, open_replayers, eagle, extra, NOTE_GENIES)
+        return render_engine(ctx, mod, open_replayers, eagle, extra, NOTE_GENIES, fast_cpu)
     return wav, play, out, led, lines
 
 
@@ -525,7 +528,7 @@ def find_reference(ctx, mod, po):
     fallback = None
     bads = []
     for i, (tag, eagle, extra) in enumerate(tries):
-        rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, eagle, extra)
+        rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, eagle, extra, po.get('reference-cpu') == 'fast')
         o = parse_output(rout)
         if not (rw and rplay and o.get('backend') == '68k'):
             continue

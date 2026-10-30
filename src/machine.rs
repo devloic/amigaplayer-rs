@@ -316,11 +316,20 @@ impl Machine {
         self.cpu.pc = entry;
         self.cpu.invalidate_prefetch();
         self.depth += 1;
+        if let Some(t) = &mut self.bus.trace {
+            t.line(format_args!("C {entry:06x} depth={} clk={}", self.depth, self.bus.clock));
+        }
         let res = match self.native_seg(entry) {
             Some(i) => self.run_native(sp + 4, i),
             None => self.run_until_return(sp + 4),
         };
         self.depth -= 1;
+        if let Some(t) = &mut self.bus.trace {
+            t.line(format_args!("E {entry:06x} depth={} clk={}", self.depth + 1, self.bus.clock));
+            if self.depth == 0 {
+                t.dump();
+            }
+        }
         let out = self.cpu.dar;
         self.cpu.dar = saved_dar;
         self.cpu.set_sr(saved_sr);
@@ -340,7 +349,11 @@ impl Machine {
             let pc = self.cpu.pc;
             if self.bus.r16(pc) & 0xF000 != 0xA000 {
                 let ins = m68k_rc::decode::decode_model(pc, &mut |a| self.bus.r16(a), m68k_rc::Model::M68020);
-                cycles += m68k_rc::cycles::cycles(&ins) as u64;
+                let c = m68k_rc::cycles::cycles(&ins) as u64;
+                cycles += c;
+                if let Some(t) = &mut self.bus.trace {
+                    t.ins(pc, c, self.bus.clock);
+                }
                 m68k_rc::Bus::cycles(&mut self.bus, cycles);
             }
             let r = self.cpu.step(&mut self.bus);
@@ -380,6 +393,15 @@ impl Machine {
     /// Handles the host side of an A-line stub. `self.cpu` must hold the guest state.
     fn trap(&mut self, opcode: u16, trap_pc: u32, ret_sp: u32) -> Result<TrapFlow, String> {
         let t = self.traps.get((opcode & 0xFFF) as usize).copied();
+        let clk0 = self.bus.clock;
+        let r = self.trap_inner(t, opcode, trap_pc, ret_sp);
+        if let Some(tr) = &mut self.bus.trace {
+            tr.line(format_args!("T {t:?} pc={trap_pc:06x} clk={clk0} +{}", self.bus.clock - clk0));
+        }
+        r
+    }
+
+    fn trap_inner(&mut self, t: Option<Trap>, opcode: u16, trap_pc: u32, ret_sp: u32) -> Result<TrapFlow, String> {
         match t {
             Some(Trap::Sentinel) => {
                 if self.cpu.dar[15] == ret_sp {

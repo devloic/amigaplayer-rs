@@ -20,6 +20,7 @@ pub mod paulaout;
 pub mod protracker;
 pub mod prowizard;
 pub mod replay;
+pub mod trace;
 pub mod xmp;
 
 use std::path::{Path, PathBuf};

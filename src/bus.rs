@@ -44,6 +44,8 @@ pub struct Bus {
     pub amp: Option<Box<crate::amplifier::Amplifier>>,
     /// The write-spacing model of the open replayer running a tick (`replay::WriteGaps`).
     pub gaps: Option<crate::replay::WriteGaps>,
+    /// DELI_TRACE: the debug trace of the guest code.
+    pub trace: Option<Box<crate::trace::Trace>>,
 }
 
 impl Bus {
@@ -61,6 +63,7 @@ impl Bus {
             write_log: None,
             amp: None,
             gaps: None,
+            trace: crate::trace::Trace::from_env(),
         }
     }
 
@@ -121,6 +124,12 @@ impl Bus {
 
     fn custom_read(&mut self, off: u32) -> u16 {
         self.paula.sync(self.clock, &self.ram);
+        if let Some(t) = &mut self.trace {
+            if matches!(off & 0x1FE, 0x004 | 0x006) {
+                let (l, h) = (self.clock / LINE % (self.frame / LINE), self.clock % LINE);
+                { let pc = t.pc; t.line(format_args!("R {:03x} pc={:06x} clk={} line={l} h={h}", off & 0x1FE, pc, self.clock)); }
+            }
+        }
         match off & 0x1FE {
             0x002 => self.paula.dmacon,
             0x004 => (self.beam().0 >> 8) as u16 & 1,
@@ -136,6 +145,10 @@ impl Bus {
     }
 
     fn custom_write(&mut self, off: u32, v: u16) {
+        if let Some(t) = &mut self.trace {
+            let pc = t.pc;
+            t.line(format_args!("W {:03x}={v:04x} pc={pc:06x} clk={}", off & 0x1FE, self.clock));
+        }
         if let Some(l) = &mut self.write_log {
             l.push((0xDFF000 | off, v, self.clock));
         }
@@ -164,6 +177,9 @@ impl Bus {
 
     fn cia_read(&mut self, a: u32) -> u8 {
         self.cia_sync();
+        if let Some(t) = &mut self.trace {
+            { let pc = t.pc; t.line(format_args!("CR {a:06x} pc={:06x} clk={}", pc, self.clock)); }
+        }
         let reg = (a >> 8) & 0xF;
         if a & 0x1000 == 0 {
             self.ciaa.read(reg)
@@ -176,6 +192,9 @@ impl Bus {
 
     fn cia_write(&mut self, a: u32, v: u8) {
         self.cia_sync();
+        if let Some(t) = &mut self.trace {
+            { let pc = t.pc; t.line(format_args!("CW {a:06x}={v:02x} pc={:06x} clk={}", pc, self.clock)); }
+        }
         if let Some(l) = &mut self.write_log {
             l.push((a, v as u16, self.clock));
         }

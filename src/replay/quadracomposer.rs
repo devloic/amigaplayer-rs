@@ -96,6 +96,10 @@ pub struct QuadraComposer {
     dma_mask: u16,
     songend: bool,
     visited: Vec<bool>,
+    /// The tick's write schedule (see `Cost`).
+    sched: Sched,
+    /// The EMIC chunk's counts of samples and of patterns, which the original's init time depends on.
+    init_counts: (u64, u64),
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -117,6 +121,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let mut positions = Vec::new();
     let mut title = String::new();
     let mut start_tempo = 0;
+    let mut counts = (0u64, 0u64);
     let mut patt: Option<usize> = None;
     let mut smp: Option<usize> = None;
 
@@ -136,6 +141,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
                 p += 40;
                 start_tempo = *d.get(p)?;
                 let ns = *d.get(p + 1)? as usize;
+                counts.0 = ns as u64;
                 p += 2;
                 for _ in 0..ns {
                     let e = d.get(p..p + 34)?;
@@ -156,6 +162,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
                 }
                 p += 1;
                 let np = *d.get(p)? as usize;
+                counts.1 = np as u64;
                 p += 1;
                 for _ in 0..np {
                     let e = d.get(p..p + 26)?;
@@ -226,6 +233,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         dma_mask: 0,
         songend: false,
         visited: vec![false; n],
+        sched: Sched::default(),
+        init_counts: counts,
     };
     q.visited[0] = true;
     // the init routine sets the LED bit of CIA-A's port: the filter is off
@@ -250,25 +259,181 @@ impl Replayer for QuadraComposer {
         (self.timer as u64 + 1) * 5
     }
 
+    /// The original's init (everything before the tick timer starts) takes a fixed 14672 CPU
+    /// cycles plus 191 per sample entry and 114 per pattern entry of the EMIC chunk (traced:
+    /// DELI_TRACE, 16 modules, exact), less the two colour clocks the engine's per-call rounding
+    /// drops. Nothing in it waits for the beam or a timer, so this alone sets the phase of the
+    /// ticks against the raster.
+    fn timer_delay(&self) -> u64 {
+        let (ns, np) = self.init_counts;
+        (14672 + 191 * ns + 114 * np) / 2 - 2
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
+        let t0 = hw.bus.clock;
         self.change_tempo();
         self.dma_mask = 0;
         self.speed_count += 1;
         if self.speed_count < self.speed {
+            self.plan(t0, false);
             self.run_tick_effects(hw);
         } else if self.pattern_wait != 0 {
             self.pattern_wait -= 1;
             self.speed_count = 0;
+            self.plan(t0, false);
             self.run_tick_effects(hw);
         } else {
-            self.get_notes(hw);
+            self.get_notes(hw, t0);
         }
         self.start_voices(hw);
     }
 }
 
-/// Colour clock of the raster line at which the loop register writes start (measured).
+/// Where the original's writes fall in a tick, in half colour clocks (its code runs in whole CPU
+/// cycles), measured by tracing it (DELI_TRACE). Its pass over the four voices spends `v` on a
+/// voice and writes the voice's registers `o[n]` after the voice's start. A tick that starts a
+/// row and a tick that only runs the effects are different routines; the cost of a voice depends
+/// on its cell, on whether its sample loops and on its place in the pass.
+#[derive(Clone, Copy, Default)]
+struct Cost {
+    v: i64,
+    n: usize,
+    o: [i64; 6],
+}
+
+impl Cost {
+    fn new(v: i64, o: &[i64]) -> Cost {
+        let mut c = Cost { v, n: o.len().min(6), o: [0; 6] };
+        c.o[..c.n].copy_from_slice(&o[..c.n]);
+        c
+    }
+
+    /// The same, `d` later, with the writes `d` later too.
+    fn shifted(mut self, d: i64) -> Cost {
+        self.v += d;
+        for o in &mut self.o[..self.n] {
+            *o += d;
+        }
+        self
+    }
+
+    /// The same with more code after the writes.
+    fn plus(mut self, d: i64) -> Cost {
+        self.v += d;
+        self
+    }
+
+    fn push(mut self, o: i64) -> Cost {
+        if self.n < 6 {
+            self.o[self.n] = o;
+            self.n += 1;
+        }
+        self
+    }
+}
+
+#[derive(Default)]
+struct Sched {
+    t0: u64,
+    /// Half colour clocks after the tick's start.
+    vstart: [i64; 4],
+    widx: [u8; 4],
+    cls: [Cost; 4],
+    end: i64,
+}
+
+/// Raster-line phase of the first loop register write (the routine waits ten lines and then for
+/// the beam to be at this colour clock of a line).
 const LOOP_PHASE: u64 = 113;
+
+/// Half colour clocks from the start of a row tick to its pass over the voices, and the pass's end
+/// to the DMA going off.
+const ROW_LEAD: i64 = 464;
+const ROW_TAIL: i64 = 121;
+/// And the same for a tick that runs the effects (writes there are counted from this pass start).
+const FX_LEAD: i64 = 848;
+const FX_TAIL: i64 = 200;
+
+/// What a voice's place in the pass adds to the code that starts a sample (half colour clocks).
+const POS_SAMPLE: [i64; 4] = [0, 58, 112, 118];
+
+/// The pass over the voices of a tick that starts a row. `v` is the voice's place in the pass.
+fn cost_row(c: Cell, looped: bool, v: usize) -> Cost {
+    let (e, z) = (c.effect, c.arg == 0);
+    let k = Cost::new;
+    let pos = POS_SAMPLE[v];
+    let pos_c = 23 * v as i64;
+    match (c.sample != 0, c.note >= 0) {
+        (false, false) => match e {
+            0 if !z => k(424, &[330]),
+            3 | 4 | 5 | 0xa => k(174, &[]),
+            0xc => k(600 + pos_c, &[446 + pos_c]),
+            0xd => k(254, &[]),
+            0xf if c.arg >= 0x20 => k(598, &[]),
+            0xf => k(256, &[]),
+            _ => k(197, &[]),
+        },
+        // a sample number without a note: its volume
+        (true, false) => {
+            let b = match (e == 0 && !z, looped) {
+                (true, true) => k(1394, &[740, 1300]),
+                (true, false) => k(1320, &[736, 1300]),
+                (false, true) => k(1170, &[740]),
+                (false, false) => k(1096, &[736]),
+            };
+            b.shifted(pos)
+        }
+        // a note, with or without a sample (the volume write is the sample's)
+        (_, true) => {
+            let b = if looped { k(2020, &[782, 1434, 1644, 1830]) } else { k(1946, &[778, 1360, 1570, 1756]) };
+            let b = match e {
+                0 if !z => {
+                    let last = b.o[b.n - 1];
+                    b.plus(224).push(last + 322)
+                }
+                // tone portamento: the glide is set up, no sample starts
+                3 | 5 => k(1314, &[782]),
+                0xa => b.shifted(-4).plus(-22),
+                0xc => {
+                    let per = b.o[b.n - 1];
+                    b.plus(404 + pos_c).push(per + 440 + pos_c)
+                }
+                0xf if c.arg >= 0x20 => b.plus(406),
+                0xf => b.plus(60),
+                0xe if c.arg & 0xf0 == 0x50 => k(1302, &[778]),
+                _ => b,
+            };
+            if c.sample == 0 {
+                // a note without a sample (not in the runs): the same without the volume write
+                Cost::new(b.v - 150, &b.o[1..b.n]).shifted(pos)
+            } else {
+                b.shifted(pos)
+            }
+        }
+    }
+}
+
+/// The pass of a tick that only runs the effects: the voice costs and write offsets there come
+/// from a fit to the traced runs (the arpeggio's three steps differ by up to 26 colour clocks).
+fn cost_fx(c: Cell) -> Cost {
+    let (e, z) = (c.effect, c.arg == 0);
+    let k = Cost::new;
+    match (e, z) {
+        (0, false) => k(394, &[-210]),
+        (3, _) => k(6, &[-153]),
+        (1 | 2, _) => k(151, &[0]),
+        (4, false) => k(709, &[118]),
+        (4, true) => k(595, &[4]),
+        (5, _) => k(682, &[8]),
+        (0xa, false) => k(641, &[-33]),
+        (0xa, true) => k(640, &[-24]),
+        (0xc, false) => k(126, &[]),
+        (0xc, true) => k(132, &[]),
+        (0xe, _) => k(200, &[-169, 41, 218]),
+        (0xf, _) => k(127, &[]),
+        _ => k(151, &[]),
+    }
+}
 
 impl QuadraComposer {
     fn timer_for(tempo: u16) -> u32 {
@@ -290,7 +455,7 @@ impl QuadraComposer {
         Cell { sample: c[0], note: c[1] as i8, effect: c[2], arg: c[3] }
     }
 
-    fn get_notes(&mut self, hw: &mut Hw) {
+    fn get_notes(&mut self, hw: &mut Hw, t0: u64) {
         if !self.intro_row {
             self.change_tempo();
             if self.new_position_flag {
@@ -312,19 +477,20 @@ impl QuadraComposer {
         }
         self.intro_row = false;
         self.speed_count = 0;
+        self.plan(t0, true);
         for i in 0..4 {
             let c = self.cell(i);
             self.play_note(i, c, hw);
         }
     }
 
-    /// The DMA of the voices whose samples this tick started goes off and on together, and the
-    /// loop registers of all four voices follow: the original waits ten raster lines after the
-    /// DMA is on and then for the beam to be at colour clock 113 of a line (in every run, whatever
-    /// the DMA-on time), and writes the pairs at fixed spacing.
+    /// The DMA of the voices whose samples this tick started goes off and on together
+    /// (the original does that once it has been over the four voices), and the loop registers
+    /// of all four voices follow after the routine has waited ten raster lines.
     fn start_voices(&mut self, hw: &mut Hw) {
         if self.dma_mask != 0 {
             let m = self.dma_mask;
+            hw.bus.clock = hw.bus.clock.max(self.sched.t0 + (self.sched.end / 2) as u64);
             hw.dmacon(m);
             hw.wait(110);
             hw.dmacon(0x8000 | m);
@@ -339,10 +505,46 @@ impl QuadraComposer {
         let c = &self.ch[i];
         let (loc, len) = if c.loop_len != 0 { (c.addr + c.loop_start, (c.loop_len / 2) as u16) } else { (0, 0) };
         hw.loc(i, loc);
-        // clearing the pair takes two colour clocks longer than loading it (measured)
+        // clearing the pair takes two colour clocks longer than loading it
         hw.wait(if loc == 0 { 107 } else { 105 });
         hw.len(i, len);
         hw.wait(97);
+    }
+
+    /// Plans the tick's writes: where the original's pass over the voices is when it gets to each
+    /// (`Cost`).
+    fn plan(&mut self, t0: u64, new: bool) {
+        let mut t = if new { ROW_LEAD } else { FX_LEAD };
+        self.sched.t0 = t0;
+        for i in 0..4 {
+            let k = if new {
+                let c = self.cell(i);
+                let looped = c.sample != 0
+                    && self.samples.get(c.sample as usize - 1).and_then(|s| s.as_ref()).is_some_and(|s| s.looped);
+                cost_row(c, looped, i)
+            } else {
+                cost_fx(self.ch[i].cell)
+            };
+            self.sched.vstart[i] = t;
+            self.sched.widx[i] = 0;
+            self.sched.cls[i] = k;
+            t += k.v;
+        }
+        // the DMA goes off when the pass is over
+        self.sched.end = t + if new { ROW_TAIL } else { FX_TAIL };
+    }
+
+    /// Lets the time pass to voice `i`'s next write of this tick.
+    fn at(&mut self, i: usize, hw: &mut Hw) {
+        let k = self.sched.cls[i];
+        let w = self.sched.widx[i] as usize;
+        self.sched.widx[i] = self.sched.widx[i].saturating_add(1);
+        // a write the measured runs did not show: 100 colour clocks after the last one known
+        let o = if w < k.n { k.o[w] } else if k.n > 0 { k.o[k.n - 1] + 200 * (w + 1 - k.n) as i64 } else { 200 * (w + 1) as i64 };
+        let t = self.sched.t0 + ((self.sched.vstart[i] + o) / 2) as u64;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
     }
 
     fn init_position(&mut self) {
@@ -369,12 +571,12 @@ impl QuadraComposer {
     /// Starts the voice's sample from `start`, its registers; DMA is the caller's.
     fn sample_regs(&mut self, i: usize, hw: &mut Hw) {
         let c = &self.ch[i];
-        hw.loc(i, c.addr + c.start);
-        hw.wait(5);
+        let (a, words) = (c.addr + c.start, (c.length.wrapping_sub(c.start) / 2) as u16);
+        self.at(i, hw);
+        hw.loc(i, a);
+        self.at(i, hw);
         // a sample of one word or less is played with a length of 0, as the original writes it
-        let words = (c.length.wrapping_sub(c.start) / 2) as u16;
         hw.len(i, if words <= 1 { 0 } else { words });
-        hw.wait(5);
     }
 
     /// Plays the voice's sample again, at its period.
@@ -386,13 +588,13 @@ impl QuadraComposer {
     }
 
     fn set_period(&mut self, i: usize, hw: &mut Hw, p: u16) {
+        self.at(i, hw);
         hw.per(i, p);
-        hw.wait(5);
     }
 
     fn set_vol(&mut self, i: usize, hw: &mut Hw, v: u16) {
+        self.at(i, hw);
         hw.vol(i, v);
-        hw.wait(5);
     }
 
     fn play_note(&mut self, i: usize, c: Cell, hw: &mut Hw) {

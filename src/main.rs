@@ -179,6 +179,9 @@ fn render_wav(args: &Args) -> Result<()> {
     if let Some(v) = args.separation {
         e.settings.separation = v;
     }
+    if std::env::var_os("DELI_DMA_LOG").is_some() {
+        e.m.bus.paula.dma_log = Some(Vec::new());
+    }
     if std::env::var_os("DELI_WRITE_LOG").is_some() {
         e.m.bus.write_log = Some(Vec::new());
         e.m.bus.paula.native_log = Some(Vec::new());
@@ -228,6 +231,15 @@ fn render_wav(args: &Args) -> Result<()> {
         let text: String =
             head + &l.iter().map(|(a, v, t)| format!("{a:06x} {v:04x} {t}\n")).collect::<String>();
         std::fs::write(&p, text)?;
+    }
+    // DELI_DMA_LOG=FILE: every audio DMA word fetched (CLOCK CHANNEL ADDRESS WORD)
+    if let (Some(p), Some(l)) = (std::env::var_os("DELI_DMA_LOG"), e.m.bus.paula.dma_log.take()) {
+        let text: String = l.iter().map(|(t, c, a, w)| format!("{t} {c} {a:06x} {w:04x}\n")).collect();
+        std::fs::write(p, text)?;
+    }
+    // DELI_MEM_DUMP=FILE: guest memory as it is when the render ends, for comparing two runs
+    if let Some(p) = std::env::var_os("DELI_MEM_DUMP") {
+        std::fs::write(p, &e.m.bus.ram)?;
     }
     let n = e.m.native_stats;
     if n.calls > 0 || n.patched_calls > 0 {

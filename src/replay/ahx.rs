@@ -1429,8 +1429,9 @@ mod tests {
         let log = e.m.bus.write_log.take().unwrap();
         let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
         // InitSound's first write comes where the Eagleplayer's start (the
-        // waveforms, the song-length scan of this module) ends
-        assert_eq!(log[0].2, 35_748_331);
+        // waveforms, the song-length scan of this module) ends, from the
+        // engine's start phase
+        assert_eq!(log[0].2, 35_748_331 + 100);
         // the first tick's setup
         assert_eq!(&reg(0xDFF096)[..2], &[0x000F, 0x800F]);
         assert_eq!(reg(0xDFF0A4)[0], 0x140);

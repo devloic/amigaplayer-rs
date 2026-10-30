@@ -116,7 +116,9 @@ is how the translation is checked: renders with and without it must be
 byte-identical. `--wav` prints the share of instructions run natively.
 `DELI_WRITE_LOG=FILE` logs every custom-chip and CIA write of a `--wav` render
 (`ADDRESS VALUE COLOUR-CLOCK`, the format of the comparison log of the UADE
-build below). `DELI_UADE=1` departs from the Amiga where UADE does, to compare
+build below). `DELI_DMA_LOG=FILE` logs every audio DMA word fetched (`CLOCK CHANNEL ADDRESS WORD`).
+`DELI_MEM_DUMP=FILE` writes the guest memory as it is when a `--wav`
+render ends, to diff two runs. `DELI_UADE=1` departs from the Amiga where UADE does, to compare
 renders with it (see Timing and sound).
 
 ## Use

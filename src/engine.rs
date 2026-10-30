@@ -177,6 +177,12 @@ pub struct Engine {
     led_seen: Option<bool>,
 }
 
+/// Colour clocks into the frame at which a 68k player starts. Any phase will do for a player
+/// that does not race Paula; those that do (DMA off and on within a few colour clocks, as
+/// Quadra Composer's) come out differently for each, and this one agrees with the originals
+/// for most of the corpus's such files (found by trying phases against refcmp).
+const START_PHASE: u64 = 100;
+
 impl Engine {
     pub fn new(rate: f64) -> Self {
         let mut m = Machine::new(CpuType::M68020);
@@ -580,7 +586,8 @@ impl Engine {
         if self.open_replayers {
             if let Some(o) = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data)) {
                 // a replayer's InitSound may write Paula's registers, as the 68k
-                // players' do after start_deli's reset
+                // players' do after start_deli's reset; it starts at the same phase
+                self.align_start();
                 self.m.bus.paula.reset();
                 if let Some(r) = (o.new)(&data, addr, &mut self.m) {
                     return self.start_replay(r, path);
@@ -631,6 +638,11 @@ impl Engine {
     }
 
     fn check_player(&mut self, idx: usize) -> Result<bool> {
+        // every player is checked from the start phase with Paula just reset, so the one that
+        // takes the module runs on the same timeline whatever was checked before it (and the
+        // open replayers, which align and reset before their start, on the same as theirs)
+        self.align_start();
+        self.m.bus.paula.reset();
         if let Err(e) = self.configure(idx) {
             log::debug!("{e}");
             return Ok(false);
@@ -668,6 +680,19 @@ impl Engine {
             custom_player: false,
         });
         Ok(())
+    }
+
+    /// Moves the clock on to `START_PHASE` into the next video frame (and E clock period),
+    /// where a 68k player or an open replayer starts.
+    fn align_start(&mut self) {
+        self.m.bus.clock = self.aligned(self.m.bus.clock);
+        self.m.bus.paula.sync(self.m.bus.clock, &self.m.bus.ram);
+    }
+
+    /// The first clock at `START_PHASE` into a video frame (and E clock period) not before `t`.
+    fn aligned(&self, t: u64) -> u64 {
+        let q = self.m.bus.frame * ECLOCK_DIV;
+        t.saturating_sub(START_PHASE).div_ceil(q) * q + START_PHASE
     }
 
     fn start_replay(&mut self, r: Box<dyn crate::replay::Replayer>, path: &Path) -> Result<()> {
@@ -713,7 +738,16 @@ impl Engine {
         if custom {
             self.configure(idx)?;
         }
-        self.m.bus.paula.reset();
+        // The player starts at a fixed phase of the video frame and the E clock whatever ran
+        // before (other players' checks take arbitrary time): Paula's line grid, the beam
+        // and the vertical blank are then the same whichever way the player was chosen, so
+        // register writes that race the audio state machine (DMA off and on within a few
+        // colour clocks) come out the same
+        // a custom module's player has no check, which aligns and resets Paula for the others
+        if custom {
+            self.align_start();
+            self.m.bus.paula.reset();
+        }
         self.intena_seen = 0;
         self.next_timer = None;
         self.m.deli.voices.reset();

@@ -76,6 +76,9 @@ pub struct Paula {
     /// not through the bus's write log: ($DFF000 + register, value, colour clock).
     /// Kept for DELI_WRITE_LOG when set.
     pub native_log: Option<Vec<(u32, u16, u64)>>,
+    /// Every audio DMA word fetched (colour clock of the line, channel, address, word),
+    /// kept for DELI_DMA_LOG when set.
+    pub dma_log: Option<Vec<(u64, u8, u32, u16)>>,
 }
 
 fn setclr(r: &mut u16, v: u16) {
@@ -121,15 +124,18 @@ impl Paula {
             next_line: LINE,
             quirks: Quirks::Hardware,
             native_log: None,
+            dma_log: None,
         }
     }
 
     /// Back to the power-on state, keeping the time and the output format.
     pub fn reset(&mut self) {
         let (out, last, next_line, quirks) = (self.out.clone(), self.last, self.next_line, self.quirks);
-        let log = self.native_log.take();
+        let (log, dma) = (self.native_log.take(), self.dma_log.take());
         *self = Self::with_output(out.rate(), out.filter());
         (self.out, self.last, self.next_line, self.quirks, self.native_log) = (out, last, next_line, quirks, log);
+        self.dma_log = dma;
+        self.out.restart();
     }
 
     /// Plays volume 64 as 63 and periods below 16 as 16, as UADE does.
@@ -251,12 +257,16 @@ impl Paula {
 
     /// The audio DMA of the line that starts now.
     fn line_start(&mut self, mem: &mut impl FnMut(u32) -> u16) {
-        for c in &mut self.ch {
+        let line = self.next_line;
+        for (i, c) in self.ch.iter_mut().enumerate() {
             if c.data_written != 2 {
                 continue;
             }
             c.data_written = 0;
             c.nextdat = mem(c.pt);
+            if let Some(l) = &mut self.dma_log {
+                l.push((line, i as u8, c.pt, c.nextdat));
+            }
             if c.wlen != 1 {
                 c.pt = c.pt.wrapping_add(2);
             }

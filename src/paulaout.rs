@@ -77,6 +77,13 @@ impl OutputStage {
     }
 
     /// Switches the filter model; its state starts again from silence.
+    /// The sample grid and the filters' history restart, as at Paula's reset (the
+    /// filter chosen and the LED state stay).
+    pub fn restart(&mut self) {
+        let fresh = OutputStage::new(self.rate, self.filter);
+        (self.next, self.acc, self.acc_time, self.rc) = (fresh.next, fresh.acc, fresh.acc_time, fresh.rc);
+    }
+
     pub fn set_filter(&mut self, filter: Filter) {
         if filter != self.filter {
             self.filter = filter;

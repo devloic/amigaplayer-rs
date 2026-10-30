@@ -530,6 +530,10 @@ impl Replayer for Beathoven {
         }
     }
 
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
+    }
+
     fn songend(&self) -> bool {
         false
     }
@@ -593,7 +597,14 @@ fn relocations(d: &[u8], n: usize) -> Vec<u32> {
     v
 }
 
-fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
+/// Colour clocks from the host's start to the original's start-up writes, and to the end of its init
+/// (measured in the reference runs: its InitSound sets the voices up, the timer runs from its end).
+const INIT_FIRST_WRITE: u64 = 1444;
+const INIT_END: u64 = 8092;
+/// Colour clocks from the song's start to the host's timer start, beyond the first period.
+const TIMER_DELAY: u64 = 195;
+
+fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect(d) {
         return None;
     }
@@ -602,7 +613,7 @@ fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let img = d[32..32 + 4 * n].to_vec();
     let name = be32(&img, 0x24) as usize;
     let title = img.get(name..).map_or(String::new(), |s| s.iter().take_while(|&&b| b != 0).take(80).map(|&b| b as char).collect());
-    Some(Box::new(Beathoven {
+    let mut b = Beathoven {
         h14: be32(&img, 0x48),
         pristine: img.clone(),
         img,
@@ -614,7 +625,17 @@ fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
         started: false,
         v: Default::default(),
         w: Default::default(),
-    }))
+    };
+    if b.row().eng != 0 {
+        // the start-up routine runs in the original's InitSound, before its timer: the first
+        // tick is already the first pass over the voices
+        let t0 = m.bus.clock;
+        let mut hw = Hw { bus: &mut m.bus };
+        hw.wait(INIT_FIRST_WRITE);
+        b.start(&mut hw);
+        m.bus.clock = m.bus.clock.max(t0 + INIT_END);
+    }
+    Some(Box::new(b))
 }
 
 #[cfg(test)]

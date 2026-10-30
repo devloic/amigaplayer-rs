@@ -40,10 +40,28 @@ const SAMPLES: usize = 0x1E4;
 
 // Colour clocks between the writes of a note start, as the original's raster waits
 // keep its DMA off and on apart (measured in the reference runs).
-const WAIT_OFF: u64 = 1950;
-const WAIT_ON: u64 = 2070;
-const WAIT_NOTE: u64 = 380;
-const WAIT_VOICE: u64 = 150;
+const WAIT_OFF: u64 = 2061;
+const WAIT_ON: u64 = 2084;
+const WAIT_LEN_LOC: u64 = 35;
+/// DMA off to the sample's address and length, and on to the period.
+const WAIT_ADDR: u64 = 27;
+const WAIT_REG: u64 = 6;
+/// The sequencer's work before the first event of a tick, between two events, and after the last.
+const WAIT_FIRST_EVENT: u64 = 330;
+/// An event that writes nothing: a release, any other.
+const WAIT_RELEASE: u64 = 308;
+const WAIT_OTHER: u64 = 154;
+const WAIT_EVENT: u64 = 581;
+const WAIT_EVENTS_END: u64 = 227;
+/// A voice's effect step: period to volume, volume to the next period, period to period.
+const WAIT_PER_VOL: u64 = 196;
+const WAIT_VOL_PER: u64 = 160;
+const WAIT_PER_PER: u64 = 170;
+/// Colour clocks from the host's start to the timer's first interrupt beyond one period:
+/// the original's init routine runs first (measured in the reference runs).
+const INIT_CLOCKS: u64 = 11028;
+/// Colour clocks from the song's start to the host's timer start, beyond the first period.
+const TIMER_DELAY: u64 = 295;
 
 fn rb(d: &[u8], o: usize) -> u8 {
     d.get(o).copied().unwrap_or(0)
@@ -108,6 +126,8 @@ struct Parton {
     prog: [u8; 16],
     v: [Voice; 4],
     songend: bool,
+    /// Notes started in this tick's sequencer pass.
+    started_notes: u8,
 }
 
 /// Signed byte comparison helper.
@@ -139,6 +159,8 @@ impl Parton {
             self.v[v].phase = 0x64;
             return;
         }
+        hw.wait(if self.started_notes == 0 { WAIT_FIRST_EVENT } else { WAIT_EVENT });
+        self.started_notes += 1;
         let env = 0x144 + 4 * p;
         let vib = 0x194 + 4 * p;
         let d = &self.d;
@@ -164,20 +186,24 @@ impl Parton {
         let rlen = self.long(0xA4, p);
         let roff = self.long(0xF4, p);
         hw.dmacon(bit);
+        hw.wait(WAIT_ADDR);
         hw.loc(v, start);
+        hw.wait(WAIT_REG);
         hw.len(v, (len & 0xFFFF) as u16 >> 1);
+        hw.wait(WAIT_REG);
         hw.per(v, per);
         hw.wait(WAIT_OFF);
         hw.dmacon(0x8200 | bit);
         hw.wait(WAIT_ON);
         if rlen != 0 {
             hw.len(v, (rlen & 0xFFFF) as u16 >> 1);
+            hw.wait(WAIT_LEN_LOC);
             hw.loc(v, start.wrapping_add(roff));
         } else {
             hw.loc(v, self.base);
+            hw.wait(WAIT_LEN_LOC);
             hw.len(v, 2);
         }
-        hw.wait(WAIT_NOTE);
     }
 
     /// The sequencer step; false when the stream's end was read.
@@ -189,6 +215,7 @@ impl Parton {
         if self.wait != 0 {
             return true;
         }
+        self.started_notes = 0;
         for _ in 0..GUARD {
             let mut b = self.byte();
             if b & 0x80 != 0 {
@@ -211,11 +238,13 @@ impl Parton {
                         self.note(v, b, vel, p, hw);
                     } else {
                         self.v[v].phase = 0x64;
+                        hw.wait(WAIT_RELEASE);
                     }
                 }
                 0x80 => {
                     self.pos += 1;
                     self.v[v].phase = 0x64;
+                    hw.wait(WAIT_RELEASE);
                 }
                 0xC0 => {
                     if b == 0x7E {
@@ -225,18 +254,23 @@ impl Parton {
                         continue;
                     }
                     self.prog[ch] = b;
+                    hw.wait(WAIT_OTHER);
                 }
                 // a controller: two bytes, no effect (the original is broken here)
-                0xB0 => {}
+                0xB0 => hw.wait(WAIT_OTHER),
                 _ => {
                     if MIDIBYTES[(self.rs >> 4) as usize] == 1 {
                         self.pos += 1;
                     }
+                    hw.wait(WAIT_OTHER);
                 }
             }
             let d = self.byte();
             if d != 0 {
                 self.wait = d;
+                if self.started_notes != 0 {
+                    hw.wait(WAIT_EVENTS_END);
+                }
                 return true;
             }
         }
@@ -246,9 +280,11 @@ impl Parton {
     fn effects(&mut self, hw: &mut Hw) {
         for i in 0..4 {
             let v = &mut self.v[i];
+            let mut wrote_per = false;
             if v.vdelay != 0 {
                 v.vdelay -= 1;
             } else {
+                wrote_per = true;
                 let w = WAVE[v.vidx as usize & 0x1F] as i32;
                 let per = (w * v.vdepth as i32 + v.base_per as i32) as u16;
                 v.vidx = v.vidx.wrapping_add(v.vspeed) & 0x1F;
@@ -302,9 +338,12 @@ impl Parton {
                 _ => false,
             };
             if write {
+                hw.wait(if wrote_per { WAIT_PER_VOL } else { WAIT_VOL_PER });
                 hw.vol(i, (v.level & 0x3F) as u16);
+                hw.wait(WAIT_VOL_PER);
+            } else {
+                hw.wait(WAIT_PER_PER);
             }
-            hw.wait(WAIT_VOICE);
         }
     }
 }
@@ -316,6 +355,10 @@ impl Replayer for Parton {
 
     fn title(&self) -> String {
         self.title.clone()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
     }
 
     fn songend(&self) -> bool {
@@ -340,6 +383,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let title = m.bus.read_cstr(m.deli.file_buf);
     // the init routine sets the LED bit of CIA-A's port: the filter is off
     m.bus.ciaa.pra |= 2;
+    m.bus.clock += INIT_CLOCKS;
     Some(Box::new(Parton {
         d: d.to_vec(),
         base,
@@ -353,6 +397,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         prog: [0; 16],
         v: [Voice::default(); 4],
         songend: false,
+        started_notes: 0,
     }))
 }
 

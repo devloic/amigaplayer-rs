@@ -413,6 +413,9 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=()):
         deli, eagle = eagle[1], None
     env = dict(os.environ, SDL_AUDIO_DRIVER='dummy', RUST_LOG='error', DELIPLAYERS=deli,
                DELIGENIES=ctx.empty, EAGLEPLAYERS=eagle or ctx.empty)
+    if 'PreTracker' in extra:
+        # UADE's PreTracker player has no check: the engine accepts a checkless player for it
+        env['DELI_CHECKLESS'] = '1'
     cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else []), *ctx.flags, *extra,
            '--wav', '@WAV@', '--seconds', str(ctx.secs), mod]
     wav, lines = _run_cached(ctx, mod, cmd, env, os.path.dirname(mod), None)

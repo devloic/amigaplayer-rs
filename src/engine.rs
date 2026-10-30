@@ -390,7 +390,7 @@ impl Engine {
                 continue;
             }
             match deli::load_player(&mut self.m, &data, &f) {
-                Ok(p) if p.is_player() => {
+                Ok(p) if p.is_player() || (std::env::var_os("DELI_CHECKLESS").is_some() && (p.has(tag::INTERRUPT) || p.has(tag::START_INT))) => {
                     let kind = if p.eagle { "eagleplayer" } else { "player" };
                     log::info!("{kind}: {} v{}.{} ({})", p.name, p.version >> 16, p.version & 0xFFFF, f.display());
                     if let Some(pp) = deli::PlayerProc::new(&p.tags) {
@@ -653,7 +653,7 @@ impl Engine {
             log::debug!("{e}");
             return Ok(false);
         }
-        let Some(chk) = self.players[idx].check() else { return Ok(false) };
+        let Some(chk) = self.players[idx].check() else { return Ok(std::env::var_os("DELI_CHECKLESS").is_some()) };
         match deli::call_fn(&mut self.m, self.players[idx].globals, chk, None) {
             Ok(r) => Ok(r[0] == 0),
             Err(e) => {
@@ -1057,7 +1057,13 @@ impl Engine {
         };
         match period {
             None => self.next_timer = None,
-            Some(n) if self.next_timer.is_none() => self.next_timer = Some(now + n),
+            Some(n) if self.next_timer.is_none() => {
+                let delay = match &p.backend {
+                    Backend::Replay(r) => r.timer_delay(),
+                    _ => 0,
+                };
+                self.next_timer = Some(now + n + delay)
+            }
             _ => {}
         }
         let cias = [&self.m.bus.ciaa, &self.m.bus.ciab];

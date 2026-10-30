@@ -194,8 +194,13 @@ pub struct DeltaMusic2 {
     voices: [Voice; 4],
 }
 
+/// Colour clocks the original's init routine runs before the host starts its timer, beyond the
+/// one period (measured in the reference runs).
+const INIT_CLOCKS: u64 = 11117;
+
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let a = refs(d)?;
+    m.bus.clock += INIT_CLOCKS;
     let at = |o: usize| base + o as u32;
     // the song data, as the original's InitSound walks it
     let mut p = a[SONG] + 16;
@@ -274,6 +279,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     Some(Box::new(DeltaMusic2 { song, g: globals, voices }))
 }
 
+/// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
+/// in the reference runs).
+const TIMER_DELAY: u64 = 1175;
+
 impl Replayer for DeltaMusic2 {
     fn format(&self) -> &'static str {
         "Delta Music 2.0"
@@ -281,6 +290,10 @@ impl Replayer for DeltaMusic2 {
 
     fn title(&self) -> String {
         String::new()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
     }
 
     fn songend(&self) -> bool {

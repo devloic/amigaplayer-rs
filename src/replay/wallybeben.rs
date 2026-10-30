@@ -17,6 +17,7 @@
 //! order lists of patterns, notes with a duration, a sample and an instrument
 //! (attack and release envelope, vibrato, arpeggio), portamento and slides.
 
+use crate::paula::LINE;
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
 use m68k::AddressBus;
@@ -291,6 +292,8 @@ struct Wb {
     nsongs: u16,
     sub: u16,
     started: bool,
+    /// A note was started in this tick.
+    evented: bool,
     enable: bool,
     tr: u8,
     tc: u8,
@@ -345,6 +348,7 @@ impl Wb {
             nsongs,
             sub: 0,
             started: false,
+            evented: false,
             enable: false,
             tr: 0,
             tc: 0,
@@ -696,7 +700,12 @@ impl Wb {
         self.sync_vars(v, cnt);
         let bit = 1u8 << v;
         self.dm &= !bit;
+        if self.evented {
+            hw.wait(WAIT_NOTE);
+        }
         hw.dmacon(bit as u16);
+        self.evented = true;
+        hw.wait(WAIT_OFF_LEN);
         self.d5 = bit as u32;
         self.sample_setup(v, hw);
         self.instrument_setup(v);
@@ -748,6 +757,7 @@ impl Wb {
         self.loop_off[v] = w4;
         self.loop_len[v] = w6;
         hw.len(v, len >> 1);
+        hw.wait(WAIT_LEN_ADDR);
         if l.flags.sflag2 && flag & 2 != 0 {
             let t0 = self.rl(l.stab).wrapping_add(4 * number as u32).wrapping_add(w4 as u32);
             put32(&mut self.mem, l.stab, t0);
@@ -994,6 +1004,7 @@ impl Wb {
             return;
         }
         self.d5 = 0;
+        self.evented = false;
         for v in (0..4).rev() {
             self.sync_vars(v, self.bytes as usize);
             if self.tc != 0 {
@@ -1017,7 +1028,6 @@ impl Wb {
                         return;
                     }
                     self.volume(v);
-                    hw.wait(500);
                     continue;
                 }
                 if self.g(0x2C, v) != 0 {
@@ -1035,25 +1045,39 @@ impl Wb {
                 self.effects(v);
             }
             self.volume(v);
-            hw.wait(500);
+            hw.wait(WAIT_VOICE);
         }
         self.hardware(hw);
         self.tc = if self.tc == 0 { self.tr } else { self.tc - 1 };
     }
 
     fn hardware(&mut self, hw: &mut Hw) {
-        hw.wait(800);
+        hw.wait(if self.evented { WAIT_HARDWARE_AFTER_NOTE } else { WAIT_HARDWARE });
         for v in 0..4 {
+            if v > 0 {
+                hw.wait(WAIT_PER);
+            }
             hw.per(v, self.outper(v));
         }
         let on = !self.dm & 0x0F;
+        wait_lines(hw, LINES_DMA, PHASE_DMA);
         hw.dmacon(0x8200 | on as u16);
+        hw.wait(WAIT_DMA_OFF);
         hw.dmacon((0x8200 | on as u16) ^ 0x820F);
+        wait_lines(hw, LINES_VOL, PHASE_VOL);
         for v in 0..4 {
+            if v > 0 {
+                hw.wait(WAIT_VOL_NEXT);
+            }
             hw.vol(v, self.g(0x60, v) as u16);
         }
+        hw.wait(WAIT_LEN);
         for v in (0..4).rev() {
+            if v < 3 {
+                hw.wait(WAIT_LEN_NEXT);
+            }
             hw.len(v, self.loop_len[v] >> 1);
+            hw.wait(WAIT_LOC);
             let restart = if self.lay.flags.newl && self.lay.empty.is_some() && self.g(0x78, v) == 0 {
                 let t = self.lay.empty.unwrap_or(0);
                 self.rl(t).wrapping_sub(self.lay.origin)
@@ -1077,6 +1101,42 @@ fn put32(d: &mut [u8], o: usize, v: u32) {
     }
 }
 
+/// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
+/// in the reference runs).
+const TIMER_DELAY: u64 = 751;
+
+// Colour clocks between the writes of a tick, measured in the reference runs: the tick's start to
+// its first period, between periods, the last period to DMACON, DMACON to the DMA-off one, to the
+// first volume, between volumes, the last volume to the first length, length to address, and an
+// address to the next length. The voices' own processing takes no more time before the writes.
+const WAIT_VOICE: u64 = 0;
+// A note start: DMA off to the length, the length to the address, the address to the next voice's
+// first write.
+const WAIT_OFF_LEN: u64 = 363;
+const WAIT_LEN_ADDR: u64 = 58;
+const WAIT_NOTE: u64 = 1074;
+const WAIT_HARDWARE: u64 = 873;
+const WAIT_HARDWARE_AFTER_NOTE: u64 = 729;
+const WAIT_PER: u64 = 8;
+const WAIT_DMA_OFF: u64 = 12;
+const WAIT_VOL_NEXT: u64 = 82;
+const WAIT_LEN: u64 = 193;
+const WAIT_LOC: u64 = 67;
+const WAIT_LEN_NEXT: u64 = 54;
+// The original waits for the beam, a number of raster line changes, before the DMA enable and
+// the volumes: it goes on that many colour clocks into the line.
+const LINES_DMA: u64 = 9;
+const PHASE_DMA: u64 = 49;
+const LINES_VOL: u64 = 9;
+const PHASE_VOL: u64 = 172;
+
+/// Lets `n` raster line changes pass, then `phase` colour clocks of the line.
+fn wait_lines(hw: &mut Hw, n: u64, phase: u64) {
+    let now = hw.bus.clock;
+    let boundary = (now / LINE + 1) * LINE;
+    hw.wait(boundary + (n - 1) * LINE + phase - now);
+}
+
 impl Replayer for Wb {
     fn format(&self) -> &'static str {
         "Wally Beben"
@@ -1084,6 +1144,10 @@ impl Replayer for Wb {
 
     fn title(&self) -> String {
         self.title.clone()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
     }
 
     fn songend(&self) -> bool {
@@ -1121,6 +1185,9 @@ impl Replayer for Wb {
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let lay = locate(d)?;
     let title = m.bus.read_cstr(m.deli.file_buf);
+    // the original's init routine runs before the host starts its timer (about eight frames; measured
+    // in the reference runs)
+    m.bus.clock += 662_627;
     Some(Box::new(Wb::new(d, base, lay, title)))
 }
 

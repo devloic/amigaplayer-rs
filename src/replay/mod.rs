@@ -123,6 +123,11 @@ pub trait Replayer: Send {
     fn tick_clocks(&self) -> u64 {
         DT_TICK
     }
+    /// Colour clocks from the song's start (after `new`) to the start of the timer, on top of
+    /// the first period: what the original's StartInt takes before the timer runs.
+    fn timer_delay(&self) -> u64 {
+        0
+    }
     fn songend(&self) -> bool;
     /// The first, last and current subsong, in DeliTracker's numbering.
     fn subsongs(&self) -> (u16, u16, u16) {

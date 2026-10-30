@@ -269,7 +269,7 @@ fn rows_key(d: &[u8], n: usize) -> Cfg {
     c
 }
 
-fn new_dl(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
+fn new_dl(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_dl(d) {
         return None;
     }
@@ -342,10 +342,19 @@ fn new_dl(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     let mut s = DaveLowe::build(img, mem, cfg, title, subs, fades, special);
     s.patched = patched;
+    m.bus.clock += DL_INIT_CLOCKS;
     Some(Box::new(s))
 }
 
-fn new_dln(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
+/// Colour clocks the original's init routine runs before the host starts its timer, beyond the
+/// one period (measured in the reference runs).
+const DL_INIT_CLOCKS: u64 = 21093;
+
+/// Colour clocks the original's init routine runs before the host starts its timer, beyond the
+/// one period (measured in the reference runs: 6016 to 6459 for the Beneath a Steel Sky songs).
+const DLN_INIT_CLOCKS: u64 = 5570;
+
+fn new_dln(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_dln(d) {
         return None;
     }
@@ -389,6 +398,7 @@ fn new_dln(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
             }
         }
     }
+    m.bus.clock += DLN_INIT_CLOCKS;
     Some(Box::new(DaveLowe::build(img, base, Cfg::dln(kind), String::new(), subs, Vec::new(), 0)))
 }
 
@@ -949,6 +959,10 @@ impl DaveLowe {
     }
 }
 
+/// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
+/// in the reference runs).
+const TIMER_DELAY: u64 = 565;
+
 impl Replayer for DaveLowe {
     fn format(&self) -> &'static str {
         match self.cfg.kind {
@@ -959,6 +973,10 @@ impl Replayer for DaveLowe {
 
     fn title(&self) -> String {
         self.title.clone()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
     }
 
     fn songend(&self) -> bool {

@@ -1016,6 +1016,10 @@ impl BuildB {
     }
 }
 
+/// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
+/// in the reference runs).
+const TIMER_DELAY: u64 = 188;
+
 impl Replayer for BuildB {
     fn format(&self) -> &'static str {
         "Jason Brooke"
@@ -1023,6 +1027,10 @@ impl Replayer for BuildB {
 
     fn title(&self) -> String {
         String::new()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
     }
 
     fn songend(&self) -> bool {
@@ -1540,6 +1548,10 @@ impl Replayer for BuildA {
         String::new()
     }
 
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
+    }
+
     fn songend(&self) -> bool {
         self.songend
     }
@@ -1566,9 +1578,14 @@ impl Replayer for BuildA {
     }
 }
 
-fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
+/// Colour clocks the original's init routine runs before the host starts its timer, beyond the
+/// one period (measured in the reference runs).
+const INIT_CLOCKS: u64 = 17171;
+
+fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if is_a(d) {
         let lay = layout_a(d)?;
+        m.bus.clock += INIT_CLOCKS;
         return Some(Box::new(BuildA {
             lay,
             img: d.to_vec(),
@@ -1581,6 +1598,7 @@ fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
         }));
     }
     let lay = layout_b(d)?;
+    m.bus.clock += INIT_CLOCKS;
     let mut img = d.to_vec();
     patch(&mut img, lay.p);
     Some(Box::new(BuildB {

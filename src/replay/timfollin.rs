@@ -701,6 +701,10 @@ impl TimFollin {
     }
 }
 
+/// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
+/// in the reference runs).
+const TIMER_DELAY: u64 = 1480;
+
 impl Replayer for TimFollin {
     fn format(&self) -> &'static str {
         "Tim Follin II"
@@ -708,6 +712,10 @@ impl Replayer for TimFollin {
 
     fn title(&self) -> String {
         String::new()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
     }
 
     fn songend(&self) -> bool {
@@ -760,6 +768,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     #[cfg(test)]
     STORES.lock().unwrap().clear();
+    // the original's init routine runs before the host starts its timer (measured in the reference
+    // runs: the first music tick comes about 497,800 colour clocks later than the port's would)
+    m.bus.clock += 539_000;
     Some(Box::new(TimFollin {
         lay,
         gbase: base,

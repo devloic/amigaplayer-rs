@@ -29,6 +29,8 @@ use m68k::AddressBus;
 
 mod med4;
 mod mix;
+mod timing;
+mod timing4;
 
 pub use mix::{OPEN_MIX, OPEN_OSS};
 
@@ -164,33 +166,110 @@ const FLAG2_MIX: u8 = 0x80;
 /// one silent word (passed as length 0, so 65536 words, as the original does).
 const SILENCE_SIZE: u32 = 0x20000;
 
-/// Colour clocks the original spends between its writes (fitted to its logs;
-/// by channel where they differ).
+/// Colour clocks the original's code spends between its register writes, measured on its runs
+/// (one colour clock is two CPU cycles; the code's cycle costs are fixed, so only the path taken
+/// matters). Sizes by the tracks of the block (N): 1, 2, 3, 4, 5, 6, 8, 12 and 16.
 mod cost {
-    pub const TICK: i64 = 4600;
-    /// From a note's length to the next note's DMA off.
-    pub const DMA_OFF: i64 = 330;
-    /// A DMA off with no note before it in the tick.
-    pub const DMA_OFF_FIRST: i64 = 200;
-    pub const NOTE: [i64; 4] = [425, 440, 456, 460];
-    pub const LEN: [i64; 4] = [240, 256, 272, 275];
-    /// After the row's notes: the next position and the hold look-ahead, less
-    /// per note played.
-    pub const ROW_END: i64 = 1670;
-    pub const ROW_END_NOTE: i64 = 30;
-    pub const PER: i64 = 172;
-    pub const VOL: [i64; 4] = [172, 183, 195, 190];
-    /// A synth sound's new waveform: before its length, its start, and after.
-    pub const WF_LEN: i64 = 60;
-    /// A synth or hybrid sound's programs, each tick.
-    pub const SYNTH: i64 = 450;
-    pub const WF_LOC: i64 = 90;
-    pub const WF_END: i64 = 74;
-    pub const DMA_ON: i64 = 138;
-    /// After the host's wait for the DMA, the first loop's start, the next ones'.
-    pub const LOOP_FIRST: i64 = 211;
-    pub const LOOP: i64 = 150;
-    pub const LOOP_LEN: i64 = 112;
+    /// A tick's entry: from the interrupt to the soft interrupt, to the replay routine's body.
+    pub const IRQ: f64 = 97.0;
+    pub const ENTRY: f64 = 143.0;
+    /// Every tenth call (every 25th with a fast timer) costs more.
+    pub const ENTRY_NTH: f64 = 34.0;
+    /// With a timer value up to this (fast tempos) the entry takes 2 more.
+    pub const FAST: u16 = 4096;
+    pub const FAST_EXTRA: f64 = 2.0;
+    /// To the every-tick stage of a tick that is not a row's, and to the row stage.
+    pub const EVERY: f64 = 157.0;
+    pub const ROW: f64 = 169.0;
+    /// In BPM mode a tick that plays takes this much more in the entry.
+    pub const BPM_EXTRA: f64 = 21.0;
+    pub const BPM_EXTRA_EVERY: f64 = 20.0;
+    /// The track counts the tables below are measured at.
+    pub const SIZES: [usize; 9] = [1, 2, 3, 4, 5, 6, 8, 12, 16];
+    /// The row read: base, per track, per note, per instrument set (MMD0, then MMD1 and 2).
+    pub const READ0: [f64; 4] = [197.0, 97.0, 9.0, 112.0];
+    pub const READ1: [f64; 4] = [194.5, 71.5, 4.0, 112.0];
+    pub const READ_INFO: f64 = 19.0;
+    /// The row's commands: base and per track.
+    pub const CMDS0: [f64; 2] = [159.0, 31.0];
+    pub const CMDS1: [f64; 2] = [163.5, 31.0];
+    /// A track that does not play a note in the trigger loop.
+    pub const SKIP: f64 = 39.5;
+    /// From the loop's start to the first note's DMA off (without skipped tracks).
+    pub const FIRST: f64 = 245.5;
+    /// From a note's length to the next note's DMA off (without skipped tracks), and after the last
+    /// to the end of the loop (per track left; the end of the loop with no note).
+    pub const NEXT: f64 = 318.0;
+    pub const LOOP_END: f64 = 88.0;
+    pub const NO_NOTE_END: f64 = 16.0;
+    /// A note that loops moves this much of the time to the following step.
+    pub const LOOPED: f64 = 10.0;
+    /// From a note's DMA off to its start, and to its length, by channel; less if its song repeat
+    /// length is over a word, and less if the instrument loops.
+    pub const NOTE: [f64; 4] = [426.0, 441.0, 457.0, 461.0];
+    pub const NOTE_REP: f64 = 3.0;
+    pub const LEN: [f64; 4] = [245.0, 261.0, 276.0, 280.0];
+    /// The line advance and hold look-ahead, by N of the block after it.
+    pub const ADV0: [f64; 9] = [563.7, 604.0, 644.2, 684.5, 771.0, 834.0, 961.0, 1169.0, 1423.0];
+    pub const ADV1: [f64; 9] = [572.0, 613.0, 653.5, 694.0, 735.0, 798.0, 925.0, 1133.0, 1387.0];
+    pub const ADV2: [f64; 9] = [607.0, 648.0, 688.0, 729.0, 769.0, 856.0, 960.0, 1053.0, 1422.0];
+    /// Each track whose hold counter runs adds this to the advance.
+    pub const ADV_HOLD: f64 = 23.0;
+    pub const ADV_EXTEND: f64 = 11.5;
+    /// The pass over the tracks every tick, up to the output pass.
+    pub const PASS0: [f64; 9] = [446.0, 639.0, 819.0, 987.0, 1120.0, 1252.0, 1492.0, 1985.0, 2452.0];
+    pub const PASS1: [f64; 9] = [441.0, 616.0, 792.0, 967.0, 1082.0, 1197.0, 1427.0, 1887.0, 2347.0];
+    /// The output pass: to the first period, from a volume to the next period, from a period to
+    /// the volume by channel.
+    pub const OUT_ENTRY: f64 = 104.0;
+    pub const PER: f64 = 172.0;
+    pub const VOL: [f64; 4] = [172.0, 183.0, 195.0, 190.0];
+    /// A synth sound's programs, each tick, and a new waveform's length, start and end.
+    pub const SYNTH: f64 = 450.0;
+    pub const WF_LEN: f64 = 60.0;
+    pub const WF_LOC: f64 = 90.0;
+    pub const WF_END: f64 = 74.0;
+    /// After the last volume to the DMA going on, with more than four tracks 29 more each.
+    pub const DMA_ON: f64 = 138.0;
+    pub const DMA_ON_TRACK: f64 = 29.0;
+    /// After the host's wait for the DMA: the first loop write by channel, the next by the
+    /// channels between, a length after its start.
+    pub const LOOP_FIRST: [f64; 4] = [148.0, 179.0, 211.0, 238.0];
+    pub const LOOP_SKIP: f64 = 12.5;
+    pub const LOOP_LEN: f64 = 112.0;
+    pub const LOOP_LEN_LONG: f64 = 110.0;
+    /// From a loop's length to the next loop's start, by the two channels.
+    pub const LOOP_NEXT: [[f64; 4]; 4] = [
+        [0.0, 154.0, 185.0, 213.0],
+        [0.0, 0.0, 154.0, 181.0],
+        [0.0, 0.0, 0.0, 150.0],
+        [0.0; 4],
+    ];
+    /// A hold expiry's DMA off in the pass, from the pass's start by channel, and between two;
+    /// from the last to the pass's end.
+    pub const HOLD_OFF: [f64; 4] = [81.5, 270.5, 298.5, 326.5];
+    pub const HOLD_TAIL: f64 = 808.0;
+    pub const HOLD_OFF_NEXT: f64 = 209.0;
+    /// A track whose hold ends adds this to the pass, and a decay that starts then this more.
+    /// Commands that run on every tick add to the pass (a slide up or down, a tempo or special).
+    pub const CMD_SLIDE_UP: f64 = 23.0;
+    pub const CMD_SLIDE_DOWN: f64 = 8.0;
+    pub const CMD_TEMPO: f64 = 61.5;
+    pub const CMD_TICKS: f64 = -6.0;
+    pub const HOLD_ACTIVE: f64 = 28.0;
+    pub const HOLD_END: f64 = 25.0;
+    pub const HOLD_DECAY: f64 = 38.0;
+
+    /// A value of a table by N, linear between the sizes and beyond them.
+    pub fn by_n(t: &[f64; 9], n: usize) -> f64 {
+        let n = n.max(1);
+        let mut i = 0;
+        while i + 2 < SIZES.len() && SIZES[i + 1] < n {
+            i += 1;
+        }
+        let (a, b) = (SIZES[i] as f64, SIZES[i + 1] as f64);
+        t[i] + (t[i + 1] - t[i]) * (n as f64 - a) / (b - a)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -317,7 +396,24 @@ pub struct Med {
     /// BPM tempos: timer interrupts until the song advances (every fourth).
     irqs: u8,
     songend: bool,
-    spent: i64,
+    /// The timing model of the original's code: the clock the tick's time is counted from, the
+    /// half colour clocks elapsed since (the original's code runs in whole CPU cycles), the
+    /// interrupts counted since the start, the original's start-up time in colour clocks, the
+    /// track count of the block after the row's advance, and the tick's progress.
+    anchor: u64,
+    acc2: i64,
+    calls: u32,
+    init: f64,
+    n_after: usize,
+    first_out: bool,
+    /// Whether the last note of the tick loops.
+    note_loops: bool,
+    advance_cost: f64,
+    pass_start2: i64,
+    pass_extra: f64,
+    holds_off: u32,
+    hold_last: f64,
+    pass_floor2: i64,
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -336,6 +432,11 @@ fn detect(d: &[u8]) -> bool {
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    let init = if d.starts_with(b"MED\x04") {
+        timing::med4_init_clocks(d).unwrap_or(0.0)
+    } else {
+        timing::init_clocks(d)
+    };
     // a MED 2.10 module plays converted to MMD0, in memory of its own
     let conv;
     let (d, base) = if d.starts_with(b"MED\x04") {
@@ -409,7 +510,19 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         bpm: false,
         irqs: 0,
         songend: false,
-        spent: 0,
+        anchor: 0,
+        acc2: 0,
+        calls: 0,
+        init,
+        n_after: 4,
+        first_out: true,
+        note_loops: false,
+        advance_cost: 0.0,
+        pass_start2: 0,
+        pass_extra: 0.0,
+        holds_off: 0,
+        hold_last: 0.0,
+        pass_floor2: 0,
     };
     p.title = p.song_name(&m.bus);
     p.play_module(&mut m.bus, 0);
@@ -444,7 +557,16 @@ impl Replayer for Med {
         self.play_module(hw.bus, n);
     }
 
+    /// The original's start-up (see `timing`) before the timer starts, with the interrupt
+    /// aligned to the CIA's clock as the timer's first underflow is.
+    fn timer_delay(&self) -> u64 {
+        let ts = (100.0 + self.init + 0.01) as u64;
+        5 * (ts / 5) - 100
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
+        let call = self.calls;
+        self.calls = self.calls.wrapping_add(1);
         if self.bpm {
             // the first interrupt plays, then every fourth
             let n = self.irqs;
@@ -456,13 +578,35 @@ impl Replayer for Med {
         if !self.playing {
             return;
         }
-        self.spent = cost::TICK;
+        // the entry: the interrupt, the soft interrupt, the routine's body
+        let fast = self.timer <= cost::FAST;
+        let mut entry = cost::IRQ + cost::ENTRY;
+        if fast {
+            entry += cost::FAST_EXTRA;
+        }
+        if (call + 1) % if fast { 25 } else { 10 } == 0 {
+            entry += cost::ENTRY_NTH;
+        }
+        let row_tick = {
+            let c = self.counter.wrapping_add(1);
+            !((c as i8) < (self.tempo2 as i8) && c != 0)
+        };
+        if self.bpm {
+            entry += if row_tick { cost::BPM_EXTRA } else { cost::BPM_EXTRA_EVERY };
+        }
+        self.anchor = hw.bus.clock;
+        self.acc2 = 0;
+        self.spend(entry);
+        self.first_out = true;
+        self.note_loops = false;
         self.dma_on = 0;
         let c = self.counter.wrapping_add(1);
         if (c as i8) < (self.tempo2 as i8) && c != 0 {
             self.counter = c;
+            self.spend(cost::EVERY);
         } else {
             self.counter = 0;
+            self.spend(cost::ROW);
             if self.block_delay == 0 || {
                 self.block_delay -= 1;
                 self.block_delay == 0
@@ -704,6 +848,7 @@ impl Med {
         } else {
             blk + 2 + ((line * 3) & 0xffff) * self.numtracks as u32
         };
+        let (mut notes, mut insts) = (0.0, 0.0);
         for t in 0..self.numtracks as usize {
             let b = &*hw.bus;
             let (note, mut inum);
@@ -729,10 +874,12 @@ impl Med {
             tr.curr_note = note;
             if note != 0 {
                 tr.prev_note = note;
+                notes += 1.0;
             }
             tr.skip = false;
             inum &= 0x3f;
             if inum != 0 {
+                insts += 1.0;
                 let i = (inum - 1) as usize;
                 tr.instr = i as u8;
                 let smp = smp_base + 8 * i as u32;
@@ -748,23 +895,81 @@ impl Med {
                 tr.keep_wf = false;
             }
         }
+        // the row read, then the commands' stage
+        let nt = self.numtracks as f64;
+        let rd = if mmd1 { cost::READ1 } else { cost::READ0 };
+        let mut c = rd[0] + rd[1] * nt + rd[2] * notes + rd[3] * insts;
+        if mmd1 {
+            let info = self.ptr(hw.bus, blk + 4);
+            if info != 0 && self.ptr(hw.bus, info + 0xc) == 0 {
+                c += cost::READ_INFO;
+            }
+        }
+        self.spend(c);
+        let cm = if mmd1 { cost::CMDS1 } else { cost::CMDS0 };
+        self.spend(cm[0] + cm[1] * nt);
         if !self.row_commands(hw, blk) {
             return false;
         }
-        let mut notes = 0;
-        for t in 0..self.numtracks.min(64) as usize {
-            let tr = &mut self.tracks[t];
-            if tr.skip || tr.curr_note == 0 {
+        // the trigger loop: a track that plays a note costs its note, the others a little
+        let nt = self.numtracks.min(64) as usize;
+        let mut last = None;
+        let mut skipped = 0.0;
+        for t in 0..nt {
+            let tr = &self.tracks[t];
+            if tr.skip || tr.curr_note == 0 || !self.playable(hw.bus, t) {
+                skipped += 1.0;
                 continue;
             }
+            let tr = &mut self.tracks[t];
             tr.hold_cnt = if tr.hold == 0 { -1 } else { tr.hold as i8 };
             let note = tr.curr_note;
+            let gap = if last.is_none() {
+                cost::FIRST + cost::SKIP * skipped
+            } else {
+                cost::NEXT + cost::SKIP * skipped + if self.note_loops { cost::LOOPED } else { 0.0 }
+            };
+            self.spend(gap);
+            last = Some(t);
+            skipped = 0.0;
             self.play_note(hw, t, note);
-            notes += 1;
         }
-        self.spend(cost::ROW_END - cost::ROW_END_NOTE * notes.min(4));
+        match last {
+            Some(_) => self.spend(
+                cost::LOOP_END + cost::SKIP * skipped + if self.note_loops { cost::LOOPED } else { 0.0 },
+            ),
+            None => self.spend(cost::SKIP * nt as f64 + cost::NO_NOTE_END),
+        }
+        self.advance_cost = 0.0;
         self.advance(hw.bus);
+        self.n_after = self.dims_after(hw.bus);
+        let adv = match self.ver {
+            b'0' => &cost::ADV0,
+            b'1' => &cost::ADV1,
+            _ => &cost::ADV2,
+        };
+        self.spend(cost::by_n(adv, self.n_after) + self.advance_cost);
         true
+    }
+
+    /// The track count of the block the song is on now.
+    fn dims_after(&self, b: &Bus) -> usize {
+        let blk = self.block(b, self.pblock);
+        let n = if self.ver >= b'1' {
+            b.r16(blk)
+        } else {
+            b.r8(blk) as u16
+        };
+        n as usize
+    }
+
+    /// Whether a track's note starts one: a sample or synth sound on the proplayer's own channels.
+    fn playable(&self, b: &Bus, t: usize) -> bool {
+        let tr = &self.tracks[t];
+        if tr.smp == 0 || tr.outdev != 0 || t >= 4 {
+            return false;
+        }
+        self.ptr(b, self.smplarr + 4 * tr.instr as u32) != 0
     }
 
     /// The commands of the row on every page that act once, on the row tick.
@@ -780,6 +985,7 @@ impl Med {
                     continue;
                 }
                 let cmd = if stride == 3 { c & 0xf } else { c & 0x3f };
+                self.spend(self.row_cmd_cost(cmd, arg, stride == 3));
                 match self.row_command(hw, t, cmd, arg) {
                     Some(skip) => self.tracks[t].skip |= skip,
                     None => return false,
@@ -789,6 +995,42 @@ impl Med {
             if page > self.numpages {
                 return true;
             }
+        }
+    }
+
+    /// What the original's code spends on one command of the row (measured for the commands listed;
+    /// the others cost like the no-ops).
+    fn row_cmd_cost(&self, cmd: u8, arg: u8, mmd0: bool) -> f64 {
+        let m = if mmd0 { 5.0 } else { 0.0 };
+        match cmd {
+            0x0c => {
+                if !mmd0 && arg & 0x80 != 0 {
+                    114.5
+                } else if self.flags & FLAG_VOLHEX == 0 {
+                    141.0 + m
+                } else {
+                    if mmd0 { 99.9 } else { 96.5 }
+                }
+            }
+            0x0b => 178.5 + m,
+            0x0f => match arg {
+                0 => 89.0,
+                1..=0xf0 if self.bpm => 306.0 + m,
+                1..=10 => 217.0 + m,
+                0x0b..=0xf0 => 271.0 + m,
+                0xff => 353.0 + m,
+                _ => 130.5 + m,
+            },
+            0x09 => {
+                if !mmd0 && arg & 0x1f == 0 {
+                    80.5
+                } else {
+                    if mmd0 { 83.0 } else { 78.5 }
+                }
+            }
+            0x08 => 88.5 + m,
+            0x03 => if mmd0 { 109.0 } else { 111.0 },
+            _ => 63.5 + m,
         }
     }
 
@@ -968,6 +1210,7 @@ impl Med {
     /// The next line, block and play sequence position, then the hold of notes
     /// held on into the new row.
     fn advance(&mut self, b: &Bus) {
+        let mut hold_cost = 0.0;
         self.fx_block = self.pblock;
         self.fx_line = self.pline;
         let mut line = if self.next_line1 != 0 {
@@ -1004,12 +1247,14 @@ impl Med {
                 if tr.hold_cnt < 0 {
                     continue;
                 }
+                hold_cost += cost::ADV_HOLD;
                 let extend = if b0 != 0 {
                     b0 & 0x3f == 0 || b1 & 0xf == 3
                 } else {
                     b1 & 0xf0 != 0
                 };
                 if extend {
+                    hold_cost += cost::ADV_EXTEND;
                     tr.hold_cnt = tr.hold_cnt.wrapping_add(tempo2 as i8);
                 }
             }
@@ -1023,16 +1268,19 @@ impl Med {
                 if tr.hold_cnt < 0 {
                     continue;
                 }
+                hold_cost += cost::ADV_HOLD;
                 let extend = if b0 != 0 {
                     b0 & 0x7f == 0 || b2 == 3
                 } else {
                     b1 & 0x3f != 0
                 };
                 if extend {
+                    hold_cost += cost::ADV_EXTEND;
                     tr.hold_cnt = tr.hold_cnt.wrapping_add(tempo2 as i8);
                 }
             }
         }
+        self.advance_cost = hold_cost;
     }
 
     /// The block at the next play sequence position (the same one after 0B).
@@ -1212,7 +1460,9 @@ impl Med {
             s = start;
         }
         let looped = self.i_flags[tr.instr as usize % 63] & 1 != 0;
-        self.spend(cost::NOTE[t]);
+        let rep_long = self.i_replen[i] > 2;
+        self.note_loops = looped;
+        self.spend(cost::NOTE[t & 3] - if rep_long { cost::NOTE_REP } else { 0.0 });
         self.flush(hw);
         hw.loc(t, s);
         let tr = &mut self.tracks[t];
@@ -1227,9 +1477,8 @@ impl Med {
             loop_end.wrapping_sub(s) >> 1
         };
         tr.per = per;
-        self.spend(cost::LEN[t]);
+        self.spend(cost::LEN[t & 3] - if looped { cost::LOOPED } else { 0.0 });
         self.poke_len(hw, t, words);
-        self.spend(cost::DMA_OFF - cost::DMA_OFF_FIRST);
     }
 
     fn poke_len(&mut self, hw: &mut Hw, t: usize, words: u32) {
@@ -1264,7 +1513,6 @@ impl Med {
     }
 
     fn dma_off(&mut self, hw: &mut Hw, t: usize) {
-        self.spend(cost::DMA_OFF_FIRST);
         self.flush(hw);
         hw.dmacon(1 << t);
     }
@@ -1292,6 +1540,12 @@ impl Med {
     fn every_tick(&mut self, hw: &mut Hw) {
         let tick = self.counter;
         let n = self.numtracks.min(64) as usize;
+        // the pass over the tracks up to the output pass takes a time by the block's track count;
+        // the writes in it (a hold's end) fall at measured places
+        self.pass_start2 = self.acc2;
+        self.pass_extra = 0.0;
+        self.holds_off = 0;
+        self.pass_floor2 = 0;
         for t in 0..n {
             self.hold_decay(hw, t);
         }
@@ -1306,6 +1560,13 @@ impl Med {
                 a = a.wrapping_add(stride);
                 let cmd = if stride == 3 { c & 0xf } else { c & 0x1f };
                 if !self.tracks[t].skip {
+                    self.pass_extra += match cmd {
+                        0x01 => cost::CMD_SLIDE_UP,
+                        0x02 => cost::CMD_SLIDE_DOWN,
+                        0x0f => cost::CMD_TEMPO,
+                        0x09 => cost::CMD_TICKS,
+                        _ => 0.0,
+                    };
                     self.tick_command(hw, t, cmd, arg, tick);
                 }
             }
@@ -1314,6 +1575,9 @@ impl Med {
                 break;
             }
         }
+        let pass = if self.ver >= b'1' { &cost::PASS1 } else { &cost::PASS0 };
+        let end2 = self.pass_start2 + (2.0 * (cost::by_n(pass, self.n_after) + self.pass_extra)).round() as i64;
+        self.acc2 = self.acc2.max(end2).max(self.pass_floor2);
         for t in 0..self.numtracks.min(64) as usize {
             if !self.tracks[t].skip {
                 self.output(hw, t);
@@ -1328,8 +1592,10 @@ impl Med {
         }
         let tr = &mut self.tracks[t];
         if tr.hold_cnt >= 0 {
+            self.pass_extra += cost::HOLD_ACTIVE;
             tr.hold_cnt -= 1;
             if tr.hold_cnt < 0 {
+                self.pass_extra += cost::HOLD_END;
                 if tr.stype != 0 {
                     // a synth sound decays by its volume program
                     tr.vol_pos = tr.decay_speed;
@@ -1337,7 +1603,20 @@ impl Med {
                 } else {
                     tr.fade_speed = tr.decay_speed;
                     if tr.fade_speed == 0 {
+                        // (seen in the original's first tick only, where every track's hold has
+                        // not started: the first at a place by channel, the next 209 on)
+                        let at = if self.holds_off == 0 {
+                            cost::HOLD_OFF[t & 3]
+                        } else {
+                            self.hold_last + cost::HOLD_OFF_NEXT
+                        };
+                        self.hold_last = at;
+                        self.acc2 = self.acc2.max(self.pass_start2 + (2.0 * at) as i64);
+                        self.holds_off += 1;
                         self.dma_off(hw, t);
+                        self.pass_floor2 = self.acc2 + (2.0 * cost::HOLD_TAIL) as i64;
+                    } else {
+                        self.pass_extra += cost::HOLD_DECAY;
                     }
                 }
             }
@@ -1600,7 +1879,8 @@ impl Med {
         };
         tr.out_vol = 0xff;
         let vol = ((v as u32 * tr.trk_vol as u32) as u16 >> 8) & 0x7f;
-        self.spend(cost::PER);
+        self.spend(if self.first_out { cost::OUT_ENTRY } else { cost::PER });
+        self.first_out = false;
         self.flush(hw);
         hw.per(t, per);
         self.spend(cost::VOL[t & 3]);
@@ -1821,34 +2101,56 @@ impl Med {
         if self.dma_on == 0 {
             return;
         }
-        self.spend(cost::DMA_ON);
+        let extra = self.n_after.saturating_sub(4) as f64;
+        self.spend(cost::DMA_ON + cost::DMA_ON_TRACK * extra);
         self.flush(hw);
         hw.dmacon(0x8000 | self.dma_on);
-        // as ENPP_DMAMask does, the host waits for the DMA to start
+        // as ENPP_DMAMask does, the host waits for the DMA to start: to the line ten lines on
         let c = hw.bus.clock;
         hw.wait((c / LINE + 10) * LINE - c);
-        let mut first = true;
+        self.reanchor(hw);
+        let mut prev: Option<usize> = None;
+        let mut unlooped = 0.0;
         for t in 0..4 {
-            if self.dma_on & 1 << t == 0 || self.tracks[t].rptr == 0 {
+            if self.dma_on & 1 << t == 0 {
+                continue;
+            }
+            if self.tracks[t].rptr == 0 {
+                unlooped += cost::LOOP_SKIP;
                 continue;
             }
             let (r, l) = (self.tracks[t].rptr, self.tracks[t].rlen);
-            self.spend(if first { cost::LOOP_FIRST } else { cost::LOOP });
-            first = false;
+            let gap = match prev {
+                None => cost::LOOP_FIRST[t],
+                Some(p) => cost::LOOP_NEXT[p][t],
+            };
+            self.spend(gap + unlooped);
+            unlooped = 0.0;
+            prev = Some(t);
             self.flush(hw);
             hw.loc(t, r);
-            self.spend(cost::LOOP_LEN);
+            self.spend(if l > 1 { cost::LOOP_LEN_LONG } else { cost::LOOP_LEN });
             self.poke_len(hw, t, l as u32);
         }
     }
 
-    fn spend(&mut self, c: i64) {
-        self.spent += c;
+    /// Lets `c` colour clocks (in halves) of the original's code pass.
+    fn spend(&mut self, c: f64) {
+        self.acc2 += (c * 2.0).round() as i64;
     }
 
+    /// Brings the clock to the time the code has got to before a write.
     fn flush(&mut self, hw: &mut Hw) {
-        hw.wait(self.spent.max(0) as u64);
-        self.spent = 0;
+        let at = self.anchor + (self.acc2.max(0) / 2) as u64;
+        if hw.bus.clock < at {
+            hw.bus.clock = at;
+        }
+    }
+
+    /// The clock jumped (the host's wait): the code's time counts from here on.
+    fn reanchor(&mut self, hw: &Hw) {
+        self.anchor = hw.bus.clock;
+        self.acc2 = 0;
     }
 }
 

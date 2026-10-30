@@ -128,6 +128,11 @@ pub trait Replayer: Send {
     fn timer_delay(&self) -> u64 {
         0
     }
+    /// The music comes from a PC tracker: the output stage is the PC one (no Amiga filters),
+    /// as for the 68k players of PC formats.
+    fn pc_music(&self) -> bool {
+        false
+    }
     /// Whether the original's code for this song needs more than a 68000's time to keep
     /// up (an 8-voice Musicline's mixer takes 1 to 5 buffers' time on one): its reference
     /// run, which counts 68000 cycles, then plays slow or repeats buffers, where UADE

@@ -1207,7 +1207,7 @@ impl Engine {
     fn output_filter(&self) -> Filter {
         let pc = self.playing.as_ref().is_some_and(|p| {
             let f = p.format.to_ascii_lowercase();
-            PC_FORMATS.iter().any(|n| f.contains(n))
+            PC_FORMATS.iter().any(|n| f.contains(n)) || matches!(&p.backend, Backend::Replay(r) if r.pc_music())
         });
         if let Some(f) = self.settings.filter_model {
             return f;

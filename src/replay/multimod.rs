@@ -84,6 +84,10 @@ pub fn kind_of(d: &[u8]) -> Option<(usize, Kind)> {
 
 #[derive(Clone, Copy, Default)]
 struct Cell {
+    /// The cell's period when it is below the table's lowest (113). PS3M, the original of the
+    /// FastTracker tags, plays such a note as the table's second entry (seen: period 95 with
+    /// finetune 3 sounds at 791).
+    raw: u16,
     note: u8,
     smp: u8,
     eff: u8,
@@ -176,6 +180,8 @@ impl Default for Ch {
 
 pub struct MultiMod {
     kind: Kind,
+    /// A FastTracker/TakeTracker tag (`xCHN`, `xxCH`): music made on a PC.
+    pc: bool,
     title: String,
     n: usize,
     samples: Vec<Smp>,
@@ -191,6 +197,8 @@ pub struct MultiMod {
     speed: u8,
     counter: u8,
     bpm: u32,
+    /// A tempo command has run (PS3M then times ticks from the NTSC CIA clock).
+    bpm_set: bool,
     song_pos: usize,
     old_song_pos: usize,
     pat_pos: usize,
@@ -279,7 +287,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine, want: Kind) -> Option<Box<dyn Repla
                                 None => NOTES as u8,
                             }
                         };
-                        cells[row * n + c] = Cell { note, smp: (b[0] & 0xf0) | (b[2] >> 4), eff: b[2] & 15, arg: b[3] };
+                        cells[row * n + c] = Cell { raw: if period != 0 && period < MIN_PERIOD as u16 { period } else { 0 }, note, smp: (b[0] & 0xf0) | (b[2] >> 4), eff: b[2] & 15, arg: b[3] };
                     }
                 }
             }
@@ -293,8 +301,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine, want: Kind) -> Option<Box<dyn Repla
         return None;
     }
     let title = d[..20].iter().take_while(|&&c| c != 0).map(|&c| c as char).collect::<String>().trim().to_string();
+    let pc = matches!(&d[1080..1084], [b'1'..=b'9', b'C', b'H', b'N'] | [b'1'..=b'3', b'0'..=b'9', b'C', b'H']);
     let mut s = MultiMod {
         kind,
+        pc,
         title,
         n,
         samples,
@@ -308,6 +318,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine, want: Kind) -> Option<Box<dyn Repla
         speed: 6,
         counter: 0,
         bpm: 125,
+        bpm_set: false,
         song_pos: 0,
         old_song_pos: 0,
         pat_pos: 0,
@@ -342,6 +353,10 @@ impl Replayer for MultiMod {
         self.title.clone()
     }
 
+    fn pc_music(&self) -> bool {
+        self.pc
+    }
+
     fn songend(&self) -> bool {
         self.songend
     }
@@ -349,7 +364,11 @@ impl Replayer for MultiMod {
     /// The CIA timer of ProTracker's tempo: 1773447 / BPM, plus one, E-clock ticks of
     /// 5 colour clocks.
     fn tick_clocks(&self) -> u64 {
-        (1_773_447 / self.bpm.max(1) as u64 + 1) * 5
+        // PS3M (the original of the FastTracker and TakeTracker tags) sets a tempo from the NTSC
+        // CIA clock (1789773 / BPM, plus one: seen in its timer writes), the PAL default until
+        // the first tempo command
+        let clock = if self.pc && self.bpm_set { 1_789_773 } else { 1_773_447 };
+        (clock / self.bpm.max(1) as u64 + 1) * 5
     }
 
     fn tick(&mut self, hw: &mut Hw) {
@@ -573,7 +592,7 @@ impl MultiMod {
             }
             let _ = &mut skip_to_end;
             let c = &mut self.ch[i];
-            c.period = PERIODS[c.fine as usize][cell.note as usize - 1] as i32;
+            c.period = if cell.raw != 0 && self.pc { PERIODS[c.fine as usize][1] as i32 } else { PERIODS[c.fine as usize][cell.note as usize - 1] as i32 };
             if !pt || cmd != 0xe || cell.arg & 0xf0 != 0xd0 {
                 if c.wave_ctl & 4 == 0 {
                     c.vib_pos = 0;
@@ -661,6 +680,7 @@ impl MultiMod {
         } else if arg > 0 {
             if arg >= 32 {
                 self.bpm = arg as u32;
+                self.bpm_set = true;
             } else {
                 self.speed = arg;
                 self.counter = 0;

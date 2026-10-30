@@ -541,7 +541,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         m.bus.w32(tab + T_ZERO_CHANNEL + 4 * k, 0x0010_0010);
     }
     let mut f = File { d, pos: 0 };
-    let ok = load(&mut f, m, tab);
+    let mut cost = Cost::default();
+    let ok = load(&mut f, m, tab, &mut cost);
     for a in [rbuf, fh, lock] {
         m.heap.free(a);
     }
@@ -609,7 +610,17 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         title: String::new(),
     };
     let mut hw = Hw { bus: &mut m.bus };
-    ml.init_sound(&mut hw, 0);
+    // the original's loading and init take a time that follows the module: the
+    // timer starts then (4 voices), or the first write is made (8 voices, at the
+    // engine's start phase after it; InitSound's first writes)
+    let at = cost.clocks();
+    if hw.bus.r8(hw.bus.r32(tab + T_TUNES) + TU_PLAY_MODE) != 0 {
+        hw.wait((at + crate::engine::START_PHASE).saturating_sub(hw.bus.clock));
+        ml.init_sound(&mut hw, 0);
+    } else {
+        ml.init_sound(&mut hw, 0);
+        hw.wait(at.saturating_sub(hw.bus.clock));
+    }
     ml.start_int(&mut hw);
     Some(Box::new(ml))
 }
@@ -640,7 +651,7 @@ impl File<'_> {
 }
 
 /// The original's loader: the number of tunes, or None where it fails.
-fn load(f: &mut File, m: &mut Machine, tab: u32) -> Option<u16> {
+fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16> {
     let zero = tab + T_ZERO;
     // MLEDMODL, the MODL chunk (or none), VERS
     f.pos = 8;
@@ -712,6 +723,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32) -> Option<u16> {
                 if p == 0 {
                     return None;
                 }
+                cost.part_bytes += len as u64;
                 let start = f.pos;
                 if !f.skip(len as usize) || len < 2 {
                     return None;
@@ -725,6 +737,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32) -> Option<u16> {
                     if flag & 0x80 != 0 {
                         break;
                     }
+                    cost.part_lines += 1;
                     let mut fl = flag;
                     for j in 0..6 {
                         if fl & 1 != 0 {
@@ -773,6 +786,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32) -> Option<u16> {
                 let cmd = f.d[f.pos + 4];
                 f.pos += 6;
                 let extra = if orig == 0x100 { 0xf0 } else { 0 };
+                cost.waves += (orig == 0x100) as u64;
                 let s = m.alloc((orig + extra).wrapping_add(0x32));
                 if s == 0 {
                     return None;
@@ -790,7 +804,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32) -> Option<u16> {
                     let start = f.pos;
                     let n = (crunched as usize).min(f.d.len() - start);
                     f.pos += n;
-                    decrunch(&f.d[start..start + n], cmd, m, s + 0x32);
+                    decrunch(&f.d[start..start + n], cmd, m, s + 0x32, cost);
                     if tmp != 0 {
                         m.heap.free(tmp);
                     }
@@ -838,9 +852,40 @@ fn load(f: &mut File, m: &mut Machine, tab: u32) -> Option<u16> {
     Some(tunes)
 }
 
+/// What the original's loading took, counted while the port loads the module (see
+/// `Cost::clocks`).
+#[derive(Default)]
+struct Cost {
+    /// Bytes of crunched samples that are copied as they are.
+    literals: u64,
+    /// 4-bit deltas decrunched.
+    deltas: u64,
+    /// Rows of the PART chunks, and their bytes.
+    part_lines: u64,
+    part_bytes: u64,
+    /// 256-byte waveform samples.
+    waves: u64,
+}
+
+impl Cost {
+    /// Colour clocks from the start to the original's timer start (4 voices) or to
+    /// its first write (8 voices, less 100): its InitPlayer's loading and the rest of
+    /// its init. A least-squares fit on 74 tunes (the 20 of the refcmp corpus and 54
+    /// more; median error 5600 colour clocks, at most 5% of the time).
+    fn clocks(&self) -> u64 {
+        let t = 241_137.0
+            + 33.236 * self.literals as f64
+            + 38.844 * self.deltas as f64
+            + 106.893 * self.part_lines as f64
+            + 11.198 * self.part_bytes as f64
+            + 6_981.3 * self.waves as f64;
+        t.max(0.0) as u64
+    }
+}
+
 /// The delta decruncher: a byte, or the command, a start byte and a 16-bit
 /// count of 4-bit deltas.
-fn decrunch(c: &[u8], cmd: u8, m: &mut Machine, mut to: u32) {
+fn decrunch(c: &[u8], cmd: u8, m: &mut Machine, mut to: u32, cost: &mut Cost) {
     let mut i = 0;
     let mut next = || {
         let b = c.get(i).copied();
@@ -850,12 +895,14 @@ fn decrunch(c: &[u8], cmd: u8, m: &mut Machine, mut to: u32) {
     let ext = |n: u8| if n & 8 != 0 { n | 0xf0 } else { n };
     while let Some(b) = next() {
         if b != cmd {
+            cost.literals += 1;
             m.bus.w8(to, b);
             to += 1;
             continue;
         }
         let (Some(mut s), Some(hi), Some(lo)) = (next(), next(), next()) else { return };
         let mut n = (hi as u16) << 8 | lo as u16;
+        cost.deltas += n as u64;
         m.bus.w8(to, s);
         to += 1;
         while n != 0 {

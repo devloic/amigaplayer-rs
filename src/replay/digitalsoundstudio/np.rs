@@ -117,6 +117,7 @@ impl Np {
     /// Does the player's start-up: the four volumes cleared twice, after the
     /// loops over the positions and the samples that precede them.
     pub fn new(d: &[u8], base: u32, mem: u32, bus: &mut Bus) -> Np {
+        let run = bus.clock;
         let n = u16::from_be_bytes([d[0x59c], d[0x59d]]) as u64;
         let (mut max, mut raised) = (0u8, 0u64);
         for k in 0..n as usize {
@@ -153,7 +154,8 @@ impl Np {
         // the ticks come the start's own time after the run's, which the empty
         // header's start (3249) does not have: every write of a tick is that
         // much later than the tick, in the logs of every module
-        let anchor = hw.bus.clock as i64 - (t0 as i64 - 3249);
+        // (the run starts START_PHASE into a frame)
+        let anchor = (hw.bus.clock - run + crate::engine::START_PHASE) as i64 - (t0 as i64 - 3249);
         Np {
             base,
             mem,

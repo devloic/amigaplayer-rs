@@ -392,8 +392,9 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
             f.seek(start + flex_pos as usize);
             let mut idb = [0u8; 4];
             let num_read = f.read(&mut idb);
-            // libxmp seeks back to start + pos, pos being absolute already
-            f.seek(start + pos);
+            // libxmp seeks back to start + pos, pos being absolute already, which
+            // only works for a module at the start of the file (not in a UMX)
+            f.seek(pos);
             if num_read == 4 && &idb == b"FLEX" {
                 tracker_id = TRACKER_FLEXTRAX;
                 needs_timing_detection = false;

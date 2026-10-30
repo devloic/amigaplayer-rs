@@ -504,6 +504,7 @@ pub fn run(
     genies: Option<PathBuf>,
     use_genies: &[String],
     files: Vec<PathBuf>,
+    settings: crate::engine::Settings,
 ) -> Result<()> {
     // Our own application name, so the sound server keeps a volume/mute
     // setting for us instead of sharing the generic "SDL Application" one.
@@ -520,6 +521,7 @@ pub fn run(
     let audio = sdl.audio().map_err(|e| anyhow!("SDL audio: {e}"))?;
 
     let mut engine = Engine::new(SAMPLE_RATE as f64);
+    engine.settings = settings;
     let players_loaded = match &players {
         Some(dir) => engine.load_players(dir),
         None => 0,

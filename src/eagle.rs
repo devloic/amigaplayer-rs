@@ -295,7 +295,9 @@ fn module_change(m: &mut Machine) {
     let (mode, arg5) = (m.bus.r32(g + epg::ARG4), m.bus.r32(g + epg::ARG5));
     log::debug!("ENPP_ModuleChange: {start:#x} {len} table {table:#x} mode {mode} arg5 {arg5:#x} n {}", m.bus.r32(g + epg::ARGN));
     if mode != 1 || arg5 != 0xFFFF_FFFE {
-        // only the search mode of the Wanted Team players is known
+        // only the search mode of the Wanted Team players is known; the others
+        // leave the code unpatched
+        log::warn!("ENPP_ModuleChange: mode {mode} arg5 {arg5:#x} not handled, code left unpatched");
         m.set_d0(0);
         return;
     }

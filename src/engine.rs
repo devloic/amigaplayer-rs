@@ -174,6 +174,8 @@ pub struct Engine {
     /// The LED filter's state at the first sample, and each change after it
     /// (rendered frame, new state), for the first few changes.
     pub led_log: Vec<(u64, bool)>,
+    /// Every change, also those past `led_log`'s.
+    led_changes: u64,
     led_seen: Option<bool>,
 }
 
@@ -181,7 +183,7 @@ pub struct Engine {
 /// that does not race Paula; those that do (DMA off and on within a few colour clocks, as
 /// Quadra Composer's) come out differently for each, and this one agrees with the originals
 /// for most of the corpus's such files (found by trying phases against refcmp).
-const START_PHASE: u64 = 100;
+pub const START_PHASE: u64 = 100;
 
 impl Engine {
     pub fn new(rate: f64) -> Self {
@@ -214,6 +216,7 @@ impl Engine {
             intena_seen: 0,
             heard: false,
             led_log: Vec::new(),
+            led_changes: 0,
             led_seen: None,
         }
     }
@@ -484,6 +487,8 @@ impl Engine {
         self.m.os.int_servers = Default::default();
         self.m.os.icr_vectors = [[0; 5]; 2];
         self.m.bus.ciab = Default::default();
+        // the LED (CIA-A PRA bit 1) as at reset, not as the last module left it
+        self.m.bus.ciaa.pra = crate::cia::Cia::default().pra;
     }
 
     /// Loads and starts playing a module file.
@@ -507,6 +512,7 @@ impl Engine {
         self.m.bus.paula.samples.clear();
         self.heard = false;
         self.led_log.clear();
+        self.led_changes = 0;
         self.led_seen = None;
     }
 
@@ -1272,7 +1278,7 @@ impl Engine {
                 "led-switched: yes at {:.2}s ({}, {} change(s); led {} at start)",
                 t(*f),
                 if *s { "on" } else { "off" },
-                self.led_log.len() - 1,
+                self.led_changes,
                 if *s0 { "on" } else { "off" }
             ),
         }
@@ -1295,8 +1301,13 @@ impl Engine {
                 continue;
             }
             let led_now = self.m.bus.led();
-            if self.led_seen != Some(led_now) && self.led_log.len() < 16 {
-                self.led_log.push((self.playing.as_ref().map_or(0, |p| p.frames), led_now));
+            if self.led_seen != Some(led_now) {
+                if self.led_seen.is_some() {
+                    self.led_changes += 1;
+                }
+                if self.led_log.len() < 16 {
+                    self.led_log.push((self.playing.as_ref().map_or(0, |p| p.frames), led_now));
+                }
             }
             self.led_seen = Some(led_now);
             let led_on = self.settings.led_force || led_now;
@@ -1320,11 +1331,11 @@ impl Engine {
                 self.heard |= nl != 0.0 || nr != 0.0;
                 let mut vl = nl * (0.5 + sep * 0.5) + nr * (0.5 - sep * 0.5);
                 let mut vr = nr * (0.5 + sep * 0.5) + nl * (0.5 - sep * 0.5);
-                if self.settings.filter_model.map_or(self.settings.a500_filter, |f| f == Filter::A500) {
+                if filter == Filter::A500 {
                     vl = self.a500.run(0, vl);
                     vr = self.a500.run(1, vr);
                 }
-                if self.settings.led_filter && self.settings.filter_model != Some(Filter::None) && led_on {
+                if self.settings.led_filter && filter != Filter::None && led_on {
                     vl = self.led.run(0, vl);
                     vr = self.led.run(1, vr);
                 }

@@ -280,7 +280,7 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
     let mut name = [0u8; 64];
     if a > 32 {
         f.read(&mut name[..32]);
-        f.seek(a - 32);
+        f.skip(a - 32);
     } else {
         f.read(&mut name[..a]);
     }

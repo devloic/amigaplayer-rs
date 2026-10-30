@@ -3,6 +3,7 @@ mod ui;
 use amigaplayer_rs::paulaout::Filter;
 use amigaplayer_rs::xmp::mixer::Interp;
 use amigaplayer_rs::{default_eagleplayers_dir, default_genies_dir, default_players_dir, engine, SAMPLE_RATE};
+use amigaplayer_rs::engine::Settings;
 
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -143,6 +144,22 @@ fn write_wav(path: &Path, rate: u32, frames: &[f32]) -> Result<()> {
     Ok(())
 }
 
+/// The output options of the command line, for the window and `--wav` alike.
+fn apply_settings(args: &Args, s: &mut Settings) {
+    s.led_filter = args.led;
+    s.led_force = args.led_force;
+    s.filter_model = args.filter;
+    s.mono = args.mono;
+    s.interp = args.interp;
+    s.xmp_filter = args.xmp_filter;
+    if let Some(v) = args.volume {
+        s.volume = v;
+    }
+    if let Some(v) = args.separation {
+        s.separation = v;
+    }
+}
+
 fn render_wav(args: &Args) -> Result<()> {
     let wav = args.wav.as_ref().unwrap();
     let Some(file) = args.files.first() else { bail!("--wav needs a module file") };
@@ -164,15 +181,7 @@ fn render_wav(args: &Args) -> Result<()> {
     }
     e.only_player = args.only_player.clone();
     e.open_replayers = args.open_replayers;
-    e.settings.led_filter = args.led;
-    e.settings.led_force = args.led_force;
-    e.settings.filter_model = args.filter;
-    e.settings.mono = args.mono;
-    e.settings.interp = args.interp;
-    e.settings.xmp_filter = args.xmp_filter;
-    if let Some(v) = args.volume {
-        e.settings.volume = v;
-    }
+    apply_settings(args, &mut e.settings);
     if std::env::var_os("DELI_UADE").is_some() {
         e.set_uade_compat();
     }
@@ -264,6 +273,11 @@ fn main() {
             args.genies.clone().or_else(default_genies_dir),
             &args.use_genies,
             args.files.clone(),
+            {
+                let mut s = Settings::default();
+                apply_settings(&args, &mut s);
+                s
+            },
         )
     };
     if let Err(e) = r {

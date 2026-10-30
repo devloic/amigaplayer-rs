@@ -148,6 +148,10 @@ struct Globals {
     songend: bool,
     /// The last register write of this tick, for `gap`.
     last: Option<Write>,
+    /// The voice playing.
+    cur: usize,
+    /// The voice starts a note in this pass (its writes take longer than a running voice's).
+    ev: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -171,15 +175,18 @@ impl Globals {
         let clocks = match (self.last, next) {
             (None, _) => 0,
             (Some(Vol), Len | DmaOn) => 232,
-            (Some(Vol), DmaOff) => 243,
+            (Some(Vol), DmaOff) => 322,
+            (Some(Vol), Loc) if self.ev => 487,
             (Some(Vol), Loc) => 271,
             (Some(Vol), Per) => 500,
             (Some(Len), Loc) => 115,
-            (Some(Len), Per) => 410,
+            (Some(Len), Per) if self.cur == 0 => 448,
+            (Some(Len), Per) => 620,
             (Some(Loc), Len) => 101,
             (Some(Loc), Loc) => 212,
             (Some(Loc), Per) => 478,
-            (Some(DmaOff), Loc) => 426,
+            (Some(DmaOff), Loc) if self.cur == 0 => 516,
+            (Some(DmaOff), Loc) => 257,
             (Some(Per), Vol) => 127,
             _ => 250,
         };
@@ -237,6 +244,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         dma: d[g],
         songend: false,
         last: None,
+        cur: 0,
+        ev: false,
     };
     let voices = std::array::from_fn(|i| {
         // what the original's InitSound leaves as the editor saved it
@@ -333,6 +342,8 @@ impl Voice {
         let r8 = |hw: &Hw, a: u32| hw.bus.r8(a);
         let r16 = |hw: &Hw, a: u32| hw.bus.r16(a);
         let mut ins = self.instrument;
+        g.cur = i;
+        g.ev = false;
 
         if self.loop_pending {
             self.loop_pending = false;
@@ -358,6 +369,7 @@ impl Voice {
             let row = self.block + self.block_position as u32;
             let note = r8(hw, row);
             if note != 0 {
+                g.ev = true;
                 g.gap(hw, Write::DmaOff);
                 hw.dmacon(1 << i);
                 self.note = note;

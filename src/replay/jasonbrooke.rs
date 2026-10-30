@@ -31,7 +31,7 @@
 //! song-end test reads a byte 0x32 into each record, which in the B-28 layout is the
 //! next record's.
 
-use super::{be16, be32, Hw, Open, Replayer};
+use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
 use crate::machine::Machine;
 use m68k::AddressBus;
 
@@ -1020,6 +1020,39 @@ impl BuildB {
 /// in the reference runs).
 const TIMER_DELAY: u64 = 188;
 
+/// Where the writes of a tick of build B fall in the original's run, by the previous write (see
+/// `WriteGaps`): the voices' work between two writes.
+static JCBB_GAPS: WriteGaps = WriteGaps::new(
+    &[
+        (0, 20, 90), // LOC0 -> DMA_ON x674
+        (1, 20, 106), // LOC1 -> DMA_ON x514
+        (2, 20, 121), // LOC2 -> DMA_ON x756
+        (3, 20, 125), // LOC3 -> DMA_ON x959
+        (4, 0, 55), // LEN0 -> LOC0 x674
+        (5, 1, 70), // LEN1 -> LOC1 x514
+        (6, 2, 86), // LEN2 -> LOC2 x756
+        (7, 3, 90), // LEN3 -> LOC3 x959
+        (8, 5, 283), // PER0 -> LEN1 x514
+        (8, 13, 422), // PER0 -> VOL1 x3462
+        (9, 6, 298), // PER1 -> LEN2 x756
+        (9, 14, 441), // PER1 -> VOL2 x3220
+        (10, 7, 314), // PER2 -> LEN3 x959
+        (10, 15, 470), // PER2 -> VOL3 x3017
+        (11, 16, 422), // PER3 -> DMA_OFF x605
+        (12, 8, 288), // VOL0 -> PER0 x3976
+        (13, 9, 332), // VOL1 -> PER1 x3976
+        (14, 10, 305), // VOL2 -> PER2 x3976
+        (15, 11, 323), // VOL3 -> PER3 x3976
+        (16, 16, 266), // DMA_OFF -> DMA_OFF x832
+        (20, 12, 196), // DMA_ON -> VOL0 x674
+        (20, 13, 204), // DMA_ON -> VOL1 x514
+        (20, 14, 208), // DMA_ON -> VOL2 x756
+        (20, 15, 221), // DMA_ON -> VOL3 x959
+    ],
+    &[(0, 55), (1, 70), (2, 86), (3, 90), (5, 283), (6, 298), (7, 314), (8, 288), (9, 332), (10, 305), (11, 323), (12, 196), (13, 422), (14, 441), (15, 470), (16, 332), (20, 111)],
+    &[(4, 512), (12, 643)],
+);
+
 impl Replayer for BuildB {
     fn format(&self) -> &'static str {
         "Jason Brooke"
@@ -1060,6 +1093,7 @@ impl Replayer for BuildB {
             self.songend = false;
             self.start(self.sub as usize, hw);
         }
+        hw.gaps(&JCBB_GAPS);
         self.tick_b(hw);
     }
 }

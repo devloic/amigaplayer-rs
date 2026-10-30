@@ -18,7 +18,7 @@
 //! the routine are a table (`davelowe_tables.rs`) and a few special cases.
 
 use super::davelowe_tables::{PATCHES, ROWS};
-use super::{be16, be32, Hw, Open, Replayer};
+use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
 use crate::machine::Machine;
 
 pub const OPEN_DL: Open = Open { name: "Dave Lowe", detect: detect_dl, new: new_dl };
@@ -601,11 +601,14 @@ impl DaveLowe {
         }
     }
 
-    fn lc(&mut self, vi: usize, a: u32, len: u16, hw: &mut Hw) {
+    fn lc(&mut self, vi: usize, a: u32, len: u16, note: bool, hw: &mut Hw) {
         if self.muted(vi) {
             return;
         }
         hw.loc(self.v[vi].ch, self.mem.wrapping_add(a));
+        if note && self.cfg.kind == Kind::Dl {
+            hw.wait(NOTE_LEN[self.v[vi].ch & 3]);
+        }
         hw.len(self.v[vi].ch, len);
     }
 
@@ -707,7 +710,7 @@ impl DaveLowe {
             } else {
                 if self.v[vi].smode == 3 {
                     let (a, l) = self.v[vi].lp;
-                    self.lc(vi, a, l, hw);
+                    self.lc(vi, a, l, false, hw);
                     self.v[vi].smode = 1;
                 }
                 self.v[vi].left -= 1;
@@ -808,7 +811,7 @@ impl DaveLowe {
                     let len = be16(&r, 6);
                     if ty == 0 {
                         self.v[vi].smode = 0;
-                        self.lc(vi, start, len, hw);
+                        self.lc(vi, start, len, false, hw);
                     } else {
                         let lp = (be32(&r, 8), be16(&r, 12));
                         let v = &mut self.v[vi];
@@ -929,7 +932,7 @@ impl DaveLowe {
         if v.smode != 0 {
             v.smode = 3;
             let (a, l) = v.att;
-            self.lc(vi, a, l, hw);
+            self.lc(vi, a, l, true, hw);
         }
         if !self.cfg.dma_tick {
             self.dma(vi, true, hw);
@@ -963,6 +966,162 @@ impl DaveLowe {
 /// in the reference runs).
 const TIMER_DELAY: u64 = 565;
 
+/// Where the writes of a tick fall in the original's run (Line of Fire), by the previous write: a
+/// voice's work between two writes takes this long. The tick's first write sits at its start plus
+/// the `start` gap (shifted by 141 colour clocks, which `timer_delay` takes off again).
+static DL_GAPS: WriteGaps = WriteGaps::new(
+    &[
+        (0, 4, 10), // LOC0 -> LEN0 x87
+        (1, 5, 10), // LOC1 -> LEN1 x73
+        (2, 6, 10), // LOC2 -> LEN2 x135
+        (3, 7, 10), // LOC3 -> LEN3 x23
+        (4, 12, 257), // LEN0 -> VOL0 x43
+        (4, 20, 83), // LEN0 -> DMA_ON x44
+        (5, 13, 270), // LEN1 -> VOL1 x36
+        (5, 20, 98), // LEN1 -> DMA_ON x37
+        (6, 14, 269), // LEN2 -> VOL2 x67
+        (6, 20, 113), // LEN2 -> DMA_ON x68
+        (7, 15, 307), // LEN3 -> VOL3 x11
+        (7, 20, 118), // LEN3 -> DMA_ON x12
+        (8, 0, 185), // PER0 -> LOC0 x44
+        (9, 1, 200), // PER1 -> LOC1 x37
+        (10, 2, 215), // PER2 -> LOC2 x68
+        (11, 3, 228), // PER3 -> LOC3 x12
+        (11, 15, 317), // PER3 -> VOL3 x183
+        (12, 1, 235), // VOL0 -> LOC1 x36
+        (12, 9, 247), // VOL0 -> PER1 x37
+        (12, 12, 193), // VOL0 -> VOL0 x4
+        (12, 13, 475), // VOL0 -> VOL1 x374
+        (12, 16, 231), // VOL0 -> DMA_OFF x50
+        (13, 2, 250), // VOL1 -> LOC2 x67
+        (13, 10, 263), // VOL1 -> PER2 x68
+        (13, 13, 201), // VOL1 -> VOL1 x13
+        (13, 14, 494), // VOL1 -> VOL2 x295
+        (13, 16, 246), // VOL1 -> DMA_OFF x67
+        (14, 3, 265), // VOL2 -> LOC3 x11
+        (14, 11, 414), // VOL2 -> PER3 x191
+        (14, 15, 559), // VOL2 -> VOL3 x284
+        (14, 16, 262), // VOL2 -> DMA_OFF x11
+        (16, 11, 177), // DMA_OFF -> PER3 x4
+        (16, 12, 249), // DMA_OFF -> VOL0 x48
+        (16, 13, 257), // DMA_OFF -> VOL1 x50
+        (16, 14, 261), // DMA_OFF -> VOL2 x67
+        (16, 15, 311), // DMA_OFF -> VOL3 x7
+        (20, 12, 188), // DMA_ON -> VOL0 x44
+        (20, 13, 201), // DMA_ON -> VOL1 x37
+        (20, 14, 205), // DMA_ON -> VOL2 x68
+        (20, 15, 214), // DMA_ON -> VOL3 x12
+    ],
+    &[(0, 185), (1, 200), (2, 216), (3, 228), (4, 10), (5, 10), (6, 10), (7, 10), (9, 247), (10, 263), (11, 414), (12, 249), (13, 475), (14, 494), (15, 523), (16, 246), (20, 98)],
+    &[(0, 4), (8, 179), (12, 236), (16, 0)],
+);
+
+/// The same for the Beneath a Steel Sky, King's Quest 6 and Midwinter-style songs (layout A), whose
+/// player works differently from Line of Fire's.
+static DLNA_GAPS: WriteGaps = WriteGaps::new(
+    &[
+        (0, 4, 10), // LOC0 -> LEN0 x84
+        (1, 5, 10), // LOC1 -> LEN1 x116
+        (2, 6, 10), // LOC2 -> LEN2 x137
+        (3, 7, 10), // LOC3 -> LEN3 x34
+        (4, 12, 220), // LEN0 -> VOL0 x42
+        (4, 20, 147), // LEN0 -> DMA_ON x42
+        (5, 13, 229), // LEN1 -> VOL1 x58
+        (5, 20, 178), // LEN1 -> DMA_ON x58
+        (6, 14, 257), // LEN2 -> VOL2 x67
+        (6, 20, 209), // LEN2 -> DMA_ON x70
+        (7, 15, 246), // LEN3 -> VOL3 x17
+        (7, 20, 217), // LEN3 -> DMA_ON x17
+        (8, 0, 147), // PER0 -> LOC0 x42
+        (9, 1, 162), // PER1 -> LOC1 x58
+        (9, 13, 233), // PER1 -> VOL1 x425
+        (10, 2, 185), // PER2 -> LOC2 x70
+        (10, 14, 252), // PER2 -> VOL2 x126
+        (11, 3, 182), // PER3 -> LOC3 x17
+        (11, 15, 270), // PER3 -> VOL3 x75
+        (12, 1, 258), // VOL0 -> LOC1 x58
+        (12, 9, 396), // VOL0 -> PER1 x469
+        (12, 13, 462), // VOL0 -> VOL1 x2396
+        (12, 16, 254), // VOL0 -> DMA_OFF x59
+        (13, 2, 273), // VOL1 -> LOC2 x67
+        (13, 10, 411), // VOL1 -> PER2 x184
+        (13, 13, 152), // VOL1 -> VOL1 x5
+        (13, 14, 480), // VOL1 -> VOL2 x2660
+        (13, 16, 269), // VOL1 -> DMA_OFF x71
+        (14, 3, 289), // VOL2 -> LOC3 x17
+        (14, 11, 427), // VOL2 -> PER3 x91
+        (14, 14, 155), // VOL2 -> VOL2 x3
+        (14, 15, 510), // VOL2 -> VOL3 x2850
+        (14, 16, 285), // VOL2 -> DMA_OFF x24
+        (15, 15, 169), // VOL3 -> VOL3 x7
+        (16, 9, 155), // DMA_OFF -> PER1 x14
+        (16, 10, 163), // DMA_OFF -> PER2 x12
+        (16, 11, 155), // DMA_OFF -> PER3 x1
+        (16, 12, 212), // DMA_OFF -> VOL0 x42
+        (16, 13, 221), // DMA_OFF -> VOL1 x45
+        (16, 14, 225), // DMA_OFF -> VOL2 x59
+        (16, 15, 238), // DMA_OFF -> VOL3 x23
+        (20, 12, 152), // DMA_ON -> VOL0 x42
+        (20, 13, 161), // DMA_ON -> VOL1 x58
+        (20, 14, 164), // DMA_ON -> VOL2 x70
+        (20, 15, 177), // DMA_ON -> VOL3 x17
+    ],
+    &[(0, 147), (1, 214), (2, 186), (3, 239), (4, 10), (5, 10), (6, 10), (7, 10), (9, 396), (10, 411), (11, 427), (12, 212), (13, 462), (14, 480), (15, 510), (16, 269), (20, 178)],
+    &[(0, 505), (8, 507), (12, 700), (16, 501)],
+);
+
+/// And for the Super Street Fighter 2 songs (layout B); the model's start gaps need the timer 23
+/// colour clocks earlier.
+static DLNB_GAPS: WriteGaps = WriteGaps::new(
+    &[
+        (0, 4, 10), // LOC0 -> LEN0 x369
+        (1, 5, 10), // LOC1 -> LEN1 x206
+        (2, 6, 10), // LOC2 -> LEN2 x472
+        (3, 7, 10), // LOC3 -> LEN3 x441
+        (4, 12, 220), // LEN0 -> VOL0 x184
+        (4, 20, 147), // LEN0 -> DMA_ON x185
+        (5, 13, 254), // LEN1 -> VOL1 x95
+        (5, 20, 178), // LEN1 -> DMA_ON x111
+        (6, 14, 232), // LEN2 -> VOL2 x235
+        (6, 20, 209), // LEN2 -> DMA_ON x237
+        (7, 15, 246), // LEN3 -> VOL3 x219
+        (7, 20, 217), // LEN3 -> DMA_ON x222
+        (8, 0, 147), // PER0 -> LOC0 x185
+        (9, 1, 170), // PER1 -> LOC1 x111
+        (9, 13, 234), // PER1 -> VOL1 x294
+        (10, 2, 178), // PER2 -> LOC2 x237
+        (11, 3, 182), // PER3 -> LOC3 x222
+        (11, 15, 270), // PER3 -> VOL3 x127
+        (12, 1, 287), // VOL0 -> LOC1 x95
+        (12, 9, 425), // VOL0 -> PER1 x385
+        (12, 13, 515), // VOL0 -> VOL1 x1044
+        (12, 16, 283), // VOL0 -> DMA_OFF x107
+        (13, 2, 303), // VOL1 -> LOC2 x235
+        (13, 10, 540), // VOL1 -> PER2 x237
+        (13, 14, 510), // VOL1 -> VOL2 x917
+        (13, 16, 299), // VOL1 -> DMA_OFF x242
+        (14, 3, 318), // VOL2 -> LOC3 x219
+        (14, 11, 321), // VOL2 -> PER3 x344
+        (14, 14, 155), // VOL2 -> VOL2 x3
+        (14, 15, 539), // VOL2 -> VOL3 x845
+        (14, 16, 314), // VOL2 -> DMA_OFF x223
+        (16, 20, 10), // DMA_OFF -> DMA_ON x760
+        (20, 9, 164), // DMA_ON -> PER1 x20
+        (20, 11, 155), // DMA_ON -> PER3 x5
+        (20, 12, 212), // DMA_ON -> VOL0 x373
+        (20, 13, 160), // DMA_ON -> VOL1 x198
+        (20, 14, 215), // DMA_ON -> VOL2 x479
+        (20, 15, 178), // DMA_ON -> VOL3 x440
+        (20, 20, 10), // DMA_ON -> DMA_ON x755
+    ],
+    &[(0, 147), (1, 170), (2, 178), (3, 190), (4, 10), (5, 10), (6, 10), (7, 10), (9, 425), (10, 540), (11, 321), (12, 212), (13, 491), (14, 510), (15, 539), (16, 299), (20, 10)],
+    &[(0, 4), (8, 6), (12, 198), (16, 0)],
+);
+
+/// A note's length write follows its address later than a loop update's does: colour clocks more,
+/// by channel.
+const NOTE_LEN: [u64; 4] = [52, 68, 83, 87];
+
 impl Replayer for DaveLowe {
     fn format(&self) -> &'static str {
         match self.cfg.kind {
@@ -976,7 +1135,13 @@ impl Replayer for DaveLowe {
     }
 
     fn timer_delay(&self) -> u64 {
+        // the write-spacing models' start gaps are shifted so that none is negative
         TIMER_DELAY
+            - match self.cfg.kind {
+                Kind::Dl => 141,
+                Kind::DlnB => 23,
+                _ => 0,
+            }
     }
 
     fn songend(&self) -> bool {
@@ -1009,6 +1174,12 @@ impl Replayer for DaveLowe {
                 self.fade_r -= 1;
                 self.fade_wait = 19;
             }
+        }
+        match self.cfg.kind {
+            Kind::Dl => hw.gaps(&DL_GAPS),
+            Kind::DlnA => hw.gaps(&DLNA_GAPS),
+            Kind::DlnB => hw.gaps(&DLNB_GAPS),
+            Kind::Older => {}
         }
         let first = self.tickno == 1;
         for vi in 0..3 {

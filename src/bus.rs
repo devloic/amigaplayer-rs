@@ -42,6 +42,8 @@ pub struct Bus {
     /// The Eagleplayer amplifier, while a player's voices are mixed (it plays
     /// on channels 0 and 1).
     pub amp: Option<Box<crate::amplifier::Amplifier>>,
+    /// The write-spacing model of the open replayer running a tick (`replay::WriteGaps`).
+    pub gaps: Option<crate::replay::WriteGaps>,
 }
 
 impl Bus {
@@ -58,6 +60,7 @@ impl Bus {
             log_unmapped: false,
             write_log: None,
             amp: None,
+            gaps: None,
         }
     }
 

@@ -20,7 +20,7 @@
 //! re-written every tick. There is no song end: the lists loop for ever.
 
 use super::beathoven_tables::{Row, ROWS};
-use super::{be16, be32, Hw, Open, Replayer};
+use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
 use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "Beathoven Synthesizer", detect, new };
@@ -207,8 +207,40 @@ impl Beathoven {
                     ..Default::default()
                 };
             }
-            for c in 0..4 {
-                hw.vol(c, 0);
+            if row.eng == 1 {
+                // the original's InitSound: the volumes off twice, every voice on the silent word
+                // with a length and period of 1, the volumes off again; then the DMA (the waits
+                // are measured in the reference runs)
+                for (c, w) in [0u64, 154, 166, 178].into_iter().enumerate() {
+                    hw.wait(w);
+                    hw.vol(c, 0);
+                }
+                hw.wait(266);
+                for (c, w) in [0u64, 154, 166, 178].into_iter().enumerate() {
+                    hw.wait(w);
+                    hw.vol(c, 0);
+                }
+                hw.wait(609);
+                for c in 0..4 {
+                    hw.loc(c, self.silent());
+                    hw.wait(8);
+                }
+                hw.wait(6);
+                for c in 0..4 {
+                    hw.len(c, 1);
+                    hw.per(c, 1);
+                    hw.wait(8);
+                }
+                hw.wait(241);
+                for (c, w) in [0u64, 129, 129, 120].into_iter().enumerate() {
+                    hw.wait(w);
+                    hw.vol(c, 0);
+                }
+                hw.wait(48);
+            } else {
+                for c in 0..4 {
+                    hw.vol(c, 0);
+                }
             }
             if row.init_dma {
                 hw.dmacon(if row.eng == 3 && row.voices == 3 { 0x8007 } else { 0x800F });
@@ -394,7 +426,12 @@ impl Beathoven {
         let on = if simple { v.cur & 0xFF != 0 || v.flags & (P | H) == 0 } else { d2 || v.flags & (P | H) == 0 };
         if on {
             // the routine's wait before the DMA is switched on (measured: about 1900 colour clocks)
-            hw.wait(if simple { 1500 } else { 1900 });
+            if simple {
+                hw.wait(1500);
+            } else {
+                // the original waits for the beam: ten line changes, then 64 colour clocks in
+                hw.wait_lines(10, 64);
+            }
             hw.dmacon(0x8000 | bit);
         }
         self.v[ch] = v;
@@ -549,6 +586,9 @@ impl Replayer for Beathoven {
 
     fn tick(&mut self, hw: &mut Hw) {
         let row = self.row();
+        if row.eng == 1 {
+            hw.gaps(&GAPS);
+        }
         if !self.started {
             self.start(hw);
             if row.eng != 0 {
@@ -603,6 +643,56 @@ const INIT_FIRST_WRITE: u64 = 1444;
 const INIT_END: u64 = 8092;
 /// Colour clocks from the song's start to the host's timer start, beyond the first period.
 const TIMER_DELAY: u64 = 195;
+
+/// Where the writes of a pass over the voices fall (engines 109 and NEW), measured in the reference
+/// runs, by the previous write: the period to the DMA enable is not here, the routine waits for the
+/// beam there (see `voice`).
+static GAPS: WriteGaps = WriteGaps::new(
+    &[
+        (0, 4, 8), // LOC0 -> LEN0 x3962
+        (0, 16, 116), // LOC0 -> DMA_OFF x148
+        (1, 5, 8), // LOC1 -> LEN1 x3789
+        (1, 16, 116), // LOC1 -> DMA_OFF x36
+        (2, 6, 8), // LOC2 -> LEN2 x3980
+        (2, 16, 116), // LOC2 -> DMA_OFF x177
+        (3, 7, 8), // LOC3 -> LEN3 x3233
+        (3, 16, 116), // LOC3 -> DMA_OFF x21
+        (4, 0, 22), // LEN0 -> LOC0 x148
+        (4, 8, 69), // LEN0 -> PER0 x3617
+        (4, 16, 87), // LEN0 -> DMA_OFF x345
+        (5, 1, 22), // LEN1 -> LOC1 x36
+        (5, 9, 69), // LEN1 -> PER1 x3626
+        (5, 16, 86), // LEN1 -> DMA_OFF x163
+        (6, 2, 22), // LEN2 -> LOC2 x177
+        (6, 10, 69), // LEN2 -> PER2 x3626
+        (6, 16, 86), // LEN2 -> DMA_OFF x354
+        (7, 3, 22), // LEN3 -> LOC3 x21
+        (7, 11, 69), // LEN3 -> PER3 x3129
+        (7, 16, 86), // LEN3 -> DMA_OFF x104
+        (8, 1, 79), // PER0 -> LOC1 x178
+        (12, 4, 178), // VOL0 -> LEN0 x148
+        (13, 5, 194), // VOL1 -> LEN1 x36
+        (14, 6, 210), // VOL2 -> LEN2 x177
+        (15, 7, 209), // VOL3 -> LEN3 x21
+        (16, 0, 169), // DMA_OFF -> LOC0 x336
+        (16, 1, 171), // DMA_OFF -> LOC1 x163
+        (16, 2, 169), // DMA_OFF -> LOC2 x354
+        (16, 3, 169), // DMA_OFF -> LOC3 x104
+        (16, 8, 204), // DMA_OFF -> PER0 x9
+        (16, 12, 170), // DMA_OFF -> VOL0 x148
+        (16, 13, 182), // DMA_OFF -> VOL1 x36
+        (16, 14, 193), // DMA_OFF -> VOL2 x177
+        (16, 15, 205), // DMA_OFF -> VOL3 x21
+        (16, 20, 68), // DMA_OFF -> DMA_ON x1
+        (20, 1, 60), // DMA_ON -> LOC1 x3448
+        (20, 2, 60), // DMA_ON -> LOC2 x3626
+        (20, 3, 68), // DMA_ON -> LOC3 x3129
+        (20, 16, 83), // DMA_ON -> DMA_OFF x1
+    ],
+    &[(0, 169), (1, 60), (2, 60), (3, 68), (4, 8), (5, 8), (6, 8), (7, 8), (8, 69), (9, 69), (10, 69), (11, 69), (12, 170), (13, 182), (14, 193), (15, 205), (16, 87)],
+    &[],
+);
+
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect(d) {

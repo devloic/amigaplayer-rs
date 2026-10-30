@@ -287,28 +287,100 @@ pub struct Hw<'a> {
     pub bus: &'a mut Bus,
 }
 
+/// Where a tick's register writes fall, measured in the original's runs: the colour clocks from
+/// the previous write of the tick (or from the tick's start) to each write, by the kind of write and
+/// the channel. A port that has such a table switches it on with `Hw::gaps` at the start of its tick;
+/// `Hw` then lets the time pass before each write.
+///
+/// A write is keyed `kind * 4 + channel` (`WriteGaps::LOC` .. `DMA_ON`; DMAON/DMAOFF use channel 0),
+/// the tick's start is `WriteGaps::START`. `pairs` holds (previous key, key, gap) for the sequences
+/// seen in the runs, `any` (key, gap) the typical gap to a key after any other write, used for a
+/// sequence the runs did not show, and `start` (key, gap) the first write of the tick.
+#[derive(Clone, Copy)]
+pub struct WriteGaps {
+    pub pairs: &'static [(u8, u8, u16)],
+    pub any: &'static [(u8, u16)],
+    pub start: &'static [(u8, u16)],
+    prev: u8,
+}
+
+impl WriteGaps {
+    pub const LOC: u8 = 0;
+    pub const LEN: u8 = 1;
+    pub const PER: u8 = 2;
+    pub const VOL: u8 = 3;
+    pub const DMA_OFF: u8 = 4;
+    pub const DMA_ON: u8 = 5;
+    pub const START: u8 = 255;
+
+    pub const fn new(pairs: &'static [(u8, u8, u16)], any: &'static [(u8, u16)], start: &'static [(u8, u16)]) -> Self {
+        WriteGaps { pairs, any, start, prev: Self::START }
+    }
+
+    pub fn key(kind: u8, ch: usize) -> u8 {
+        kind * 4 + if kind >= Self::DMA_OFF { 0 } else { ch as u8 & 3 }
+    }
+
+    /// The colour clocks before the write `key`; it becomes the previous write.
+    fn gap(&mut self, key: u8) -> u64 {
+        let prev = std::mem::replace(&mut self.prev, key);
+        if prev == Self::START {
+            return self.start.iter().find(|e| e.0 == key).map_or(0, |e| e.1 as u64);
+        }
+        if let Some(e) = self.pairs.iter().find(|e| e.0 == prev && e.1 == key) {
+            return e.2 as u64;
+        }
+        self.any.iter().find(|e| e.0 == key).map_or(0, |e| e.1 as u64)
+    }
+}
+
 impl Hw<'_> {
+    /// Switches the write-spacing model on for this tick (the previous write is the tick's start).
+    pub fn gaps(&mut self, g: &WriteGaps) {
+        let mut g = *g;
+        g.prev = WriteGaps::START;
+        self.bus.gaps = Some(g);
+    }
+    fn space(&mut self, kind: u8, ch: usize) {
+        if let Some(g) = self.bus.gaps.as_mut() {
+            let w = g.gap(WriteGaps::key(kind, ch));
+            self.bus.clock += w;
+        }
+    }
     pub fn dmacon(&mut self, v: u16) {
+        self.space(if v & 0x8000 != 0 { WriteGaps::DMA_ON } else { WriteGaps::DMA_OFF }, 0);
         self.bus.write_word(0xDFF096, v);
     }
     pub fn loc(&mut self, ch: usize, a: u32) {
+        self.space(WriteGaps::LOC, ch);
         let r = 0xDFF0A0 + 16 * ch as u32;
         self.bus.write_word(r, (a >> 16) as u16);
         self.bus.write_word(r + 2, a as u16);
     }
     pub fn len(&mut self, ch: usize, words: u16) {
+        self.space(WriteGaps::LEN, ch);
         self.bus.write_word(0xDFF0A4 + 16 * ch as u32, words);
     }
     pub fn per(&mut self, ch: usize, period: u16) {
+        self.space(WriteGaps::PER, ch);
         self.bus.write_word(0xDFF0A6 + 16 * ch as u32, period);
     }
     pub fn vol(&mut self, ch: usize, vol: u16) {
+        self.space(WriteGaps::VOL, ch);
         self.bus.write_word(0xDFF0A8 + 16 * ch as u32, vol);
     }
     /// Lets `clocks` colour clocks pass before the next write, as the original's
     /// code takes time between two (Paula runs on to the next write's moment).
     pub fn wait(&mut self, clocks: u64) {
         self.bus.clock += clocks;
+    }
+    /// Lets `n` raster line changes pass, then `phase` colour clocks of the line, as a routine that
+    /// waits for the beam does.
+    pub fn wait_lines(&mut self, n: u64, phase: u64) {
+        use crate::paula::LINE;
+        let now = self.bus.clock;
+        let boundary = (now / LINE + 1) * LINE;
+        self.bus.clock = boundary + (n - 1) * LINE + phase;
     }
 
     // The Eagleplayer amplifier's virtual voices (`start_amplifier`), poked as

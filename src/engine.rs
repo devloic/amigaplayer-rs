@@ -1134,7 +1134,10 @@ impl Engine {
     fn timer_interrupt(&mut self) {
         let Some(p) = &mut self.playing else { return };
         match &mut p.backend {
-            Backend::Replay(r) => r.tick(&mut crate::replay::Hw { bus: &mut self.m.bus }),
+            Backend::Replay(r) => {
+                r.tick(&mut crate::replay::Hw { bus: &mut self.m.bus });
+                self.m.bus.gaps = None;
+            }
             Backend::Mix(_) => {}
             Backend::Native(pt) => {
                 // its DMA waits run the clock on, as the 68k replay's loops do

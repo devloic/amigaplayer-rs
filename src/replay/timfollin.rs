@@ -768,9 +768,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     #[cfg(test)]
     STORES.lock().unwrap().clear();
-    // the original's init routine runs before the host starts its timer (measured in the reference
-    // runs: the first music tick comes about 497,800 colour clocks later than the port's would)
-    m.bus.clock += 539_000;
+    // the original's init routine runs before the host starts its timer. In the reference runs the
+    // first music tick of a header-build module (Ghouls'n'Ghosts, Sly Spy) comes 153,000 colour
+    // clocks plus 12.9 a byte of the file after the port's clock (nine files, within 2 %: the routine
+    // goes over the module), and the jump-table build's (Puzznic, one file) 155,000 after it
+    let init = if lay.subs > 1 || be16(d, 0) == 0x4EF9 { 11_200 } else { 9_350 + d.len() as u64 * 129 / 10 };
+    m.bus.clock += init;
     Some(Box::new(TimFollin {
         lay,
         gbase: base,

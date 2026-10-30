@@ -16,7 +16,7 @@
 //! table, and a pitch slide; all sound is Paula DMA, started in three steps over
 //! three ticks (stop, enable, install the loop). The tick is 50 Hz.
 
-use super::{be16, be32, Hw, Open, Replayer};
+use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
 use crate::machine::Machine;
 use m68k::AddressBus;
 
@@ -111,6 +111,8 @@ pub struct Rjp {
     flags: u8,
     flags0: u8,
     songend: bool,
+    /// The next tick is the first of the song (the original's start-up routine runs in it).
+    first: bool,
 }
 
 /// The name the sample companion has: `smp.NAME` for `rjp.NAME` (the prefix in any
@@ -184,6 +186,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         flags: 0,
         flags0: 0,
         songend: false,
+        first: false,
     };
     r.title = file;
     let mut hw = Hw { bus: &mut m.bus };
@@ -222,6 +225,7 @@ impl Rjp {
         hw.dmacon(0x000F);
         self.sub = n;
         self.songend = false;
+        self.first = true;
         // a new start finds the samples as loaded
         self.area.copy_from_slice(&self.pristine);
         hw.bus.write_bytes(self.base, &self.pristine);
@@ -522,6 +526,55 @@ impl Rjp {
     }
 }
 
+/// Where the writes of a tick fall in the original's runs, by the previous write (see `WriteGaps`):
+/// the voices' work between two writes, and the tick's first write (the first write of a tick sits at its start
+/// gap).
+static GAPS: WriteGaps = WriteGaps::new(
+    &[
+        (0, 4, 10), // LOC0 -> LEN0 x628
+        (1, 5, 10), // LOC1 -> LEN1 x494
+        (2, 6, 10), // LOC2 -> LEN2 x602
+        (3, 7, 10), // LOC3 -> LEN3 x270
+        (4, 12, 575), // LEN0 -> VOL0 x628
+        (5, 13, 583), // LEN1 -> VOL1 x494
+        (6, 14, 660), // LEN2 -> VOL2 x602
+        (7, 15, 682), // LEN3 -> VOL3 x270
+        (8, 1, 204), // PER0 -> LOC1 x249
+        (8, 13, 729), // PER0 -> VOL1 x3413
+        (8, 16, 500), // PER0 -> DMA_OFF x241
+        (8, 20, 232), // PER0 -> DMA_ON x240
+        (9, 2, 220), // PER1 -> LOC2 x302
+        (9, 14, 748), // PER1 -> VOL2 x2821
+        (9, 16, 515), // PER1 -> DMA_OFF x297
+        (9, 20, 247), // PER1 -> DMA_ON x295
+        (10, 3, 236), // PER2 -> LOC3 x135
+        (10, 15, 777), // PER2 -> VOL3 x2820
+        (10, 16, 531), // PER2 -> DMA_OFF x132
+        (10, 20, 263), // PER2 -> DMA_ON x131
+        (12, 8, 137), // VOL0 -> PER0 x4439
+        (13, 9, 152), // VOL1 -> PER1 x4173
+        (14, 10, 167), // VOL2 -> PER2 x3724
+        (15, 11, 172), // VOL3 -> PER3 x3231
+        (16, 0, 44), // DMA_OFF -> LOC0 x310
+        (16, 1, 44), // DMA_OFF -> LOC1 x243
+        (16, 2, 44), // DMA_OFF -> LOC2 x298
+        (16, 3, 44), // DMA_OFF -> LOC3 x133
+        (20, 12, 512), // DMA_ON -> VOL0 x309
+        (20, 13, 521), // DMA_ON -> VOL1 x242
+        (20, 14, 525), // DMA_ON -> VOL2 x297
+        (20, 15, 538), // DMA_ON -> VOL3 x133
+    ],
+    &[(0, 44), (1, 204), (2, 220), (3, 235), (4, 10), (5, 10), (6, 10), (7, 10), (8, 137), (9, 152), (10, 167), (11, 172), (12, 552), (13, 729), (14, 748), (15, 682), (16, 530), (20, 247)],
+    &[(0, 0), (1, 89), (2, 177), (3, 266), (12, 516), (13, 613), (14, 705), (15, 807), (16, 576), (20, 28)],
+);
+
+/// The tick's first write falls this far into it (the start gap of a stop of DMA below).
+const START_FIRST: u64 = 576;
+
+/// Colour clocks from the song's start to the host's timer start, beyond the first period: the
+/// original's init takes longer than the port's by this much, over the files at the median.
+const TIMER_DELAY: u64 = 14131;
+
 impl Replayer for Rjp {
     fn format(&self) -> &'static str {
         "Richard Joseph Player"
@@ -529,6 +582,10 @@ impl Replayer for Rjp {
 
     fn title(&self) -> String {
         self.title.clone()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
     }
 
     fn songend(&self) -> bool {
@@ -549,11 +606,26 @@ impl Replayer for Rjp {
             self.songend = true;
             return;
         }
-        hw.wait(2000);
+        if self.first {
+            // the start-up routine of the first tick: all voices off, the volumes cleared, the
+            // DMA stopped again (measured in the reference runs: the first voice's stop comes some
+            // 8,000 colour clocks into the tick, which fixes how long the channels stay in the
+            // state the data-register write leaves them in)
+            self.first = false;
+            hw.wait(START_FIRST);
+            hw.dmacon(0x000F);
+            for ch in 0..4 {
+                hw.vol(ch, 0);
+                hw.wait(6);
+            }
+            hw.wait(4648);
+            hw.dmacon(0x000F);
+            hw.wait(3351 - START_FIRST);
+        }
+        hw.gaps(&GAPS);
         for ch in 0..4 {
             if self.v[ch].active {
                 self.step(ch, hw);
-                hw.wait(1200);
             }
         }
     }
@@ -649,7 +721,7 @@ mod tests {
         assert!(dma.contains(&0x0001) && dma.contains(&0x8201));
         let lc = reg(&log, 0xDFF0A2);
         assert_eq!(lc[1] - lc[0], 8);
-        // the envelope is flat at 64
-        assert_eq!(reg(&log, 0xDFF0A8)[0], 64);
+        // the start-up routine clears the volume first; the envelope is flat at 64
+        assert_eq!(reg(&log, 0xDFF0A8)[..2], [0, 64]);
     }
 }

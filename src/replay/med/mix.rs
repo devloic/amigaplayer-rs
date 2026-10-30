@@ -194,9 +194,23 @@ struct Tempo {
     tpl: u16,
     lpb: u16,
     bpm: bool,
+    /// A 5-8 channel song: its tempo 1-10 (held as the BPM value the load made of it)
+    /// sets the original's CIA timer from a table, not a BPM rate.
+    eight: bool,
 }
 
 impl Tempo {
+    /// The original's timer period in colour clocks for a 5-8 channel song: the Eagleplayer
+    /// loads the CIA latch with 90 * (100 + 10 t) for the song's tempo t (1-10, more is 10),
+    /// and the timer runs latch + 1 E-clock ticks of 5 colour clocks.
+    fn eight_clocks(&self) -> Option<f64> {
+        if !self.eight {
+            return None;
+        }
+        let t = if self.tempo == 99 { 10 } else { BPM_VALS.iter().position(|&v| v as u16 == self.tempo).map_or(10, |i| i + 1) };
+        Some(5.0 * (90.0 * (100.0 + 10.0 * t as f64) + 1.0))
+    }
+
     /// The player's rate in Hz (NostalgicPlayer's SetMixTempo).
     fn hz(&self) -> f64 {
         if self.bpm {
@@ -481,7 +495,7 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
             blocks: Vec::new(),
             sections: Vec::new(),
             pseqs: Vec::new(),
-            tempo: Tempo { tempo: 125, tpl: 6, lpb: 4, bpm: true },
+            tempo: Tempo { tempo: 125, tpl: 6, lpb: 4, bpm: true, eight: false },
             channels: 4,
             play_transp: 0,
             slide1st: false,
@@ -971,6 +985,7 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
                 }
             }
             ss.tempo.bpm = true;
+            ss.tempo.eight = true;
             ss.tempo.lpb = 4;
             let old = ss.tempo.tempo;
             ss.tempo.tempo = if old >= 10 { 99 } else { BPM_VALS[(old.max(1) - 1) as usize] as u16 };
@@ -1239,7 +1254,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
         td: vec![Track::default(); MAX_TRACKS],
         ch: vec![Chan::default(); MAX_TRACKS],
         ivol: [0; MAX_INSTR],
-        tempo: Tempo { tempo: 125, tpl: 6, lpb: 4, bpm: true },
+        tempo: Tempo { tempo: 125, tpl: 6, lpb: 4, bpm: true, eight: false },
         track_pan: [0; MAX_TRACKS],
         pos: Pos::default(),
         pulse: 0,
@@ -1763,6 +1778,9 @@ impl OctaMed {
     /// (the NTSC clock, as the slides do), so on a PAL Amiga its ticks are 0.9%
     /// longer than the tempo's Hz: what UADE's render shows.
     fn tick_clocks_f(&self) -> f64 {
+        if let Some(c) = self.tempo.eight_clocks() {
+            return c;
+        }
         // the older songs' ticks are another 0.45% longer in UADE's renders (fitted
         // on 14 of them, drifting 0.02 s in 4 s; the cause is not known)
         let slow = if self.old { 1.0045 } else { 1.0 };

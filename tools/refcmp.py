@@ -33,7 +33,8 @@ The two sample streams are compared and each file gets a class:
               (the LED / A500 kind: 2-5 kHz vs the low band)
   LEVEL       overall RMS differs by more than LEVEL_DB
   PITCH       dominant spectral peak shifted by more than PITCH_PCT
-  TEMPO       onset rate differs by more than TEMPO_PCT
+  TEMPO       the loudness envelopes' alignment drifts by TEMPO_DRIFT_S or more over the render
+              (tempo_drift_s, positive: the port lags further behind the original as it goes)
   DIFF        anything else
   NOREF       no original available (neutral: not counted as an inconsistency)
 
@@ -71,7 +72,11 @@ PITCH_CENTS = 20        # cents: shift of the whole log-frequency spectrum for P
 PITCH_GAIN = 0.02       # ... which must raise the spectra's correlation by this much over no shift
 TEMPO_DRIFT_S = 0.04    # s: drift of the loudness envelopes' alignment over the render for TEMPO
 TEMPO_SEGMENTS = 8      # segments the drift is measured over
-TEMPO_MIN_CORR = 0.3    # segments whose envelopes correlate less than this are left out
+TEMPO_TAU = 0.75        # ... and the alignments must trend (Kendall's tau over the segments) at least this much
+TEMPO_MIN_CORR = 0.5    # segments whose envelopes correlate less than this are left out
+# ports whose original is UADE's Eagleplayer, not EP206's older one of the same format:
+# Hippel 7V follows V1.3 (UADE), EP206 has V1.0, which keeps another tempo and LED
+UADE_FIRST = ('hippel7v',)
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 MUST_MATCH = ('filter', 'led', 'sep', 'mono', 'resampler', 'volume', 'interp', 'xmp-filter')
@@ -123,24 +128,22 @@ def _envelope(mid, rate):
 
 def _tempo_drift(ma, mb, rate):
     """(drift in seconds, segments used): how far the best alignment of the two
-    loudness envelopes moves from the first usable segment to the last. A tempo
-    difference makes it grow over the render; equal tempi keep it near 0."""
+    loudness envelopes moves from the first usable segment to the last (the median
+    slope of the segments' alignments times the span). A tempo difference makes it
+    grow over the render; equal tempi keep it near 0."""
     ea, eb = _envelope(ma, rate), _envelope(mb, rate)
     n = min(len(ea), len(eb))
     seg = n // TEMPO_SEGMENTS
     w = 50  # 0.5 s search either way
     if seg < 4 * w:
         return 0.0, 0
-    lags, prev = [], None
-    for k in range(TEMPO_SEGMENTS):
+    def align(k, rng):
+        """(best lag, its correlation) of segment k's envelope against b's over the lags in rng."""
         x = ea[k * seg:(k + 1) * seg]
         x0 = x - x.mean()
-        if not x0.any():
-            continue
-        # the first usable segment searches 0.5 s either way, the next ones 80 ms around
-        # the last alignment, so that a rhythm's neighbouring beat is never taken instead
-        rng = range(-w, w + 1) if prev is None else range(prev - 8, prev + 9)
         best, bl = -2.0, 0
+        if not x0.any():
+            return 0, best
         for l in rng:
             o = k * seg + l
             if o < 0 or o + len(x) > len(eb):
@@ -150,12 +153,35 @@ def _tempo_drift(ma, mb, rate):
             c = (x0 * y0).sum() / den if den else -2.0
             if c > best:
                 best, bl = c, l
-        if best >= TEMPO_MIN_CORR:
-            lags.append(bl)
-            prev = bl
-    if len(lags) < 2:
-        return 0.0, len(lags)
-    return (lags[-1] - lags[0]) / 100.0, len(lags)
+        return bl, best
+
+    # the segment that lines up best (0.5 s either way) is the anchor; from it the neighbours are
+    # followed outwards, 80 ms around the last alignment, so that a rhythm's neighbouring beat is
+    # never taken instead, and a bad first segment does not spoil the rest
+    free = [align(k, range(-w, w + 1)) for k in range(TEMPO_SEGMENTS)]
+    a0 = max(range(TEMPO_SEGMENTS), key=lambda k: free[k][1])
+    found = {a0: free[a0]} if free[a0][1] >= TEMPO_MIN_CORR else {}
+    for step in (1, -1):
+        prev = free[a0][0]
+        k = a0 + step
+        while found and 0 <= k < TEMPO_SEGMENTS:
+            bl, c = align(k, range(prev - 8, prev + 9))
+            if c >= TEMPO_MIN_CORR:
+                found[k] = (bl, c)
+                prev = bl
+            k += step
+    ks = sorted(found)
+    lags = [found[k][0] for k in ks]
+    if len(lags) < 4:
+        return 0.0, len(lags)  # too few segments that line up to tell a drift from noise
+    # the median slope of all pairs (Theil-Sen) times the span: one segment aligned a beat off,
+    # or a start-up offset between the two sides, must not read as a drift, a steady slope does
+    sl = sorted((lags[j] - lags[i]) / (ks[j] - ks[i]) for i in range(len(lags)) for j in range(i + 1, len(lags)))
+    tau = (sum(x > 0 for x in sl) - sum(x < 0 for x in sl)) / len(sl)
+    if abs(tau) < TEMPO_TAU:
+        return 0.0, len(lags)  # the alignments wander, they do not trend: not a tempo difference
+    slope = sl[len(sl) // 2] if len(sl) % 2 else (sl[len(sl) // 2 - 1] + sl[len(sl) // 2]) / 2
+    return slope * (ks[-1] - ks[0]) / 100.0, len(lags)
 
 
 def _pitch_shift(ma, mb, rate):
@@ -448,6 +474,8 @@ def find_reference(ctx, mod, po):
                     led='', player='libxmp 4.7.4 (oracle)', o={}, note='')
     want = _norm(po.get('format', ''))
     dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
+    if want in UADE_FIRST:
+        dirs = dirs[::-1]
     # the player the port was verified against comes first, then the generic search
     verified = VERIFIED.get(want)
     tries = special_reference(mod, want) or []

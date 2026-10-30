@@ -58,6 +58,10 @@ pub struct OsState {
     current_dir: u32,
     io_err: u32,
     pub progdir: PathBuf,
+    /// What Env: and EnvArc: are: the `ENV` folder of the Eagleplayer directory, where UADE
+    /// keeps the players' settings (`ENV/EaglePlayer/EP-Hippel_7V.cfg`, the mixing rate of
+    /// Hippel 7V: 24 kHz, not its own 16).
+    pub env_dir: PathBuf,
     /// The current module's directory, where the `Instruments:` volume is.
     pub module_dir: PathBuf,
     /// Files held in memory, by host path, read before the disk: a host with no
@@ -1435,6 +1439,13 @@ impl OsState {
                 // instruments, Scott Johnston's samples), its names in any case as
                 // on the Amiga's file systems (songs name "BigBow" for BIGBOW.instr)
                 let mut d = any_case(&self.module_dir, "Instruments");
+                for part in rest.split('/').filter(|p| !p.is_empty()) {
+                    d = any_case(&d, part);
+                }
+                return d;
+            }
+            if (vol.eq_ignore_ascii_case("Env") || vol.eq_ignore_ascii_case("EnvArc")) && !self.env_dir.as_os_str().is_empty() {
+                let mut d = self.env_dir.clone();
                 for part in rest.split('/').filter(|p| !p.is_empty()) {
                     d = any_case(&d, part);
                 }

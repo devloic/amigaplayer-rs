@@ -362,6 +362,7 @@ impl Engine {
     /// after `load_players`.
     pub fn load_eagleplayers(&mut self, dir: &Path) -> usize {
         self.eagle_from.get_or_insert(self.players.len());
+        self.m.os.env_dir = dir.join("ENV");
         self.m.alloc_top = true;
         let n = self.load_dir(dir);
         self.m.alloc_top = false;

@@ -22,14 +22,16 @@
 //!   tune E5, loop E6, retrigger E9, fine volume EA/EB, cut EC, delay ED, pattern
 //!   delay EE), F, global volume, multi retrigger, fine vibrato and the four
 //!   note slides (one with a retrigger);
-//! - the volume goes through PolyTracker's volume table (libxmp's `ptm_vol`).
+//! - the volume is linear (0-64): the Eagleplayer hands the NotePlayer genie twice that, with no
+//!   table (libxmp's `ptm_vol` is not used).
 //!
 //! Where this differs from libxmp, or cannot follow it:
-//! - panning: the amplifier's voices have a side, left or right, from the start; a
-//!   channel's pan of 0-7 is left, 9-15 right and 8 (centre) the side with fewer
-//!   voices so far. `8xx` and `E8x` change nothing;
-//! - samples are played at the amplifier's 8-bit, sample-and-hold mixing, not with
-//!   libxmp's interpolation; a 16-bit sample keeps its high byte;
+//! - panning: the amplifier's voices have a side, left or right, from the start, as the
+//!   Eagleplayer gives them to the NotePlayer genie: the module's pan is ignored and the
+//!   channels alternate left, right, left ... `8xx` and `E8x` change nothing;
+//! - samples are played at the amplifier's 8-bit, sample-and-hold mixing (at the genie's
+//!   14477 Hz, wrapping round on overflow, as the genie's mix does), not with libxmp's
+//!   interpolation; a 16-bit sample keeps its high byte;
 //! - a bidirectional loop is unrolled into the sample (forward, then back) and
 //!   plays as a loop of twice the length;
 //! - a pattern's cell for a channel beyond the module's count is read and dropped,
@@ -46,11 +48,12 @@ use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "PolyTracker", detect, new };
 
-/// Volume translation table of PolyTracker (libxmp's `ptm_vol`).
-const PTM_VOL: [u8; 65] = [
-    0, 5, 8, 10, 12, 14, 15, 17, 18, 20, 21, 22, 23, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 37, 38, 39, 40, 41, 42, 42,
-    43, 44, 45, 46, 46, 47, 48, 49, 49, 50, 51, 51, 52, 53, 54, 54, 55, 56, 56, 57, 58, 58, 59, 59, 60, 61, 61, 62, 63, 63, 64, 64,
-];
+/// The mix rate as a Paula period: the genie's, 3546895 / 245 = 14477 Hz.
+const MIX_PERIOD: u16 = 245;
+
+/// The boost in tenths over the voices of the busier side (the amplifier divides by them): a lone
+/// voice then counts 4.0 / side times its sample, as measured on the genie.
+const MIX_BOOST: u32 = 39;
 
 /// Volume of the multi retrigger: add, multiply, divide.
 const RVAL: [(i32, i32, i32); 17] = [
@@ -360,22 +363,9 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let (ordnum, insnum, patnum, chn) = (u16le(d, 32) as usize, u16le(d, 34) as usize, u16le(d, 36) as usize, u16le(d, 38) as usize);
     let title = d[..28].iter().take_while(|&&c| c != 0).map(|&c| c as char).collect::<String>().trim().to_string();
     let orders = d[0x60..0x60 + 256][..ordnum].to_vec();
-    // sides: 0-7 left, 9-15 right; the centre ones go to the side with fewer voices
-    let mut pans: Vec<i16> = (0..chn)
-        .map(|c| match d[0x40 + c] & 15 {
-            p if p < 8 => 1,
-            8 => 0,
-            _ => -1,
-        })
-        .collect();
-    let (mut left, mut right) = (pans.iter().filter(|&&p| p > 0).count(), pans.iter().filter(|&&p| p < 0).count());
-    for p in pans.iter_mut().filter(|p| **p == 0) {
-        if left <= right {
-            (*p, left) = (1, left + 1);
-        } else {
-            (*p, right) = (-1, right + 1);
-        }
-    }
+    // sides: the Eagleplayer ignores the module's panning and gives the channels left and right
+    // alternately, starting on the left
+    let pans: Vec<i16> = (0..chn).map(|c| if c % 2 == 0 { 1 } else { -1 }).collect();
 
     // instruments and their samples
     let mut smps = Vec::with_capacity(insnum);
@@ -497,13 +487,19 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
 
     let silence = m.alloc(4);
-    // The amplifier divides a side's sum by its voices, so a module of many channels
-    // would be a fraction of what PolyTracker's own mix gives: the boost follows the
-    // voices of the busier side as side^0.85 (the divisor then is side^0.15), which puts the
-    // level near the Eagleplayer's from 4 to 30 channels.
-    let side = pans.iter().filter(|&&p| p > 0).count().max(pans.iter().filter(|&&p| p < 0).count()).max(1);
-    let gain = (100.0 * (side as f64).powf(0.85)).round() as u32;
-    if silence == 0 || !super::start_amplifier_panned(m, &pans, gain) {
+    // The mix is DeliTracker's NotePlayer genie's (the 32 voice one, which plays a `_note` player
+    // for as many voices): 8 bits at 14477 Hz, wrapping round where it overflows, a voice
+    // counting 4/side of its sample (a lone voice of a 4 channel module: twice).
+    if silence == 0
+        || !crate::amplifier::start_panned_mix(
+            m,
+            pans.len(),
+            crate::eagle::epamb::DIRECT | crate::eagle::epamb::BIT8 | crate::eagle::epamb::CHIP_RAM,
+            &pans,
+            MIX_PERIOD,
+            MIX_BOOST,
+        )
+    {
         return None;
     }
     Some(Box::new(Ptm {
@@ -1086,8 +1082,8 @@ impl Ptm {
         let out_vol = if xc.released {
             0
         } else {
-            let idx = ((gvol * xc.mastervol * vol) >> 8) >> 4;
-            PTM_VOL[idx.clamp(0, 64) as usize] as i32
+            // linear: the Eagleplayer hands the genie twice this (0-128)
+            (((gvol * xc.mastervol * vol) >> 8) >> 4).clamp(0, 64)
         };
         // process_frequency: note slide, vibrato, arpeggio, glissando
         if xc.flags & NOTE_SLIDE != 0 {
@@ -1369,8 +1365,8 @@ mod tests {
         let p0 = *per0.last().unwrap() as f64;
         let p1 = *per1.last().unwrap() as f64;
         assert!((p0 / p1 - 0.5).abs() < 0.01 || (p0 / p1 - 2.0).abs() < 0.01, "{p0} {p1}");
-        // volume 48 through PolyTracker's table
-        assert_eq!(*reg(&log, 0, 8).last().unwrap(), PTM_VOL[48] as u16);
+        // volume 48, linear
+        assert_eq!(*reg(&log, 0, 8).last().unwrap(), 48);
         assert_eq!(*reg(&log, 0, 0xA).last().unwrap(), 0x8000);
     }
 
@@ -1388,7 +1384,7 @@ mod tests {
         let d = module(1, 8363, &[(0, 0, 48, 1, 0x0a, 0x04, 20)]);
         let (_, log) = play(d, 4);
         let v = reg(&log, 0, 8);
-        let first = PTM_VOL[20] as u16;
+        let first = 20u16;
         assert!(v.contains(&first), "{v:?}");
         assert!(v.windows(2).any(|w| w[1] < w[0]), "{v:?}");
     }

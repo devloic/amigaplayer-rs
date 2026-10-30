@@ -55,6 +55,8 @@ EP206 = SCRATCH + '/eplicense/x/Eagleplayer_2.06/Eagleplayers'
 UADE_PLAYERS = os.path.expanduser('~/.local/opt/uade/share/uade/players')
 # DeliPlayers of the DeliTracker PlayerStore: the original of the ports verified against one
 DELI_STORE = os.path.expanduser('~/.config/deliplayer/DeliPlayers/PlayerStore')
+# DeliTracker's NotePlayer genies (4Voices, 8Voices, 32Voices ...)
+NOTE_GENIES = SCRATCH + '/extract/DeliTracker_II/Files/x_genies/DeliGenies'
 XMP_ORACLE = SCRATCH + '/ports/x01-core/harness/render'
 LISTEN_PY = SCRATCH + '/listen/listen.py'
 BASELINE = os.path.join(HERE, 'refcmp-baseline.tsv')
@@ -407,12 +409,12 @@ def _run_cached(ctx, key, cmd, env, cwd, wav):
     return (out if os.path.exists(out) else None), lines
 
 
-def render_engine(ctx, mod, open_replayers, eagle, extra=()):
+def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None):
     deli = ctx.empty
     if isinstance(eagle, tuple):   # ('deli', DeliPlayer directory)
         deli, eagle = eagle[1], None
     env = dict(os.environ, SDL_AUDIO_DRIVER='dummy', RUST_LOG='error', DELIPLAYERS=deli,
-               DELIGENIES=ctx.empty, EAGLEPLAYERS=eagle or ctx.empty)
+               DELIGENIES=genies or ctx.empty, EAGLEPLAYERS=eagle or ctx.empty)
     if 'PreTracker' in extra:
         # UADE's PreTracker player has no check: the engine accepts a checkless player for it
         env['DELI_CHECKLESS'] = '1'
@@ -422,6 +424,12 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=()):
     play = next((l for l in lines if l.startswith('playing')), None)
     out = next((l for l in lines if l.startswith('output:')), None)
     led = next((l for l in lines if l.startswith('led-switched')), None)
+    if (not open_replayers and not genies and out and 'builtin-voices=builtin-noteplayer' in out
+            and os.path.isdir(NOTE_GENIES)):
+        # a `_note` player the engine played through its own NotePlayer renderer: the original
+        # plays it through DeliTracker's NotePlayer genie (the engine picks the cheapest that
+        # has enough voices), so give it the genies
+        return render_engine(ctx, mod, open_replayers, eagle, extra, NOTE_GENIES)
     return wav, play, out, led, lines
 
 

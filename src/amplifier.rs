@@ -255,6 +255,8 @@ pub struct Amplifier {
     pub period: u16,
     /// Boost in tenths.
     pub boost: u32,
+    /// The mix wraps round at 8 bits, as a NotePlayer genie's does, where it would clip.
+    pub wrap: bool,
     /// The half channel 0's LOC points to.
     loc_half: u32,
     /// The emulated time mixed so far.
@@ -313,6 +315,7 @@ impl Amplifier {
             buf: 0,
             period: ((clock + rate / 2) / rate) as u16,
             boost: 10 + (n as u32 - 1) / 4,
+            wrap: false,
             loc_half: 0,
             mixed_to: 0,
         }
@@ -445,7 +448,11 @@ impl Amplifier {
         }
         let div = 64 * 10 * self.side;
         for (i, a) in acc.iter().enumerate() {
-            let o = |x: i32| (x as i64 * self.boost as i64 / div).clamp(-128, 127) as i8;
+            let wrap = self.wrap;
+            let o = |x: i32| {
+                let y = x as i64 * self.boost as i64 / div;
+                if wrap { y as i8 } else { y.clamp(-128, 127) as i8 }
+            };
             (left[i], right[i]) = (o(a[0]), o(a[1]));
         }
         self.mixed_to += n as u64 * mp as u64;
@@ -540,13 +547,13 @@ impl Amplifier {
 /// Starts the amplifier for `n` voices: its buffers in guest memory and Paula
 /// playing them.
 pub fn start(m: &mut Machine, n: usize, structs: u32, flags: u32) -> bool {
-    start_with(m, n, structs, flags, None, 100)
+    start_with(m, n, structs, flags, None, 100, None)
 }
 
 /// `start` with the boost at `gain` percent of the default's, for a player whose
 /// original mixes louder than the 8 Bit Amplifier's factory settings.
 pub fn start_gain(m: &mut Machine, n: usize, structs: u32, flags: u32, gain: u32) -> bool {
-    start_with(m, n, structs, flags, None, gain)
+    start_with(m, n, structs, flags, None, gain, None)
 }
 
 /// The same for poked voices whose sides the player chooses: `pans[v]` positive
@@ -554,10 +561,16 @@ pub fn start_gain(m: &mut Machine, n: usize, structs: u32, flags: u32, gain: u32
 /// in percent of the default's (100: as `start`), for a player whose mix is not
 /// scaled down by the voices of a side as far as the default is.
 pub fn start_panned(m: &mut Machine, n: usize, flags: u32, pans: &[i16], gain: u32) -> bool {
-    start_with(m, n, 0, flags, Some(pans), gain)
+    start_with(m, n, 0, flags, Some(pans), gain, None)
 }
 
-fn start_with(m: &mut Machine, n: usize, structs: u32, flags: u32, sides: Option<&[i16]>, gain: u32) -> bool {
+/// `start_panned` for a player whose host mixes at its own rate and scale: the mix rate as a
+/// Paula period and the boost in tenths are given, not the 8 Bit Amplifier's factory ones.
+pub fn start_panned_mix(m: &mut Machine, n: usize, flags: u32, pans: &[i16], period: u16, boost: u32) -> bool {
+    start_with(m, n, 0, flags, Some(pans), 100, Some((period, boost)))
+}
+
+fn start_with(m: &mut Machine, n: usize, structs: u32, flags: u32, sides: Option<&[i16]>, gain: u32, mix: Option<(u16, u32)>) -> bool {
     let n = n.min(MAX_VOICES);
     let pans: Vec<i16> = match sides {
         Some(p) => p.to_vec(),
@@ -565,6 +578,9 @@ fn start_with(m: &mut Machine, n: usize, structs: u32, flags: u32, sides: Option
     };
     let mut a = Amplifier::new(n, structs, flags, &pans);
     a.boost = a.boost * gain / 100;
+    if let Some((period, boost)) = mix {
+        (a.period, a.boost, a.wrap) = (period, boost, true);
+    }
     a.buf = m.alloc(4 * BUF);
     if a.buf == 0 {
         return false;

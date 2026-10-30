@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 
 pub const SCOPE_LEN: usize = 512;
 
-/// The NotePlayer genie played through when none was chosen: DeliTracker's default.
-/// Players with more voices than it has are left to the built-in renderer (the
-/// genies with more mix in software, which takes a 68000 far too long).
-const DEFAULT_NOTE_GENIE: &str = "4Voices-NotePlayer";
+/// The NotePlayer genies played through when none was chosen, cheapest first (the
+/// first with enough voices plays); players needing more voices than any has are left
+/// to the built-in renderer.
+const NOTE_GENIES: &[&str] = &["4Voices-NotePlayer", "8Voices-NotePlayer", "32Voices-NotePlayer"];
 use crate::bus::ECLOCK_DIV;
 /// Players of formats from the PC, played without the Amiga's output filters.
 const PC_FORMATS: &[&str] =
@@ -283,11 +283,15 @@ impl Engine {
         Ok(())
     }
 
-    /// `DEFAULT_NOTE_GENIE`, if it is installed and has at least `voices` voices.
+    /// The NotePlayer genie for a player with `voices` voices: DeliTracker picks the
+    /// cheapest one that has enough (CPU use first, so the Paula based 4 and 8 voice
+    /// genies before the software mixer of the 32 voice one).
     fn default_note_genie(&self, voices: u32) -> Option<usize> {
-        let i = self.genies.iter().position(|g| g.name.eq_ignore_ascii_case(DEFAULT_NOTE_GENIE))?;
-        let r = self.genies[i].tag(tag::NOTE_PLAYER).filter(|&r| r != 0)?;
-        (self.m.bus.r16(r) as u32 + self.m.bus.r16(r + 2) as u32 >= voices).then_some(i)
+        NOTE_GENIES.iter().find_map(|name| {
+            let i = self.genies.iter().position(|g| g.name.eq_ignore_ascii_case(name))?;
+            let r = self.genies[i].tag(tag::NOTE_PLAYER).filter(|&r| r != 0)?;
+            (self.m.bus.r16(r) as u32 + self.m.bus.r16(r + 2) as u32 >= voices).then_some(i)
+        })
     }
 
     /// Calls one of a running genie's functions; a genie that fails is dropped.
@@ -316,6 +320,7 @@ impl Engine {
                 voices += 1;
                 ch = self.m.bus.r32(ch);
             }
+            log::debug!("player has {voices} note channels");
             self.note_genie = self.default_note_genie(voices);
         }
         if let (Some(i), ns) = (self.note_genie, ns) {

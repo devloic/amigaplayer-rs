@@ -26,6 +26,9 @@
 //! time just passed, with each poke applied at the output sample of its colour
 //! clock, so the output lags the pokes by two buffers. All in integers.
 //!
+//! A NotePlayer genie's mix (`start_panned_mix`) differs: four Paula channels, the voices of a
+//! side split between its two channels (see `genie_groups`), each channel's sum wrapping at 8 bits.
+//!
 //! The defaults are the 8 Bit Amplifier's factory settings on a 68020 for the
 //! module's voice count n: mix rate 28000 Hz less 500 Hz for each voice past
 //! 2, boost 1.0 and 0.1 more for every 4 voices, stereo (the voices' sides come
@@ -43,6 +46,8 @@ pub const MAX_VOICES: usize = 32;
 pub const LOG_BASE: u32 = 0xD0_0000;
 /// Bytes in each half of a channel's double buffer.
 const BUF: u32 = 512;
+/// ... and a NotePlayer genie's (100 words).
+const GENIE_BUF: u32 = 200;
 
 /// The AudioStruct, 100 bytes a voice, as players fill it and the amplifier
 /// engines read it (recovered from the players' InitAmplifier and play
@@ -257,6 +262,15 @@ pub struct Amplifier {
     pub boost: u32,
     /// The mix wraps round at 8 bits, as a NotePlayer genie's does, where it would clip.
     pub wrap: bool,
+    /// A NotePlayer genie's mix: four Paula channels, each playing the sum of a group of the
+    /// voices (see `genie_groups`), the sum scaled by an eighth-step gain.
+    quad: bool,
+    /// Paula's channel for each voice (`quad`).
+    group: Vec<u8>,
+    /// The gain in eighths (`quad`): 32 over the voices on the busier side, rounded down.
+    gain8: i64,
+    /// Bytes in each half of a channel's double buffer.
+    half: u32,
     /// The half channel 0's LOC points to.
     loc_half: u32,
     /// The emulated time mixed so far.
@@ -316,9 +330,32 @@ impl Amplifier {
             period: ((clock + rate / 2) / rate) as u16,
             boost: 10 + (n as u32 - 1) / 4,
             wrap: false,
+            quad: false,
+            group: Vec::new(),
+            gain8: 0,
+            half: BUF,
             loc_half: 0,
             mixed_to: 0,
         }
+    }
+
+    /// The genie's way of mixing: the left voices in order go to Paula channel 0 (the first
+    /// half of them, rounded up) and channel 3, the right voices to channel 1 and channel 2,
+    /// each channel summing its voices (8 bits, wrapping) and the two of a side adding up in
+    /// Paula. Measured on the genie with one-voice and two-voice modules of 2 to 32 channels.
+    fn genie_groups(&mut self) {
+        let mut group = vec![0u8; self.n];
+        for (pan, near, far) in [(1i8, 0u8, 3u8), (-1, 1, 2)] {
+            let voices: Vec<usize> = (0..self.n).filter(|&v| self.pans[v] == pan).collect();
+            let first = voices.len().div_ceil(2);
+            for (k, &v) in voices.iter().enumerate() {
+                group[v] = if k < first { near } else { far };
+            }
+        }
+        self.group = group;
+        self.gain8 = 32 / self.side;
+        self.half = GENIE_BUF;
+        self.quad = true;
     }
 
     /// The mix rate Paula plays, in Hz.
@@ -328,7 +365,7 @@ impl Amplifier {
 
     /// The colour clocks one buffer plays.
     fn buffer_clocks(&self) -> u64 {
-        BUF as u64 * self.period as u64
+        self.half as u64 * self.period as u64
     }
 
     /// A poke for voice `v` at colour clock `t`, logged when `log` is on.
@@ -408,10 +445,20 @@ impl Amplifier {
 
     /// Mixes the `left.len()` output samples from `mixed_to` on into `left`
     /// and `right`; `ints` gets the Interrupts to Cause().
+    #[cfg(test)]
     fn mix(&mut self, ram: &mut [u8], left: &mut [i8], right: &mut [i8], ints: &mut Vec<u32>) {
+        let mut out = [left.to_vec(), right.to_vec(), Vec::new(), Vec::new()];
+        self.mix4(ram, &mut out, ints);
+        left.copy_from_slice(&out[0]);
+        right.copy_from_slice(&out[1]);
+    }
+
+    /// `mix` for the four channels a genie plays: `out[c]` is Paula channel c's stream (the
+    /// first `out[0].len()` samples).
+    fn mix4(&mut self, ram: &mut [u8], out: &mut [Vec<i8>; 4], ints: &mut Vec<u32>) {
         let mp = self.period as u32;
-        let n = left.len();
-        let mut acc = vec![[0i32; 2]; n];
+        let n = out[0].len();
+        let mut acc = vec![[0i32; 4]; n];
         if self.direct {
             for (i, a) in acc.iter_mut().enumerate() {
                 let t = self.mixed_to + i as u64 * mp as u64;
@@ -428,10 +475,14 @@ impl Amplifier {
                         continue;
                     }
                     let s = r8(ram, voice.pt.wrapping_add(voice.pos)) as i8 as i32 * voice.vol as i32;
-                    match self.pans[v] {
-                        1 => a[0] += s,
-                        -1 => a[1] += s,
-                        _ => {}
+                    if self.quad {
+                        a[self.group[v] as usize] += s;
+                    } else {
+                        match self.pans[v] {
+                            1 => a[0] += s,
+                            -1 => a[1] += s,
+                            _ => {}
+                        }
                     }
                     if voice.run(mp) {
                         let is = self.int(ram, v);
@@ -450,16 +501,22 @@ impl Amplifier {
         for (i, a) in acc.iter().enumerate() {
             let wrap = self.wrap;
             let o = |x: i32| {
+                if self.quad {
+                    // the sum of volume times sample, scaled in eighths and rounded down
+                    return ((x as i64 * self.gain8) >> 9) as i8;
+                }
                 let y = x as i64 * self.boost as i64 / div;
                 if wrap { y as i8 } else { y.clamp(-128, 127) as i8 }
             };
-            (left[i], right[i]) = (o(a[0]), o(a[1]));
+            for c in 0..if self.quad { 4 } else { 2 } {
+                out[c][i] = o(a[c]);
+            }
         }
         self.mixed_to += n as u64 * mp as u64;
     }
 
     /// Mixes AudioStruct `v` into `acc` and leaves its new position there.
-    fn mix_struct(&mut self, ram: &mut [u8], v: usize, acc: &mut [[i32; 2]], ints: &mut Vec<u32>) {
+    fn mix_struct(&mut self, ram: &mut [u8], v: usize, acc: &mut [[i32; 4]], ints: &mut Vec<u32>) {
         let s = self.structs + v as u32 * aus::SIZE;
         let side = match self.pans[v] {
             1 => 0,
@@ -580,8 +637,9 @@ fn start_with(m: &mut Machine, n: usize, structs: u32, flags: u32, sides: Option
     a.boost = a.boost * gain / 100;
     if let Some((period, boost)) = mix {
         (a.period, a.boost, a.wrap) = (period, boost, true);
+        a.genie_groups();
     }
-    a.buf = m.alloc(4 * BUF);
+    a.buf = m.alloc(2 * a.half * if a.quad { 4 } else { 2 });
     if a.buf == 0 {
         return false;
     }
@@ -620,21 +678,22 @@ fn set_loc(bus: &mut Bus, ch: u32, a: u32) {
 /// turned DMA off. The voices go on.
 pub fn restart(bus: &mut Bus) {
     let Some(a) = bus.amp.as_mut() else { return };
-    let (buf, period) = (a.buf, a.period);
+    let (buf, period, half, chans) = (a.buf, a.period, a.half, if a.quad { 4 } else { 2 });
     a.loc_half = 0;
     // the first buffer, filled when the DMA starts, is the time before it
     a.mixed_to = bus.clock.saturating_sub(a.buffer_clocks());
-    bus.write_bytes(buf, &[0; 4 * BUF as usize]);
-    paula(bus, 0x096, 0x0003);
-    for ch in 0..2 {
-        set_loc(bus, ch, buf + 2 * BUF * ch);
-        paula(bus, 0x0A4 + 16 * ch, (BUF / 2) as u16);
+    bus.write_bytes(buf, &vec![0; 2 * half as usize * chans as usize]);
+    let dma = (1u16 << chans) - 1;
+    paula(bus, 0x096, dma);
+    for ch in 0..chans {
+        set_loc(bus, ch, buf + 2 * half * ch);
+        paula(bus, 0x0A4 + 16 * ch, (half / 2) as u16);
         paula(bus, 0x0A6 + 16 * ch, period);
         paula(bus, 0x0A8 + 16 * ch, 64);
     }
     paula(bus, 0x09C, 0x0080);
     paula(bus, 0x09A, 0x8080);
-    paula(bus, 0x096, 0x8203);
+    paula(bus, 0x096, 0x8200 | dma);
 }
 
 /// Channel 0's audio interrupt: a buffer has started, so the next one is mixed
@@ -643,14 +702,17 @@ pub fn interrupt(bus: &mut Bus) -> Vec<u32> {
     let mut ints = Vec::new();
     let Some(a) = bus.amp.as_mut() else { return ints };
     a.loc_half ^= 1;
-    let (l, r) = (a.buf + a.loc_half * BUF, a.buf + 2 * BUF + a.loc_half * BUF);
-    let (mut left, mut right) = ([0i8; BUF as usize], [0i8; BUF as usize]);
-    a.mix(&mut bus.ram, &mut left, &mut right, &mut ints);
-    bus.write_bytes(l, &left.map(|x| x as u8));
-    bus.write_bytes(r, &right.map(|x| x as u8));
+    let (half, chans) = (a.half, if a.quad { 4u32 } else { 2 });
+    let at: Vec<u32> = (0..chans).map(|c| a.buf + 2 * half * c + a.loc_half * half).collect();
+    let mut out = [0, 1, 2, 3].map(|c| if c < chans { vec![0i8; half as usize] } else { Vec::new() });
+    a.mix4(&mut bus.ram, &mut out, &mut ints);
+    for c in 0..chans as usize {
+        bus.write_bytes(at[c], &out[c].iter().map(|&x| x as u8).collect::<Vec<u8>>());
+    }
     paula(bus, 0x09C, 0x0080);
-    set_loc(bus, 0, l);
-    set_loc(bus, 1, r);
+    for c in 0..chans {
+        set_loc(bus, c, at[c as usize]);
+    }
     ints
 }
 

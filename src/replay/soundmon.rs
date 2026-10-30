@@ -225,7 +225,20 @@ const TICK_TO_LOC_20: u64 = 78;
 /// PER_TO_LOC_20 after it.
 const TICK_TO_LFO_20: u64 = 48;
 const PER_TO_LOC_20: u64 = 294;
+/// 2.2: the originals' set-up takes some 19000 to 30000 colour clocks (it walks the song's steps
+/// and the instruments) before the first tick, but their renders (WAV) do not contain that time,
+/// only their write logs do, so the first tick comes at once.
 const TIMER_DELAY_22: u64 = 0;
+/// 2.2 tick, from the reference logs: each voice's synth step takes SYNTH_STEP_22 colour clocks,
+/// its volume write comes VOL_PRE_22 into the step and the step goes on VOL_POST_22 after it,
+/// an LFO period write LFO_PRE_22 after that.
+const SYNTH_STEP_22: u64 = 28;
+const VOL_PRE_22: u64 = 170;
+const VOL_POST_22: u64 = 171;
+const LFO_PRE_22: u64 = 135;
+/// 2.2: the row's decoding takes this long (a fit; it depends on the row) before the DMA goes off.
+const ROW_BASE_22: u64 = 1250;
+
 const NEXT_COL_20: u64 = 167;
 /// 2.0, from the last write of the tick's effects: a row's volume byte of voice k is
 /// written VOL_TIME_20 + VOL_STEP_20 * k later, and DMA goes off AFTER_VOL_20[k] after
@@ -238,8 +251,18 @@ const VOL_COST_20: u64 = 289;
 const AFTER_VOL_20: [u64; 4] = [1475, 859, 715, 256];
 const ROW_NONE_20: u64 = 1781;
 const OFF_TO_PER_20: [u64; 4] = [328, 190, 223, 255];
-const OFF_WAIT_22: u64 = 390;
-const PLAY_WAIT_22: u64 = 716;
+const OFF_WAIT_22: u64 = 388;
+/// 2.2, from the reference logs: from the DMA off to the first restarted voice's period
+/// (by voice), and from one voice's restart to the next voice's; within a restart the
+/// period is followed by the pointer (voice 0: 169, the others 352), the length 40, the
+/// volume (voice 0: 119, the others 225) and, for the last voice, the DMA on 300 after
+/// the volume.
+const OFF_TO_PER_22: [u64; 4] = [270, 301, 333, 364];
+const NEXT_VOICE_22: u64 = 210;
+const PER_TO_LOC_22: [u64; 4] = [169, 352, 352, 352];
+const LOC_TO_LEN_22: u64 = 40;
+const LEN_TO_VOL_22: [u64; 4] = [119, 225, 225, 225];
+const VOL_TO_ON_22: u64 = 300;
 
 /// A counter's decrement: 2.0 keeps words, 2.2 bytes.
 fn dec(v22: bool, c: u16) -> u16 {
@@ -320,6 +343,9 @@ impl Replayer for SoundMon {
         self.last_vol = None;
         self.n_vol = 0;
         self.next_row(hw);
+        if self.v22 {
+            hw.wait(ROW_BASE_22);
+        }
         if !self.v22 {
             // the row's decoding takes as long as the original's before the DMA goes off
             let after = self.last_vol.map_or(ROW_NONE_20, |k| {
@@ -330,9 +356,8 @@ impl Replayer for SoundMon {
         }
         hw.dmacon(self.mask & 0xF);
         if self.v22 {
-            hw.wait(OFF_WAIT_22);
-        }
-        if self.v22 {
+            let first = (0..4).find(|&i| self.voices[i].period & 0x8000 != 0);
+            hw.wait(first.map_or(OFF_WAIT_22, |i| OFF_TO_PER_22[i]));
             for v in &mut self.voices {
                 if v.period & 0x8000 != 0 && v.wave != 0 {
                     hw.bus.write_bytes(v.wave, &v.saved);
@@ -345,6 +370,7 @@ impl Replayer for SoundMon {
                     self.play_22(i, hw);
                 }
             }
+            hw.wait(VOL_TO_ON_22.saturating_sub(NEXT_VOICE_22));
             dma_on(hw, self.mask);
         } else {
             let mut first = true;
@@ -421,11 +447,13 @@ impl SoundMon {
         // the writes' spacing in the original's log: the first voice's follow the tick's
         // set-up, each voice's period, pointer and length then 84, 41 and 141 colour
         // clocks apart
-        hw.wait(pre.unwrap_or(if i == 0 { 294 } else { 84 }));
+        hw.wait(pre.unwrap_or(if i == 0 && !v22 { 294 } else { 84 }));
         hw.loc(i, v.addr);
-        hw.wait(if i == 0 { 39 } else { 41 });
+        // 2.2: a voice whose synth step writes its volume this tick takes 2 fewer clocks here
+        let vol_now = v22 && v.synth && v.adsr_control != 0 && dec(true, v.adsr_count) == 0;
+        hw.wait(if v22 { if vol_now { 39 } else { 41 } } else if i == 0 { 39 } else { 41 });
         hw.len(i, plen(v.len));
-        hw.wait(141);
+        hw.wait(if v22 { 138 } else { 141 });
         if v.arp_value != 0 || v.auto_arp != 0 {
             let add = match arp {
                 0 => (v.arp_value >> 4) + (v.auto_arp >> 4),
@@ -690,6 +718,7 @@ impl SoundMon {
         let v = &mut self.voices[i];
         v.period &= 0x7fff;
         hw.per(i, v.period);
+        hw.wait(PER_TO_LOC_22[i]);
         let inst = v.instrument;
         let n = self.inst(inst);
         let w = |o: usize| be16(&n, o);
@@ -715,7 +744,9 @@ impl SoundMon {
             v.addr = wave;
             v.len = w(2);
             hw.loc(i, wave);
+            hw.wait(LOC_TO_LEN_22);
             hw.len(i, plen(v.len));
+            hw.wait(LEN_TO_VOL_22[i]);
             if n[4] != 0 {
                 self.adsr_start(i, n[5], n[0x1d], hw);
             } else {
@@ -731,7 +762,9 @@ impl SoundMon {
             v.synth = false;
             v.lfo_control = 0;
             hw.loc(i, a);
+            hw.wait(LOC_TO_LEN_22);
             hw.len(i, plen(w(0x18)));
+            hw.wait(LEN_TO_VOL_22[i]);
             Self::restart_volume(hw, i, v.volume, w(0x1e));
             v.len = w(0x1c);
             let loop_start = w(0x1a);
@@ -749,16 +782,19 @@ impl SoundMon {
                 hw.len(i, plen(v.len));
             }
         }
-        hw.wait(PLAY_WAIT_22);
+        hw.wait(NEXT_VOICE_22);
         self.mask |= 1 << i;
     }
 
     /// The synth effects of a voice playing a synth sound.
     fn synth(&mut self, i: usize, hw: &mut Hw) {
+        let v22 = self.v22;
+        if v22 {
+            hw.wait(SYNTH_STEP_22);
+        }
         if !self.voices[i].synth {
             return;
         }
-        let v22 = self.v22;
         let n = self.inst(self.voices[i].instrument);
         let w = |o: usize| be16(&n, o);
         // the instrument's offsets that differ between the versions
@@ -771,7 +807,13 @@ impl SoundMon {
                 v.adsr_count = n[8] as u16;
                 let t = self.table(hw, n[5], self.voices[i].adsr_ptr);
                 let v = &mut self.voices[i];
+                if v22 {
+                    hw.wait(VOL_PRE_22);
+                }
                 hw.vol(i, (t.wrapping_add(0x80) as u16 >> 2) * v.volume as u16 >> 6);
+                if v22 {
+                    hw.wait(VOL_POST_22);
+                }
                 if i == 0 {
                     self.synth0 = true;
                 }
@@ -793,6 +835,9 @@ impl SoundMon {
                     let at = self.t_tick + if self.synth0 { FIRST_PER_AFTER_VOL_20 } else { TICK_TO_LFO_20 };
                     hw.wait(at.saturating_sub(hw.bus.clock));
                     self.lfo0 = Some(hw.bus.clock);
+                }
+                if v22 {
+                    hw.wait(LFO_PRE_22);
                 }
                 let v = &mut self.voices[i];
                 hw.per(i, v.period.wrapping_add(t as u16));

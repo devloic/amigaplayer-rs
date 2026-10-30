@@ -32,8 +32,8 @@
 //! - samples are played at the amplifier's 8-bit, sample-and-hold mixing (at the genie's
 //!   14477 Hz, wrapping round on overflow, as the genie's mix does), not with libxmp's
 //!   interpolation; a 16-bit sample keeps its high byte;
-//! - a bidirectional loop is unrolled into the sample (forward, then back) and
-//!   plays as a loop of twice the length;
+//! - a bidirectional loop plays forward only, as the Eagleplayer hands the loop to the NotePlayer
+//!   genie (measured with a ramp sample on the genie);
 //! - a pattern's cell for a channel beyond the module's count is read and dropped,
 //!   where libxmp's loader goes on without reading the bytes that follow it;
 //! - a note off silences the channel until the next instrument number (libxmp's
@@ -51,8 +51,8 @@ pub const OPEN: Open = Open { name: "PolyTracker", detect, new };
 /// The mix rate as a Paula period: the genie's, 3546895 / 245 = 14477 Hz.
 const MIX_PERIOD: u16 = 245;
 
-/// The boost in tenths over the voices of the busier side (the amplifier divides by them): a lone
-/// voice then counts 4.0 / side times its sample, as measured on the genie.
+/// The boost in tenths over the voices of the busier side (the amplifier's own mix; the genie's
+/// four-channel mix in `amplifier` scales by 4 / side in eighths, rounded down instead).
 const MIX_BOOST: u32 = 39;
 
 /// Volume of the multi retrigger: add, multiply, divide.
@@ -205,6 +205,9 @@ struct Ch {
     flags: u32,
     /// A note off is waiting for the next instrument number.
     released: bool,
+    /// The channel was cut (`ECx`): it stays silent, whatever its volume is set to, until the
+    /// next note (measured on the genie).
+    cut: bool,
     has_voice: bool,
     smp: usize,
     delay: i32,
@@ -258,6 +261,7 @@ impl Default for Ch {
             mastervol: 64,
             flags: 0,
             released: false,
+            cut: false,
             has_voice: false,
             smp: 0,
             delay: 0,
@@ -381,7 +385,6 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             lpe >>= 1;
         }
         let mut looped = typ & 12 != 0;
-        let bidir = typ & 8 != 0;
         if lpe > len {
             lpe = len;
         }
@@ -406,13 +409,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             let mut pcm: Vec<u8> = if wide { raw.chunks(2).map(|c| c[1]).collect() } else { raw };
             if looped {
                 pcm.truncate(lpe);
-                if bidir {
-                    let back: Vec<u8> = pcm[lps..lpe].iter().rev().copied().collect();
-                    pcm.extend(back);
-                    s.loop_len = 2 * (lpe - lps) as u32;
-                } else {
-                    s.loop_len = (lpe - lps) as u32;
-                }
+                s.loop_len = (lpe - lps) as u32;
                 s.loop_start = lps as u32;
             }
             s.end = pcm.len() as u32;
@@ -488,8 +485,9 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
 
     let silence = m.alloc(4);
     // The mix is DeliTracker's NotePlayer genie's (the 32 voice one, which plays a `_note` player
-    // for as many voices): 8 bits at 14477 Hz, wrapping round where it overflows, a voice
-    // counting 4/side of its sample (a lone voice of a 4 channel module: twice).
+    // for as many voices): 8 bits at 14477 Hz, four Paula channels each summing a group of the
+    // voices (wrapping round where it overflows), a voice counting 4/side of its sample in
+    // eighths (a lone voice of a 4 channel module: twice).
     if silence == 0
         || !crate::amplifier::start_panned_mix(
             m,
@@ -700,6 +698,9 @@ impl Ptm {
             }
         }
         if e.note != 0 {
+            if e.note != KEY_OFF {
+                self.ch[chn].cut = false;
+            }
             if e.note == KEY_OFF {
                 self.ch[chn].released = true;
             } else if is_toneporta {
@@ -1029,10 +1030,15 @@ impl Ptm {
                 if xc.retrig_type < 0x10 && xc.has_voice {
                     xc.start = Some(0);
                 }
-                let (s, mu, dv) = RVAL[xc.retrig_type.min(16)];
-                xc.volume += s;
-                xc.volume *= mu;
-                xc.volume /= dv;
+                if xc.retrig_type == 0x10 {
+                    // the cut mutes the voice and leaves the channel's volume alone
+                    xc.cut = true;
+                } else {
+                    let (s, mu, dv) = RVAL[xc.retrig_type.min(16)];
+                    xc.volume += s;
+                    xc.volume *= mu;
+                    xc.volume /= dv;
+                }
                 xc.retrig_count = xc.retrig_val;
             }
         }
@@ -1079,7 +1085,7 @@ impl Ptm {
             }
         }
         let vol = vol.clamp(0, 64);
-        let out_vol = if xc.released {
+        let out_vol = if xc.released || xc.cut {
             0
         } else {
             // linear: the Eagleplayer hands the genie twice this (0-128)

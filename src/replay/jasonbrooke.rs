@@ -1237,10 +1237,11 @@ fn layout_a(d: &[u8]) -> Option<LayA> {
     })
 }
 
-/// Pac-Land's envelope index high byte at the start of a tick: the D2 that UADE's
-/// score leaves in the interrupted registers, INTENAR (0x4020) after InitSound
-/// (specification 9.6). Its envelope reads then land past the image, which reads as 0.
-const PACLAND_H: u8 = 0x40;
+/// Pac-Land's envelope index high byte at the start of a tick: the D2 the host leaves in the
+/// interrupted registers. Under the engine's fixed start phase (the reference run) it is 0, so the
+/// envelopes are read from the table; before that phase was fixed UADE's score left INTENAR
+/// (0x4020) there, and the reads landed past the image and were 0 (a nearly silent song).
+const PACLAND_H: u8 = 0x00;
 
 pub struct BuildA {
     lay: LayA,

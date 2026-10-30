@@ -486,6 +486,52 @@ DELI_REF = {'amosmusicbank': 'AmosMusicBank'}
 FORCED_PLAYER = {'sidmon20': 'SIDMon 2.0', 'scumm': 'SCUMM_Player'}
 
 
+# Formats no Amiga player plays (README: HVL is checked against the C replayer only): whatever
+# player the engine's detection picks for such a file (a tracker that takes it for a module and
+# plays noise or silence) is no original.
+NO_AMIGA_PLAYER = {'hivelytracker'}
+
+
+# Formats whose original never reports a song end (UADE's PreTracker and SCUMM players are bare replay
+# routines: they play on) while the port signals one at the song's end (README), which stops
+# the CLI render there. The original is compared over the port's length.
+ORIGINAL_PLAYS_ON = {'pretracker', 'scumm'}
+
+
+# Formats whose original refuses some modules the port plays (Hippel 7V: the five COSO modules, README):
+# the engine's detection then falls back to another replayer of the family (the 4-voice COSO one),
+# which is no reference for the port's 7-voice replayer.
+REFUSED_NO_FALLBACK = {'hippel7v'}
+
+
+def retext_empty(ctx, mod):
+    """TFMX Pro modules whose text is the editor's "(Empty) ": EP206's TFMX_Pro takes only four it
+    knows and leaves the rest to TFMX_1.5, which refuses them, while UADE's newer TFMX_Pro plays
+    them but differs (another subsong list and song-end test). The port follows EP206's
+    replayer, which plays every one of them with the text changed (README), so the original is
+    EP206's on a copy with the text changed (companion files linked). Returns the copy's path,
+    or `mod` for any other module."""
+    try:
+        with open(mod, 'rb') as fh:
+            d = bytearray(fh.read())
+    except OSError:
+        return mod
+    if d[:10] != b'TFMX-SONG ' or d[0x10:0x18] != b'(Empty) ' or d[0x1d0:0x1d4] != b'\0\0\0\0':
+        return mod
+    d[0x10:0x18] = b'Retexted'
+    dst = os.path.join(ctx.cache, 'retext-' + hashlib.sha1(mod.encode()).hexdigest()[:12])
+    os.makedirs(dst, exist_ok=True)
+    out = os.path.join(dst, os.path.basename(mod))
+    with open(out, 'wb') as fh:
+        fh.write(d)
+    src = os.path.dirname(mod)
+    for n in os.listdir(src):
+        link = os.path.join(dst, n)
+        if n != os.path.basename(mod) and not os.path.lexists(link):
+            os.symlink(os.path.join(src, n), link)
+    return out
+
+
 def special_reference(mod, fmt):
     """A per-module original where one player does not cover the format: Digital Sound
     Studio modules with a tempo byte play on UADE's DSS 1.0-3.0 player (V1.2), as the
@@ -503,7 +549,7 @@ def special_reference(mod, fmt):
     return None
 
 
-def find_reference(ctx, mod, po):
+def find_reference(ctx, mod, po, port_short=False):
     """The original's render for a file whose port output line parses to `po`:
     dict(kind 'engine'|'libxmp'|'none', wav (path), data ((rate, samples)), out, led, player, o, note, noref)."""
     none = dict(kind='none', note='', noref=True)
@@ -516,9 +562,13 @@ def find_reference(ctx, mod, po):
         return dict(kind='libxmp', wav=raw, data=read_raw(raw), out='libxmp 4.7.4 ' + info.replace('\t', ' '),
                     led='', player='libxmp 4.7.4 (oracle)', o={}, note='')
     want = _norm(po.get('format', ''))
+    if want in NO_AMIGA_PLAYER:
+        return dict(none, note='no Amiga player plays this format (README)')
     dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
     if want in UADE_FIRST:
         dirs = dirs[::-1]
+    if want == 'tfmxpro':
+        mod = retext_empty(ctx, mod)
     # the player the port was verified against comes first, then the generic search
     verified = VERIFIED.get(want)
     tries = special_reference(mod, want) or []
@@ -549,7 +599,8 @@ def find_reference(ctx, mod, po):
         # engine could not run (or a different song set): try the next original first
         m = re.search(r'subsongs (\d+)\.\.(\d+)', rplay)
         with wave.open(rw, 'rb') as w:
-            short = w.getnframes() < w.getframerate() // 4 and ctx.secs >= 5
+            # (a port that ends as early itself makes a short original an agreeing one)
+            short = w.getnframes() < w.getframerate() // 4 and ctx.secs >= 5 and not port_short
         bad = short or (m and int(m.group(1)) > 1 and int(m.group(2)) > 255)
         if bad:
             bads.append(cand)
@@ -561,6 +612,12 @@ def find_reference(ctx, mod, po):
     fallback = fallback or (bads[0] if bads else None)
     if not fallback:
         return dict(none, note='no original player plays it in the engine')
+    if want in REFUSED_NO_FALLBACK:
+        got = re.sub(r'[^a-z0-9]', '', fallback['o'].get('format', '').lower())
+        if not (want in got or got in want):
+            # the verified player refuses the module and the engine's detection found another
+            # replayer: its output is not the original of this port
+            return dict(none, note=f'the {want} Eagleplayer refuses it; {fallback["player"][:60]} is another replayer')
     fallback['data'] = read_wav(fallback['wav'])
     if not fallback['data'][1].any():
         return dict(none, note='the original is silent in the engine (' + fallback['player'][:60] + ')')
@@ -581,17 +638,24 @@ def process(ctx, f):
             return row
         row['player'] = pplay
         po = parse_output(pout)
-        ref = find_reference(ctx, mod, po)
+        with wave.open(pw, 'rb') as w:
+            port_short = w.getnframes() < w.getframerate() // 4
+        ref = find_reference(ctx, mod, po, port_short)
         if ref['kind'] == 'none':
             row['cls'] = 'NOREF' if ref['noref'] else 'FAIL'
             row['note'] = ref['note']
             return row
         row.update(out_ref=ref['out'], led_ref=ref['led'], ref_player=ref['player'])
         ra, oref = ref['data'], ref['o']
+        cut_note = ''
         rb = read_wav(pw)
         if ra[0] != rb[0]:
             row['note'] = f'rates {ra[0]} vs {rb[0]}'
             return row
+        if (_norm(po.get('format', '')) in ORIGINAL_PLAYS_ON and any(l.startswith('song end after') for l in plines)
+                and len(ra[1]) > len(rb[1])):
+            ra = (ra[0], ra[1][:len(rb[1])])
+            cut_note = 'port song end; original plays on, cut to the port length'
         r = compare(ra[1], rb[1], ra[0])
         row.update({k: r[k] for k in ('identical', 'first_diff', 'first_diff_s', 'pct_identical', 'maxabs',
                                       'level_db', 'lag', 'lag_pct', 'len_a', 'len_b', 'silent_a', 'silent_b',
@@ -605,7 +669,7 @@ def process(ctx, f):
         if lr and lp and lr != lp:
             mm.append(f'led-start/switch ref={lr} port={lp}')
         row['cls'] = cls
-        row['note'] = ' '.join(mm)
+        row['note'] = ' '.join(mm + ([cut_note] if cut_note else []))
     except Exception as e:  # noqa
         row['note'] = f'{type(e).__name__}: {e}'[:160]
     return row

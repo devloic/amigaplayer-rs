@@ -3708,6 +3708,13 @@ impl Replayer for Hip7 {
     /// The tick comes with channel 0's interrupt, not DeliTracker's timer.
     fn tick(&mut self, _hw: &mut Hw) {}
 
+    /// The Eagleplayer is 68020 code: its software mixer of voices 3-6 overruns a buffer's
+    /// time on a 68000 in some modules, so the reference (which counts 68000 cycles) repeats
+    /// buffers and its ticks drift later (0.5% in Amberstar Intro), where UADE's 68020 does not.
+    fn needs_fast_reference_cpu(&self) -> bool {
+        true
+    }
+
     fn songend(&self) -> bool {
         self.songend
     }

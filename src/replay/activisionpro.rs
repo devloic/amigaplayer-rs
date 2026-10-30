@@ -856,6 +856,9 @@ pub struct ActivisionPro {
     sub: u16,
     /// Clocks since the last write.
     pend: u64,
+    /// A track ended with its end byte (the Eagleplayer reports the song's end there: the engine's
+    /// empty-subsong skip then goes on to the next subsong, as it does after the original).
+    ended: bool,
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -870,7 +873,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let blk = m.alloc(d.len() as u32 + 0x2000);
     let mb = blk + 0x1000;
     m.bus.write_bytes(mb, d);
-    let mut a = ActivisionPro { sub: l.min, l, mb, pend: 0 };
+    let mut a = ActivisionPro { sub: l.min, l, mb, pend: 0, ended: false };
     let mut hw = Hw { bus: &mut m.bus };
     a.init(a.sub, &mut hw);
     Some(Box::new(a))
@@ -886,7 +889,7 @@ impl Replayer for ActivisionPro {
     }
 
     fn songend(&self) -> bool {
-        false
+        self.ended
     }
 
     fn subsongs(&self) -> (u16, u16, u16) {
@@ -975,6 +978,7 @@ impl ActivisionPro {
 
     /// The Eagleplayer's InitSound: the replayer's init routine.
     fn init(&mut self, n: u16, hw: &mut Hw) {
+        self.ended = false;
         if self.l.jt {
             self.sgb(hw, "REQ", n as u8);
             return;
@@ -984,6 +988,7 @@ impl ActivisionPro {
 
     /// The replayer's init: the subsong's position lists, each voice's start.
     fn init_sub(&mut self, n: u16, hw: &mut Hw) {
+        self.ended = false;
         let d1 = n.wrapping_shl(4);
         let subs = self.a("SUBS");
         for k in 0..(self.l.r("INITN") as u32 / 4) {
@@ -1299,6 +1304,7 @@ impl ActivisionPro {
         let t = self.vb(hw, v, "TRACK");
         if t >= 0xfe {
             if t == 0xfe {
+                self.ended = true;
                 self.stop(hw);
                 return false;
             }

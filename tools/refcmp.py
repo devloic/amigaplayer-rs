@@ -79,7 +79,8 @@ TEMPO_MIN_CORR = 0.5    # segments whose envelopes correlate less than this are 
 UADE_FIRST = ('hippel7v',)
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
-MUST_MATCH = ('filter', 'led', 'sep', 'mono', 'resampler', 'volume', 'interp', 'xmp-filter')
+# builtin-voices: a reference played through our own NotePlayer renderer is not the original's
+MUST_MATCH = ('filter', 'led', 'sep', 'mono', 'resampler', 'volume', 'interp', 'xmp-filter', 'builtin-voices')
 
 GOOD = ('IDENTICAL', 'LAG-ONLY', 'NEAR', 'SIMILAR', 'NOREF')
 CLASSES = GOOD + ('FAIL', 'STAGE-MISMATCH', 'SILENT', 'LENGTH', 'FILTER', 'LEVEL', 'PITCH', 'TEMPO', 'DIFF')

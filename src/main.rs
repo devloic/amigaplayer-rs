@@ -205,7 +205,9 @@ fn render_wav(args: &Args) -> Result<()> {
             p.module_name, p.format, p.sub_min, p.sub_max, p.sub
         );
     }
-    eprintln!("{}", e.output_report());
+    // printed after the render: the built-in voices are only known to be in use
+    // once the player has played a note
+    let mut report = e.output_report();
     let total = (args.seconds * SAMPLE_RATE as f64) as usize;
     let mut out = vec![0f32; total * 2];
     let mut done = 0;
@@ -222,6 +224,10 @@ fn render_wav(args: &Args) -> Result<()> {
         }
     }
     out.truncate(done * 2);
+    if e.playing.is_some() {
+        report = e.output_report();
+    }
+    eprintln!("{report}");
     eprintln!("{}", e.led_report());
     if let Some(err) = &e.last_error {
         eprintln!("error: {err}");

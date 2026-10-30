@@ -215,15 +215,17 @@ const PLAY_TIME: u64 = 4814;
 // interrupt's entry.
 const FIRST_TICK: u64 = 65536 * ECLOCK + 47;
 // The time of the tick's work before its first write grows with what it does
-// (fitted to the original's tick times on four tunes, 4-voice tunes only):
-// per voice that starts a row, and per byte an effect handles.
+// (fitted to the original's tick times on twelve tunes, 4-voice tunes only; the
+// phase, mix, resonance and transform costs by least squares on the delay between a
+// tick's start and its first write, which was up to 26000 colour clocks short on
+// the tunes with 256-byte or several resonance effects): per voice that starts a
+// row, and per byte an effect handles.
 const ROW_TIME: u64 = 1158;
-const PHASE_BYTE: u64 = 21;
-const MIX_BYTE: u64 = 32;
+const PHASE_BYTE: u64 = 25;
+const MIX_BYTE: u64 = 2;
 const FILTER_BYTE: u64 = 113;
-// Not seen in the four tunes; taken from the effects that do alike.
-const RESONANCE_BYTE: u64 = 113;
-const TRANSFORM_BYTE: u64 = 32;
+const RESONANCE_BYTE: u64 = 177;
+const TRANSFORM_BYTE: u64 = 70;
 const PER_TO_VOL: u64 = 114;
 const VOL_TO_PER: u64 = 58;
 const OFF_TO_TIMER: u64 = 107;

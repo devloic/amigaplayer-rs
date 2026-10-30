@@ -37,8 +37,9 @@
 //!
 //! A module with a tempo byte (byte 8 not 0) is from a newer Digital Sound Studio
 //! than the Eagleplayer's, which would leave it silent for minutes. It is decided
-//! from the header only and played as NostalgicPlayer does (`np.rs`): the tempo
-//! is a BPM tempo (the CIA's 1773447 / BPM, as ProTracker's), the speed is byte 9,
+//! from the header only and played as that player ("player module V1.2") does
+//! (`np.rs`, written from a black-box specification of its register writes): the
+//! tempo is a BPM tempo (the CIA's 1773375 / BPM), the speed is byte 9,
 //! and all 31 effects (finetune, volume and master volume slides, tempo, pitch
 //! control, loops, retrigger, note delay and cut, sample offset, tone portamento)
 //! are there. Nothing of the above applies to it: no fitted costs, no clearing of
@@ -166,7 +167,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // and InitSound, whose loops over the positions and samples take their time
     if tempo {
         r.init_sound(d, &mut m.bus, false);
-        r.np = Some(np::Np::new(d, base, mem));
+        r.np = Some(np::Np::new(d, base, mem, &mut m.bus));
         return Some(Box::new(r));
     }
     let c: f64 = r.init.iter().map(|&(c, n)| COSTS[c as usize] * n as f64).sum();
@@ -756,8 +757,8 @@ mod tests {
         d
     }
 
-    /// With a tempo byte the module is NostalgicPlayer's: speed 2 (byte 9) at 250
-    /// BPM, so a row every 2 ticks of 1773447 / 250 CIA ticks, and effect 7+ work
+    /// With a tempo byte the module is the newer player's: speed 2 (byte 9) at 250
+    /// BPM, so a row every 2 ticks of 1773375 / 250 CIA ticks, and effect 7+ work
     /// (here B, set song tempo, on row 1).
     #[test]
     fn plays_a_module_with_a_tempo() {
@@ -774,7 +775,8 @@ mod tests {
         let log = e.m.bus.write_log.take().unwrap();
         let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
         assert_eq!(reg(0xDFF0A6)[0], 428);
-        assert_eq!(reg(0xDFF0A8)[0], 48);
+        // after the start's two clears of the volume
+        assert_eq!(&reg(0xDFF0A8)[..3], &[0, 0, 48]);
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
         // the pattern's 128 ticks take 2.56 s at 125 BPM, about 1.3 s once row 1 has
         // set 250: the note on row 0 comes again within the 2 s

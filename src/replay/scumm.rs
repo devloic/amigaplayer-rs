@@ -41,6 +41,16 @@ const SCRATCH: usize = 0x120;
 const T_ENTRY: u64 = 140;
 /// Before a group of channel writes (a note start or a slot update).
 const T_GROUP: u64 = 134;
+/// Before a note's DMA off.
+const T_STOP: u64 = 88;
+/// From a slot's DMA off to the next note's first write (the start sequence's own T_GROUP included).
+const OFF_TO_START: u64 = 322 - T_GROUP;
+/// After a note's DMA on, on top of the update's own wait that follows.
+const AFTER_START: u64 = 149;
+/// The first call's first two notes (the later ones go as the other calls'): the wait before
+/// their first write, and after the second one's DMA on.
+const COLD_START: [u64; 2] = [439, 411];
+const COLD_AFTER: u64 = 118;
 
 // ------------------------------------------------------------------ recognition
 
@@ -278,6 +288,9 @@ struct Scumm {
     a0: [u8; SCRATCH],
     first: bool,
     songend: bool,
+    /// Notes started so far by the first call (its code runs slower than the later calls').
+    cold: u8,
+    in_first: bool,
 }
 
 impl Scumm {
@@ -476,10 +489,12 @@ impl Scumm {
 
     fn seq(&mut self, s: &Seq, start: bool, d0: u16, hw: &mut Hw) -> bool {
         let slots = if s.four { 4 } else { 2 };
+        self.in_first = start;
         if s.four {
             self.set_sw(0x16, 0);
         }
         if start {
+            self.cold = 0;
             for k in 0..8 {
                 self.set_sw(2 * k, 0);
             }
@@ -542,9 +557,9 @@ impl Scumm {
             return;
         }
         if !s.four {
-            hw.wait(T_GROUP);
+            hw.wait(T_STOP);
             hw.dmacon(((1 << x) | (1 << (x + 2))) & d0);
-            hw.wait(212 - T_GROUP);
+            hw.wait(OFF_TO_START);
         }
         self.a0[0x10 + x] = 0xFF;
     }
@@ -565,7 +580,12 @@ impl Scumm {
             self.clear4(sample.wrapping_add(o as u32), hw);
             hw.wait(12);
         }
-        hw.wait(T_GROUP);
+        let cold = self.in_first && !s.four;
+        hw.wait(match (cold, self.cold) {
+            (true, 0) => COLD_START[0],
+            (true, 1) => COLD_START[1],
+            _ => T_GROUP,
+        });
         if s.dma_off_first {
             hw.dmacon(bit);
             hw.wait(134);
@@ -580,6 +600,10 @@ impl Scumm {
         hw.vol(ch, self.env(s, ve, 0));
         hw.wait(if s.four { 26 } else { 44 });
         hw.dmacon(0x8000 | bit);
+        hw.wait(if cold && self.cold == 1 { COLD_AFTER } else { AFTER_START });
+        if cold {
+            self.cold = self.cold.saturating_add(1);
+        }
     }
 
     fn update(&mut self, s: &Seq, n: u16, d0: u16, hw: &mut Hw) {
@@ -631,6 +655,11 @@ impl Scumm {
     }
 }
 
+/// Where in a raster line the original's ticks fall (Paula fetches words at fixed places in a
+/// line, so which side of a fetch a write lands on depends on it), from its write and DMA logs.
+const TIMER_DELAY: u64 = 140;
+const FIRST_PERIOD: u64 = 61;
+
 impl Replayer for Scumm {
     fn format(&self) -> &'static str {
         "SCUMM"
@@ -638,6 +667,20 @@ impl Replayer for Scumm {
 
     fn title(&self) -> String {
         self.title.clone()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
+    }
+
+    fn tick_clocks(&self) -> u64 {
+        // the first tick comes FIRST_TICK earlier in its line than the later ones, the second
+        // follows the first by that much more than a period
+        if self.first {
+            super::DT_TICK + FIRST_PERIOD
+        } else {
+            super::DT_TICK
+        }
     }
 
     fn tick(&mut self, hw: &mut Hw) {
@@ -656,7 +699,7 @@ impl Replayer for Scumm {
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let fam = family(d)?;
     let title = m.bus.read_cstr(m.deli.file_buf);
-    let p = Scumm { fam, img: d.to_vec(), base, title, a0: [0; SCRATCH], first: true, songend: false };
+    let p = Scumm { fam, img: d.to_vec(), base, title, a0: [0; SCRATCH], first: true, songend: false, cold: 0, in_first: false };
     Some(Box::new(p))
 }
 

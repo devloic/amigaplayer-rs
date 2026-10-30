@@ -231,6 +231,18 @@ fn poke_len(len: u16) -> u16 {
     }
 }
 
+/// Colour clocks (medians of the original's write logs) from a voice's volume write to its
+/// period write, and from the period write to the next voice's volume; the effects of a row's tick begin
+/// EFFECTS_START after the row's last length write.
+const VOL_TO_PER: [u64; 4] = [488, 488, 488, 385];
+const PER_TO_VOL: [u64; 4] = [250, 250, 186, 220];
+const EFFECTS_START: u64 = 278;
+/// The first tick's moment within a raster line, as the original's (Paula fetches words at fixed
+/// places in a line, so which side of a fetch a write lands on depends on it).
+const TIMER_DELAY: u64 = 127;
+const ROW_BASE: u64 = 278;
+const ROW_NOTE: u64 = 60;
+
 impl Replayer for SidMon2 {
     fn format(&self) -> &'static str {
         "SidMon 2.0"
@@ -238,6 +250,10 @@ impl Replayer for SidMon2 {
 
     fn title(&self) -> String {
         String::new()
+    }
+
+    fn timer_delay(&self) -> u64 {
+        TIMER_DELAY
     }
 
     fn songend(&self) -> bool {
@@ -262,6 +278,8 @@ impl Replayer for SidMon2 {
                     v.note = (v.note & 0xff00) | (v.note as u8).wrapping_add(v.note_transpose) as u16;
                 }
             }
+            // reading the rows takes ROW_BASE plus ROW_NOTE for each note (the original's logs)
+            hw.wait(ROW_BASE + ROW_NOTE * (mask & 0xf).count_ones() as u64);
             hw.dmacon(mask & 0xf);
             // Paula stops a playing voice only at the end of its word, and restarts
             // it only once stopped, so the time the original takes from DMA off to
@@ -296,6 +314,9 @@ impl Replayer for SidMon2 {
                     self.find_note(i, hw.bus);
                 }
             }
+        }
+        if self.rast == 0 {
+            hw.wait(EFFECTS_START - 106);
         }
         for i in 0..4 {
             self.effects(i, hw);
@@ -458,9 +479,9 @@ impl SidMon2 {
         } else if v.period as i16 >= 5760 {
             v.period = 5760;
         }
-        hw.wait(395);
+        hw.wait(VOL_TO_PER[i]);
         hw.per(i, v.period);
-        hw.wait(220);
+        hw.wait(PER_TO_VOL[i]);
     }
 
     fn envelope(&mut self, i: usize, bus: &Bus) {

@@ -478,6 +478,14 @@ VERIFIED = verified_players()
 DELI_REF = {'amosmusicbank': 'AmosMusicBank'}
 
 
+# Formats whose modules play past their sample data's end (the port plays silence there): the
+# original reads the emulated machine's memory after the module, and with the player found by
+# the engine's detection that is the engine's own library tables (A-line stubs), noise the port
+# cannot and should not play; with the player named, nothing lies there. Seen in SIDMon 2.0
+# (3 of 10 files) and SCUMM (3 of 10).
+FORCED_PLAYER = {'sidmon20': 'SIDMon 2.0', 'scumm': 'SCUMM_Player'}
+
+
 def special_reference(mod, fmt):
     """A per-module original where one player does not cover the format: Digital Sound
     Studio modules with a tempo byte play on UADE's DSS 1.0-3.0 player (V1.2), as the
@@ -516,6 +524,8 @@ def find_reference(ctx, mod, po):
     tries = special_reference(mod, want) or []
     if verified:
         tries += [(t + '+verified', d, ('--player', verified)) for t, d in dirs]
+    if want in FORCED_PLAYER:
+        tries += [(t + '+named', d, ('--player', FORCED_PLAYER[want])) for t, d in dirs]
     first = len(tries)
     tries += [(t, d, ()) for t, d in dirs]
     pn = po.get('player', '')

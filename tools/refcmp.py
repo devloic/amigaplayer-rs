@@ -244,6 +244,12 @@ def _aligned(a, b, s):
 
 def compare(a, b, rate=48000):
     """Numbers for the pair a (reference) and b (port), int16 (n, 2) arrays."""
+    # A 68k player cannot tell the engine that its song has ended: the original goes on rendering
+    # to the time limit while the port reports the end and stops. When all the reference has
+    # past the port's end is digital silence, nothing the port would have played is missing,
+    # and the two are compared up to the port's end.
+    if 0 < len(b) < len(a) and not a[len(b):].any():
+        a = a[:len(b)]
     r = {'len_a': len(a), 'len_b': len(b)}
     n = min(len(a), len(b))
     x, y = a[:n].astype(np.int32), b[:n].astype(np.int32)

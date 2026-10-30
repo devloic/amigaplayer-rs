@@ -1174,8 +1174,10 @@ impl Engine {
                     continue;
                 }
             }
+            // an earlier handler of this round may have cleared the request already (Digital
+            // Sonix & Chrome's, which clears every audio bit): nothing is pending then
             let is = self.m.os.int_vectors[crate::os::INTB_AUD0 + ch];
-            if is != 0 {
+            if is != 0 && self.m.bus.paula.intreq & bit != 0 {
                 let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));
                 let active = (self.m.bus.paula.intena & self.m.bus.paula.intreq) as u32;
                 crate::os::call_int_code(&mut self.m, code, data, active);

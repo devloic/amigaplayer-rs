@@ -631,11 +631,34 @@ impl SoundImages {
 
     /// The step-1 work: the pending DMACON and the audio interrupt.
     fn pending(&mut self, hw: &mut Hw, takes_start: bool) {
+        let e = self.pending_head(hw);
+        self.interrupt_handler(e, takes_start, hw);
+    }
+
+    /// The tick's first write, the pending DMACON; returns the pending interrupt bits.
+    fn pending_head(&mut self, hw: &mut Hw) -> u16 {
         let dma = self.gw(self.g.dma);
         let e = self.gw(self.g.int);
         hw.dmacon(dma);
         self.sgw(self.g.dma, 0);
         self.sgw(self.g.int, 0);
+        e
+    }
+
+    /// The generation-A tick's next two writes (see `pending_head`), and the wait to its first
+    /// voice: the original's PERIOD comes 163 colour clocks after the DMACON write.
+    fn tick_a_head(&mut self, e: u16, hw: &mut Hw) {
+        hw.wait(16);
+        hw.bus.write_word(0xDFF09C, e & 0x7FFF);
+        hw.wait(10);
+        hw.bus.write_word(0xDFF09A, if e != 0 { 0x8000 | (e & 0x7FFF) } else { 0 });
+        hw.wait(137);
+    }
+
+    /// The audio interrupt handler for the bits `e` (the original takes it once the tick's code
+    /// has run, or at once when the tick has none to run): sample pointer and length of each
+    /// voice whose bit is set, then the acknowledge.
+    fn interrupt_handler(&mut self, e: u16, takes_start: bool, hw: &mut Hw) {
         // a song start in this tick turns the interrupts off before they are taken
         if e & 0x0780 == 0 || (takes_start && self.rev() != Rev::B) {
             return;
@@ -831,10 +854,13 @@ impl SoundImages {
     /// The generation-A tick (A, A9C, B, R3, R5, R6).
     fn tick_a(&mut self, hw: &mut Hw) {
         let takes = self.next_latch() != 0;
-        self.pending(hw, takes);
+        let e = self.pending_head(hw);
+        self.tick_a_head(e, hw);
+        // the original takes the audio interrupt after the tick's code
         self.take_latch();
         self.request(hw);
         if !self.gen_b() && !self.running() {
+            self.interrupt_handler(e, takes, hw);
             return;
         }
         let tt = self.tempo_tick();
@@ -848,12 +874,14 @@ impl SoundImages {
                 continue;
             }
             hw.per(k, self.vw(k, 0x06));
+            hw.wait(262);
             hw.vol(k, self.volume_out(k));
             self.step(k, tt, hw);
-            hw.wait(150);
+            hw.wait(277);
         }
         self.fade(hw);
         self.tempo_reload();
+        self.interrupt_handler(e, takes, hw);
     }
 
     /// R1 and R2: periods and volumes after the voices.
@@ -1691,10 +1719,10 @@ mod tests {
         let mut want = vec![(0xDFF096, 0x0000), (0xDFF096, 0x000F), (0xDFF0A6, 0), (0xDFF0A8, 0)];
         want.extend(lc(base + 0x400));
         want.extend([(0xDFF0A4, 8), (0xDFF096, 0x0001)]);
-        // tick 1: the four voices' DMA, the interrupt installs the loop, then the note
-        want.push((0xDFF096, 0x820F));
+        // tick 1: the four voices' DMA, the note, then the interrupt installs the loop
+        want.extend([(0xDFF096, 0x820F), (0xDFF0A6, 880), (0xDFF0A8, 32)]);
         want.extend(lc(base + 0x408));
-        want.extend([(0xDFF0A4, 4), (0xDFF0A6, 880), (0xDFF0A8, 32)]);
+        want.push((0xDFF0A4, 4));
         let got = ch0(&log);
         assert_eq!(got[..want.len()], want[..]);
         // the countdown of 3 tempo ticks: the stream again on tick 3

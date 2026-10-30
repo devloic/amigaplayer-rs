@@ -16,6 +16,7 @@
 //! speed is fixed by the file. Two flavours (`AN COOL!` and `AN COOL.`) differ in
 //! the period base and in the pitch-slide effects, which only the second has.
 
+use crate::paula::LINE;
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
 
@@ -39,9 +40,26 @@ fn pitch(i: i32) -> i64 {
     }
 }
 
-/// Colour clocks the original lets pass between the writes of a restart.
-const STOP_WAIT: u64 = 180;
-const START_WAIT: u64 = 420;
+/// A restart's timing in the original, measured from its register writes: it comes out of a
+/// wait for the next raster line 34 to 46 colour clocks into the line (all restarts of one
+/// reference render, whatever the phase of its tick), writes PERIOD 1, and 32 colour clocks later
+/// stops the DMA; the sample pointer and length follow within 21 to 38, and the DMA starts again
+/// at 64 to 76 colour clocks into the line, one to three lines after it stopped (two in most
+/// restarts, none of the rules tried predicts which: period, position in the word, line phase),
+/// 421 colour clocks before the repeat pointer and length. Three lines is what the renders
+/// agree best with (levels, spectra, the DMA words), two the most frequent.
+const LINE_POS: u64 = 42;
+const STOP_AFTER: u64 = 32;
+const LOC_AFTER: u64 = 21;
+const START_POS: u64 = 72;
+const START_LINES: u64 = 3;
+const REPEAT_AFTER: u64 = 421;
+
+/// Waits for the next line, to `pos` colour clocks into it.
+fn wait_line_pos(hw: &mut Hw, lines: u64, pos: u64) {
+    let now = hw.bus.clock;
+    hw.wait((now / LINE + lines) * LINE + pos - now);
+}
 
 // ---------------------------------------------------------------------------------
 // Recognition
@@ -318,15 +336,17 @@ impl Tcb {
             if voice.flag == 0 {
                 let bit = 1u16 << v;
                 let run = hw.bus.paula.dmacon & bit != 0;
+                wait_line_pos(hw, 1, LINE_POS);
                 hw.per(v, 1);
+                hw.wait(STOP_AFTER - 6);
                 hw.dmacon(if run { bit } else { 0 });
-                hw.wait(STOP_WAIT);
+                hw.wait(LOC_AFTER);
                 hw.loc(v, (base + voice.reg_adr) as u32);
                 hw.len(v, (voice.reg_len >> 1) as u16);
                 hw.per(v, voice.hw_per);
-                hw.wait(STOP_WAIT / 2);
+                wait_line_pos(hw, START_LINES, START_POS);
                 hw.dmacon(0x8000 | bit);
-                hw.wait(START_WAIT);
+                hw.wait(REPEAT_AFTER);
                 hw.loc(v, (base + la) as u32);
                 hw.len(v, (ll >> 1) as u16);
                 voice.flag = 0xFF;

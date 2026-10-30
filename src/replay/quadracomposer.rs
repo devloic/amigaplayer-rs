@@ -267,6 +267,9 @@ impl Replayer for QuadraComposer {
     }
 }
 
+/// Colour clock of the raster line at which the loop register writes start (measured).
+const LOOP_PHASE: u64 = 113;
+
 impl QuadraComposer {
     fn timer_for(tempo: u16) -> u32 {
         if tempo == 0 { crate::deli::DEFAULT_TIMER as u32 } else { 1789773 / tempo as u32 }
@@ -315,15 +318,17 @@ impl QuadraComposer {
         }
     }
 
-    /// The DMA of the voices whose samples this tick started goes off and on together,
-    /// and the loop registers of all four voices follow.
+    /// The DMA of the voices whose samples this tick started goes off and on together, and the
+    /// loop registers of all four voices follow: the original waits ten raster lines after the
+    /// DMA is on and then for the beam to be at colour clock 113 of a line (in every run, whatever
+    /// the DMA-on time), and writes the pairs at fixed spacing.
     fn start_voices(&mut self, hw: &mut Hw) {
         if self.dma_mask != 0 {
             let m = self.dma_mask;
             hw.dmacon(m);
             hw.wait(110);
             hw.dmacon(0x8000 | m);
-            hw.wait(2330);
+            hw.wait_lines(10, LOOP_PHASE);
             for i in 0..4 {
                 self.write_loop(i, hw);
             }
@@ -334,9 +339,10 @@ impl QuadraComposer {
         let c = &self.ch[i];
         let (loc, len) = if c.loop_len != 0 { (c.addr + c.loop_start, (c.loop_len / 2) as u16) } else { (0, 0) };
         hw.loc(i, loc);
-        hw.wait(5);
+        // clearing the pair takes two colour clocks longer than loading it (measured)
+        hw.wait(if loc == 0 { 107 } else { 105 });
         hw.len(i, len);
-        hw.wait(90);
+        hw.wait(97);
     }
 
     fn init_position(&mut self) {

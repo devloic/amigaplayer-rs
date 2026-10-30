@@ -340,8 +340,14 @@ impl SoundMon {
             // 2.0: the LFO sets the period instead
             hw.per(i, v.period);
         }
+        // the writes' spacing in the original's log: the first voice's follow the tick's
+        // set-up, each voice's period, pointer and length then 84, 41 and 141 colour
+        // clocks apart
+        hw.wait(if i == 0 { 294 } else { 84 });
         hw.loc(i, v.addr);
+        hw.wait(if i == 0 { 39 } else { 41 });
         hw.len(i, plen(v.len));
+        hw.wait(141);
         if v.arp_value != 0 || v.auto_arp != 0 {
             let add = match arp {
                 0 => (v.arp_value >> 4) + (v.auto_arp >> 4),

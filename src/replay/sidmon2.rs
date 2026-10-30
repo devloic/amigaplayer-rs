@@ -458,7 +458,9 @@ impl SidMon2 {
         } else if v.period as i16 >= 5760 {
             v.period = 5760;
         }
+        hw.wait(395);
         hw.per(i, v.period);
+        hw.wait(220);
     }
 
     fn envelope(&mut self, i: usize, bus: &Bus) {

@@ -53,6 +53,8 @@ DEFAULT_LIST = SCRATCH + '/listen/files.json'
 DEFAULT_BIN = os.path.join(HERE, '..', 'target', 'release', 'amigaplayer-rs')
 EP206 = SCRATCH + '/eplicense/x/Eagleplayer_2.06/Eagleplayers'
 UADE_PLAYERS = os.path.expanduser('~/.local/opt/uade/share/uade/players')
+# DeliPlayers of the DeliTracker PlayerStore: the original of the ports verified against one
+DELI_STORE = os.path.expanduser('~/.config/deliplayer/DeliPlayers/PlayerStore')
 XMP_ORACLE = SCRATCH + '/ports/x01-core/harness/render'
 LISTEN_PY = SCRATCH + '/listen/listen.py'
 BASELINE = os.path.join(HERE, 'refcmp-baseline.tsv')
@@ -75,8 +77,10 @@ TEMPO_SEGMENTS = 8      # segments the drift is measured over
 TEMPO_TAU = 0.75        # ... and the alignments must trend (Kendall's tau over the segments) at least this much
 TEMPO_MIN_CORR = 0.5    # segments whose envelopes correlate less than this are left out
 # ports whose original is UADE's Eagleplayer, not EP206's older one of the same format:
-# Hippel 7V follows V1.3 (UADE), EP206 has V1.0, which keeps another tempo and LED
-UADE_FIRST = ('hippel7v',)
+# Hippel 7V follows V1.3 (UADE), EP206 has V1.0, which keeps another tempo and LED;
+# Sound Master and SCUMM were written against the 68k players UADE ships (EP206's
+# SoundMaster is another build, SCUMM's differs in its sweeps)
+UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm')
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's
@@ -404,7 +408,10 @@ def _run_cached(ctx, key, cmd, env, cwd, wav):
 
 
 def render_engine(ctx, mod, open_replayers, eagle, extra=()):
-    env = dict(os.environ, SDL_AUDIO_DRIVER='dummy', RUST_LOG='error', DELIPLAYERS=ctx.empty,
+    deli = ctx.empty
+    if isinstance(eagle, tuple):   # ('deli', DeliPlayer directory)
+        deli, eagle = eagle[1], None
+    env = dict(os.environ, SDL_AUDIO_DRIVER='dummy', RUST_LOG='error', DELIPLAYERS=deli,
                DELIGENIES=ctx.empty, EAGLEPLAYERS=eagle or ctx.empty)
     cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else []), *ctx.flags, *extra,
            '--wav', '@WAV@', '--seconds', str(ctx.secs), mod]
@@ -452,10 +459,17 @@ def verified_players(readme=os.path.join(HERE, '..', 'README.md')):
 VERIFIED = verified_players()
 
 
+# ports whose original is a PlayerStore DeliPlayer (UADE's Eagleplayer of the format converts
+# the bank to a ProTracker module and plays that, so it is no reference): normalised format -> player
+DELI_REF = {'amosmusicbank': 'AmosMusicBank'}
+
+
 def special_reference(mod, fmt):
     """A per-module original where one player does not cover the format: Digital Sound
     Studio modules with a tempo byte play on UADE's DSS 1.0-3.0 player (V1.2), as the
     V1.71 Eagleplayer the port follows for the others reads the tempo as part of the speed."""
+    if fmt in DELI_REF and os.path.isdir(DELI_STORE):
+        return [('deli', ('deli', DELI_STORE), ('--player', DELI_REF[fmt]))]
     if fmt == 'digitalsoundstudio':
         try:
             with open(mod, 'rb') as fh:

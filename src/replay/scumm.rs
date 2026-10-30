@@ -38,7 +38,7 @@ const SCRATCH: usize = 0x120;
 // Gaps between writes in colour clocks, from the reference runs: they place the
 // writes against Paula (DMA off to on in particular), they are not compared.
 /// From the tick to the routine's first instructions.
-const T_ENTRY: u64 = 135;
+const T_ENTRY: u64 = 140;
 /// Before a group of channel writes (a note start or a slot update).
 const T_GROUP: u64 = 134;
 
@@ -358,15 +358,15 @@ impl Scumm {
         }
         let mut j = 0u16;
         for ch in 0..4 {
-            hw.wait(36);
+            hw.wait(27);
             if d0 & 1 << ch != 0 {
                 if j == cnt {
                     hw.loc(ch, a1);
-                    hw.wait(6);
-                    hw.len(ch, 16);
                     hw.wait(8);
-                    hw.per(ch, p);
+                    hw.len(ch, 16);
                     hw.wait(6);
+                    hw.per(ch, p);
+                    hw.wait(if start { 8 } else { 6 });
                     hw.vol(ch, v);
                 }
                 j = j.wrapping_add(1);
@@ -374,8 +374,9 @@ impl Scumm {
         }
         if start {
             self.set_sw(0, cnt.wrapping_add(1));
-            hw.wait(40);
+            hw.wait(34);
             hw.dmacon(d0 | 0x8000);
+            hw.wait(26);
             self.set_sw(2, s.p0);
             return false;
         }
@@ -388,7 +389,7 @@ impl Scumm {
         self.set_sw(2, base);
         let end = if s.le { base as i16 <= s.lim as i16 } else { base as i16 >= s.lim as i16 };
         if end {
-            hw.wait(52);
+            hw.wait(62);
             hw.dmacon(d0);
         }
         end
@@ -398,18 +399,19 @@ impl Scumm {
 
     fn siren(&mut self, s: &Siren, start: bool, d0: u16, hw: &mut Hw) -> bool {
         if start {
+            hw.wait(6);
             hw.dmacon(d0);
             let (mut wa, mut wb) = (self.a1(), self.a1().wrapping_add(s.w2 as u32));
             let (mut p, mut q) = (s.d6, s.d7);
             for ch in 0..4 {
-                hw.wait(20);
+                hw.wait(39);
                 if d0 & 1 << ch != 0 {
                     hw.loc(ch, wa);
-                    hw.wait(6);
-                    hw.len(ch, 16);
                     hw.wait(8);
-                    hw.per(ch, p);
+                    hw.len(ch, 16);
                     hw.wait(6);
+                    hw.per(ch, p);
+                    hw.wait(8);
                     hw.vol(ch, 0x3F);
                     std::mem::swap(&mut p, &mut q);
                     std::mem::swap(&mut wa, &mut wb);
@@ -417,7 +419,7 @@ impl Scumm {
                     q = q.wrapping_sub(s.dec);
                 }
             }
-            hw.wait(34);
+            hw.wait(38);
             hw.dmacon(d0 | 0x8000);
             for (k, v) in s.s.iter().enumerate() {
                 self.set_sw(2 * k, *v);
@@ -426,7 +428,7 @@ impl Scumm {
         }
         let mut j = 0;
         for ch in 0..4 {
-            hw.wait(20);
+            hw.wait(27);
             if d0 & 1 << ch != 0 {
                 hw.per(ch, self.sw(2 * j));
                 j += 1;
@@ -569,14 +571,14 @@ impl Scumm {
             hw.wait(134);
         }
         hw.loc(ch, sample);
-        hw.wait(14);
+        hw.wait(16);
         hw.len(ch, self.iw(r + 0x18) >> 1);
-        hw.wait(26);
+        hw.wait(if s.four { 36 } else { 40 });
         let (pe, ve) = (self.iw(r + 0x0C), self.iw(r));
         hw.per(ch, self.env(s, pe, 0).wrapping_add(padd));
-        hw.wait(14);
+        hw.wait(30);
         hw.vol(ch, self.env(s, ve, 0));
-        hw.wait(if s.four { 26 } else { 36 });
+        hw.wait(if s.four { 26 } else { 44 });
         hw.dmacon(0x8000 | bit);
     }
 
@@ -591,17 +593,17 @@ impl Scumm {
         let (ch, _) = Self::chan(s, slot, d0);
         let lp = self.a1().wrapping_add(self.iw(r + 0x16) as i16 as u32);
         let len = self.iw(r + 0x10) >> 1;
-        hw.wait(T_GROUP);
+        hw.wait(233);
         hw.loc(ch, lp);
-        hw.wait(14);
+        hw.wait(16);
         hw.len(ch, len);
         if s.four && len == 1 {
             self.clear4(lp, hw);
         }
-        hw.wait(if s.four { 52 } else { 46 });
+        hw.wait(if s.four { 71 } else { 63 });
         let (pe, ve, pi, padd) = (self.iw(r + 0x0C), self.iw(r), self.iw(r + 0x0E), self.iw(r + 0x0A));
         hw.per(ch, self.env(s, pe, pi).wrapping_add(padd));
-        hw.wait(26);
+        hw.wait(42);
         let v = self.env(s, ve, vi);
         hw.vol(ch, v);
         let inc = |x: u16| if x.wrapping_add(1) == 0xFF { 0xFE } else { x.wrapping_add(1) };

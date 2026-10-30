@@ -184,6 +184,7 @@ mod cost {
     /// In BPM mode a tick that plays takes this much more in the entry.
     pub const BPM_EXTRA: f64 = 21.0;
     pub const BPM_EXTRA_EVERY: f64 = 20.0;
+    pub const FAST_SPD_EVERY: f64 = 18.0;
     /// The track counts the tables below are measured at.
     pub const SIZES: [usize; 9] = [1, 2, 3, 4, 5, 6, 8, 12, 16];
     /// The row read: base, per track, per note, per instrument set (MMD0, then MMD1 and 2).
@@ -247,18 +248,26 @@ mod cost {
     ];
     /// A hold expiry's DMA off in the pass, from the pass's start by channel, and between two;
     /// from the last to the pass's end.
-    pub const HOLD_OFF: [f64; 4] = [81.5, 270.5, 298.5, 326.5];
-    pub const HOLD_TAIL: f64 = 808.0;
-    pub const HOLD_OFF_NEXT: f64 = 209.0;
+    pub const HOLD_FIRST: f64 = 150.0;
+    pub const HOLD_TRACK: f64 = 74.25;
+    pub const HOLD_OFF: f64 = 134.5;
     /// A track whose hold ends adds this to the pass, and a decay that starts then this more.
     /// Commands that run on every tick add to the pass (a slide up or down, a tempo or special).
     pub const CMD_SLIDE_UP: f64 = 23.0;
     pub const CMD_SLIDE_DOWN: f64 = 8.0;
+    pub const CMD_SLIDE_DOWN2: f64 = 26.0;
+    pub const CMD_VIBRATO: f64 = 102.0;
+    pub const CMD_VOLSLIDE: f64 = 31.0;
     pub const CMD_TEMPO: f64 = 61.5;
     pub const CMD_TICKS: f64 = -6.0;
-    pub const HOLD_ACTIVE: f64 = 28.0;
+    /// A volume command costs this more in the pass of the row's own tick.
+    pub const CMD_VOLUME: f64 = 6.5;
+    /// A track whose hold is running (not out) adds this to the pass; one whose volume fades,
+    /// this.
+    pub const HOLD_ACTIVE: f64 = 0.0;
+    pub const FADE: f64 = 18.0;
     pub const HOLD_END: f64 = 25.0;
-    pub const HOLD_DECAY: f64 = 38.0;
+    pub const HOLD_DECAY: f64 = 63.0;
 
     /// A value of a table by N, linear between the sizes and beyond them.
     pub fn by_n(t: &[f64; 9], n: usize) -> f64 {
@@ -411,9 +420,7 @@ pub struct Med {
     advance_cost: f64,
     pass_start2: i64,
     pass_extra: f64,
-    holds_off: u32,
-    hold_last: f64,
-    pass_floor2: i64,
+    hold_extra: f64,
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -520,9 +527,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         advance_cost: 0.0,
         pass_start2: 0,
         pass_extra: 0.0,
-        holds_off: 0,
-        hold_last: 0.0,
-        pass_floor2: 0,
+        hold_extra: 0.0,
     };
     p.title = p.song_name(&m.bus);
     p.play_module(&mut m.bus, 0);
@@ -593,6 +598,9 @@ impl Replayer for Med {
         };
         if self.bpm {
             entry += if row_tick { cost::BPM_EXTRA } else { cost::BPM_EXTRA_EVERY };
+        } else if fast {
+            // a fast tempo in SPD mode: the timer's interrupt takes longer to get to the routine
+            entry += if row_tick { cost::BPM_EXTRA - cost::FAST_EXTRA } else { cost::FAST_SPD_EVERY };
         }
         self.anchor = hw.bus.clock;
         self.acc2 = 0;
@@ -1544,8 +1552,7 @@ impl Med {
         // the writes in it (a hold's end) fall at measured places
         self.pass_start2 = self.acc2;
         self.pass_extra = 0.0;
-        self.holds_off = 0;
-        self.pass_floor2 = 0;
+        self.hold_extra = 0.0;
         for t in 0..n {
             self.hold_decay(hw, t);
         }
@@ -1562,9 +1569,13 @@ impl Med {
                 if !self.tracks[t].skip {
                     self.pass_extra += match cmd {
                         0x01 => cost::CMD_SLIDE_UP,
+                        0x02 if self.ver >= b'2' => cost::CMD_SLIDE_DOWN2,
                         0x02 => cost::CMD_SLIDE_DOWN,
+                        0x04 => cost::CMD_VIBRATO,
+                        0x0d => cost::CMD_VOLSLIDE,
                         0x0f => cost::CMD_TEMPO,
                         0x09 => cost::CMD_TICKS,
+                        0x0c if tick == 0 => cost::CMD_VOLUME,
                         _ => 0.0,
                     };
                     self.tick_command(hw, t, cmd, arg, tick);
@@ -1576,8 +1587,9 @@ impl Med {
             }
         }
         let pass = if self.ver >= b'1' { &cost::PASS1 } else { &cost::PASS0 };
-        let end2 = self.pass_start2 + (2.0 * (cost::by_n(pass, self.n_after) + self.pass_extra)).round() as i64;
-        self.acc2 = self.acc2.max(end2).max(self.pass_floor2);
+        let end2 = self.pass_start2
+            + (2.0 * (cost::by_n(pass, self.n_after) + self.pass_extra + self.hold_extra)).round() as i64;
+        self.acc2 = self.acc2.max(end2);
         for t in 0..self.numtracks.min(64) as usize {
             if !self.tracks[t].skip {
                 self.output(hw, t);
@@ -1592,37 +1604,34 @@ impl Med {
         }
         let tr = &mut self.tracks[t];
         if tr.hold_cnt >= 0 {
-            self.pass_extra += cost::HOLD_ACTIVE;
             tr.hold_cnt -= 1;
+            if tr.hold_cnt >= 0 {
+                self.hold_extra += cost::HOLD_ACTIVE;
+            }
             if tr.hold_cnt < 0 {
-                self.pass_extra += cost::HOLD_END;
                 if tr.stype != 0 {
                     // a synth sound decays by its volume program
                     tr.vol_pos = tr.decay_speed;
                     tr.vol_wait = 0;
+                    self.hold_extra += cost::HOLD_END;
                 } else {
                     tr.fade_speed = tr.decay_speed;
                     if tr.fade_speed == 0 {
-                        // (seen in the original's first tick only, where every track's hold has
-                        // not started: the first at a place by channel, the next 209 on)
-                        let at = if self.holds_off == 0 {
-                            cost::HOLD_OFF[t & 3]
-                        } else {
-                            self.hold_last + cost::HOLD_OFF_NEXT
-                        };
-                        self.hold_last = at;
+                        // the track's turn in the pass, then the DMA off (a track's hold has
+                        // run out in the original's first tick, where every one starts at 0)
+                        let at = cost::HOLD_FIRST + cost::HOLD_TRACK * t as f64 + self.hold_extra;
                         self.acc2 = self.acc2.max(self.pass_start2 + (2.0 * at) as i64);
-                        self.holds_off += 1;
                         self.dma_off(hw, t);
-                        self.pass_floor2 = self.acc2 + (2.0 * cost::HOLD_TAIL) as i64;
+                        self.hold_extra += cost::HOLD_OFF;
                     } else {
-                        self.pass_extra += cost::HOLD_DECAY;
+                        self.hold_extra += cost::HOLD_DECAY;
                     }
                 }
             }
         }
         let tr = &mut self.tracks[t];
         if tr.fade_speed != 0 {
+            self.hold_extra += cost::FADE;
             tr.vol = tr.vol.wrapping_sub(tr.fade_speed);
             if (tr.vol as i8) < 0 {
                 tr.vol = 0;
@@ -2141,7 +2150,8 @@ impl Med {
 
     /// Brings the clock to the time the code has got to before a write.
     fn flush(&mut self, hw: &mut Hw) {
-        let at = self.anchor + (self.acc2.max(0) / 2) as u64;
+        let round = (self.ver >= b'1') as i64;
+        let at = self.anchor + ((self.acc2.max(0) + round) / 2) as u64;
         if hw.bus.clock < at {
             hw.bus.clock = at;
         }

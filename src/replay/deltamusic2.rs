@@ -147,50 +147,122 @@ struct Globals {
     dma: u8,
     songend: bool,
     /// The last register write of this tick, for `gap`.
-    last: Option<Write>,
-    /// The voice playing.
-    cur: usize,
-    /// The voice starts a note in this pass (its writes take longer than a running voice's).
-    ev: bool,
+    last: Option<Site>,
+    /// The paths the original's code has taken since its last write (`P_*`, and above bit 26 the
+    /// number of the effect), whose costs `gap` adds.
+    path: u32,
 }
 
+/// The register writes of a tick, by the place in the code that makes them.
 #[derive(Clone, Copy, PartialEq)]
-enum Write {
+enum Site {
     DmaOff,
-    Loc,
-    Len,
+    NoteLoc,
+    NoteLen,
+    LoopLen,
+    LoopLoc,
+    TblLoc,
+    TblLen,
     Per,
     Vol,
     DmaOn,
 }
 
+// The paths the original's code takes between two writes (`Globals::path`). Its time between two
+// writes is a constant for the pair plus the cost of each path taken, measured over the reference
+// runs of ten modules (every gap within a few colour clocks; `PATH_COST`).
+const P_TICK0: u32 = 1 << 0;
+const P_BLOCK: u32 = 1 << 1;
+const P_EFFECT: u32 = 1 << 2;
+const P_TBL_SKIP: u32 = 1 << 4;
+const P_TBL_RUN: u32 = 1 << 5;
+const P_TBL_JUMP: u32 = 1 << 6;
+const P_TBL_END: u32 = 1 << 7;
+const P_VIB_SUSTAIN: u32 = 1 << 8;
+const P_VIB_STEP: u32 = 1 << 9;
+const P_VIB_WRAP: u32 = 1 << 10;
+const P_VIB_FLIP: u32 = 1 << 11;
+const P_VIB_DOWN: u32 = 1 << 12;
+const P_VOL_SUSTAIN: u32 = 1 << 13;
+const P_VOL_UP: u32 = 1 << 14;
+const P_VOL_REACHED: u32 = 1 << 15;
+const P_VOL_DOWN: u32 = 1 << 17;
+const P_VOL_DOWN_REACHED: u32 = 1 << 18;
+const P_ARP_WRAP: u32 = 1 << 22;
+const P_ARP_LOOKUP: u32 = 1 << 23;
+const P_CLAMP_MAX: u32 = 1 << 24;
+const P_CLAMP_GLOBAL: u32 = 1 << 25;
+/// The song's end (the track wraps; one module in the runs, so the cost is one measurement).
+const P_TRACK_END: u32 = 1 << 30;
+/// The effect's number (0 to 7) is kept above this bit.
+const P_EFFECT_SHIFT: u32 = 27;
+
+/// Colour clocks each path costs (the fit is not unique: the table works as a whole).
+const PATH_COST: [(u32, i32); 21] = [
+    (P_TRACK_END, 48),
+    (P_TICK0, 73),
+    (P_BLOCK, 79),
+    (P_TBL_SKIP, 24),
+    (P_TBL_RUN, 176),
+    (P_TBL_JUMP, 40),
+    (P_TBL_END, -136),
+    (P_VIB_SUSTAIN, 98),
+    (P_VIB_STEP, 115),
+    (P_VIB_WRAP, 8),
+    (P_VIB_FLIP, 18),
+    (P_VIB_DOWN, -5),
+    (P_VOL_SUSTAIN, 42),
+    (P_VOL_UP, 86),
+    (P_VOL_REACHED, 28),
+    (P_VOL_DOWN, 86),
+    (P_VOL_DOWN_REACHED, 29),
+    (P_ARP_WRAP, 42),
+    (P_ARP_LOOKUP, 213),
+    (P_CLAMP_MAX, 6),
+    (P_CLAMP_GLOBAL, 6),
+];
+
+/// What an effect costs, by its number.
+const EFFECT_COST: [i32; 8] = [64, 123, 66, 64, 60, 64, 64, 90];
+
+/// The constant of a pair of writes (previous, next), colour clocks.
+const PAIR_COST: [(Site, Site, i32); 14] = [
+    (Site::DmaOff, Site::NoteLoc, 257),
+    (Site::DmaOff, Site::TblLoc, 250),
+    (Site::LoopLen, Site::LoopLoc, 115),
+    (Site::LoopLoc, Site::Per, 35),
+    (Site::NoteLen, Site::Per, 126),
+    (Site::NoteLoc, Site::NoteLen, 99),
+    (Site::Per, Site::Vol, 127),
+    (Site::TblLen, Site::Per, 5),
+    (Site::TblLoc, Site::TblLen, 101),
+    (Site::Vol, Site::DmaOff, 170),
+    (Site::Vol, Site::DmaOn, 232),
+    (Site::Vol, Site::LoopLen, 232),
+    (Site::Vol, Site::Per, 86),
+    (Site::Vol, Site::TblLoc, 95),
+];
+
+/// The constant of a tick's first write, by the write: from the tick's start (the timer's, which
+/// `TIMER_DELAY` places 140 colour clocks before the earliest of them).
+const START_COST: [(Site, i32); 4] = [(Site::DmaOff, 182), (Site::LoopLen, 254), (Site::Per, 99), (Site::TblLoc, 107)];
+
 impl Globals {
-    /// Lets the time pass that the original takes between its last write and
-    /// this one (median colour clocks in its write logs). Paula stops a playing
-    /// voice only at the end of its word and restarts it only once stopped, so
-    /// the time from a note's DMA off to the tick's DMA on decides whether the
-    /// note starts.
-    fn gap(&mut self, hw: &mut Hw, next: Write) {
-        use Write::*;
-        let clocks = match (self.last, next) {
-            (None, _) => 0,
-            (Some(Vol), Len | DmaOn) => 232,
-            (Some(Vol), DmaOff) => 322,
-            (Some(Vol), Loc) if self.ev => 487,
-            (Some(Vol), Loc) => 271,
-            (Some(Vol), Per) => 500,
-            (Some(Len), Loc) => 115,
-            (Some(Len), Per) if self.cur == 0 => 448,
-            (Some(Len), Per) => 620,
-            (Some(Loc), Len) => 101,
-            (Some(Loc), Loc) => 212,
-            (Some(Loc), Per) => 478,
-            (Some(DmaOff), Loc) if self.cur == 0 => 516,
-            (Some(DmaOff), Loc) => 257,
-            (Some(Per), Vol) => 127,
-            _ => 250,
+    /// Lets the time pass that the original takes between its last write and this one: the
+    /// constant of the pair plus the cost of the paths its code took meanwhile. Paula stops a
+    /// playing voice only at the end of its word and restarts it only once stopped, so the time
+    /// from a note's DMA off to the tick's DMA on decides whether the note starts.
+    fn gap(&mut self, hw: &mut Hw, next: Site) {
+        let base = match self.last {
+            None => START_COST.iter().find(|e| e.0 == next).map_or(0, |e| e.1),
+            Some(prev) => PAIR_COST.iter().find(|e| e.0 == prev && e.1 == next).map_or(250, |e| e.2),
         };
-        hw.wait(clocks);
+        let mut clocks = base + PATH_COST.iter().filter(|e| self.path & e.0 != 0).map(|e| e.1).sum::<i32>();
+        if self.path & P_EFFECT != 0 {
+            clocks += EFFECT_COST[(self.path >> P_EFFECT_SHIFT & 7) as usize];
+        }
+        hw.wait(clocks.max(0) as u64);
+        self.path = 0;
         self.last = Some(next);
     }
 }
@@ -202,8 +274,10 @@ pub struct DeltaMusic2 {
 }
 
 /// Colour clocks the original's init routine runs before the host starts its timer, beyond the
-/// one period (measured in the reference runs).
-const INIT_CLOCKS: u64 = 11117;
+/// one period (measured in the reference runs). Together with `TIMER_DELAY` it also sets where the
+/// output sample grid falls against the register writes: with these two the render of a module
+/// whose writes match to the colour clock is sample for sample the reference's (module 556).
+const INIT_CLOCKS: u64 = 11191;
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let a = refs(d)?;
@@ -244,8 +318,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         dma: d[g],
         songend: false,
         last: None,
-        cur: 0,
-        ev: false,
+        path: 0,
     };
     let voices = std::array::from_fn(|i| {
         // what the original's InitSound leaves as the editor saved it
@@ -290,7 +363,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
 
 /// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
 /// in the reference runs).
-const TIMER_DELAY: u64 = 1175;
+const TIMER_DELAY: u64 = 710;
 
 impl Replayer for DeltaMusic2 {
     fn format(&self) -> &'static str {
@@ -327,7 +400,7 @@ impl Replayer for DeltaMusic2 {
             v.play(i, hw, &self.song, &mut self.g);
         }
         // every voice played
-        self.g.gap(hw, Write::DmaOn);
+        self.g.gap(hw, Site::DmaOn);
         hw.dmacon(if self.g.dma & 0x80 != 0 { 0x800F } else { 0x000F });
     }
 }
@@ -342,35 +415,35 @@ impl Voice {
         let r8 = |hw: &Hw, a: u32| hw.bus.r8(a);
         let r16 = |hw: &Hw, a: u32| hw.bus.r16(a);
         let mut ins = self.instrument;
-        g.cur = i;
-        g.ev = false;
+        g.path |= if g.tick == 0 { P_TICK0 } else { 0 };
 
         if self.loop_pending {
-            self.loop_pending = false;
+                        self.loop_pending = false;
             let s = Self::sample(hw, song, ins);
-            g.gap(hw, Write::Len);
+            g.gap(hw, Site::LoopLen);
             hw.len(i, r16(hw, ins + 4));
             hw.bus.w16(s, 0);
-            g.gap(hw, Write::Loc);
+            g.gap(hw, Site::LoopLoc);
             hw.loc(i, s + r16(hw, ins + 2) as u32);
         }
 
         if g.tick == 0 {
             if self.block_position == 0 {
+                g.path |= P_BLOCK;
                 let t = self.track.wrapping_add(self.track_position as i16 as u32);
                 self.block = song.blocks + ((r8(hw, t) as u32) << 6);
                 self.transpose = r8(hw, t + 1);
                 self.track_position = self.track_position.wrapping_add(2);
                 if !mi(self.track_position, self.track_length) {
                     self.track_position = self.track_loop;
+                    g.path |= P_TRACK_END;
                     g.songend = true;
                 }
             }
             let row = self.block + self.block_position as u32;
             let note = r8(hw, row);
             if note != 0 {
-                g.ev = true;
-                g.gap(hw, Write::DmaOff);
+                g.gap(hw, Site::DmaOff);
                 hw.dmacon(1 << i);
                 self.note = note;
                 self.period = r16(hw, song.periods + 2 * note.wrapping_add(self.transpose) as u32);
@@ -381,9 +454,9 @@ impl Voice {
                 self.loop_pending = r8(hw, ins + 0x26) & 0x80 != 0;
                 if self.loop_pending {
                     let s = Self::sample(hw, song, ins);
-                    g.gap(hw, Write::Loc);
+                    g.gap(hw, Site::NoteLoc);
                     hw.loc(i, s);
-                    g.gap(hw, Write::Len);
+                    g.gap(hw, Site::NoteLen);
                     hw.len(i, r16(hw, ins));
                 }
                 self.table_delay = 0;
@@ -401,7 +474,11 @@ impl Voice {
             // effects 1 to $80; 9 and on are 1 to 8 again
             let effect = r8(hw, row + 2).wrapping_sub(1);
             if (effect as i8) >= 0 {
+                g.path |= P_EFFECT;
+            }
+            if (effect as i8) >= 0 {
                 let arg = r8(hw, row + 3);
+                g.path |= ((effect & 7) as u32) << P_EFFECT_SHIFT;
                 match effect & 7 {
                     0 => g.speed = arg & 0x0f,
                     1 => {
@@ -426,21 +503,27 @@ impl Voice {
         // the sound table, for a synth sound
         if r8(hw, ins + 0x26) & 0x80 == 0 {
             if self.table_delay != 0 {
+                g.path |= P_TBL_SKIP;
                 self.table_delay -= 1;
             } else {
+                g.path |= P_TBL_RUN;
                 self.table_delay = r8(hw, ins + 0x27);
                 let table = ins + 0x28;
                 let mut pos = self.table_position;
                 let mut wave = r8(hw, table + pos as u32);
                 if wave == 0xff {
+                    g.path |= P_TBL_JUMP;
                     pos = r8(hw, table + pos as u32 + 1);
                     wave = r8(hw, table + pos as u32);
                 }
+                if wave == 0xff {
+                    g.path |= P_TBL_END;
+                }
                 if wave != 0xff {
                     let a = song.waveforms + ((wave as u32) << 8);
-                    g.gap(hw, Write::Loc);
+                    g.gap(hw, Site::TblLoc);
                     hw.loc(i, a);
-                    g.gap(hw, Write::Len);
+                    g.gap(hw, Site::TblLen);
                     hw.len(i, r16(hw, ins));
                     self.table_position = pos.wrapping_add(1) & 0x3f;
                 }
@@ -450,6 +533,7 @@ impl Voice {
         // vibrato
         let vib = ins + 0x15 + self.vibrato_position as u32;
         let speed = r8(hw, vib) as u16;
+        g.path |= if self.vibrato_down != 0 { P_VIB_DOWN } else { 0 };
         self.vibrato_period = if self.vibrato_down == 0 {
             self.vibrato_period.wrapping_add(speed)
         } else {
@@ -457,14 +541,18 @@ impl Voice {
         };
         self.vibrato_delay = self.vibrato_delay.wrapping_sub(1);
         if self.vibrato_delay == 0 {
+            g.path |= P_VIB_FLIP;
             self.vibrato_delay = r8(hw, vib + 1);
             self.vibrato_down = !self.vibrato_down;
         }
         if self.vibrato_sustain != 0 {
+            g.path |= P_VIB_SUSTAIN;
             self.vibrato_sustain -= 1;
         } else {
+            g.path |= P_VIB_STEP;
             self.vibrato_position = self.vibrato_position.wrapping_add(3);
             if self.vibrato_position == 15 {
+                g.path |= P_VIB_WRAP;
                 self.vibrato_position = 12;
             }
             // the next step's sustain; after the last step, the sample flag ($26)
@@ -473,14 +561,17 @@ impl Voice {
 
         // the volume envelope
         if self.volume_sustain != 0 {
+            g.path |= P_VOL_SUSTAIN;
             self.volume_sustain -= 1;
         } else {
             let env = ins + 6 + self.volume_position as u32;
             let speed = r8(hw, env) as u16;
             let level = r8(hw, env + 1) as u16;
             if !mi(level, self.volume) {
+                g.path |= P_VOL_UP;
                 self.volume = self.volume.wrapping_add(speed);
                 if mi(level, self.volume) {
+                    g.path |= P_VOL_REACHED;
                     self.volume = level;
                     self.volume_position = self.volume_position.wrapping_add(3);
                     if self.volume_position == 15 {
@@ -489,9 +580,11 @@ impl Voice {
                     self.volume_sustain = r8(hw, env + 2);
                 }
             } else {
+                g.path |= P_VOL_DOWN;
                 self.volume = self.volume.wrapping_sub(speed);
                 // going down, the envelope does not stop at its last step
                 if !mi(level, self.volume) {
+                    g.path |= P_VOL_DOWN_REACHED;
                     self.volume = level;
                     self.volume_position = self.volume_position.wrapping_add(3);
                     self.volume_sustain = r8(hw, env + 2);
@@ -518,12 +611,14 @@ impl Voice {
         // arpeggio
         let mut arp = r8(hw, self.arpeggio + self.arpeggio_position as u32);
         if self.arpeggio_position as u8 != 0 && arp == 0x80 {
+            g.path |= P_ARP_WRAP;
             self.arpeggio_position = 0;
             arp = r8(hw, self.arpeggio);
         }
         self.arpeggio_position = (self.arpeggio_position + 1) & 0x0f;
         let mut period = self.final_period;
         if self.portamento == 0 {
+            g.path |= P_ARP_LOOKUP;
             let n = arp.wrapping_add(self.note).wrapping_add(self.transpose);
             period = r16(hw, song.periods + 2 * n as u32);
             self.final_period = period;
@@ -531,17 +626,19 @@ impl Voice {
 
         let bend = r16(hw, ins + 0x24).wrapping_sub(self.pitch_bend);
         self.vibrato_period = self.vibrato_period.wrapping_sub(bend);
-        g.gap(hw, Write::Per);
+        g.gap(hw, Site::Per);
         hw.per(i, period.wrapping_add(self.vibrato_period));
 
         let mut volume = ((self.volume >> 2) & 0x3f) as u8;
         if (volume.wrapping_sub(self.max_volume) as i8) >= 0 {
             volume = self.max_volume;
+            g.path |= P_CLAMP_MAX;
         }
         if (volume.wrapping_sub(g.global_volume) as i8) >= 0 {
             volume = g.global_volume;
+            g.path |= P_CLAMP_GLOBAL;
         }
-        g.gap(hw, Write::Vol);
+        g.gap(hw, Site::Vol);
         hw.vol(i, volume as u16);
     }
 

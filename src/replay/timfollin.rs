@@ -28,7 +28,7 @@
 //! does what it did in the original, and ends the song when the fade it starts runs
 //! out (the original crashes there).
 
-use super::{be16, be32, Hw, Open, Replayer};
+use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
 use crate::machine::Machine;
 use m68k::AddressBus;
 
@@ -73,19 +73,59 @@ const PERIODS: [u16; 97] = [
     25, 24, 22, 21, 20, 19, 18, 17, 16, 8,
 ];
 
-/// Waits between writes, colour clocks: rough medians of the reference (Puzznic),
-/// so that the writes of a tick spread over it as the original's do.
-const T_START: u64 = 190;
-const T_LC: u64 = 12;
-const T_LEN: u64 = 8;
-const T_RETRIG: u64 = 100;
-const T_PARSE: u64 = 460;
-const T_ON: u64 = 42;
-const T_NOTE: u64 = 228;
+/// Where the writes of a tick fall in the reference runs (ten files), by the previous write (see
+/// `WriteGaps`): the voice work between two writes. After the DMA is switched on the routine waits
+/// ten raster lines (see `play`).
+static GAPS: WriteGaps = WriteGaps::new(
+    &[
+        (0, 4, 25), // LOC0 -> LEN0 x690
+        (1, 5, 25), // LOC1 -> LEN1 x551
+        (2, 6, 25), // LOC2 -> LEN2 x757
+        (3, 7, 25), // LOC3 -> LEN3 x496
+        (4, 1, 60), // LEN0 -> LOC1 x296
+        (4, 2, 96), // LEN0 -> LOC2 x162
+        (4, 3, 131), // LEN0 -> LOC3 x5
+        (4, 12, 139), // LEN0 -> VOL0 x81
+        (5, 2, 60), // LEN1 -> LOC2 x192
+        (5, 3, 80), // LEN1 -> LOC3 x48
+        (5, 12, 111), // LEN1 -> VOL0 x131
+        (6, 3, 60), // LEN2 -> LOC3 x145
+        (6, 12, 84), // LEN2 -> VOL0 x118
+        (7, 12, 56), // LEN3 -> VOL0 x122
+        (8, 13, 50), // PER0 -> VOL1 x1226
+        (9, 14, 50), // PER1 -> VOL2 x915
+        (10, 15, 50), // PER2 -> VOL3 x703
+        (11, 0, 75), // PER3 -> LOC0 x131
+        (11, 1, 110), // PER3 -> LOC1 x8
+        (11, 2, 146), // PER3 -> LOC2 x90
+        (11, 3, 181), // PER3 -> LOC3 x229
+        (11, 20, 50), // PER3 -> DMA_ON x152
+        (12, 8, 37), // VOL0 -> PER0 x1226
+        (12, 13, 65), // VOL0 -> VOL1 x3734
+        (13, 9, 37), // VOL1 -> PER1 x915
+        (13, 14, 65), // VOL1 -> VOL2 x4045
+        (14, 10, 37), // VOL2 -> PER2 x703
+        (14, 15, 65), // VOL2 -> VOL3 x4257
+        (15, 0, 89), // VOL3 -> LOC0 x67
+        (15, 1, 125), // VOL3 -> LOC1 x55
+        (15, 2, 160), // VOL3 -> LOC2 x162
+        (15, 11, 37), // VOL3 -> PER3 x930
+        (15, 20, 65), // VOL3 -> DMA_ON x300
+        (16, 0, 55), // DMA_OFF -> LOC0 x218
+        (16, 1, 83), // DMA_OFF -> LOC1 x106
+        (16, 2, 110), // DMA_OFF -> LOC2 x92
+        (16, 3, 138), // DMA_OFF -> LOC3 x36
+        (20, 0, 0),
+        (20, 1, 0),
+        (20, 2, 0),
+        (20, 3, 0),
+    ],
+    &[(0, 75), (1, 60), (2, 110), (3, 181), (4, 25), (5, 25), (6, 25), (7, 25), (8, 37), (9, 37), (10, 37), (11, 37), (12, 84), (13, 65), (14, 65), (15, 65), (20, 65)],
+    &[(12, 985), (13, 985), (14, 985), (15, 985), (16, 2029)],
+);
+
+/// Colour clocks from a voice's end to its DMA off (the end-of-voice command).
 const T_OFFV: u64 = 54;
-const T_AFTER_OFF: u64 = 116;
-const T_IDLE: u64 = 170;
-const T_PER: u64 = 40;
 
 /// Bytes a parse may read before the port gives the voice up (a sequence of
 /// commands that never reaches a note).
@@ -151,7 +191,6 @@ struct Voice {
     insno: u8,
     ins: u32,
     flags: u8,
-    pend: u8,
     dur: u8,
     fixdur: u8,
     transp: u8,
@@ -185,6 +224,13 @@ struct Voice {
     pwm_cnt: u8,
     pwm_pos: u8,
     pwm_dir: u8,
+    /// This tick's writes, buffered until the pass over the voices is done.
+    /// The restart is armed: the tick before the note ends (duration counter 1), bit 7 of the flags was set.
+    arm: bool,
+    o_vol: Option<u16>,
+    o_per: Option<u16>,
+    o_trig: Option<(u32, u16)>,
+    o_loop: Option<(u32, u16)>,
 }
 
 pub struct TimFollin {
@@ -199,6 +245,8 @@ pub struct TimFollin {
     songend: bool,
     work: [u8; W_SIZE],
     v: [Voice; 4],
+    /// The voices whose sample restarts this tick (DMA off and on in one batch).
+    mask: u8,
     #[cfg(test)]
     ticks: u32,
 }
@@ -279,20 +327,20 @@ impl TimFollin {
         self.reg(hw, 3, ch, v);
     }
 
-    /// LC := sample of record `r`, LEN := its length, DMA on.
-    fn trigger(&self, hw: &mut Hw, ch: usize, r: u32) {
-        let lc = match self.guest(r.wrapping_add(SAMPLE)) {
-            Some(g) => g,
-            None => r.wrapping_add(SAMPLE),
-        };
-        let len = (self.b(hw, r) as u16) << 8 | self.b(hw, r.wrapping_add(1)) as u16;
+    /// The sample address and length (words) of instrument record `r`.
+    fn sample_of(&self, hw: &Hw, r: u32) -> (u32, u16) {
+        let lc = self.guest(r.wrapping_add(SAMPLE)).unwrap_or_else(|| r.wrapping_add(SAMPLE));
+        (lc, (self.b(hw, r) as u16) << 8 | self.b(hw, r.wrapping_add(1)) as u16)
+    }
+
+    /// LC and LEN of channel `ch`.
+    fn put_sample(&self, hw: &mut Hw, ch: usize, (lc, len): (u32, u16)) {
         let a = self.wl(W_REGS + 32 + 4 * ch);
+        hw.space(WriteGaps::LOC, ch);
         hw.bus.write_word(a, (lc >> 16) as u16);
         hw.bus.write_word(a.wrapping_add(2), lc as u16);
-        hw.wait(T_LC);
+        hw.space(WriteGaps::LEN, ch);
         self.reg(hw, 1, ch, len);
-        hw.wait(T_LEN);
-        hw.dmacon(self.ww(W_ON + 2 * ch));
     }
 
     fn song(&self) -> u32 {
@@ -321,6 +369,8 @@ impl TimFollin {
             v.seq = seq;
             v.sp = 16 * k as u32;
             v.dur = 1;
+            v.flags = 0xC4;
+            v.arm = true;
             v.active = if d == 14 { 0 } else { 0xFF };
         }
     }
@@ -338,20 +388,8 @@ impl TimFollin {
         self.wl(self.v[ch].sp as usize)
     }
 
-    /// The retrigger pass (specification, 5.2).
-    fn retrigger(&mut self, hw: &mut Hw) {
-        for ch in 0..4 {
-            if self.v[ch].pend != 0 {
-                self.v[ch].pend = 0;
-                let r = self.instrument(hw, self.v[ch].flags & 0x3F);
-                self.trigger(hw, ch, r);
-                hw.wait(T_RETRIG);
-            }
-        }
-    }
-
     /// PWM, envelope and volume (specification, 5.3).
-    fn pwm_env(&mut self, hw: &mut Hw, ch: usize) {
+    fn pwm_env(&mut self, hw: &mut Hw, ch: usize) -> u16 {
         let v = self.v[ch];
         if (v.insno as i8) < 4 {
             let v = &mut self.v[ch];
@@ -409,14 +447,13 @@ impl TimFollin {
         if fade != 0 && (out as i8) >= ((fade >> 2) as i8) {
             out = fade >> 2;
         }
-        self.vol(hw, ch, out as u16);
+        out as u16
     }
 
-    fn set_note(&mut self, hw: &mut Hw, ch: usize, n: u8) {
+    fn set_note(&mut self, _hw: &mut Hw, ch: usize, n: u8) {
         self.v[ch].note = n;
         self.v[ch].period = self.period(n & 0x7F);
-        hw.wait(T_PER);
-        self.per(hw, ch, self.v[ch].period);
+        self.v[ch].o_per = Some(self.v[ch].period);
     }
 
     fn glide(&mut self, hw: &mut Hw, ch: usize) {
@@ -459,8 +496,7 @@ impl TimFollin {
                 v.vib_cnt = v.vib_len.wrapping_mul(2);
                 v.dir ^= 1;
             }
-            hw.wait(T_PER);
-            self.per(hw, ch, p);
+            self.v[ch].o_per = Some(p);
             self.glide(hw, ch);
         } else if v.tr_cnt != 0 {
             v.tr_cnt -= 1;
@@ -616,13 +652,17 @@ impl TimFollin {
         v.note = n;
         let period = self.period(n & 0x7F);
         self.v[ch].period = period;
-        hw.wait(T_PARSE);
-        self.trigger(hw, ch, self.v[ch].ins);
-        if self.v[ch].flags & 0x40 != 0 {
-            self.v[ch].pend = 1;
+        // a voice flagged to restart (bit 7 when the note begins) starts the note's sample; every
+        // note then sets the loop pointer: bit 6 names the instrument (low six bits), else the note's own
+        if self.mask & 1 << ch != 0 {
+            let t = self.sample_of(hw, self.v[ch].ins);
+            self.v[ch].o_trig = Some(t);
         }
-        hw.wait(T_ON);
-        self.per(hw, ch, period);
+        let fl = self.v[ch].flags;
+        let lr = if fl & 0x40 != 0 { self.instrument(hw, fl & 0x3F) } else { self.v[ch].ins };
+        let lp = self.sample_of(hw, lr);
+        self.v[ch].o_loop = Some(lp);
+        self.v[ch].o_per = Some(period);
         let d = if self.v[ch].fixdur != 0 {
             self.v[ch].fixdur
         } else {
@@ -663,34 +703,72 @@ impl TimFollin {
     }
 
     fn play(&mut self, hw: &mut Hw) {
-        hw.wait(T_START);
-        self.retrigger(hw);
+        hw.gaps(&GAPS);
         if self.fade() {
             self.dead = true;
             self.songend = true;
             return;
         }
+        // the voices whose note begins this tick and whose current flags say "restart": their DMA
+        // goes off first and on again after everything is written
+        self.mask = 0;
+        for ch in 0..4 {
+            let v = &mut self.v[ch];
+            (v.o_vol, v.o_per, v.o_trig, v.o_loop) = (None, None, None, None);
+            if v.active & 0x80 != 0 && v.dur.wrapping_sub(1) == 0 && v.arm {
+                self.mask |= 1 << ch;
+            }
+        }
+        let mask = self.mask;
+        if mask != 0 {
+            let m = (0..4).filter(|ch| mask & 1 << ch != 0).fold(0, |a, ch| a | self.ww(W_OFF + 2 * ch));
+            hw.dmacon(m);
+        }
         for ch in 0..4 {
             if self.v[ch].active & 0x80 == 0 {
                 continue;
             }
-            self.pwm_env(hw, ch);
+            let vol = self.pwm_env(hw, ch);
+            self.v[ch].o_vol = Some(vol);
             self.pitch(hw, ch);
             let v = &mut self.v[ch];
             v.dur = v.dur.wrapping_sub(1);
-            if v.dur == 1 {
-                if v.flags & 0x80 != 0 {
-                    hw.wait(T_OFFV);
-                    hw.dmacon(self.ww(W_OFF + 2 * ch));
-                    hw.wait(T_AFTER_OFF);
-                } else {
-                    hw.wait(T_IDLE);
-                }
-            } else if v.dur != 0 {
-                hw.wait(T_IDLE);
-            } else {
+            if v.dur == 1 && v.flags & 0x80 != 0 {
+                v.arm = true;
+            }
+            if v.dur == 0 {
                 self.parse(hw, ch);
-                hw.wait(T_NOTE);
+                self.v[ch].arm = false;
+            }
+        }
+        // the sample starts of the restarted voices, then the volumes and periods (a note's loop
+        // pointer follows its period), then the DMA back on
+        for ch in 0..4 {
+            if let Some(t) = self.v[ch].o_trig {
+                self.put_sample(hw, ch, t);
+            }
+        }
+        for ch in 0..4 {
+            if let Some(x) = self.v[ch].o_vol {
+                hw.space(WriteGaps::VOL, ch);
+                self.vol(hw, ch, x);
+            }
+            if let Some(x) = self.v[ch].o_per {
+                hw.space(WriteGaps::PER, ch);
+                self.per(hw, ch, x);
+            }
+        }
+        if self.v.iter().any(|v| v.o_trig.is_some()) {
+            let m = (0..4).filter(|&ch| self.v[ch].o_trig.is_some()).fold(0, |a, ch| a | self.ww(W_OFF + 2 * ch));
+            hw.dmacon(m | 0x8000);
+            // ten raster lines; the loop writes then start at a fixed place in the line, by the
+            // voice that comes first
+            let first = (0..4).find(|&ch| self.v[ch].o_loop.is_some()).unwrap_or(0);
+            hw.wait_lines(10, [45, 81, 116, 152][first]);
+        }
+        for ch in 0..4 {
+            if let Some(t) = self.v[ch].o_loop {
+                self.put_sample(hw, ch, t);
             }
         }
         // the original never reports an end; when every voice has ended the output stays
@@ -784,6 +862,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         work: work_area(),
         v: Default::default(),
+        mask: 0,
         #[cfg(test)]
         ticks: 0,
     }))
@@ -892,11 +971,13 @@ mod tests {
         // instrument 0, fixed duration off, note 0x10 for 3 ticks, note 0x20 for 2, end
         let (_, log) = play(module(&[0x81, 0, 0x10, 3, 0x20, 2, 0x8F], &[]), 8);
         let a = audio(&log);
-        // tick 1: voice 0's VOL, LC, LEN, DMA on, PER; the anchor voices the same with instrument 4
-        assert_eq!(a[0], (0xDFF0A8, 0));
+        // tick 1: every voice's DMA off, then the sample starts of all four (voice 0's instrument 0, the
+        // anchor voices' instrument 4), the volumes and periods, the DMA back on, and the loop pointers
+        assert_eq!(a[0], (0xDFF096, 0x000F));
         assert_eq!(a[1].0, 0xDFF0A0);
-        assert_eq!((a[3], a[4]), ((0xDFF0A4, 8), (0xDFF096, 0x8201)));
-        assert_eq!(a[5], (0xDFF0A6, PERIODS[0x10]));
+        assert_eq!(a[3], (0xDFF0A4, 8));
+        assert_eq!(a.iter().filter(|w| **w == (0xDFF096, 0x800F)).count(), 1);
+        assert_eq!(reg(&log, 0xDFF0A6)[0], PERIODS[0x10]);
         assert_eq!(reg(&log, 0xDFF0A6), [PERIODS[0x10], PERIODS[0x20]]);
         // the end of the voice: DMA off, VOL 0
         let dma = reg(&log, 0xDFF096);
@@ -931,15 +1012,16 @@ mod tests {
 
     #[test]
     fn envelope_and_retrigger() {
-        // envelope from 0x10, attack every tick by 8; retrigger of instrument 1 after each note
+        // envelope from 0x10, attack every tick by 8; loop pointer of instrument 1 after each note
         let seq = [0x81, 0, 0x86, 0x48, 0x00, 0, 0x90, 8, 0x8C, 1, 0x8D, 0x41, 0x10, 4, 0x8F];
         let (_, log) = play(module(&seq, &[]), 6);
         let vols = reg(&log, 0xDFF0A8);
         assert_eq!(vols[..4], [0, 0x18, 0x20, 0x28]);
-        // the retrigger: LC of instrument 1 and its length on the tick after the note
+        // the sample start (instrument 0), then the loop pointer: LEN of instrument 1; the DMA is
+        // restarted by the first note only (bit 7 of the flags is clear afterwards)
         assert_eq!(reg(&log, 0xDFF0A4)[..2], [8, 4]);
-        let ons: Vec<u16> = reg(&log, 0xDFF096).into_iter().filter(|&v| v == 0x8201).collect();
-        assert_eq!(ons.len(), 2);
+        let ons: Vec<u16> = reg(&log, 0xDFF096).into_iter().filter(|&v| v & 0x8000 != 0).collect();
+        assert_eq!(ons.len(), 1);
     }
 
     /// `TF_MODULE=file TF_TICKS=n TF_STORES=out [PK_SUBSONG=k] cargo test --release fetch_dump -- --ignored`:

@@ -235,6 +235,15 @@ pub struct DaveLowe {
     special: u32,
     /// Fixed-up longs of the sample table: (hunk offset, value).
     patched: Vec<(usize, u32)>,
+    /// Layout A write timing (see `Slot`): the clock at the tick's entry and the per-voice state.
+    base: u64,
+    slot: i64,
+    tt: i64,
+    add: i64,
+    cmd: i64,
+    vbase: i64,
+    vadj: bool,
+    last_vol: Option<i64>,
 }
 
 fn rows_key(d: &[u8], n: usize) -> Cfg {
@@ -351,8 +360,14 @@ fn new_dl(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
 const DL_INIT_CLOCKS: u64 = 21093;
 
 /// Colour clocks the original's init routine runs before the host starts its timer, beyond the
-/// one period (measured in the reference runs: 6016 to 6459 for the Beneath a Steel Sky songs).
-const DLN_INIT_CLOCKS: u64 = 5570;
+/// one period, for layout B (measured in the reference runs).
+const DLNB_INIT_CLOCKS: u64 = 5570;
+
+/// The same for layout A, with the write timing model: the reference's write clocks are then those
+/// of the Beneath a Steel Sky song `ingame_02` exactly, which puts every write on the same raster
+/// line phase and so on the same Paula audio slot. The other layout A songs' inits last up to
+/// about 1900 colour clocks more (in steps that follow no file property found).
+const DLN_INIT_CLOCKS: u64 = 33823;
 
 fn new_dln(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_dln(d) {
@@ -398,7 +413,7 @@ fn new_dln(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             }
         }
     }
-    m.bus.clock += DLN_INIT_CLOCKS;
+    m.bus.clock += if layout_a { DLN_INIT_CLOCKS } else { DLNB_INIT_CLOCKS };
     Some(Box::new(DaveLowe::build(img, base, Cfg::dln(kind), String::new(), subs, Vec::new(), 0)))
 }
 
@@ -500,6 +515,10 @@ impl DaveLowe {
             &[0, 0, END]
         } else if !cfg.held {
             &[END]
+        } else if cfg.kind == Kind::DlnA {
+            // (a layout A rest's envelope is still stepping for a few ticks, which shows only
+            // in the time the voice takes)
+            &[0, 0, 0, 0, 0, 0, 0, END]
         } else {
             &[0, END]
         };
@@ -530,6 +549,14 @@ impl DaveLowe {
             fx: None,
             special,
             patched: Vec::new(),
+            base: 0,
+            slot: 0,
+            tt: 0,
+            add: 0,
+            cmd: 0,
+            vbase: 0,
+            vadj: true,
+            last_vol: None,
         };
         s.start(1);
         s
@@ -590,10 +617,26 @@ impl DaveLowe {
         vi == 3 && self.fx.as_ref().is_some_and(|f| f.active)
     }
 
+    /// Layout A: the original's work between writes is modelled per voice slot (the `SLOT_*`
+    /// tables); `tw` lets the clock run to the moment `t` (colour clocks after the tick's entry).
+    fn timed(&self) -> bool {
+        self.cfg.kind == Kind::DlnA
+    }
+
+    fn tw(&self, hw: &mut Hw, t: i64) {
+        if self.timed() {
+            let target = (self.base as i64 + t).max(0) as u64;
+            if hw.bus.clock < target {
+                hw.bus.clock = target;
+            }
+        }
+    }
+
     fn dma(&mut self, vi: usize, on: bool, hw: &mut Hw) {
         if self.muted(vi) && !on {
             return;
         }
+        self.tw(hw, self.tt);
         let bit = 1u16 << self.v[vi].ch;
         hw.dmacon(if on { 0x8000 | bit } else { bit });
         if self.cfg.kind == Kind::DlnB {
@@ -605,7 +648,9 @@ impl DaveLowe {
         if self.muted(vi) {
             return;
         }
+        self.tw(hw, self.tt);
         hw.loc(self.v[vi].ch, self.mem.wrapping_add(a));
+        self.tw(hw, self.tt + 10);
         if note && self.cfg.kind == Kind::Dl {
             hw.wait(NOTE_LEN[self.v[vi].ch & 3]);
         }
@@ -614,6 +659,7 @@ impl DaveLowe {
 
     fn per(&mut self, vi: usize, p: u16, hw: &mut Hw) {
         if !self.muted(vi) {
+            self.tw(hw, self.tt);
             hw.per(self.v[vi].ch, p);
         }
     }
@@ -621,6 +667,7 @@ impl DaveLowe {
     /// A volume written straight, which the master volume does not see.
     fn vol_raw(&mut self, vi: usize, val: u16, hw: &mut Hw) {
         if !self.muted(vi) {
+            self.tw(hw, self.tt);
             hw.vol(self.v[vi].ch, val & 0x7F);
         }
     }
@@ -650,6 +697,7 @@ impl DaveLowe {
             x = ((x as u32 * m as u32) >> 6) as u16;
         }
         if !self.muted(vi) {
+            self.tw(hw, self.tt);
             hw.vol(self.v[vi].ch, x & 0x7F);
         }
     }
@@ -658,6 +706,10 @@ impl DaveLowe {
     fn vol_step(&mut self, vi: usize, hw: &mut Hw) {
         let e = self.v[vi].env;
         let w = self.w(e);
+        if self.timed() {
+            self.tt = self.vbase - if w != END && self.vadj { 9 } else { 0 };
+            self.last_vol = Some(self.tt);
+        }
         if w == END {
             if self.cfg.held {
                 if self.cfg.held1 {
@@ -676,17 +728,21 @@ impl DaveLowe {
         self.vol(vi, x, hw);
     }
 
-    fn wrap_test(&mut self, vi: usize) {
+    fn wrap_test(&mut self, vi: usize, rest: bool, first: bool) {
         if vi >= 4 {
             return;
         }
+        let zero = self.songcnt[vi] == 0;
         if self.songcnt[vi] != 0 {
             self.songcnt[vi] = self.songcnt[vi].wrapping_add(1);
         }
+        let mut end = false;
         if self.songcnt.iter().all(|&c| c == 0) {
             self.songend = true;
             self.songcnt = [0xFF; 4];
+            end = true;
         }
+        self.cmd += if rest { REST_FLAG_COST[vi] } else { WRAP_COST[(zero || first) as usize][vi] } + if end { WRAP_END } else { 0 };
     }
 
     // ------------------------------------------------------------ the voice
@@ -696,6 +752,12 @@ impl DaveLowe {
             return;
         }
         let mut off = false;
+        let k = vi & 3;
+        let s0 = self.slot;
+        self.add = 0;
+        self.cmd = 0;
+        self.vadj = true;
+        self.last_vol = None;
         if self.v[vi].left == 0 {
             self.fetch(vi, hw);
         } else {
@@ -703,20 +765,31 @@ impl DaveLowe {
                 if self.v[vi].smode != 0 {
                     off = true;
                     if !self.cfg.dma_tick {
+                        self.tt = s0 + SLOT_DMAOFF;
                         self.dma(vi, false, hw);
                     }
                 }
+                self.add += SLOT_LAST;
                 self.v[vi].left = 0;
             } else {
                 if self.v[vi].smode == 3 {
                     let (a, l) = self.v[vi].lp;
+                    self.tt = s0 + SLOT_LOC;
                     self.lc(vi, a, l, false, hw);
                     self.v[vi].smode = 1;
+                    self.add += SLOT_RELOAD;
                 }
                 self.v[vi].left -= 1;
             }
+            self.vbase = s0 + SLOT_VOL[k] + self.add;
             self.slide(vi, hw);
             self.vol_step(vi, hw);
+        }
+        if self.timed() {
+            self.slot = match self.last_vol {
+                Some(t) => t + SLOT_TAIL[k],
+                None => s0 + SLOT_PLAIN[k],
+            };
         }
         if self.cfg.dma_tick && !self.v[vi].dead {
             self.dma(vi, !off, hw);
@@ -728,11 +801,16 @@ impl DaveLowe {
         let v = &mut self.v[vi];
         let mut p = v.period;
         let mut changed = false;
+        // (cost of the work done, and when in the slot the period is written)
+        let mut cost = 0;
+        let mut pt = 0;
         if v.pmode != 0 {
             if v.pdelay != 0 {
                 v.pdelay -= 1;
+                cost += SLOT_DELAY;
             } else {
                 changed = true;
+                pt = SLOT_PORTA;
                 if v.pmode == 1 {
                     p = p.wrapping_add(v.pstep);
                     if p > v.ptarget {
@@ -751,26 +829,38 @@ impl DaveLowe {
         if v.vstate != 0 {
             if v.vdelay != 0 {
                 v.vdelay -= 1;
+                cost += SLOT_DELAY;
             } else if v.vcount != 0 {
                 v.vcount -= 1;
+                cost += SLOT_RATE;
             } else {
                 v.vcount = v.vreload;
                 changed = true;
                 if v.vstate < 3 {
                     p = p.wrapping_sub(v.vdown);
                     v.vstate += 1;
+                    pt = SLOT_VDOWN;
                 } else {
                     p = p.wrapping_add(v.vup);
                     v.vstate += 1;
+                    pt = SLOT_VUP;
                     if v.vstate == 5 {
                         v.vstate = 1;
+                        pt = SLOT_VWRAP;
                     }
                 }
             }
         }
         if changed {
             v.period = p;
+            self.add += cost;
+            let s0 = self.slot;
+            self.tt = s0 + self.add + pt;
+            self.vbase = self.tt + SLOT_PERVOL[vi & 3];
             self.per(vi, p, hw);
+        } else {
+            self.add += cost;
+            self.vbase += cost;
         }
     }
 
@@ -790,6 +880,7 @@ impl DaveLowe {
             match w / 4 {
                 0 => return,
                 1 => {
+                    self.cmd += CMD_SAMPLE;
                     let rec = self.l(pos + 2) as usize;
                     pos += 6;
                     let mut r = [0u8; 14];
@@ -826,15 +917,19 @@ impl DaveLowe {
                         return;
                     }
                     let mut order = v.order;
+                    let order_was_none = order == NONE;
+                    self.cmd += CMD_NEXT;
                     if order == NONE || self.l(order) == 0 {
+                        self.cmd -= CMD_NEXT;
                         order = self.v[vi].order0;
-                        self.wrap_test(vi);
+                        self.wrap_test(vi, false, order_was_none);
                     }
                     let entry = self.l(order) as usize;
                     self.v[vi].order = order + 4;
                     pos = entry;
                 }
                 3 => {
+                    self.cmd += CMD_ENV;
                     let b = self.l(pos + 2) as usize;
                     pos += 6;
                     self.v[vi].env0 = match self.cfg.env_hdr {
@@ -844,6 +939,7 @@ impl DaveLowe {
                     };
                 }
                 4 => {
+                    self.cmd += CMD_PORTA;
                     let v = &mut self.v[vi];
                     let a = [2, 4, 6, 8].map(|k| be16(&self.img, pos + k));
                     v.pmode = a[0];
@@ -853,6 +949,7 @@ impl DaveLowe {
                     pos += 10;
                 }
                 5 => {
+                    self.cmd += CMD_VIBRATO;
                     let a = [2, 4, 6, 8, 10, 12].map(|k| be16(&self.img, pos + k));
                     let v = &mut self.v[vi];
                     v.vstate = 1;
@@ -871,6 +968,7 @@ impl DaveLowe {
                     pos += 2;
                 }
                 7 => {
+                    self.cmd += CMD_VIBOFF;
                     self.v[vi].vstate = 0;
                     pos += 2;
                 }
@@ -880,11 +978,14 @@ impl DaveLowe {
                     v.left = len.wrapping_sub(1);
                     v.seq = pos + 4;
                     v.env = self.rest_env;
-                    self.vol_raw(vi, 0, hw);
                     if len & 0x8000 != 0 {
-                        self.wrap_test(vi);
+                        self.wrap_test(vi, true, false);
                     }
+                    self.tt = self.slot + SLOT_REST + self.cmd;
+                    self.vol_raw(vi, 0, hw);
                     if !self.cfg.rest_returns {
+                        self.vbase = self.tt + SLOT_REST2[vi & 3];
+                        self.vadj = false;
                         self.vol_step(vi, hw);
                     }
                     return;
@@ -908,6 +1009,7 @@ impl DaveLowe {
                     pos += 2;
                 }
                 14 => {
+                    self.cmd += CMD_JUMP;
                     pos = self.l(pos + 2) as usize;
                 }
                 _ => return,
@@ -918,6 +1020,11 @@ impl DaveLowe {
     /// A note: `pos` is at its period.
     fn note(&mut self, vi: usize, pos: usize, hw: &mut Hw) {
         let period = self.w(pos);
+        let k = vi & 3;
+        let tper = self.slot + SLOT_NOTE + self.cmd;
+        // a running vibrato makes the rest of the slot 8 later
+        let tloc = tper + NOTE_LOC[k] + if self.v[vi].vstate != 0 { NOTE_VIB } else { 0 };
+        self.tt = tper;
         self.per(vi, period, hw);
         let length = self.w(pos + 2);
         let v = &mut self.v[vi];
@@ -932,11 +1039,17 @@ impl DaveLowe {
         if v.smode != 0 {
             v.smode = 3;
             let (a, l) = v.att;
+            self.tt = tloc;
             self.lc(vi, a, l, true, hw);
         }
+        // (without a loop pair the DMA start keeps the same distance to the period)
+        let tdma = tloc + 10 + NOTE_DMA[k];
         if !self.cfg.dma_tick {
+            self.tt = tdma;
             self.dma(vi, true, hw);
         }
+        self.vbase = tdma + NOTE_VOL[k];
+        self.vadj = false;
         self.vol_step(vi, hw);
     }
 
@@ -1016,60 +1129,6 @@ static DL_GAPS: WriteGaps = WriteGaps::new(
     &[(0, 4), (8, 179), (12, 236), (16, 0)],
 );
 
-/// The same for the Beneath a Steel Sky, King's Quest 6 and Midwinter-style songs (layout A), whose
-/// player works differently from Line of Fire's.
-static DLNA_GAPS: WriteGaps = WriteGaps::new(
-    &[
-        (0, 4, 10), // LOC0 -> LEN0 x84
-        (1, 5, 10), // LOC1 -> LEN1 x116
-        (2, 6, 10), // LOC2 -> LEN2 x137
-        (3, 7, 10), // LOC3 -> LEN3 x34
-        (4, 12, 220), // LEN0 -> VOL0 x42
-        (4, 20, 147), // LEN0 -> DMA_ON x42
-        (5, 13, 229), // LEN1 -> VOL1 x58
-        (5, 20, 178), // LEN1 -> DMA_ON x58
-        (6, 14, 257), // LEN2 -> VOL2 x67
-        (6, 20, 209), // LEN2 -> DMA_ON x70
-        (7, 15, 246), // LEN3 -> VOL3 x17
-        (7, 20, 217), // LEN3 -> DMA_ON x17
-        (8, 0, 147), // PER0 -> LOC0 x42
-        (9, 1, 162), // PER1 -> LOC1 x58
-        (9, 13, 233), // PER1 -> VOL1 x425
-        (10, 2, 185), // PER2 -> LOC2 x70
-        (10, 14, 252), // PER2 -> VOL2 x126
-        (11, 3, 182), // PER3 -> LOC3 x17
-        (11, 15, 270), // PER3 -> VOL3 x75
-        (12, 1, 258), // VOL0 -> LOC1 x58
-        (12, 9, 396), // VOL0 -> PER1 x469
-        (12, 13, 462), // VOL0 -> VOL1 x2396
-        (12, 16, 254), // VOL0 -> DMA_OFF x59
-        (13, 2, 273), // VOL1 -> LOC2 x67
-        (13, 10, 411), // VOL1 -> PER2 x184
-        (13, 13, 152), // VOL1 -> VOL1 x5
-        (13, 14, 480), // VOL1 -> VOL2 x2660
-        (13, 16, 269), // VOL1 -> DMA_OFF x71
-        (14, 3, 289), // VOL2 -> LOC3 x17
-        (14, 11, 427), // VOL2 -> PER3 x91
-        (14, 14, 155), // VOL2 -> VOL2 x3
-        (14, 15, 510), // VOL2 -> VOL3 x2850
-        (14, 16, 285), // VOL2 -> DMA_OFF x24
-        (15, 15, 169), // VOL3 -> VOL3 x7
-        (16, 9, 155), // DMA_OFF -> PER1 x14
-        (16, 10, 163), // DMA_OFF -> PER2 x12
-        (16, 11, 155), // DMA_OFF -> PER3 x1
-        (16, 12, 212), // DMA_OFF -> VOL0 x42
-        (16, 13, 221), // DMA_OFF -> VOL1 x45
-        (16, 14, 225), // DMA_OFF -> VOL2 x59
-        (16, 15, 238), // DMA_OFF -> VOL3 x23
-        (20, 12, 152), // DMA_ON -> VOL0 x42
-        (20, 13, 161), // DMA_ON -> VOL1 x58
-        (20, 14, 164), // DMA_ON -> VOL2 x70
-        (20, 15, 177), // DMA_ON -> VOL3 x17
-    ],
-    &[(0, 147), (1, 214), (2, 186), (3, 239), (4, 10), (5, 10), (6, 10), (7, 10), (9, 396), (10, 411), (11, 427), (12, 212), (13, 462), (14, 480), (15, 510), (16, 269), (20, 178)],
-    &[(0, 505), (8, 507), (12, 700), (16, 501)],
-);
-
 /// And for the Super Street Fighter 2 songs (layout B); the model's start gaps need the timer 23
 /// colour clocks earlier.
 static DLNB_GAPS: WriteGaps = WriteGaps::new(
@@ -1118,6 +1177,59 @@ static DLNB_GAPS: WriteGaps = WriteGaps::new(
     &[(0, 4), (8, 6), (12, 198), (16, 0)],
 );
 
+/// Layout A: the part of `TIMER_DELAY` the write model takes into its own start offsets.
+const DLNA_TIMER_SHIFT: u64 = 565;
+
+/// Layout A write timing, in colour clocks after the tick's entry or after the start of a voice's
+/// slot (the time its processing takes, measured from the original's register writes). A slot
+/// starts where the previous one ended; the first starts `SLOT_FIRST` after the tick's entry.
+const SLOT_FIRST: i64 = 194;
+/// A counting-down voice: the volume write, and the slot's end after it.
+const SLOT_VOL: [i64; 4] = [374, 383, 386, 400];
+const SLOT_TAIL: [i64; 4] = [79, 94, 110, 113];
+/// The slot of a voice with nothing to write.
+const SLOT_PLAIN: [i64; 4] = [453, 477, 496, 513];
+/// Added by a vibrato (or portamento) delay count, a vibrato rate count, the last tick of a note and
+/// a loop reload; the DMA stop and the loop address come at these moments.
+const SLOT_DELAY: i64 = 24;
+const SLOT_RATE: i64 = 36;
+const SLOT_LAST: i64 = 13;
+const SLOT_RELOAD: i64 = 35;
+const SLOT_DMAOFF: i64 = 175;
+const SLOT_LOC: i64 = 179;
+/// The period write of a vibrato step (down, up, wrap) and of a portamento step, and the distance
+/// from a period write to the volume write.
+const SLOT_VDOWN: i64 = 317;
+const SLOT_VUP: i64 = 325;
+const SLOT_VWRAP: i64 = 333;
+const SLOT_PORTA: i64 = 296;
+const SLOT_PERVOL: [i64; 4] = [209, 233, 252, 270];
+/// A voice that starts a note: the period write (after the commands in front of the note), then the
+/// distances to the loop address, from the length to the DMA start, from there to the volume.
+const SLOT_NOTE: i64 = 181;
+const NOTE_LOC: [i64; 4] = [147, 162, 177, 182];
+const NOTE_DMA: [i64; 4] = [147, 178, 209, 217];
+const NOTE_VIB: i64 = 8;
+const NOTE_VOL: [i64; 4] = [152, 161, 164, 177];
+/// A rest: the first volume write and the distance to the second.
+const SLOT_REST: i64 = 247;
+const SLOT_REST2: [i64; 4] = [143, 152, 155, 169];
+/// Costs of the stream commands in front of a note or rest.
+const CMD_SAMPLE: i64 = 152;
+const CMD_NEXT: i64 = 114;
+const CMD_ENV: i64 = 84;
+const CMD_PORTA: i64 = 70;
+const CMD_VIBRATO: i64 = 90;
+const CMD_VIBOFF: i64 = 54;
+const CMD_JUMP: i64 = 80;
+/// The next-sequence command when the list wraps, by whether the voice's counter was zero.
+const WRAP_COST: [[i64; 4]; 2] = [[233, 248, 260, 267], [218, 235, 247, 258]];
+/// The same bookkeeping run by a rest that carries the list-position flag (measured for voices 1
+/// and 3; the others are interpolated).
+const REST_FLAG_COST: [i64; 4] = [103, 104, 105, 106];
+/// More when that wrap ends the song.
+const WRAP_END: i64 = 52;
+
 /// A note's length write follows its address later than a loop update's does: colour clocks more,
 /// by channel.
 const NOTE_LEN: [u64; 4] = [52, 68, 83, 87];
@@ -1139,6 +1251,7 @@ impl Replayer for DaveLowe {
         TIMER_DELAY
             - match self.cfg.kind {
                 Kind::Dl => 141,
+                Kind::DlnA => DLNA_TIMER_SHIFT,
                 Kind::DlnB => 23,
                 _ => 0,
             }
@@ -1177,11 +1290,13 @@ impl Replayer for DaveLowe {
         }
         match self.cfg.kind {
             Kind::Dl => hw.gaps(&DL_GAPS),
-            Kind::DlnA => hw.gaps(&DLNA_GAPS),
+            Kind::DlnA => {}
             Kind::DlnB => hw.gaps(&DLNB_GAPS),
             Kind::Older => {}
         }
         let first = self.tickno == 1;
+        self.base = hw.bus.clock;
+        self.slot = SLOT_FIRST;
         for vi in 0..3 {
             self.voice(vi, hw);
         }

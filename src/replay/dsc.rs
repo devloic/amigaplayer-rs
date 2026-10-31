@@ -19,9 +19,9 @@
 //! so the whole sample plays twice; a handler running inside the trigger). The
 //! port decides them as the specification says a host must: it makes the writes in
 //! the original's order with the gaps measured in the reference runs, lets the
-//! emulated Paula raise its interrupts on the way, and runs the handlers at the
-//! moment they are raised, also inside the tick (the music tick does not block the
-//! audio interrupts).
+//! emulated Paula raise its interrupts on the way, and serves those raised while the
+//! tick runs when it returns (the handlers back to back, lowest channel first), the
+//! others at the moment they are raised.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -29,35 +29,39 @@ use crate::paula::LINE;
 
 pub const OPEN: Open = Open { name: "Digital Sonix & Chrome", detect, new };
 
-// Gaps between the original's writes, in colour clocks, measured in the reference
-// runs (UADE, 68020): they only place the writes relative to Paula's events.
-/// From the tick to the voice loop.
-const T_START: u64 = 313;
-/// Each voice the loop looks at.
-const T_VOICE: u64 = 58;
+// Times of the original's code, in colour clocks, measured in the reference runs
+// (UADE, 68020): they place the writes relative to Paula's events.
+/// A tick that starts no row.
+const T_IDLE: u64 = 283;
+/// From the tick's start of a row to the first voice.
+const T_START: u64 = 328;
+/// Each voice the loop looks at, in half clocks: 145 clocks, but the third voice looked at
+/// before any sample was started takes one clock more.
+const T_VOICE2: [u64; 4] = [290, 290, 292, 290];
 /// After a trigger's last write, before the next voice.
-const T_AFTER: u64 = 12;
+const T_AFTER: u64 = 13;
+/// After the fourth voice.
+const T_END: u64 = 395;
 /// From AUDxDAT to AUDxVOL (the Eagleplayer's volume scaling), per channel.
-const T_VOL: [u64; 4] = [240, 248, 256, 254];
-/// From AUDxVOL to AUDxLEN, per channel.
-const T_LEN: [u64; 4] = [52, 64, 76, 80];
+const T_VOL: [u64; 4] = [275, 287, 298, 293];
+/// From AUDxVOL to AUDxLEN in half clocks, per channel.
+const T_LEN2: [u64; 4] = [150, 182, 213, 221];
+/// From AUDxLEN to AUDxLC.
+const T_LC: u64 = 12;
 /// From AUDxLC to the period write when the request is already there, per channel.
-const T_POLL: [u64; 4] = [110, 122, 134, 138];
+const T_POLL: [u64; 4] = [134, 149, 165, 169];
 /// What the loop part's state set-up adds before the poll (a record with repeats).
-const T_REPEAT: u64 = 56;
-/// One more turn of the request poll (the gaps of the delayed polls are multiples of it).
-const T_POLL_LOOP: u64 = 14;
-/// From AUDxLC (and the state set-up) to the poll's first test of INTREQR.
-const T_POLL_TEST: u64 = 12;
-/// The handler waits for the next raster line, then writes at about this
-/// horizontal position (colour clocks from the line start).
-const H_FREE: u64 = 66;
-const H_SILENCE: u64 = 76;
-const H_LOOP: u64 = 77;
-/// The interrupt's entry, before the handler reads the beam.
-const H_ENTRY: u64 = 20;
-/// From the handler's last write to the end of the interrupt.
-const H_EXIT: u64 = 16;
+const T_REPEAT: u64 = 76;
+/// One more turn of the request poll, in half clocks, and the distance in half clocks
+/// from a look at INTREQR to the period write that follows it.
+const T_POLL_LOOP2: u64 = 39;
+const T_POLL_OUT2: u64 = 29;
+/// The handler: from its start to the first read of the beam, to the second, then the
+/// reads every 10.5 (alternately 10 and 11) until the line changes, then every 12.5
+/// (12 and 13) until the horizontal position is 22 or more.
+const H_READ1: u64 = 12;
+const H_READ2: u64 = 18;
+const H_POS: u64 = 22;
 
 // ------------------------------------------------------------------ recognition
 
@@ -129,6 +133,11 @@ struct Dsc {
     /// A 4-byte silent buffer in chip memory.
     zero: u32,
     title: String,
+    /// Colour clocks the original's start-up takes before its timer runs: a function of
+    /// the header (sample records, song-table entries, subsong terminators).
+    init_cost: u64,
+    /// The odd half clock carried within a tick.
+    frac: u64,
     /// The song-table entry each subsong starts at.
     starts: Vec<usize>,
     sub: u16,
@@ -172,34 +181,19 @@ impl Dsc {
         self.songend = false;
     }
 
-    /// The handlers of the interrupts that are requested and enabled now.
-    fn service(&mut self, hw: &mut Hw) {
-        loop {
-            let p = &hw.bus.paula;
-            let pend = p.pending_audio_irqs();
-            match (0..4).find(|&ch| pend & 0x80 << ch != 0) {
-                Some(ch) => self.handler(ch, hw),
-                None => return,
-            }
-        }
+    /// Lets `n` colour clocks of the tick's code pass. The audio interrupts that Paula
+    /// raises meanwhile are not taken inside the tick: they wait until it returns
+    /// (the engine then calls the handlers, lowest channel first, back to back).
+    fn run(&mut self, hw: &mut Hw, n: u64) {
+        hw.bus.clock += n;
     }
 
-    /// Lets `n` colour clocks of the tick's code pass; the audio interrupts that
-    /// Paula raises meanwhile are taken when raised, and their handlers' time is
-    /// added.
-    fn run(&mut self, hw: &mut Hw, n: u64) {
-        let mut left = n;
-        loop {
-            self.service(hw);
-            if left == 0 {
-                return;
-            }
-            let target = hw.bus.clock + left;
-            let stop = hw.bus.paula.sync_to_irq(target, &hw.bus.ram);
-            let stop = stop.max(hw.bus.clock);
-            left = target - stop;
-            hw.bus.clock = stop;
-        }
+    /// The same for `h` half clocks (the original's code takes half clocks too; the
+    /// odd one is carried to the next wait).
+    fn run2(&mut self, hw: &mut Hw, h: u64) {
+        let t = self.frac + h;
+        hw.bus.clock += t / 2;
+        self.frac = t % 2;
     }
 
     fn intreq(hw: &mut Hw, v: u16) {
@@ -209,7 +203,10 @@ impl Dsc {
         m68k::AddressBus::write_word(hw.bus, 0xDFF09A, v);
     }
 
-    /// Channel `ch`'s audio interrupt handler.
+    /// Channel `ch`'s audio interrupt handler, called at clock S. It waits for the beam: it
+    /// reads the position at S+12 and S+18, then about every 10.5 until the line number is
+    /// another, then every 12.5 until the horizontal position is at least 22; the last read
+    /// is R, and the writes follow at fixed distances from it.
     fn handler(&mut self, ch: usize, hw: &mut Hw) {
         let ibit = 0x80u16 << ch;
         hw.bus.paula.sync(hw.bus.clock, &hw.bus.ram);
@@ -217,31 +214,46 @@ impl Dsc {
         if p.intena & p.intreq & ibit == 0 {
             return;
         }
-        // the wait for the next raster line and a horizontal position
-        let line = ((hw.bus.clock + H_ENTRY) / LINE + 1) * LINE;
-        let at = |h: u64| line + h;
-        if self.icnt[ch] == 0 {
-            hw.bus.clock = at(H_FREE);
-            Self::intena(hw, ibit);
-            hw.wait(18);
-        } else {
-            self.icnt[ch] -= 1;
-            if self.icnt[ch] == 0 {
-                hw.bus.clock = at(H_SILENCE);
-                hw.loc(ch, self.zero);
-                hw.wait(8);
-                hw.len(ch, 2);
-                hw.wait(10);
-            } else {
-                hw.bus.clock = at(H_LOOP);
-                hw.len(ch, self.llen[ch]);
-                hw.wait(10);
-                hw.loc(ch, self.lptr[ch]);
-                hw.wait(14);
-            }
+        let line0 = (hw.bus.clock + H_READ1) / LINE;
+        let mut t = hw.bus.clock + H_READ2;
+        let mut k = 0;
+        while t / LINE == line0 {
+            t += 10 + (k & 1);
+            k += 1;
         }
-        Self::intreq(hw, ibit);
-        hw.wait(H_EXIT);
+        let mut k = 0;
+        while t % LINE < H_POS {
+            t += 12 + (k & 1);
+            k += 1;
+        }
+        let r = t;
+        let at = |d: u64| r + d;
+        if self.icnt[ch] == 0 {
+            hw.bus.clock = at(48);
+            Self::intena(hw, ibit);
+            hw.bus.clock = at(69);
+            Self::intreq(hw, ibit);
+            hw.bus.clock = at(83);
+            return;
+        }
+        self.icnt[ch] -= 1;
+        if self.icnt[ch] == 0 {
+            hw.bus.clock = at(61);
+            hw.loc(ch, self.zero);
+            hw.bus.clock = at(69);
+            hw.len(ch, 2);
+            hw.bus.clock = at(82);
+            Self::intreq(hw, ibit);
+            hw.bus.clock = at(96);
+        } else {
+            hw.bus.clock = at(63);
+            hw.len(ch, self.llen[ch]);
+            hw.bus.clock = at(77);
+            hw.loc(ch, self.lptr[ch]);
+            hw.bus.clock = at(85);
+            Self::intreq(hw, ibit);
+            hw.bus.clock = at(99);
+        }
     }
 
     /// Starts sample `s` on voice `k`, in the original's order of writes.
@@ -266,9 +278,9 @@ impl Dsc {
         m68k::AddressBus::write_word(hw.bus, 0xDFF0AA + 16 * k as u32, 0);
         self.run(hw, T_VOL[k]);
         hw.vol(k, vol);
-        self.run(hw, T_LEN[k]);
+        self.run2(hw, T_LEN2[k]);
         hw.len(k, (length as i32 >> 1) as u16);
-        self.run(hw, 6);
+        self.run(hw, T_LC);
         hw.loc(k, addr);
         self.icnt[k] = rep.wrapping_add(1);
         if rep != 0 {
@@ -276,22 +288,24 @@ impl Dsc {
             self.lptr[k] = addr.wrapping_add(lp);
         }
         // wait for the request the AUDxDAT write raises (at once if the channel is
-        // idle, else when the word it plays is used up)
-        self.run(hw, T_POLL_TEST + if rep != 0 { T_REPEAT } else { 0 });
+        // idle, else when the word it plays is used up): the looks at INTREQR are 19.5
+        // apart, the period write follows the one that finds it
+        let mut look2 = 2 * (hw.bus.clock + T_POLL[k] + if rep != 0 { T_REPEAT } else { 0 }) + self.frac - T_POLL_OUT2;
         for _ in 0..16384 {
-            hw.bus.paula.sync(hw.bus.clock, &hw.bus.ram);
+            hw.bus.paula.sync(look2 / 2, &hw.bus.ram);
             if hw.bus.paula.intreq & ibit != 0 {
                 break;
             }
-            self.run(hw, T_POLL_LOOP);
+            look2 += T_POLL_LOOP2;
         }
-        self.run(hw, T_POLL[k] - T_POLL_TEST);
+        hw.bus.clock = (look2 + T_POLL_OUT2) / 2;
+        self.frac = (look2 + T_POLL_OUT2) % 2;
         hw.per(k, per);
-        self.run(hw, 16);
+        self.run(hw, 18);
         hw.dmacon(0x8000 | bit);
         self.run(hw, 8);
         Self::intreq(hw, ibit);
-        self.run(hw, 16);
+        self.run(hw, 18);
         Self::intena(hw, 0x8000 | ibit);
     }
 
@@ -299,13 +313,17 @@ impl Dsc {
         let l = self.lay.l;
         let b: [u8; 4] = std::array::from_fn(|k| self.d.get(self.lay.pb + self.ptr + k * l).copied().unwrap_or(0xFF));
         self.ptr += 1;
+        self.run(hw, T_START);
+        let mut started = false;
         for (k, &s) in b.iter().enumerate() {
-            self.run(hw, T_VOICE);
+            self.run2(hw, if started { 290 } else { T_VOICE2[k] });
             if s != 0xFF {
+                started = true;
                 self.trigger(k, s as usize, hw);
                 self.run(hw, T_AFTER);
             }
         }
+        self.run(hw, T_END);
         self.row = self.row.wrapping_add(1);
         if self.row == self.len(self.pos) {
             self.row = 0;
@@ -335,12 +353,18 @@ impl Replayer for Dsc {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        self.run(hw, T_START);
+        self.frac = 0;
         self.cnt = self.cnt.wrapping_sub(1);
         if self.cnt == 0 {
             self.cnt = self.speed;
             self.play_row(hw);
+        } else {
+            self.run(hw, T_IDLE);
         }
+    }
+
+    fn timer_delay(&self) -> u64 {
+        self.init_cost
     }
 
     fn songend(&self) -> bool {
@@ -370,6 +394,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             starts.push(e + 1);
         }
     }
+    let terminators = (0..lay.np).filter(|&e| d[16 + 6 * e] == 0).count() as u64;
+    // in half clocks: 4362 + 264 per sample record + 274 per song-table entry + 4.5 per terminator, rounded up
+    let init_cost = (8724 + 528 * d[2] as u64 + 548 * lay.np as u64 + 9 * terminators + 1) / 2;
     let zero = m.alloc(4);
     let title = m.bus.read_cstr(m.deli.file_buf);
     let mut p = Dsc {
@@ -378,6 +405,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         base,
         zero,
         title,
+        init_cost,
+        frac: 0,
         starts,
         sub: 0,
         speed: 1,

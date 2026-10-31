@@ -287,6 +287,8 @@ struct Scumm {
     /// The player's scratch area (`a0`).
     a0: [u8; SCRATCH],
     first: bool,
+    /// The engine has asked for the first tick's time.
+    armed: std::cell::Cell<bool>,
     songend: bool,
     /// Notes started so far by the first call (its code runs slower than the later calls').
     cold: u8,
@@ -368,10 +370,11 @@ impl Scumm {
             self.set_sw(0, 0);
             hw.wait(8);
             hw.dmacon(d0);
+            hw.wait(SWEEP_AFTER_DMA);
         }
         let mut j = 0u16;
         for ch in 0..4 {
-            hw.wait(27);
+            hw.wait(if ch == 2 { SWEEP_CH2_WAIT } else { 27 });
             if d0 & 1 << ch != 0 {
                 if j == cnt {
                     hw.loc(ch, a1);
@@ -387,7 +390,7 @@ impl Scumm {
         }
         if start {
             self.set_sw(0, cnt.wrapping_add(1));
-            hw.wait(34);
+            hw.wait(34 - (SWEEP_CH2_WAIT - 27));
             hw.dmacon(d0 | 0x8000);
             hw.wait(26);
             self.set_sw(2, s.p0);
@@ -655,10 +658,21 @@ impl Scumm {
     }
 }
 
-/// Where in a raster line the original's ticks fall (Paula fetches words at fixed places in a
-/// line, so which side of a fetch a write lands on depends on it), from its write and DMA logs.
-const TIMER_DELAY: u64 = 140;
+/// Colour clocks the original's start-up takes before its timer starts: the song's sound counts
+/// from here (what a render keeps of Paula's output), and the first tick follows later.
+const INIT_CLOCKS: u64 = 190;
+/// From the start of the timer to the first tick: the first call's entry, in a line, from the
+/// write logs (the sweeps' first call, with all four channels on at once, enters later).
+const FIRST_DELAY: u64 = 201;
+const SWEEP_FIRST_DELAY: u64 = 211;
+/// The second tick follows the first by a period and this much (the sweeps': less).
 const FIRST_PERIOD: u64 = 61;
+const SWEEP_FIRST_PERIOD: u64 = 36;
+/// A sweep's start: extra wait between the all-channels DMA write and the first voice's writes.
+const SWEEP_AFTER_DMA: u64 = 14;
+/// The sweep loop's wait before the third channel is a colour clock longer than the others'
+/// (the voices 2 and 3 write one later in their ticks, in every tick).
+const SWEEP_CH2_WAIT: u64 = 28;
 
 impl Replayer for Scumm {
     fn format(&self) -> &'static str {
@@ -669,15 +683,16 @@ impl Replayer for Scumm {
         self.title.clone()
     }
 
-    fn timer_delay(&self) -> u64 {
-        TIMER_DELAY
-    }
-
     fn tick_clocks(&self) -> u64 {
-        // the first tick comes FIRST_TICK earlier in its line than the later ones, the second
-        // follows the first by that much more than a period
+        let sweep = matches!(self.fam, Family::Sweep(_));
+        if !self.armed.replace(true) {
+            // the engine's first question: the time from the song's start to the first tick
+            // (a period on top of `INIT_CLOCKS`, which `new` has taken already)
+            let first = if sweep { SWEEP_FIRST_DELAY } else { FIRST_DELAY };
+            return super::DT_TICK + first - INIT_CLOCKS;
+        }
         if self.first {
-            super::DT_TICK + FIRST_PERIOD
+            super::DT_TICK + if sweep { SWEEP_FIRST_PERIOD } else { FIRST_PERIOD }
         } else {
             super::DT_TICK
         }
@@ -699,7 +714,15 @@ impl Replayer for Scumm {
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let fam = family(d)?;
     let title = m.bus.read_cstr(m.deli.file_buf);
-    let p = Scumm { fam, img: d.to_vec(), base, title, a0: [0; SCRATCH], first: true, songend: false, cold: 0, in_first: false };
+    // DeliTracker leaves the module's path in guest memory; a sweep's voices run through low
+    // memory (their DMA starts before the loop registers are written, with a length of 64K
+    // words), so the text is heard, as in the original's run
+    let full = m.bus.read_cstr(m.deli.dir_buf) + &title;
+    m.bus.write_cstr(m.deli.path_buf, &full);
+    // the original's start-up runs this long before the timer starts: the sound of the song
+    // counts from its end (the timer's delay below is that much shorter)
+    m.bus.clock += INIT_CLOCKS;
+    let p = Scumm { fam, img: d.to_vec(), base, title, a0: [0; SCRATCH], first: true, armed: std::cell::Cell::new(false), songend: false, cold: 0, in_first: false };
     Some(Box::new(p))
 }
 

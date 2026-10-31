@@ -363,11 +363,139 @@ const DL_INIT_CLOCKS: u64 = 21093;
 /// one period, for layout B (measured in the reference runs).
 const DLNB_INIT_CLOCKS: u64 = 5570;
 
-/// The same for layout A, with the write timing model: the reference's write clocks are then those
-/// of the Beneath a Steel Sky song `ingame_02` exactly, which puts every write on the same raster
-/// line phase and so on the same Paula audio slot. The other layout A songs' inits last up to
-/// about 1900 colour clocks more (in steps that follow no file property found).
+/// The same for layout A, with the write timing model: with `DLN_REF_START` the start constant
+/// equals the reference's for the Beneath a Steel Sky song `ingame_02`, which puts every write on
+/// the same raster line phase and so on the same Paula audio slot. The other songs' inits last up
+/// to 1864 colour clocks more; `dln_start_work2` prices that from the module.
 const DLN_INIT_CLOCKS: u64 = 33823;
+
+/// The reference's start-up work for `ingame_02`, in colour clocks.
+const DLN_REF_START: u64 = 5448;
+
+/// Module quantities the reference's start-up work for a layout A module is proportional to. It
+/// examines the module before the song starts; the costs are fitted to the reference's write logs
+/// of the 24 corpus files (max error 0.5 cc). The coefficients of `voices_skipped`,
+/// `short_header`, `unaligned_run` and `patched_module` each rest on a single corpus file.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DlnStartFeatures {
+    /// Voices of subsong 1 skipped before one whose first sequence starts with a sample command.
+    voices_skipped: u32,
+    /// The header's first word is 4, not 8 (one file).
+    short_header: u32,
+    /// Subsong table entries + 1.
+    table_len: u32,
+    /// Sample records in the run ending at the first referenced one, that one included.
+    run_back: u32,
+    /// Sample records in the whole run, forward from its start, + 1.
+    run_forward: u32,
+    /// The subsong table ended on a zero word (not on a word with a non-zero upper half).
+    zero_terminated: u32,
+    /// The word in front of the sample run is neither 8 nor 0 (one file).
+    unaligned_run: u32,
+    /// The 5-subsong module with 18 sample records whose order lists the port patches (one file).
+    patched_module: u32,
+    /// Words read in the four order lists of subsong 1, terminators included.
+    list_words: u32,
+    /// Of those four lists, how many are strictly longer than every earlier one.
+    longer_lists: u32,
+}
+
+fn dln_start_features(d: &[u8]) -> DlnStartFeatures {
+    let w0 = be16(d, 0) as usize;
+    let mut f = DlnStartFeatures::default();
+    // the subsong table
+    let (mut o, mut n) = (w0, 0u32);
+    loop {
+        let (h, l) = (be16(d, o), be16(d, o + 2));
+        if h != 0 {
+            break;
+        }
+        if l == 0 {
+            f.zero_terminated = 1;
+            break;
+        }
+        if l & 1 != 0 {
+            break;
+        }
+        n += 1;
+        o += 4;
+    }
+    f.table_len = n + 1;
+    // the order lists of subsong 1
+    let lists = [0usize, 1, 2, 3].map(|v| be32(d, w0 + 4 * v) as usize);
+    let mut lens = [0u32; 4];
+    for (k, &e) in lists.iter().enumerate() {
+        let mut q = e;
+        while be32(d, q) != 0 {
+            lens[k] += 1;
+            q += 4;
+        }
+    }
+    f.list_words = lens.iter().map(|k| k + 1).sum();
+    f.longer_lists = (0..4).filter(|&i| lens[i] > lens[..i].iter().copied().max().unwrap_or(0)).count() as u32;
+    // the first voice whose first sequence references a sample record
+    let mut sp = None;
+    for (v, &l) in lists.iter().enumerate() {
+        f.voices_skipped = v as u32;
+        let mut q = be32(d, l) as usize;
+        if be16(d, q) == 0x30 {
+            q += 2;
+        }
+        if be16(d, q) == 0x0C && be16(d, q + 6) == 4 {
+            sp = Some(be32(d, q + 8) as usize);
+            break;
+        }
+    }
+    if let Some(sp) = sp.filter(|&sp| be16(d, sp) == 1) {
+        let mut a = sp;
+        let mut first;
+        loop {
+            first = a;
+            f.run_back += 1;
+            if a < 14 {
+                break;
+            }
+            a -= 14;
+            if be16(d, a) != 1 {
+                break;
+            }
+        }
+        if first >= 2 && !matches!(be16(d, first - 2), 8 | 0) {
+            f.unaligned_run = 1;
+            first += 14;
+        }
+        while be16(d, first) == 1 {
+            f.run_forward += 1;
+            first += 14;
+        }
+        f.run_forward += 1;
+    }
+    f.short_header = (w0 == 4) as u32;
+    f.patched_module = (w0 == 8 && be32(d, 0x38) == 0x74 && n / 4 == 5 && f.run_forward == 0x13) as u32;
+    f
+}
+
+/// The start-up work in half colour clocks.
+fn dln_start_work2(f: &DlnStartFeatures) -> u64 {
+    2 * 4616
+        + 162 * f.voices_skipped as u64
+        + 71 * f.table_len as u64
+        + 41 * f.run_back as u64
+        + 47 * f.run_forward as u64
+        + 29 * f.list_words as u64
+        + 16 * f.longer_lists as u64
+        + 17 * f.zero_terminated as u64
+        + 28 * f.unaligned_run as u64
+        + 40 * f.short_header as u64
+        + 182 * f.patched_module as u64
+}
+
+/// The start constant of a layout A module: the single-file constant plus what its start-up work
+/// costs more than `ingame_02`'s (half clocks rounded down).
+fn dln_init_clocks(d: &[u8]) -> u64 {
+    let w = dln_start_work2(&dln_start_features(d)) / 2;
+    (DLN_INIT_CLOCKS + w).saturating_sub(DLN_REF_START)
+}
 
 fn new_dln(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_dln(d) {
@@ -413,7 +541,7 @@ fn new_dln(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             }
         }
     }
-    m.bus.clock += if layout_a { DLN_INIT_CLOCKS } else { DLNB_INIT_CLOCKS };
+    m.bus.clock += if layout_a { dln_init_clocks(d) } else { DLNB_INIT_CLOCKS };
     Some(Box::new(DaveLowe::build(img, base, Cfg::dln(kind), String::new(), subs, Vec::new(), 0)))
 }
 
@@ -1547,5 +1675,31 @@ mod tests {
         e.play_data(Path::new("t.dln"), d).unwrap();
         let p = e.playing.as_ref().unwrap();
         assert_eq!((p.sub_min, p.sub_max, p.sub), (1, 2, 1));
+    }
+
+    /// Layout A start-up features and cost of corpus modules (from the reference's write logs):
+    /// (file, [voices_skipped, short_header, table_len, run_back, run_forward, zero_terminated,
+    /// unaligned_run, patched_module, list_words, longer_lists], measured cost in cc).
+    #[test]
+    fn dln_start_features_corpus() {
+        let dir = Path::new("/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/davelowe/mods/dln");
+        let cases: [(&str, [u32; 10], u64); 5] = [
+            ("Beneath_a_Steel_Sky_CD32__ingame_02", [0, 0, 11, 2, 4, 1, 0, 0, 20, 1], 5448),
+            ("Beneath_a_Steel_Sky_CD32__game_complete", [2, 0, 7, 36, 38, 1, 0, 0, 44, 1], 7312),
+            ("Beneath_a_Steel_Sky_CD32__ingame_10", [0, 0, 23, 3, 19, 1, 0, 1, 32, 3], 6528),
+            ("Kings_Quest_6__ingame_2", [0, 0, 25, 2, 7, 0, 1, 0, 12, 1], 5905),
+            ("Kings_Quest_6__title", [0, 1, 5, 6, 15, 0, 0, 0, 93, 1], 6645),
+        ];
+        for (name, v, t) in cases {
+            let Ok(d) = std::fs::read(dir.join(format!("dln.{name}"))) else { continue };
+            let f = dln_start_features(&d);
+            // the spec's order: tries1 w4 n1 back c1 zterm lea pat L1 U
+            let got = [
+                f.voices_skipped, f.short_header, f.table_len, f.run_back, f.run_forward,
+                f.zero_terminated, f.unaligned_run, f.patched_module, f.list_words, f.longer_lists,
+            ];
+            assert_eq!(got, v, "{name}");
+            assert_eq!(dln_init_clocks(&d), 28375 + t, "{name}");
+        }
     }
 }

@@ -21,7 +21,8 @@
 //! volume.
 //!
 //! Not in this replayer (they are in the tracker's): effects E1, E2 (fine
-//! slides), E4 (vibrato control), EA and EB (fine volume). Its new instrument
+//! slides) and E4 (vibrato control); EA and EB (fine volume slides, once per
+//! row on the note's volume) are, as the reference's volume writes show. Its new instrument
 //! clears the portamento's speed, not the play list's slide speed; a play
 //! list filter command that takes the 4xx override's position rebuilds the
 //! waveform too; a voice starts with its square limits and sign at 0; the
@@ -839,6 +840,13 @@ impl Ahx {
                         return;
                     }
                 }
+            }
+            // fine volume slides: once per row, on the note's volume, kept in 0..=0x40
+            if e == 0xA {
+                ch.note_max_volume = (ch.note_max_volume as u16 + p as u16).min(0x40) as u8;
+            }
+            if e == 0xB {
+                ch.note_max_volume = (ch.note_max_volume as i16 - p as i16).max(0) as u8;
             }
         }
         if cmd == 0 && param != 0 && param & 0xF <= 9 {

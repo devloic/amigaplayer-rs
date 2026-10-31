@@ -19,6 +19,7 @@
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
+use m68k::AddressBus;
 
 pub const OPEN: Open = Open { name: "Jesper Olsen", detect, new };
 
@@ -744,6 +745,15 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let title = m.bus.read_cstr(m.deli.file_buf);
     if rw(d, 0) == 0x6000 {
         let lay = scan_c(d)?;
+        // The reference leaves the LED filter off before the first sound (observed in its
+        // host calls: the LED command goes on and off again within a few colour clocks of
+        // each song start; the title music also writes CIA-A port A itself, in its log).
+        if lay.kind == CKind::T {
+            let pra = m.bus.ciaa.pra | 2;
+            m.bus.write_byte(0xBFE001, pra);
+        } else {
+            m.bus.ciaa.pra |= 2;
+        }
         return Some(Box::new(C::new(d, base, lay, title)));
     }
     let comp = companion_len(m);
@@ -890,6 +900,8 @@ impl C {
         self.started = true;
         self.songend = false;
         let g = self.lay.kind == CKind::G;
+        // Every song start leaves the LED filter off, as the reference does (see `new`).
+        hw.bus.ciaa.pra |= 2;
         let stride = if g { 16 } else { 14 };
         let e = self.lay.song_table + stride * self.sub as usize;
         let (b8, b9, b10) = (self.rb(e + 8), self.rb(e + 9), self.rb(e + 10));

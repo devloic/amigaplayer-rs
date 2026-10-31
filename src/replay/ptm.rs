@@ -32,6 +32,10 @@
 //! - samples are played at the amplifier's 8-bit, sample-and-hold mixing (at the genie's
 //!   14477 Hz, wrapping round on overflow, as the genie's mix does), not with libxmp's
 //!   interpolation; a 16-bit sample keeps its high byte;
+//! - effect 1 slides the pitch down and 2 up (libxmp's loader maps them the other way round),
+//!   as the Eagleplayer does (measured with synthetic modules on it, plain, fine and extra fine);
+//! - the voice's pitch is not rounded to a whole Paula period (`Hw::voice_per_fine`, 1/64 colour
+//!   clock): the genie's mix steps by the exact pitch, where whole periods were up to 0.1% off;
 //! - a bidirectional loop plays forward only, as the Eagleplayer hands the loop to the NotePlayer
 //!   genie (measured with a ramp sample on the genie);
 //! - a pattern's cell for a channel beyond the module's count is read and dropped,
@@ -44,6 +48,7 @@
 //! loop's LOC and LEN, as ProTracker writes them.
 
 use super::{Hw, Open, Replayer};
+use crate::amplifier::PER_SUB;
 use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "PolyTracker", detect, new };
@@ -817,7 +822,9 @@ impl Ptm {
             }
             1 | 2 => {
                 let xc = &mut self.ch[chn];
-                let sign = if fxt == 1 { -1.0 } else { 1.0 };
+                // PolyTracker's 1xx slides the pitch down and 2xx up (measured on the Eagleplayer;
+                // libxmp's loader maps them the other way round)
+                let sign = if fxt == 1 { 1.0 } else { -1.0 };
                 fxp = memory(fxp, &mut xc.freq_mem);
                 match msn(fxp) {
                     0xf => {
@@ -1122,7 +1129,7 @@ impl Ptm {
             bend += 12800 * arp;
         }
         let fin = PERIOD_BASE / 2f64.powf((xc.note as f64 + bend as f64 / 12800.0) / 12.0);
-        let per = (fin * PAULA_PAL / (428.0 * 8363.0)).round().clamp(1.0, 65535.0) as i32;
+        let per = (fin * PAULA_PAL / (428.0 * 8363.0) * PER_SUB as f64).round().clamp(PER_SUB as f64, 65535.0 * PER_SUB as f64) as i32;
         Some((per, out_vol))
     }
 
@@ -1218,7 +1225,7 @@ impl Replayer for Ptm {
             if let (Some((per, vol)), true) = (r, loop_after) {
                 if per != self.ch[v].last_per {
                     self.ch[v].last_per = per;
-                    hw.voice_per(v, per as u16);
+                    hw.voice_per_fine(v, per as u32);
                 }
                 if vol != self.ch[v].last_vol {
                     self.ch[v].last_vol = vol;
@@ -1433,13 +1440,13 @@ mod tests {
         let d = module(1, 8363, &[(0, 0, 48, 1, 0x0e, 0xc2, 255)]);
         let (_, log) = play(d, 4);
         assert_eq!(*reg(&log, 0, 8).last().unwrap(), 0);
-        // portamento up by 4 each tick but the first: the period falls
-        let d = module(1, 8363, &[(0, 0, 48, 1, 0x01, 0x04, 255)]);
+        // effect 2 slides up by 4 each tick but the first: the period falls (effect 1 slides down)
+        let d = module(1, 8363, &[(0, 0, 48, 1, 0x02, 0x04, 255)]);
         let (_, log) = play(d, 6);
         let per = reg(&log, 0, 6);
         assert!(per.windows(2).any(|w| w[1] < w[0]), "{per:?}");
-        // fine portamento down F2: once, on the first tick, so the period does not fall further
-        let d = module(1, 8363, &[(0, 0, 48, 1, 0x02, 0xf2, 255)]);
+        // fine portamento down F2 (effect 1): once, on the first tick, so the period does not fall
+        let d = module(1, 8363, &[(0, 0, 48, 1, 0x01, 0xf2, 255)]);
         let (_, log) = play(d, 6);
         let per = reg(&log, 0, 6);
         assert!(per.windows(2).all(|w| w[1] >= w[0] || w[0] == 0x71), "{per:?}");

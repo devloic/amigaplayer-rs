@@ -96,9 +96,15 @@ pub enum Poke {
     /// OctaMED SoundStudio's does, play samples that long). Latched like LEN.
     LenBytes(u32),
     Per(u16),
+    /// The period in 1/64 colour clocks, for a player that hands its mixer a pitch finer than
+    /// Paula's whole periods (its log entry is the rounded period).
+    PerFine(u32),
     Vol(u16),
     Dma(bool),
 }
+
+/// Units of a direct voice's period in a colour clock.
+pub const PER_SUB: u32 = 64;
 
 /// A virtual voice fed by pokes: Paula's registers and its DMA's position.
 #[derive(Clone, Default)]
@@ -107,7 +113,8 @@ struct Voice {
     len: u16,
     /// A LEN poked in bytes (0: the word count).
     len_bytes: u32,
-    per: u16,
+    /// The period in 1/PER_SUB colour clocks.
+    per: u32,
     vol: u8,
     on: bool,
     /// The block playing: its start and its length in bytes.
@@ -128,7 +135,8 @@ impl Voice {
                 self.len_bytes = 0;
             }
             Poke::LenBytes(b) => self.len_bytes = b.max(1),
-            Poke::Per(p) => self.per = p,
+            Poke::Per(p) => self.per = p as u32 * PER_SUB,
+            Poke::PerFine(p) => self.per = p,
             Poke::Vol(v) => self.vol = if v & 64 != 0 { 64 } else { (v & 63) as u8 },
             Poke::Dma(true) if !self.on => {
                 self.on = true;
@@ -155,8 +163,8 @@ impl Voice {
     /// Plays `cc` colour clocks. Returns whether a block ended (Paula's
     /// interrupt).
     fn run(&mut self, cc: u32) -> bool {
-        let per = if self.per == 0 { 0x10000 } else { self.per as u32 };
-        self.phase += cc;
+        let per = if self.per == 0 { 0x10000 * PER_SUB } else { self.per };
+        self.phase += cc * PER_SUB;
         if self.phase < per {
             return false;
         }
@@ -388,6 +396,7 @@ impl Amplifier {
                 }
                 Poke::LenBytes(x) => l.push((a + 4, (x / 2).min(0xFFFF) as u16, t)),
                 Poke::Per(x) => l.push((a + 6, x, t)),
+                Poke::PerFine(x) => l.push((a + 6, ((x + PER_SUB / 2) / PER_SUB).min(0xFFFF) as u16, t)),
                 Poke::Vol(x) => l.push((a + 8, x, t)),
                 Poke::Dma(on) => l.push((a + 0xA, if on { 0x8000 } else { 0 }, t)),
             }
@@ -408,6 +417,7 @@ impl Amplifier {
                 w8(ram, s + aus::LOOP, (b != 0) as u8);
             }
             Poke::Per(p) => w16(ram, s + aus::PER, p << 2),
+            Poke::PerFine(p) => w16(ram, s + aus::PER, (p * 4 / PER_SUB).min(0xFFFF) as u16),
             Poke::Vol(x) => {
                 w16(ram, s + aus::VOL, x.min(64));
                 w16(ram, s + aus::VOL + 2, x.min(64));

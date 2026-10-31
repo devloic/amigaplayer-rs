@@ -62,13 +62,30 @@
 //! reference's register writes are identical to the port's for all of module 243
 //! (corpus line 245). refcmp runs the reference that way for such modules.
 //!
-//! Not modelled: a 4-voice tune whose effects (256-byte phase, mix and resonance
-//! voices) take a tick's whole period on a 68000 makes the original's next tick late
-//! and its CIA-B timer B interrupts (the DMA restart's two waits) run after it, so a
-//! note starts two ticks late and the DMA mask is never cleared again (the voice
-//! restarts every tick, with no LOC/LEN writes). The port stretches the tick as the
-//! original does but runs the waits inside it (corpus lines 244 and 760). UADE has
-//! none of this (a faster CPU: its ticks stay on the timer's period).
+//! Late ticks (4 voices): a tune whose effects (256-byte phase, mix and resonance voices)
+//! take a tick's whole period on a 68000 makes the original's next tick late. The
+//! original's CIA-B has two timers in play: timer A, the tick (its underflows go on
+//! while the code runs and are one pending interrupt when the tick overran), and
+//! timer B, the DMA restart's two waits (100 E-clocks, or the longest period those
+//! voices played, and then 150), whose interrupts are taken after a tick that
+//! overran, in the order of the CIA's bits (the tick, then timer B). The port keeps
+//! both timers (`grid`, `TimerB`) and takes the interrupts at those moments:
+//! * the DMA routine at a tick's end (DMA off for the voices that restart and those
+//!   still waiting, timer B started, the interrupt's step set to the first) and the
+//!   interrupt's two steps (the voices' registers and DMA on, then their loops and
+//!   the DMA mask cleared) are separate; a timer B interrupt that waited for a tick
+//!   to end runs the first step again (the routine set it), so a note starts two ticks
+//!   late, the second step never comes and the DMA mask stays set (the voice
+//!   restarts every tick with no LOC/LEN writes);
+//! * the interrupt that runs while timer B counts again only changes its latch (the
+//!   timer is not restarted), as the CIA does;
+//! * the engine takes the next tick's time from `Replayer::next_tick_at`, the first
+//!   underflow after the tick that was called.
+//! The time the effects take on a 68000 is still a model by averages (`PHASE_BYTE`
+//! ..., `ROW_TIME`): the original's per-byte costs depend on the data and the effect's
+//! types, so a tick's length is right to about half a percent on the tunes that
+//! overrun (corpus line 244 still drifts by 0.12 s over 20 s). UADE has none of this
+//! (a faster CPU: its ticks stay on the timer's period).
 //!
 //! The tables (`musicline_tables.rs`) come from NostalgicPlayer's Tables.cs; the
 //! 68k player was used only to check them, none of its code or data is copied.
@@ -246,15 +263,39 @@ const RESONANCE_BYTE: u64 = 177;
 const TRANSFORM_BYTE: u64 = 70;
 const PER_TO_VOL: u64 = 114;
 const VOL_TO_PER: u64 = 58;
-const OFF_TO_TIMER: u64 = 107;
-const IRQ_ENTRY: u64 = 117;
+// The tick's entry to its first write (the acknowledge), after the timer's underflow.
+const CALL_TO_ACK: u64 = 50;
+// The DMA routine at a tick's end: DMA off, 90 colour clocks to the low byte of timer B's
+// latch and 17 more to the high byte, which starts the timer.
+const OFF_TO_TB_LOW: u64 = 90;
+const TB_LOW_TO_HIGH: u64 = 17;
+// ... and the tick returns 107 colour clocks after that.
+const TICK_RETURN: u64 = 107;
 const VOL_TO_LOC: u64 = 64;
 const LOC_TO_LEN: u64 = 10;
 const LEN_TO_PER: u64 = 10;
-const NEXT_VOICE: u64 = 90;
-const TO_DMA_ON: u64 = 18;
-const ON_TO_TIMER: u64 = 24;
-const LOOP_NEXT: u64 = 80;
+// Timer B's first interrupt (the voices' registers and DMA on), measured from its entry
+// (the timer's underflow, or the end of the tick it waited for): the first voice's
+// first write by the voice (the skipped voices take about 20 colour clocks each); from
+// a voice's period write to the next voice's first write by the voices skipped between
+// (125 and about 20 more for each); from the last voice's period write to the DMA-on
+// write by the voices after it; with no voice to start, the DMA-on write comes at 218.
+// The routine then writes timer B's latch (24 colour clocks after the DMA-on write, and 17
+// more for the high byte, which starts the 150 wait) and returns 82 after that.
+const START_FIRST: [u64; 4] = [243, 264, 284, 305];
+const START_NEXT: [u64; 3] = [125, 145, 166];
+const START_LAST_TO_ON: [u64; 4] = [80, 59, 39, 18];
+const START_NONE_ON: u64 = 218;
+const ON_TO_TB_LOW: u64 = 24;
+const TB_HIGH_TO_END: u64 = 82;
+// The second interrupt (the loop registers of the voices in the mask): the first voice's
+// location write by the voice, the length 10 later, the next voice's location by the voices
+// skipped (63, 10 more each), the return by the voices after the last (98, 9 more each);
+// with an empty mask it returns at 260.
+const LOOP_FIRST: [u64; 4] = [188, 197, 207, 216];
+const LOOP_NEXT: [u64; 3] = [63, 73, 82];
+const LOOP_LAST_TO_END: [u64; 4] = [126, 117, 107, 98];
+const LOOP_NONE_END: u64 = 260;
 
 #[derive(Clone, Copy, Default)]
 struct Counter {
@@ -506,6 +547,38 @@ const B_MIXB: u32 = 0x200;
 const B_RES: u32 = 0x300;
 const B_FILT: u32 = 0x400;
 
+/// CIA-B timer B in one-shot mode, as the engine's CIA counts it: a write of the high byte
+/// of the latch starts it when it is stopped (while it runs only the latch changes), it
+/// underflows (latch + 1) E-clocks after that and then stops; the interrupt it raises is
+/// taken by whatever runs the interrupt handlers, which can be late.
+#[derive(Default)]
+struct TimerB {
+    latch: u16,
+    running: bool,
+    /// The colour clock of the underflow.
+    fire: u64,
+    /// An underflow no interrupt has taken yet.
+    pending: bool,
+}
+
+impl TimerB {
+    fn sync(&mut self, now: u64) {
+        if self.running && self.fire <= now {
+            self.running = false;
+            self.pending = true;
+        }
+    }
+
+    fn write_high(&mut self, now: u64, latch: u16) {
+        self.sync(now);
+        self.latch = latch;
+        if !self.running {
+            self.running = true;
+            self.fire = (now / ECLOCK + latch as u64 + 1) * ECLOCK;
+        }
+    }
+}
+
 pub struct Musicline {
     tab: u32,
     data: u32,
@@ -526,6 +599,12 @@ pub struct Musicline {
     mix_length: u16,
     half: u16,
     dma_mask: u16,
+    /// CIA-B timer B, the DMA restart's two waits, and the interrupt step it takes next
+    /// (1 after a tick's DMA routine, 2 once the first interrupt has run).
+    tb: TimerB,
+    isr_step: u8,
+    /// The tick timer's next underflow (CIA-B timer A, which runs on whatever the code does).
+    grid: Option<u64>,
     prev_period: [u16; 4],
     /// Each channel buffer's "written this tick" flag.
     chan_written: [bool; 4],
@@ -621,6 +700,9 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         mix_length: 0,
         half: 0,
         dma_mask: 0,
+        tb: TimerB::default(),
+        isr_step: 1,
+        grid: None,
         prev_period: [0; 4],
         chan_written: [false; 4],
         voices,
@@ -970,7 +1052,34 @@ impl Replayer for Musicline {
         if self.eight {
             return;
         }
+        // The timer's underflows go on while the code runs: the next one is the first after
+        // this call (one that came in a tick that ran too long is one pending interrupt,
+        // not several).
+        let now = hw.bus.clock;
+        let period = (self.timer as u64 + 1) * ECLOCK;
+        let mut next = self.grid.unwrap_or(now);
+        while next <= now {
+            next += period;
+        }
+        self.grid = Some(next);
+        // the interrupts pending at this point are taken after the tick's, in the
+        // order of the CIA's bits (timer A, timer B)
+        self.tb.sync(now);
+        let take_b = std::mem::take(&mut self.tb.pending);
+        hw.wait(CALL_TO_ACK);
         self.handler(hw);
+        if take_b {
+            self.timer_b_interrupt(hw);
+        }
+        self.until_next_tick(hw, next);
+    }
+
+    fn next_tick_at(&self) -> Option<u64> {
+        if self.eight {
+            None
+        } else {
+            self.grid
+        }
     }
 
     fn tick_clocks(&self) -> u64 {
@@ -1094,7 +1203,10 @@ impl Musicline {
             let t0 = hw.bus.clock;
             hw.wait(131);
             hw.dmacon(0x8000 | self.dma_mask);
-            self.used.set(FIRST_TICK.saturating_sub(hw.bus.clock - t0).max(1));
+            self.used.set(FIRST_TICK.saturating_sub(CALL_TO_ACK + hw.bus.clock - t0).max(1));
+            self.grid = None;
+            self.tb = TimerB::default();
+            self.isr_step = 1;
         } else {
             hw.bus.write_word(0xdff09c, 0x0080);
             hw.bus.write_word(0xdff09a, 0x8080);
@@ -1184,7 +1296,10 @@ impl Musicline {
         }
     }
 
-    /// The DMA routine and the two CIA-B timer B interrupts after it.
+    /// The DMA routine, at a tick's end: the voices that restart (and those of earlier
+    /// ticks whose restart has not run yet) are switched off, timer B starts its wait (100
+    /// E-clocks, or the longest period those voices played on the last tick) and the
+    /// timer B interrupt will take its first step.
     fn dma(&mut self, hw: &mut Hw) {
         let mut mask = self.dma_mask;
         let mut wait = 100u16;
@@ -1206,39 +1321,103 @@ impl Musicline {
         for v in 0..4 {
             self.prev_period[v] = self.voices[v].period;
         }
-        hw.wait(OFF_TO_TIMER + (wait as u64 + 1) * ECLOCK + IRQ_ENTRY);
-        for v in 0..4 {
-            let x = &mut self.voices[v];
-            if x.play & P_RETRIGGER == 0 {
-                continue;
-            }
-            x.play &= !P_RETRIGGER;
-            if !self.voices[v].muted {
-                let vol = self.amiga_volume(v);
-                hw.vol(v, vol);
-                hw.wait(VOL_TO_LOC);
-            }
-            let x = &self.voices[v];
-            hw.loc(v, x.wave_pointer);
-            hw.wait(LOC_TO_LEN);
-            hw.len(v, x.wave_length);
-            hw.wait(LEN_TO_PER);
-            hw.per(v, x.period);
-            hw.wait(NEXT_VOICE);
+        hw.wait(OFF_TO_TB_LOW + TB_LOW_TO_HIGH);
+        self.tb.write_high(hw.bus.clock, wait);
+        self.isr_step = 1;
+        hw.wait(TICK_RETURN);
+    }
+
+    /// Lets the time pass to `t`, if it has not.
+    fn until(hw: &mut Hw, t: u64) {
+        let now = hw.bus.clock;
+        if t > now {
+            hw.wait(t - now);
         }
-        hw.wait(TO_DMA_ON);
-        hw.dmacon(0x8000 | self.dma_mask);
-        hw.wait(ON_TO_TIMER + 151 * ECLOCK + IRQ_ENTRY);
-        for v in 0..4 {
-            if self.dma_mask & 1 << v != 0 {
+    }
+
+    /// What happens before the tick timer's next underflow `due`: a timer B interrupt
+    /// that is pending is taken (when the tick is not yet due again, and also when it is,
+    /// by the tick's own call), and a timer B that underflows before `due` is waited for.
+    fn until_next_tick(&mut self, hw: &mut Hw, due: u64) {
+        loop {
+            let now = hw.bus.clock;
+            self.tb.sync(now);
+            if now >= due {
+                return;
+            }
+            if self.tb.pending {
+                self.tb.pending = false;
+                self.timer_b_interrupt(hw);
+            } else if self.tb.running && self.tb.fire < due {
+                hw.wait(self.tb.fire - now);
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// The CIA-B timer B interrupt: the first step starts the voices, the second sets their
+    /// loops. The DMA routine of every tick sets the first step again, so a timer B
+    /// interrupt that waited for a tick to end runs the first step again, and the second
+    /// (which clears the DMA mask) never comes while the ticks overrun.
+    fn timer_b_interrupt(&mut self, hw: &mut Hw) {
+        let c = hw.bus.clock;
+        if self.isr_step == 1 {
+            self.isr_step = 2;
+            let mut last: Option<(usize, u64)> = None;
+            for v in 0..4 {
+                if self.voices[v].play & P_RETRIGGER == 0 {
+                    continue;
+                }
+                self.voices[v].play &= !P_RETRIGGER;
+                let mut at = match last {
+                    None => START_FIRST[v],
+                    Some((l, per)) => per + START_NEXT[v - l - 1],
+                };
+                if !self.voices[v].muted {
+                    Self::until(hw, c + at);
+                    let vol = self.amiga_volume(v);
+                    hw.vol(v, vol);
+                    at += VOL_TO_LOC;
+                }
+                Self::until(hw, c + at);
+                let x = &self.voices[v];
+                hw.loc(v, x.wave_pointer);
+                at += LOC_TO_LEN;
+                Self::until(hw, c + at);
+                hw.len(v, x.wave_length);
+                at += LEN_TO_PER;
+                Self::until(hw, c + at);
+                hw.per(v, x.period);
+                last = Some((v, at));
+            }
+            let on = last.map_or(START_NONE_ON, |(l, per)| per + START_LAST_TO_ON[l]);
+            Self::until(hw, c + on);
+            hw.dmacon(0x8000 | self.dma_mask);
+            Self::until(hw, c + on + ON_TO_TB_LOW + TB_LOW_TO_HIGH);
+            self.tb.write_high(hw.bus.clock, 150);
+            Self::until(hw, c + on + ON_TO_TB_LOW + TB_LOW_TO_HIGH + TB_HIGH_TO_END);
+        } else {
+            let mut last: Option<(usize, u64)> = None;
+            for v in 0..4 {
+                if self.dma_mask & 1 << v == 0 {
+                    continue;
+                }
+                let at = match last {
+                    None => LOOP_FIRST[v],
+                    Some((l, len)) => len + LOOP_NEXT[v - l - 1],
+                };
+                Self::until(hw, c + at);
                 let x = &self.voices[v];
                 hw.loc(v, x.repeat_pointer);
-                hw.wait(LOC_TO_LEN);
+                Self::until(hw, c + at + LOC_TO_LEN);
                 hw.len(v, x.repeat_length);
-                hw.wait(LOOP_NEXT);
+                last = Some((v, at + LOC_TO_LEN));
             }
+            let end = last.map_or(LOOP_NONE_END, |(l, len)| len + LOOP_LAST_TO_END[l]);
+            Self::until(hw, c + end);
+            self.dma_mask = 0;
         }
-        self.dma_mask = 0;
     }
 
     // ---- the tune ----

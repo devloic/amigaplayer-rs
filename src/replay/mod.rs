@@ -128,6 +128,14 @@ pub trait Replayer: Send {
     fn timer_delay(&self) -> u64 {
         0
     }
+    /// The time (colour clocks, absolute) of the next tick, when the player keeps its own
+    /// timer and knows it after a tick (a CIA timer whose underflows the original's slow
+    /// code can miss, as the 4-voice Musicline Editor's): the engine then takes it
+    /// in place of the previous due time plus `tick_clocks`. A tick that is already due runs
+    /// at once, as for the default.
+    fn next_tick_at(&self) -> Option<u64> {
+        None
+    }
     /// The music comes from a PC tracker: the output stage is the PC one (no Amiga filters),
     /// as for the 68k players of PC formats.
     fn pc_music(&self) -> bool {

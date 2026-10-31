@@ -1101,6 +1101,11 @@ impl Engine {
             if d <= now {
                 self.next_timer = Some(d + n);
                 self.timer_interrupt();
+                if let Some(Playing { backend: Backend::Replay(r), .. }) = &self.playing {
+                    if let Some(t) = r.next_tick_at() {
+                        self.next_timer = Some(t);
+                    }
+                }
             }
         }
         if self.next_vblank <= now {

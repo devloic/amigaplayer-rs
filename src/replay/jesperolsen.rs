@@ -225,6 +225,7 @@ fn detect(d: &[u8]) -> bool {
 
 /// Which of the two data engines plays.
 #[derive(Clone, Copy, PartialEq, Debug)]
+#[allow(dead_code)]
 enum Eng {
     A,
     B,
@@ -249,41 +250,11 @@ fn companion_len(m: &Machine) -> Option<u64> {
     None
 }
 
-/// The engine by the companion's length (5860 bytes: A, 6074: B); without it, a guess
-/// from the module: the second game has samples embedded behind an 8SVX header, and
-/// speed bytes the first game's two-step form does not give.
-fn choose_engine(d: &[u8], companion: Option<u64>) -> Eng {
-    match companion {
-        Some(5860) => return Eng::A,
-        Some(6074) => return Eng::B,
-        _ => {}
-    }
-    let Some(lists) = song_lists(d) else { return Eng::B };
-    for &l in &lists {
-        let mut p = l;
-        while rw(d, p) != 0x7FFF && p + 10 <= d.len() {
-            let sp = d[p + 7];
-            if sp & 0x80 != 0 || (sp >> 4) & 7 != sp & 7 && sp != 0 {
-                return Eng::B;
-            }
-            let tbl = rw(d, p + 2) as usize;
-            let w0 = rw(d, 0) as usize;
-            for i in 0..32 {
-                let rec = rw(d, tbl + 2 * i) as usize;
-                if rec % 2 != 0 || rec < w0 || rec + 26 > d.len() {
-                    break;
-                }
-                // only the second game has samples embedded with an 8SVX header
-                let start = be32(d, rec + 14);
-                let hdr = (start & 0x7FFF_FFFF) as usize;
-                if start & 0x8000_0000 != 0 && hdr >= 0x68 && d.get(hdr - 0x68..hdr - 0x68 + 4) == Some(b"FORM") {
-                    return Eng::B;
-                }
-            }
-            p += 10;
-        }
-    }
-    Eng::A
+/// The engine: the reference plays every data module with the fractional-speed
+/// scheme (engine B), whatever the companion's length says, so the companion is not
+/// consulted. Engine A stays in the code but is not selected.
+fn choose_engine(_d: &[u8], _companion: Option<u64>) -> Eng {
+    Eng::B
 }
 
 /// The number of subsongs the host offers: one per list after the first, less a
@@ -1673,19 +1644,11 @@ mod tests {
     }
 
     #[test]
-    fn engine_by_companion_length() {
+    fn engine_is_always_b() {
         let d = data_module(0xFF);
-        assert_eq!(choose_engine(&d, Some(5860)), Eng::A);
+        assert_eq!(choose_engine(&d, Some(5860)), Eng::B);
         assert_eq!(choose_engine(&d, Some(6074)), Eng::B);
-        // without a companion: a speed of the first game's form
-        assert_eq!(choose_engine(&data_module(0x22), None), Eng::A);
-        assert_eq!(choose_engine(&data_module(0x48), None), Eng::B);
-        // and a sample behind an 8SVX header
-        let mut f = data_module(0x22);
-        f[0x10..0x14].copy_from_slice(b"FORM");
-        f.resize(0x200, 0);
-        put32(&mut f, 0xA0 + 14, 0x8000_0078);
-        assert_eq!(choose_engine(&f, None), Eng::B);
+        assert_eq!(choose_engine(&data_module(0x22), None), Eng::B);
     }
 
     fn run(path: &Path, data: Vec<u8>, companion: Option<usize>, ticks: usize) -> Vec<(u32, u16)> {

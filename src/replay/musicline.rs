@@ -81,10 +81,20 @@
 //!   timer is not restarted), as the CIA does;
 //! * the engine takes the next tick's time from `Replayer::next_tick_at`, the first
 //!   underflow after the tick that was called.
-//! The time the effects take on a 68000 is still a model by averages (`PHASE_BYTE`
-//! ..., `ROW_TIME`): the original's per-byte costs depend on the data and the effect's
-//! types, so a tick's length is right to about half a percent on the tunes that
-//! overrun (corpus line 244 still drifts by 0.12 s over 20 s). UADE has none of this
+//! The time the original's code takes on a 68000 is priced by what a tick does, not by
+//! averages: a pass of each effect (per byte of its wave, and a setup by its type: the
+//! phase types and fill, the mix sources, the filter types), the lines and instruments
+//! of a row, and the slides, envelope, arpeggio and loop steps of each voice, each with
+//! a price in colour clocks (`PHASE_PASS`, `RES_BYTE`, `SEQ_ENTRY` ...) that was measured
+//! on the Eagleplayer's runs on the engine's 68000 clock (the instruction cycles the
+//! code ran on 174 four-voice modules, regressed on these counts; 130 of them fitted
+//! and 44 held out: a tick is right to 0.2% on average and 0.9% at worst on those, and
+//! to 0.1% on corpus lines 244 and the list's synthmix, which were drifting by 0.1 s over
+//! 20 s). The costs are charged where the port does the work and paid after the row and
+//! after each voice's effects (`pay`); the time from the last voice's volume write to the
+//! DMA routine depends on how many voices write (`TAIL`). The effects' output is copied
+//! to the played wave without running Paula up to the copy, as the original's code
+//! does under the engine (it touches no register meanwhile). UADE has none of this
 //! (a faster CPU: its ticks stay on the timer's period).
 //!
 //! The tables (`musicline_tables.rs`) come from NostalgicPlayer's Tables.cs; the
@@ -245,22 +255,70 @@ const FX_PT_VIBRATO: u8 = 0xea;
 // Colour clocks the original's code takes between its writes (68000, from
 // the Eagleplayer's write log) and the CIA's wait.
 const ECLOCK: u64 = 5;
-const PLAY_TIME: u64 = 4814;
+/// The tick's fixed work before the effects.
+const PLAY_TIME: u64 = 2683;
 // The first tick's first write, after the timer starts: 65536 E-clocks and the
 // interrupt's entry.
 const FIRST_TICK: u64 = 65536 * ECLOCK + 47;
-// The time of the tick's work before its first write grows with what it does
-// (fitted to the original's tick times on twelve tunes, 4-voice tunes only; the
-// phase, mix, resonance and transform costs by least squares on the delay between a
-// tick's start and its first write, which was up to 26000 colour clocks short on
-// the tunes with 256-byte or several resonance effects): per voice that starts a
-// row, and per byte an effect handles.
-const ROW_TIME: u64 = 1158;
-const PHASE_BYTE: u64 = 25;
-const MIX_BYTE: u64 = 2;
-const FILTER_BYTE: u64 = 113;
-const RESONANCE_BYTE: u64 = 177;
-const TRANSFORM_BYTE: u64 = 70;
+
+// Prices, in colour clocks, of what the original's code does (see PLAY_TIME).
+// A row:
+const SEQ_ENTRY: f64 = 196.2;
+const PART_LINE: f64 = 153.7;
+const CHECK_INSTRUMENT: f64 = 514.2;
+const CHECK_NOTE: f64 = 0.0;
+const CHECK_NEW_INSTRUMENT: f64 = 98.5;
+const PART_FX: f64 = 32.0;
+const ARP_START: f64 = 365.9;
+const PLAY_INSTRUMENT: f64 = 122.3;
+const INST_PLAY: f64 = 756.2;
+const INST_ENVELOPE: f64 = 104.1;
+const INST_FILTER: f64 = 199.9;
+const INST_MIX: f64 = 80.5;
+const INST_PHASE: f64 = 116.7;
+const INST_RESONANCE: f64 = 164.0;
+// Each tick and voice:
+const VOICE_PLAY: f64 = 450.9;
+const SLIDE_NOTE: f64 = 51.8;
+const ARP_WAIT: f64 = 25.6;
+const ARP_STEP: f64 = 313.1;
+const ARP_LINE: f64 = 170.4;
+const ENVELOPE: f64 = 78.5;
+const ENVELOPE_END1: f64 = 4.2;
+const ENVELOPE_END2: f64 = 30.5;
+const ENVELOPE_STEP: f64 = 20.3;
+const VIBRATO: f64 = 191.7;
+const TREMOLO: f64 = 165.5;
+const LOOP_MOVE: f64 = 120.3;
+const LOOP_COUNT: f64 = 148.6;
+const WAVE_COPY: f64 = 58.9;
+const WAVE_COPY_BYTE: f64 = 2.88;
+// The effects: a pass and a byte of it.
+const RES_PASS: f64 = 316.4;
+const RES_BYTE: f64 = 155.26;
+const TRANSFORM_PASS: f64 = 442.5;
+const TRANSFORM_BYTE: f64 = 62.49;
+const FILTER_PASS: f64 = 315.5;
+const FILTER_BYTE: f64 = 110.12;
+const RFILTER_PASS: f64 = 311.3;
+const RFILTER_BYTE: f64 = 109.13;
+const MIX_BYTE: f64 = 29.82;
+const MIX_BYTE_BOOST: f64 = 29.83;
+const PHASE_EARLY_PASS: f64 = 284.5;
+const PHASE_EARLY_BYTE: f64 = 10.69;
+/// A mix pass by its source (own buffer or not), whether it uses a wave of its own and
+/// whether its offset is 0: [buffer][wave of its own][offset 0].
+const MIX_PASS: [[[f64; 2]; 2]; 2] = [[[333.2, 350.6], [351.6, 370.9]], [[346.4, 336.4], [337.9, 319.4]]];
+/// A phase pass by type (0 to 3) and fill: (pass, per interpolated byte, per filled byte).
+const PHASE_PASS: [[(f64, f64, f64); 2]; 4] = [[(386.4, 17.65, 8.64), (414.3, 17.82, 10.49)],
+    [(391.9, 38.89, 21.84), (384.1, 39.04, 41.05)],
+    [(732.2, 27.97, 14.68), (375.1, 34.05, 34.95)],
+    [(348.7, 39.06, 28.01), (423.3, 38.24, 41.29)]];
+/// ... and per restart of the row of a fill (types 1 and 2).
+const PHASE_RESTART: [f64; 4] = [0.0, 0.0, 11.0, 0.0];
+/// Colour clocks from the last volume write to the DMA routine's first write, by the last
+/// voice that wrote and how many voices wrote (the rest restart; measured on the original).
+const TAIL: [[u64; 4]; 4] = [[347, 0, 0, 0], [320, 263, 0, 0], [276, 241, 192, 0], [250, 201, 166, 131]];
 const PER_TO_VOL: u64 = 114;
 const VOL_TO_PER: u64 = 58;
 // The tick's entry to its first write (the acknowledge), after the timer's underflow.
@@ -611,6 +669,8 @@ pub struct Musicline {
     voices: [Voice; 8],
     vol_table: Vec<u8>,
     title: String,
+    /// The prices of the work done since the last `pay` (colour clocks, with fractions).
+    owed: f64,
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -707,6 +767,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         chan_written: [false; 4],
         voices,
         vol_table,
+        owed: 0.0,
         title: String::new(),
     };
     let mut hw = Hw { bus: &mut m.bus };
@@ -722,6 +783,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         hw.wait(at.saturating_sub(hw.bus.clock));
     }
     ml.start_int(&mut hw);
+    // what the init's row cost is in the start time already
+    ml.owed = 0.0;
     Some(Box::new(ml))
 }
 
@@ -1244,10 +1307,12 @@ impl Musicline {
             }
         } else {
             self.play_tune(hw);
+            self.pay(hw);
         }
         hw.wait(PLAY_TIME);
         for v in 0..self.voice_count() {
             self.play_effects(hw, v);
+            self.pay(hw);
         }
         for v in 0..self.voice_count() {
             self.period(v);
@@ -1293,6 +1358,26 @@ impl Musicline {
                 hw.vol(v, self.amiga_volume(v));
             }
             hw.wait(VOL_TO_PER);
+        }
+        hw.wait(self.tail_extra() as u64);
+    }
+
+    /// The time from the last voice's volume write to the DMA routine's first write is
+    /// longer than a voice's (VOL_TO_PER) by what the original spends on the voices that
+    /// restart, which write nothing here. It is taken off the effects' time, so that the
+    /// first write comes when the original's does and the tick is as long as before.
+    fn tail_extra(&self) -> f64 {
+        let mut last = None;
+        let mut written = 0;
+        for v in 0..4 {
+            if self.voices[v].play & P_RETRIGGER == 0 {
+                last = Some(v);
+                written += 1;
+            }
+        }
+        match last {
+            Some(l) => (TAIL[l][written - 1] - VOL_TO_PER) as f64,
+            None => 0.0,
         }
     }
 
@@ -1444,13 +1529,11 @@ impl Musicline {
             spd = x.groove;
         }
         x.speed_counter = spd;
-        if !self.eight {
-            hw.wait(ROW_TIME);
-        }
         let x = &mut self.voices[v];
         x.speed_part = 0;
         x.groove_part = 0;
         for _ in 0..256 {
+            self.owed += SEQ_ENTRY;
             let x = &mut self.voices[v];
             let pos = x.tune_position;
             let data = rw(hw, seq + 2 * pos as u32);
@@ -1520,6 +1603,7 @@ impl Musicline {
         x.transpose_number = ((data & 0x1f) as u8).wrapping_sub(16);
         let part = rl(hw, self.tab + T_PARTS + 4 * x.part_number as u32);
         loop {
+            self.owed += PART_LINE;
             let x = &mut self.voices[v];
             let pos = x.part_position;
             x.part_position = x.part_position.wrapping_add(1) & 0x7f;
@@ -1570,6 +1654,13 @@ impl Musicline {
 
     fn check_instrument(&mut self, hw: &mut Hw, v: usize) {
         let pi = self.voices[v].part_instrument;
+        self.owed += CHECK_INSTRUMENT;
+        if pi != 0 {
+            self.owed += CHECK_NEW_INSTRUMENT;
+        }
+        if self.voices[v].part_note != 0 {
+            self.owed += CHECK_NOTE;
+        }
         if pi != 0 {
             let inst = rl(hw, self.tab + T_INSTS + 4 * pi as u32);
             let x = &mut self.voices[v];
@@ -1602,6 +1693,7 @@ impl Musicline {
             return;
         }
         x.arp |= A_WILL_SET_NOTE;
+        self.owed += ARP_START;
         let mut num = rw(hw, inst + I_ARP_TABLE) as u32;
         if x.arp & A_USE_TABLE != 0 {
             num = x.arp_table as u32;
@@ -1665,6 +1757,7 @@ impl Musicline {
         if self.voices[v].arp_wait || inst == 0 {
             return;
         }
+        self.owed += PLAY_INSTRUMENT;
         let mut is = inst;
         let mut st = rb(hw, inst + IS_TYPE);
         let x = &mut self.voices[v];
@@ -1850,8 +1943,17 @@ impl Musicline {
 
     fn inst_play(&mut self, hw: &mut Hw, v: usize) {
         let inst = self.voices[v].instrument;
+        self.owed += INST_PLAY;
         let x = &mut self.voices[v];
         if x.pitch_slide != FX_PORTAMENTO && !x.arp_wait {
+            for (flag, price) in [(E2_PHASE, INST_PHASE), (E2_RESONANCE, INST_RESONANCE), (E2_FILTER, INST_FILTER), (E2_MIX, INST_MIX)] {
+                if x.effect2 & flag != 0 {
+                    self.owed += price;
+                }
+            }
+            if x.effect1 & E1_ENVELOPE != 0 {
+                self.owed += INST_ENVELOPE;
+            }
             x.play |= P_RETRIGGER;
             let w = |o: u32| rw(hw, inst + o);
             if x.vibrato == 0 && x.effect1 & E1_VIBRATO != 0 {
@@ -2045,6 +2147,9 @@ impl Musicline {
         }
         for k in 0..5 {
             let (e, a) = self.voices[v].part_effects[k];
+            if e != 0 || a != 0 {
+                self.owed += PART_FX;
+            }
             self.part_effect(hw, v, e, a);
         }
     }
@@ -2468,6 +2573,7 @@ impl Musicline {
             x.repeat_pointer = x.repeat_original;
         }
         if self.voices[v].play & P_RETRIGGER == 0 {
+            self.owed += VOICE_PLAY;
             self.slide_volume(v);
             self.slide_channel_volume(v);
             self.slide_master_volume(v);
@@ -2480,27 +2586,16 @@ impl Musicline {
         }
         self.envelope_play(v);
         self.move_loop(hw, v);
-        let len = self.voices[v].repeat_length as u32 * 2;
         self.transform_play(hw, v);
-        if self.voices[v].effect2 & E2_TRANSFORM != 0 {
-            self.spend(hw, len, TRANSFORM_BYTE);
-        }
         self.phase_play(hw, v);
-        if self.voices[v].effect2 & E2_PHASE != 0 {
-            self.spend(hw, len, PHASE_BYTE);
-        }
         self.mix_play(hw, v);
-        if self.voices[v].effect2 & E2_MIX != 0 {
-            self.spend(hw, len, MIX_BYTE);
-        }
         self.resonance_play(hw, v);
-        if self.voices[v].effect2 & E2_RESONANCE != 0 {
-            self.spend(hw, len, RESONANCE_BYTE);
-        }
         self.filter_play(hw, v);
-        if self.voices[v].effect2 & E2_FILTER != 0 {
-            self.spend(hw, len, FILTER_BYTE);
+        // the writes at the end of the voice's effects come after their time
+        if v + 1 == self.voice_count() {
+            self.owed -= self.tail_extra();
         }
+        self.pay(hw);
         let eight = self.eight;
         let x = &mut self.voices[v];
         if !eight {
@@ -2512,8 +2607,13 @@ impl Musicline {
                     x.wave_pointer = wb;
                 }
                 let n = (x.repeat_length >> 3) as u32 * 16;
-                // Paula has played on while the effects ran
-                hw.bus.paula.sync(hw.bus.clock, &hw.bus.ram);
+                self.owed += WAVE_COPY + WAVE_COPY_BYTE * n as f64;
+                // Paula is not run up to the copy: the original's code touches no register
+                // while its effects run, so under the engine Paula catches up at the next
+                // register access (the next tick's acknowledge, or the tick's first period
+                // write) and plays the new wave from the last access (measured on the
+                // original's DMA fetches: the words Paula fetches are the same ones
+                // with this, not with the copy's own time)
                 for k in 0..n / 4 {
                     let b = rl(hw, rp + 4 * k);
                     hw.bus.w32(wb + 4 * k, b);
@@ -2655,6 +2755,7 @@ impl Musicline {
             if x.pitch_slide_to < 0 {
                 return;
             }
+            self.owed += SLIDE_NOTE;
             if x.pitch_slide_down {
                 x.pitch_slide_note = x.pitch_slide_note.wrapping_sub(x.pitch_slide_speed);
                 let n = x.note.wrapping_add(x.pitch_slide_note).wrapping_sub(x.pitch_slide_to as u16) as i16;
@@ -2782,8 +2883,10 @@ impl Musicline {
             }
             x.arp_speed_counter = x.arp_speed_counter.wrapping_sub(1);
             if x.arp_speed_counter != 0 {
+                self.owed += ARP_WAIT;
                 return;
             }
+            self.owed += ARP_STEP;
             let mut spd = rb(hw, inst + I_ARP_SPEED);
             x.arp_groove = !x.arp_groove;
             let g = rb(hw, inst + I_ARP_GROOVE);
@@ -2799,6 +2902,7 @@ impl Musicline {
         }
         let arp = rl(hw, self.tab + T_ARPS + 4 * (num & 0xff));
         loop {
+            self.owed += ARP_LINE;
             let x = &mut self.voices[v];
             let pos = x.arp_position;
             x.arp_position = x.arp_position.wrapping_add(1) & 0x7f;
@@ -2909,6 +3013,7 @@ impl Musicline {
         if x.effect1 & E1_ENVELOPE == 0 {
             return;
         }
+        self.owed += ENVELOPE;
         let set3 = |x: &mut Voice, d: u16| {
             x.volume3 = ((d as u32 * x.volume2 as u32) >> 6).min(1024) as u16;
         };
@@ -2916,12 +3021,14 @@ impl Musicline {
         let mut d = x.envelope[i];
         i += 1;
         if d == 0 {
+            self.owed += ENVELOPE_END1;
             d = x.envelope[i];
             i += 1;
             if d == 0 {
                 d = x.envelope[i];
                 i += 1;
                 if d == 0 {
+                    self.owed += ENVELOPE_END2;
                     if x.arg1 & F_HOLD_SUSTAIN != 0 {
                         let s = x.envelope[i + 7];
                         set3(x, s);
@@ -2937,6 +3044,7 @@ impl Musicline {
                 }
             }
         }
+        self.owed += ENVELOPE_STEP;
         let mut vol = x.envelope_volume.wrapping_add(x.envelope[i + 3]);
         x.envelope_volume = vol;
         vol >>= 8;
@@ -2980,6 +3088,7 @@ impl Musicline {
                 return;
             }
         }
+        self.owed += TREMOLO;
         if x.tremolo_attack_length == 0 {
             x.tremolo_depth_now = x.tremolo_depth;
         } else {
@@ -3049,6 +3158,7 @@ impl Musicline {
                 return;
             }
         }
+        self.owed += VIBRATO;
         if x.vibrato_attack_length == 0 {
             x.vibrato_depth_now = x.vibrato_depth;
         } else {
@@ -3081,6 +3191,7 @@ impl Musicline {
         }
         let step = x.arg2 & M_LOOP_STEP != 0;
         if !step {
+            self.owed += LOOP_MOVE;
             x.loop_delay = x.loop_delay.wrapping_sub(1);
             if x.loop_delay >= 0 {
                 let p = x.loop_sample.wrapping_add(2 * x.loop_counter_save as u32);
@@ -3096,6 +3207,7 @@ impl Musicline {
                 }
                 x.loop_wait_counter = x.loop_wait as i16;
             }
+            self.owed += LOOP_COUNT;
             x.loop_counter_save = x.loop_counter;
             Self::loop_count(x);
         } else if x.arg2 & M_LOOP_INIT == 0 {
@@ -3271,6 +3383,7 @@ impl Musicline {
             }
         }
         let factor = prev as i32;
+        self.owed += TRANSFORM_PASS + TRANSFORM_BYTE * len as f64;
         let sn = x.transform_waves[octave];
         if sn == 0 {
             return;
@@ -3295,10 +3408,12 @@ impl Musicline {
         }
     }
 
-    /// The time an effect takes over `bytes` bytes (4-voice tunes).
-    fn spend(&self, hw: &mut Hw, bytes: u32, per: u64) {
+    /// Lets the time of the work counted since the last call pass (4-voice tunes).
+    fn pay(&mut self, hw: &mut Hw) {
+        let due = self.owed.floor().max(0.0);
+        self.owed -= due;
         if !self.eight {
-            hw.wait(bytes as u64 * per);
+            hw.wait(due as u64);
         }
     }
 
@@ -3329,6 +3444,15 @@ impl Musicline {
         let fill = x.arg1 & F_PHASE_FILL != 0;
         let ptype = x.phase_type;
         let prev = prev as u32;
+        if prev >= len || prev == 0 {
+            self.owed += PHASE_EARLY_PASS + PHASE_EARLY_BYTE * len as f64;
+        } else {
+            let (pass, interpolated, filled) = PHASE_PASS[(ptype as usize).min(3)][fill as usize];
+            self.owed += pass + interpolated * prev as f64 + filled * (len - prev) as f64;
+            if fill {
+                self.owed += PHASE_RESTART[(ptype as usize).min(3)] * ((len - prev + prev - 1) / prev) as f64;
+            }
+        }
         let rd = |hw: &Hw, k: u32| rs8(hw, src.wrapping_add(k));
         if prev >= len || prev == 0 {
             for k in 0..len {
@@ -3447,6 +3571,9 @@ impl Musicline {
             prev >>= 5;
             off = 256 + 128 + 64 + 32;
         }
+        let pass = MIX_PASS[(x.arg2 & M_MIX_BUFF != 0) as usize][(x.mix_wave != 0) as usize][(prev == 0) as usize];
+        let byte = if x.boost & B_MIX != 0 { MIX_BYTE_BOOST } else { MIX_BYTE };
+        self.owed += pass + byte * len as f64;
         let src = x.repeat_pointer;
         let dest = x.bufs + B_MIXB;
         let mut mixb = dest;
@@ -3489,6 +3616,7 @@ impl Musicline {
         let buf = x.bufs + B_RES;
         Self::set_effect_output(x, buf, true);
         let len = x.repeat_length as u32 * 2;
+        self.owed += RES_PASS + RES_BYTE * len as f64;
         let mut last = x.resonance_last;
         if x.resonance_last_init {
             x.resonance_last_init = false;
@@ -3528,6 +3656,7 @@ impl Musicline {
         let buf = x.bufs + B_FILT;
         Self::set_effect_output(x, buf, true);
         let len = x.repeat_length as u32 * 2;
+        self.owed += if x.filter_type == 0 { FILTER_PASS + FILTER_BYTE * len as f64 } else { RFILTER_PASS + RFILTER_BYTE * len as f64 };
         let mut last = x.filter_last;
         let normal = x.filter_type == 0;
         if x.filter_last_init {

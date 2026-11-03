@@ -51,6 +51,39 @@ const AFTER_START: u64 = 149;
 /// their first write, and after the second one's DMA on.
 const COLD_START: [u64; 2] = [439, 411];
 const COLD_AFTER: u64 = 118;
+/// Family C, on top of the plain work: a looping track end, the second note start of a call (its
+/// DMA off comes later, its DMA on's follow-up sooner), what a slot's update costs after its volume
+/// write when the duration runs out, when the release switches the slot off, and when both
+/// envelope indexes have stopped at their maximum.
+// Family D (the four-slot sequencer), in colour clocks; the first index is 1 for the Maniac Mansion
+// build (a note start first turns its channel's DMA off), 0 for the Zak build.
+/// From the call's entry to the first volume write of the first call.
+const D_START: [u64; 2] = [128, 151];
+/// A track examination that finds nothing due, per track.
+const D_FAIL: [[u64; 4]; 2] = [[34, 38, 38, 38], [36, 37, 36, 37]];
+/// From the end of the examinations (or the previous note's tail) to a note's first write.
+const D_LEAD: [u64; 2] = [403, 216];
+/// The very first note of the run takes this much longer.
+const D_FIRST_EXTRA: [u64; 2] = [23, 31];
+const D_OFF_TO_LOC: u64 = 203;
+const D_VOL_TO_ON: [u64; 2] = [30, 28];
+/// After a note's DMA on, before the same track is examined again.
+const D_AFTER: [u64; 2] = [110, 120];
+/// The slot pass: before an update's first write, after its last, after a note-end DMA off, for a
+/// slot that is not active, for a slot whose note started in this call.
+const D_UPD_PRE: u64 = 122;
+const D_UPD_POST: u64 = 111;
+const D_OFF_POST: u64 = 74;
+const D_IDLE: u64 = 10;
+const D_JUST: [u64; 2] = [156, 152];
+/// From an update's volume write to the DMA off that ends the note (even and odd voices).
+const D_VOL_TO_OFF: [[u64; 2]; 2] = [[77, 76], [75, 74]];
+const LOOP_END: u64 = 70;
+const SECOND_STOP: u64 = 34;
+const SECOND_AFTER: u64 = 31;
+const DUR_END: u64 = 29;
+const REL_OFF: u64 = 18;
+const SATURATED: u64 = 16;
 
 // ------------------------------------------------------------------ recognition
 
@@ -293,6 +326,8 @@ struct Scumm {
     /// Notes started so far by the first call (its code runs slower than the later calls').
     cold: u8,
     in_first: bool,
+    /// Note starts made so far in this call.
+    nstart: u8,
 }
 
 impl Scumm {
@@ -493,6 +528,7 @@ impl Scumm {
     fn seq(&mut self, s: &Seq, start: bool, d0: u16, hw: &mut Hw) -> bool {
         let slots = if s.four { 4 } else { 2 };
         self.in_first = start;
+        self.nstart = 0;
         if s.four {
             self.set_sw(0x16, 0);
         }
@@ -504,11 +540,11 @@ impl Scumm {
             for x in 0..slots {
                 self.set_sb(0x10 + x, 0xFF);
             }
-            hw.wait(108);
+            hw.wait(if s.four { D_START[s.dma_off_first as usize] } else { 108 });
             if s.four {
                 for ch in 0..4 {
                     hw.vol(ch, 0);
-                    hw.wait(8);
+                    hw.wait(10);
                 }
                 hw.dmacon(0x800F);
             } else {
@@ -520,6 +556,9 @@ impl Scumm {
                 let e = s.tracks[k] + 16 * self.sw(2 * k) as usize;
                 let time = self.iw(e);
                 if (self.sw(8 + 2 * k) as i16) < time as i16 {
+                    if s.four {
+                        hw.wait(D_FAIL[s.dma_off_first as usize][k]);
+                    }
                     break;
                 }
                 let padd = self.iw(e + 2);
@@ -531,11 +570,15 @@ impl Scumm {
                     if !a.looping {
                         return true;
                     }
+                    if !s.four {
+                        hw.wait(LOOP_END);
+                    }
                     continue;
                 }
                 let (dur, slot, inst) = (self.iw(e + 4), self.iw(e + 6), self.iw(e + 8));
                 self.stop(s, slot, d0, hw);
                 self.start(s, inst, dur, padd, slot, d0, hw);
+                self.nstart = self.nstart.saturating_add(1);
                 self.set_sw(2 * k, self.sw(2 * k).wrapping_add(1));
             }
         }
@@ -543,6 +586,8 @@ impl Scumm {
             let n = self.a0[0x10 + x];
             if (n as i8) >= 0 {
                 self.update(s, n as u16, d0, hw);
+            } else if s.four {
+                hw.wait(D_IDLE);
             }
         }
         for k in 0..4 {
@@ -560,7 +605,7 @@ impl Scumm {
             return;
         }
         if !s.four {
-            hw.wait(T_STOP);
+            hw.wait(T_STOP + if self.nstart > 0 && !self.in_first { SECOND_STOP } else { 0 });
             hw.dmacon(((1 << x) | (1 << (x + 2))) & d0);
             hw.wait(OFF_TO_START);
         }
@@ -584,26 +629,36 @@ impl Scumm {
             hw.wait(12);
         }
         let cold = self.in_first && !s.four;
+        let m = s.dma_off_first as usize;
         hw.wait(match (cold, self.cold) {
             (true, 0) => COLD_START[0],
             (true, 1) => COLD_START[1],
+            _ if s.four => D_LEAD[m] + if self.in_first && self.nstart == 0 { D_FIRST_EXTRA[m] } else { 0 },
             _ => T_GROUP,
         });
         if s.dma_off_first {
             hw.dmacon(bit);
-            hw.wait(134);
+            hw.wait(if s.four { D_OFF_TO_LOC } else { 134 });
         }
         hw.loc(ch, sample);
         hw.wait(16);
         hw.len(ch, self.iw(r + 0x18) >> 1);
-        hw.wait(if s.four { 36 } else { 40 });
+        hw.wait(40);
         let (pe, ve) = (self.iw(r + 0x0C), self.iw(r));
         hw.per(ch, self.env(s, pe, 0).wrapping_add(padd));
         hw.wait(30);
         hw.vol(ch, self.env(s, ve, 0));
-        hw.wait(if s.four { 26 } else { 44 });
+        hw.wait(if s.four { D_VOL_TO_ON[m] } else { 44 });
         hw.dmacon(0x8000 | bit);
-        hw.wait(if cold && self.cold == 1 { COLD_AFTER } else { AFTER_START });
+        hw.wait(if cold && self.cold == 1 {
+            COLD_AFTER
+        } else if s.four {
+            D_AFTER[m]
+        } else if !self.in_first && self.nstart > 0 {
+            AFTER_START - SECOND_AFTER
+        } else {
+            AFTER_START
+        });
         if cold {
             self.cold = self.cold.saturating_add(1);
         }
@@ -612,27 +667,30 @@ impl Scumm {
     fn update(&mut self, s: &Seq, n: u16, d0: u16, hw: &mut Hw) {
         let r = s.inst + 32 * n as usize;
         let vi = self.iw(r + 0x02);
+        let m = s.dma_off_first as usize;
         if s.four && vi == 0 {
             self.set_iw(r + 0x02, 1, hw);
+            hw.wait(D_JUST[m]);
             return;
         }
         let slot = self.iw(r + 0x1A);
         let (ch, _) = Self::chan(s, slot, d0);
         let lp = self.a1().wrapping_add(self.iw(r + 0x16) as i16 as u32);
         let len = self.iw(r + 0x10) >> 1;
-        hw.wait(233);
+        hw.wait(if s.four { D_UPD_PRE } else { 233 });
         hw.loc(ch, lp);
         hw.wait(16);
         hw.len(ch, len);
         if s.four && len == 1 {
             self.clear4(lp, hw);
         }
-        hw.wait(if s.four { 71 } else { 63 });
+        hw.wait(if s.four { 71 + 10 * (len == 1) as u64 } else { 63 });
         let (pe, ve, pi, padd) = (self.iw(r + 0x0C), self.iw(r), self.iw(r + 0x0E), self.iw(r + 0x0A));
         hw.per(ch, self.env(s, pe, pi).wrapping_add(padd));
         hw.wait(42);
         let v = self.env(s, ve, vi);
         hw.vol(ch, v);
+        let mut extra = 0;
         let inc = |x: u16| if x.wrapping_add(1) == 0xFF { 0xFE } else { x.wrapping_add(1) };
         self.set_iw(r + 0x02, inc(vi), hw);
         self.set_iw(r + 0x0E, inc(pi), hw);
@@ -641,10 +699,15 @@ impl Scumm {
             let dur = self.iw(r + 0x04).wrapping_sub(1);
             self.set_iw(r + 0x04, dur, hw);
             if dur as i16 <= 0 {
+                if !s.four {
+                    extra += DUR_END;
+                }
                 if s.four {
-                    hw.wait(66);
+                    hw.wait(D_VOL_TO_OFF[m][(slot & 1) as usize]);
                     hw.dmacon(1 << (slot & 3));
                     self.set_sb(0x10 + (slot & 3) as usize, 0xFF);
+                    hw.wait(D_OFF_POST);
+                    return;
                 } else {
                     self.set_iw(r + 0x06, 1, hw);
                     self.set_iw(r + 0x02, 0, hw);
@@ -652,9 +715,16 @@ impl Scumm {
                 }
             }
         } else if phase == 1 && v as i16 <= 0 {
+            if !s.four {
+                extra += REL_OFF;
+            }
             // indexed by the instrument number, not the slot (the original's slip)
             self.set_sb(0x10 + n as usize, 0xFF);
         }
+        if !s.four && vi == 0xFE && pi == 0xFE {
+            extra += SATURATED;
+        }
+        hw.wait(if s.four { D_UPD_POST } else { extra });
     }
 }
 
@@ -668,6 +738,11 @@ const SWEEP_FIRST_DELAY: u64 = 211;
 /// The second tick follows the first by a period and this much (the sweeps': less).
 const FIRST_PERIOD: u64 = 61;
 const SWEEP_FIRST_PERIOD: u64 = 36;
+/// The sirens': the first call enters a little later and the second tick follows a plain period.
+const SIREN_FIRST_DELAY: u64 = FIRST_DELAY + 6;
+const SIREN_FIRST_PERIOD: u64 = 0;
+/// The Zak title's second tick follows the first by less.
+const FIRST_PERIOD_ZAK: u64 = 30;
 /// A sweep's start: extra wait between the all-channels DMA write and the first voice's writes.
 const SWEEP_AFTER_DMA: u64 = 14;
 /// The sweep loop's wait before the third channel is a colour clock longer than the others'
@@ -684,15 +759,24 @@ impl Replayer for Scumm {
     }
 
     fn tick_clocks(&self) -> u64 {
-        let sweep = matches!(self.fam, Family::Sweep(_));
         if !self.armed.replace(true) {
             // the engine's first question: the time from the song's start to the first tick
             // (a period on top of `INIT_CLOCKS`, which `new` has taken already)
-            let first = if sweep { SWEEP_FIRST_DELAY } else { FIRST_DELAY };
+            let first = match self.fam {
+                Family::Sweep(_) => SWEEP_FIRST_DELAY,
+                Family::Siren(_) => SIREN_FIRST_DELAY,
+                _ => FIRST_DELAY,
+            };
             return super::DT_TICK + first - INIT_CLOCKS;
         }
         if self.first {
-            super::DT_TICK + if sweep { SWEEP_FIRST_PERIOD } else { FIRST_PERIOD }
+            super::DT_TICK
+                + match self.fam {
+                    Family::Sweep(_) => SWEEP_FIRST_PERIOD,
+                    Family::Siren(_) => SIREN_FIRST_PERIOD,
+                    Family::Seq(Seq { four: true, dma_off_first: false, .. }) => FIRST_PERIOD_ZAK,
+                    _ => FIRST_PERIOD,
+                }
         } else {
             super::DT_TICK
         }
@@ -722,7 +806,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the original's start-up runs this long before the timer starts: the sound of the song
     // counts from its end (the timer's delay below is that much shorter)
     m.bus.clock += INIT_CLOCKS;
-    let p = Scumm { fam, img: d.to_vec(), base, title, a0: [0; SCRATCH], first: true, armed: std::cell::Cell::new(false), songend: false, cold: 0, in_first: false };
+    let p = Scumm { fam, img: d.to_vec(), base, title, a0: [0; SCRATCH], first: true, armed: std::cell::Cell::new(false), songend: false, cold: 0, in_first: false, nstart: 0 };
     Some(Box::new(p))
 }
 

@@ -32,6 +32,9 @@ const PERIODS: [u16; 96] = [
     339, 320, 302, 285, 269, 254, 240, 226, 214, 202, 190, 180, 170, 160, 151, 143, 135, 127, 120, 0,
 ];
 
+/// Extra time of a 0x7FFE jump over the word it lands on (the table gives 117.2 against 103.2).
+const JUMP_EXTRA: f64 = 14.0;
+
 /// Loops over streams that never end (a jump to itself) give up after this many steps.
 const GUARD: u32 = 4096;
 
@@ -294,9 +297,34 @@ struct Ab {
     /// The song is started by the first tick or the first change of subsong, whichever
     /// comes first (the host may change subsong before it plays).
     started: bool,
+    /// Colour clocks of the in-tick timing model not yet let pass (engine B).
+    pend: f64,
+    /// A carry out of the voice's accumulator that fetched nothing, this tick.
+    carry_only: bool,
+    /// Fetch bookkeeping for the cost model: extra parameter words read, and whether
+    /// the trigger wrote DMACON in the middle of the fetch.
+    fetch_extra: f64,
+    fetch_wrote: bool,
 }
 
 impl Ab {
+    /// Adds `cc` colour clocks to the time before the next write (the additive cost model of
+    /// the reference's tick, measured from its write logs; engine B only).
+    fn adv(&mut self, cc: f64) {
+        if self.eng == Eng::B {
+            self.pend += cc;
+        }
+    }
+
+    /// Lets the pending time pass: called before every Paula write.
+    fn sync(&mut self, hw: &mut Hw) {
+        let n = self.pend.round();
+        self.pend -= n;
+        if n > 0.0 {
+            hw.wait(n as u64);
+        }
+    }
+
     fn w8(&mut self, o: usize, v: u8) {
         if let Some(b) = self.img.get_mut(o) {
             *b = v;
@@ -328,6 +356,13 @@ impl Ab {
             guard += 1;
         }
         p
+    }
+
+    /// `params` and the extra time of the words it reads.
+    fn params_cost(&mut self, s: usize, p: usize) -> usize {
+        let q = self.params(s, p);
+        self.fetch_extra += 26.5 * ((q - p) / 2) as f64;
+        q
     }
 
     /// Command "start song n".
@@ -388,6 +423,47 @@ impl Ab {
         self.alive0 = self.alive;
     }
 
+    /// The number of voices the start of list `list` (the offset of its first record) starts, with
+    /// the priorities `prio` of the voice structures as the earlier lists left them.
+    fn count_started(&self, mut p: usize, prio: &mut Vec<(usize, u8)>) -> usize {
+        let mut n = 0;
+        let mut guard = 0;
+        while self.r16(p) != 0x7FFF && guard < 64 {
+            guard += 1;
+            let s = self.r16(p) as usize;
+            let track = self.r16(p + 4);
+            let pr = self.r8(p + 8);
+            p += 10;
+            let cur = prio.iter().find(|e| e.0 == s).map_or(self.r8(s + 0x40), |e| e.1);
+            if pr < cur {
+                continue;
+            }
+            n += 1;
+            let new = if track != 0 { pr } else { 0 };
+            match prio.iter_mut().find(|e| e.0 == s) {
+                Some(e) => e.1 = new,
+                None => prio.push((s, new)),
+            }
+        }
+        n
+    }
+
+    /// Colour clocks from the reference's start of the module to its return: the time before
+    /// the start (5013 plus 29 for each header compare beyond the second) and the start-song
+    /// call (a 666 lead, the first list's voices 426 apart, 608, the subsong's voices 432 apart,
+    /// 286 to return), as seen in the reference's write logs.
+    fn start_return(&self) -> u64 {
+        let compares: u64 = match be32(&self.pristine, 0) {
+            0x001C_0046 => 3,
+            0x0004_002E => 4,
+            _ => 2,
+        };
+        let mut prio = Vec::new();
+        let n0 = self.count_started(self.r16(0) as usize, &mut prio) as u64;
+        let n1 = self.count_started(self.r16(2 * (self.sub as usize + 1)) as usize, &mut prio) as u64;
+        5013 + 29 * (compares - 2) + 666 + 426 * n0.saturating_sub(1) + 608 + 432 * n1.saturating_sub(1) + 286
+    }
+
     fn voice_end(&mut self, ch: usize) {
         self.alive &= !(1 << ch);
         if self.alive == 0 && self.alive0 != 0 {
@@ -397,21 +473,37 @@ impl Ab {
     }
 
     fn tick_ab(&mut self, hw: &mut Hw) {
+        let modelled = self.eng == Eng::B;
+        self.pend = 0.0;
+        // the first write of a tick falls 125 colour clocks after the tick call
+        self.adv(125.0);
+        self.sync(hw);
         hw.dmacon(self.pend_off as u16);
         self.pend_off = 0;
         self.pend_on = 0;
-        hw.wait(1000);
+        if modelled {
+            self.adv(70.0);
+        } else {
+            hw.wait(1000);
+        }
         for ch in 0..4 {
-            if let Some(s) = self.chan[ch] {
-                if self.r16(s + 0x34) != 0 {
+            match self.chan[ch] {
+                Some(s) if self.r16(s + 0x34) != 0 => {
                     self.voice(ch, s, hw);
-                    hw.wait(400);
+                    if !modelled {
+                        hw.wait(400);
+                    }
                 }
+                // a voice without a track (or none): the slot is passed over
+                _ => self.adv(30.5),
             }
         }
-        if self.eng == Eng::A {
+        if modelled {
+            self.adv(74.0);
+        } else {
             hw.wait(2270);
         }
+        self.sync(hw);
         hw.dmacon(0x8000 | self.pend_on as u16);
     }
 
@@ -434,6 +526,7 @@ impl Ab {
             Eng::B => {
                 let (sum, carry) = self.r8(s + 0x41).overflowing_add(b3);
                 self.w8(s + 0x41, sum);
+                self.carry_only = carry;
                 carry
             }
         };
@@ -441,6 +534,7 @@ impl Ab {
             let step = (self.r8(s + 0x33) & 0x7F).wrapping_sub(1);
             self.w8(s + 0x33, step);
             if step == 0 {
+                self.carry_only = false;
                 self.fetch(ch, s, hw);
                 return;
             }
@@ -450,6 +544,8 @@ impl Ab {
 
     fn fetch(&mut self, ch: usize, s: usize, hw: &mut Hw) {
         let bit = 1u8 << ch;
+        self.fetch_extra = 0.0;
+        self.fetch_wrote = false;
         // the track
         let mut t = self.r16(s + 0x34) as usize;
         let mut guard = 0;
@@ -457,12 +553,18 @@ impl Ab {
             match self.r16(t) {
                 0x7FFF => {
                     self.w16(s + 0x34, 0);
+                    // not covered by the measurements: taken as a fetch without a trigger
+                    self.adv(245.0);
+                    self.sync(hw);
                     hw.vol(ch, 0);
+                    self.adv(41.0);
                     self.w8(s + 0x40, 0);
                     self.voice_end(ch);
                     return;
                 }
                 0x7FFE => {
+                    // a jump in the track costs a further 20.5 (from the 165/168/9017 logs)
+                    self.adv(20.5);
                     t = self.r16(t + 2) as usize;
                     self.w16(s + 0x34, t as u16);
                     self.voice_end(ch);
@@ -474,15 +576,16 @@ impl Ab {
                 _ => break,
             }
         }
-        let t = self.params(s, t);
+        let t = self.params_cost(s, t);
         self.w16(s + 0x34, t as u16);
         let phrase = self.r16(t) as usize;
         let ppos = self.r16(s + 0x36) as usize;
         let start = phrase + ppos;
         self.w16(s + 0x0C, 0);
-        let item = self.params(s, start);
+        let item = self.params_cost(s, start);
         let (first, second) = (self.r8(item), self.r8(item + 1));
         if first == 0x7E || first == 0x7F {
+            self.adv(245.0 + self.fetch_extra + if first == 0x7F { 19.0 } else { 5.0 });
             self.w8(s + 4, first);
             self.w8(s + 5, second);
             self.w8(s + 0x33, second);
@@ -496,6 +599,8 @@ impl Ab {
         } else {
             if second & 0x80 == 0 {
                 self.trigger(ch, s, hw);
+            } else {
+                self.adv(245.0 + self.fetch_extra);
             }
             self.w8(s + 0x32, first);
             self.w8(s + 0x33, second);
@@ -512,10 +617,14 @@ impl Ab {
             self.w16(s + 0x36, 0);
             let rep = self.r8(s + 7).wrapping_sub(1);
             self.w8(s + 7, rep);
+            let w = if self.fetch_wrote { 1.0 } else { 0.0 };
             if rep & 0x80 != 0 {
+                self.adv(37.0 + w);
                 self.w8(s + 7, 0);
                 let t = self.r16(s + 0x34);
                 self.w16(s + 0x34, t.wrapping_add(2));
+            } else {
+                self.adv(21.0 + w);
             }
         }
     }
@@ -552,6 +661,7 @@ impl Ab {
             Eng::B => {
                 if flags & 4 != 0 {
                     if self.r8(s + 0x1C) != 0 {
+                        self.adv(373.0 + self.fetch_extra);
                         return;
                     }
                     self.w8(s + 0x1C, 0xFF);
@@ -560,7 +670,13 @@ impl Ab {
                 }
                 self.pend_off |= bit;
                 if flags & 1 == 0 {
+                    self.adv(396.0 + self.fetch_extra);
+                    self.sync(hw);
                     hw.dmacon(bit as u16);
+                    self.fetch_wrote = true;
+                    self.adv(103.0);
+                } else {
+                    self.adv(392.0 + self.fetch_extra);
                 }
             }
         }
@@ -568,6 +684,8 @@ impl Ab {
 
     fn effects(&mut self, ch: usize, s: usize, hw: &mut Hw) {
         if self.r8(s + 0x32) == 0x7F {
+            // a silent voice: the slot passes in 63.5 colour clocks
+            self.adv(63.5 + if self.carry_only { 23.5 } else { 0.0 });
             return;
         }
         self.pend_on |= 1 << ch;
@@ -586,6 +704,20 @@ impl Ab {
         let lstart = be32(&self.img, rec + 20);
         let llen = self.r16(rec + 24);
         let iff = eng == Eng::B && start & 0x8000_0000 != 0;
+        let carry = if self.carry_only { 23.5 } else { 0.0 };
+        let rec2 = if flags & 2 != 0 { 8.0 } else { 0.0 };
+        let wave_flag = flags & 0x80 != 0;
+        // time from the slot's top to the first write, the gap to the second, and
+        // the time from the second write to the volume write (before the scripts)
+        let (t_first, t_gap, t_vol) = if first {
+            let f = if iff { 254.0 + rec2 } else { 266.0 + rec2 + if wave_flag { 37.0 } else { 0.0 } };
+            (f, if iff { 119.0 } else { 103.0 }, 300.0)
+        } else if iff {
+            (239.0 + carry, 101.0, 296.0)
+        } else {
+            (217.0 + carry + if wave_flag { 47.0 } else { 0.0 }, 103.0, 295.0)
+        };
+        self.adv(t_first);
         if first {
             self.w8(s + 0x42, 0);
             self.w8(s + 5, 0xFF);
@@ -602,14 +734,20 @@ impl Ab {
                 let hdr = data as usize - 0x68.min(data as usize);
                 let one = self.r16(hdr + 0x16);
                 let rep = self.r16(hdr + 0x1A);
+                self.sync(hw);
                 hw.loc(ch, base.wrapping_add(data));
+                self.adv(t_gap);
+                self.sync(hw);
                 hw.len(ch, one.wrapping_add(rep) >> 1);
             } else {
                 let mut a = start;
                 if eng == Eng::B && flags & 0x80 != 0 {
                     a = a.wrapping_add(wave.wrapping_mul(alen as u32).wrapping_mul(2));
                 }
+                self.sync(hw);
                 hw.loc(ch, base.wrapping_add(a));
+                self.adv(t_gap);
+                self.sync(hw);
                 hw.len(ch, alen);
             }
         } else if iff {
@@ -617,7 +755,10 @@ impl Ab {
             let hdr = data as usize - 0x68.min(data as usize);
             let one = self.r16(hdr + 0x16);
             let rep = self.r16(hdr + 0x1A);
+            self.sync(hw);
             hw.len(ch, rep >> 1);
+            self.adv(t_gap);
+            self.sync(hw);
             hw.loc(ch, base.wrapping_add(data).wrapping_add(one as u32));
         } else {
             let mut a = lstart;
@@ -625,9 +766,13 @@ impl Ab {
                 let unit = if eng == Eng::A { llen } else { alen } as u32;
                 a = a.wrapping_add(wave.wrapping_mul(unit).wrapping_mul(2));
             }
+            self.sync(hw);
             hw.loc(ch, base.wrapping_add(a));
+            self.adv(t_gap);
+            self.sync(hw);
             hw.len(ch, llen);
         }
+        self.adv(t_vol);
         self.scripts(s);
         // the slide
         let slide = self.r16(s + 0x20).wrapping_add(self.r8(s + 0x0D) as i8 as i16 as u16);
@@ -638,9 +783,11 @@ impl Ab {
         v = v * self.r8(s + 0x13) as u32 / 63;
         v = v * self.master as u32 / 63;
         v = v * self.r8(rec + 12) as u32 / 63;
+        self.sync(hw);
         hw.vol(ch, v as u16);
         // period
         let mut n = self.r8(s + 0x09);
+        self.adv(if n & 0x80 != 0 { 132.0 } else { 138.0 });
         if n & 0x80 == 0 {
             n = n.wrapping_add(self.r8(s + 0x32));
             if eng == Eng::A {
@@ -652,7 +799,10 @@ impl Ab {
             per -= self.r8(s + 0x0F) as i8 as i32;
         }
         per -= slide as i32;
+        self.sync(hw);
         hw.per(ch, per as u16);
+        // the next slot's top
+        self.adv(41.0);
     }
 
     fn scripts(&mut self, s: usize) {
@@ -665,12 +815,14 @@ impl Ab {
             let c = self.r8(cp).wrapping_sub(1);
             self.w8(cp, c);
             if (c as i8) >= 0 {
+                self.adv(16.1);
                 continue;
             }
             self.w8(cp, 0);
             let mut pos = pos;
             let mut w = self.r16(pos);
             if w == 0x7FFE {
+                self.adv(JUMP_EXTRA);
                 pos = self.r16(pos + 2) as usize;
                 self.w16(pp, pos as u16);
                 w = self.r16(pos);
@@ -678,15 +830,21 @@ impl Ab {
             let (k, v) = ((w >> 8) as u8, w as u8);
             if k == 0x7E {
                 if v < 0x80 {
+                    self.adv(88.3);
                     self.w8(rp, v);
                 } else if self.r8(s + 5) & 0x80 != 0 {
+                    self.adv(79.5);
                     self.w8(cp, 0);
                     continue;
+                } else {
+                    self.adv(89.6);
                 }
                 self.w16(pp, (pos + 2) as u16);
             } else if w == 0x7FFF {
+                self.adv(79.0);
                 continue;
             } else {
+                self.adv(103.2);
                 self.w8(s + (k & 0x7F) as usize + 1, v);
                 self.w16(pp, (pos + 2) as u16);
             }
@@ -726,6 +884,17 @@ impl Replayer for Ab {
     fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
         self.sub = n;
         self.started = false;
+    }
+
+    fn timer_delay(&self) -> u64 {
+        if self.eng != Eng::B {
+            return 0;
+        }
+        // The reference's start returns `start_return()` colour clocks after it starts, and its
+        // first tick follows one period later. Both sides' audio is compared from the start return
+        // (the lag measured is 0 for no delay), but Paula's raster-line grid sees the ticks at the
+        // reference's line phase, so the delay is that start return modulo a line.
+        self.start_return() % crate::paula::LINE
     }
 
     fn tick(&mut self, hw: &mut Hw) {
@@ -774,6 +943,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         alive0: 0,
         songend: false,
         started: false,
+        pend: 0.0,
+        carry_only: false,
+        fetch_extra: 0.0,
+        fetch_wrote: false,
     };
     Some(Box::new(a))
 }

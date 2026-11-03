@@ -31,6 +31,8 @@ pub enum Backend {
     /// a PC tracker module on the port of libxmp's player and mixer
     /// (crate::xmp), which renders stereo itself: no Paula, no Amiga filters
     Mix(Box<crate::xmp::XmpPlayer>),
+    /// recorded audio (crate::aiff), played as it is: no Paula, no Amiga filters
+    Pcm(Box<crate::aiff::AiffPlayer>),
 }
 
 pub struct Playing {
@@ -541,6 +543,13 @@ impl Engine {
         self.stop();
         self.last_error = None;
         self.m.deli.songend = false;
+        // AIFF / AIFF-C recordings are played by our own decoder, from the file itself
+        // (not copied into guest memory); an unsupported compression is an error, not a
+        // reason to try the other players
+        if self.only_player.is_none() && crate::aiff::detect(&data) {
+            let x = crate::aiff::AiffPlayer::open(data, self.rate as u32).map_err(|e| anyhow!(e))?;
+            return self.start_pcm(Box::new(x), path);
+        }
         let data = crate::decrunch::decrunch(data);
         let data = if self.only_player.is_some() { data } else { crate::prowizard::convert(data, path) };
         if data.is_empty() {
@@ -738,6 +747,25 @@ impl Engine {
             sub_max: (x.subsongs() - 1) as u16,
             sub: 0,
             backend: Backend::Mix(x),
+            author: String::new(),
+            frames: 0,
+            custom_player: false,
+        });
+        Ok(())
+    }
+
+    fn start_pcm(&mut self, x: Box<crate::aiff::AiffPlayer>, path: &Path) -> Result<()> {
+        self.m.bus.paula.reset();
+        self.intena_seen = 0;
+        self.next_timer = None;
+        let title = x.title().to_string();
+        self.playing = Some(Playing {
+            module_name: if title.is_empty() { file_name(path) } else { title },
+            format: x.format().to_string(),
+            sub_min: 0,
+            sub_max: 0,
+            sub: 0,
+            backend: Backend::Pcm(x),
             author: String::new(),
             frames: 0,
             custom_player: false,
@@ -1013,7 +1041,7 @@ impl Engine {
                     let _ = deli::call_fn(&mut self.m, self.players[*idx].globals, f, None);
                 }
             }
-            Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_), .. }) | None => {}
+            Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_) | Backend::Pcm(_), .. }) | None => {}
         }
     }
 
@@ -1022,6 +1050,7 @@ impl Engine {
             Some(Playing { backend: Backend::Native(pt), .. }) => pt.songend,
             Some(Playing { backend: Backend::Replay(r), .. }) => r.songend(),
             Some(Playing { backend: Backend::Mix(x), .. }) => x.ended(),
+            Some(Playing { backend: Backend::Pcm(x), .. }) => x.ended(),
             Some(_) => self.m.deli.songend,
             None => false,
         }
@@ -1053,7 +1082,7 @@ impl Engine {
         let period = match &p.backend {
             Backend::Native(pt) => Some(pt.tick_clocks()),
             Backend::Replay(r) => Some(r.tick_clocks()),
-            Backend::Mix(_) => None,
+            Backend::Mix(_) | Backend::Pcm(_) => None,
             Backend::Deli(idx) => self
                 .m
                 .deli
@@ -1143,7 +1172,7 @@ impl Engine {
                 r.tick(&mut crate::replay::Hw { bus: &mut self.m.bus });
                 self.m.bus.gaps = None;
             }
-            Backend::Mix(_) => {}
+            Backend::Mix(_) | Backend::Pcm(_) => {}
             Backend::Native(pt) => {
                 // its DMA waits run the clock on, as the 68k replay's loops do
                 pt.tick(&mut self.m.bus);
@@ -1235,6 +1264,7 @@ impl Engine {
             Backend::Native(_) => ("builtin-protracker", p.format.clone()),
             Backend::Replay(_) => ("open-replayer", p.format.clone()),
             Backend::Mix(_) => ("libxmp-port", p.format.clone()),
+            Backend::Pcm(_) => ("aiff-decoder", p.format.clone()),
         };
         let q = |t: &str| t.replace(' ', "_");
         let mut o = format!("output: backend={backend} player={} format={}", q(&player), q(&p.format));
@@ -1314,6 +1344,10 @@ impl Engine {
     pub fn render(&mut self, out: &mut [f32]) {
         if let Some(Playing { backend: Backend::Mix(_), .. }) = &self.playing {
             self.render_mix(out);
+            return;
+        }
+        if let Some(Playing { backend: Backend::Pcm(_), .. }) = &self.playing {
+            self.render_pcm(out);
             return;
         }
         let sep = self.settings.separation.clamp(0.0, 1.0);
@@ -1405,6 +1439,29 @@ impl Engine {
             }
         }
         self.skip_empty_subsong();
+    }
+
+    /// `render` for recorded audio: the decoder's samples at the default volume (0.8)
+    /// unchanged, so that the 16-bit WAV the CLI writes holds the file's samples.
+    fn render_pcm(&mut self, out: &mut [f32]) {
+        let Some(Playing { backend: Backend::Pcm(x), frames, .. }) = &mut self.playing else { return };
+        let gain = self.settings.volume / 0.8;
+        let n = if self.paused { 0 } else { x.render(out) };
+        if self.paused {
+            out.fill(0.0);
+        }
+        *frames += n as u64;
+        for o in out.iter_mut() {
+            *o = (*o * gain).clamp(-1.0, 1.0);
+        }
+        self.heard |= out[..n * 2].iter().any(|&s| s != 0.0);
+        if self.settings.mono {
+            for f in out.chunks_exact_mut(2) {
+                let m = (f[0] + f[1]) * 0.5;
+                f[0] = m;
+                f[1] = m;
+            }
+        }
     }
 
     fn push_scopes(&mut self, paula: [f32; 4]) {

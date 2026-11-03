@@ -6,9 +6,11 @@
 //! p = dp_alloc(n)            copy the module (or a companion file) to p
 //! dp_add_file(path, len, p, n)   a companion, at its path beside the module
 //! dp_open(name, len, p, n, rate, max_bytes, subsong)   0, -2 not claimed, -1 failed
-//! dp_info_ptr/len            "title\tformat\tsubsong\tfirst\tlast"
+//! dp_info_ptr/len            "title\tformat\tsubsong\tfirst\tlast"; after -1, the reason
 //! dp_pcm_ptr/len, dp_truncated, dp_close
 //! ```
+//!
+//! An AIFF file is decoded by `amigaplayer_rs::aiff` (a recording: played to its end).
 //!
 //! The PCM is interleaved stereo s16le. A tune ends where its replayer says, after
 //! 10 s of silence, or at `max_bytes` (truncated): many Amiga players loop for ever.
@@ -101,7 +103,14 @@ pub unsafe extern "C" fn dp_open(
     }
     let name = String::from_utf8_lossy(unsafe { bytes(name, name_len) }).replace(['/', '\\'], "_");
     let path = PathBuf::from(DIR).join(name);
-    let Ok(mut song) = Song::open_with(&path, data.to_vec(), files, rate) else { return -1 };
+    let mut song = match Song::open_with(&path, data.to_vec(), files, rate) {
+        Ok(song) => song,
+        Err(e) => {
+            // the reason, for the page to show (AIFF names the compression it cannot decode)
+            s.info = e.to_string();
+            return -1;
+        }
+    };
     let (lo, hi, first) = song.subsongs();
     let want = if subsong < 0 { first } else { (subsong as u16).clamp(lo, hi) };
     if song.set_subsong(want).is_err() {
@@ -111,6 +120,8 @@ pub unsafe extern "C" fn dp_open(
     let max_frames = max_bytes / 4;
     let mut buf = vec![0f32; 2 * 1024];
     let mut quiet = 0u32;
+    // a recording is played to its end, silent stretches included
+    let recorded = song.format().starts_with("AIFF");
     while !song.songend() {
         if s.pcm.len() / 2 >= max_frames {
             s.truncated = true;
@@ -124,7 +135,7 @@ pub unsafe extern "C" fn dp_open(
             s.pcm.push(v);
         }
         quiet = if silent { quiet + buf.len() as u32 / 2 } else { 0 };
-        if quiet >= SILENCE_S * rate {
+        if !recorded && quiet >= SILENCE_S * rate {
             break;
         }
     }

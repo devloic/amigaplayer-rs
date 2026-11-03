@@ -2,6 +2,7 @@
 //! Amiga, and the Eagleplayers too. `engine::Engine` is the entry point; the
 //! binary adds the SDL3 UI.
 
+pub mod aiff;
 pub mod amplifier;
 pub mod bus;
 pub mod cia;

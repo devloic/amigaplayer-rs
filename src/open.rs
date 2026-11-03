@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 /// last-resort 15-instrument heuristic ("SoundTracker") is not: it is loose, and the
 /// host's own players take the modules it alone would claim.
 pub fn detect(data: &[u8]) -> Option<String> {
+    if crate::aiff::detect(data) {
+        return Some("AIFF".to_string());
+    }
     let data = crate::decrunch::decrunch(data.to_vec());
     let data = crate::prowizard::convert(data, Path::new(""));
     if let Some(f) = crate::protracker::ProTracker::detect(&data).filter(|f| *f != "SoundTracker") {
@@ -49,7 +52,7 @@ impl Song {
         e.open_replayers = true;
         e.play_data(path, data)?;
         match &e.playing {
-            Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_), .. }) => {}
+            Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_) | Backend::Pcm(_), .. }) => {}
             Some(Playing { backend: Backend::Native(_), format, .. }) if format != "SoundTracker" => {}
             _ => bail!("no open replayer plays this module"),
         }

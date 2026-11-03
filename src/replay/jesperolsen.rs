@@ -886,17 +886,6 @@ impl Replayer for Ab {
         self.started = false;
     }
 
-    fn timer_delay(&self) -> u64 {
-        if self.eng != Eng::B {
-            return 0;
-        }
-        // The reference's start returns `start_return()` colour clocks after it starts, and its
-        // first tick follows one period later. Both sides' audio is compared from the start return
-        // (the lag measured is 0 for no delay), but Paula's raster-line grid sees the ticks at the
-        // reference's line phase, so the delay is that start return modulo a line.
-        self.start_return() % crate::paula::LINE
-    }
-
     fn tick(&mut self, hw: &mut Hw) {
         if !self.started {
             self.start(self.sub, hw);
@@ -948,6 +937,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         fetch_extra: 0.0,
         fetch_wrote: false,
     };
+    if a.eng == Eng::B {
+        // The reference's start returns `start_return()` colour clocks after Paula's reset and
+        // the engine drops the audio before that (the song starts there), and its first tick
+        // follows one period later. The output sample grid starts at the reset, so the audio
+        // only comes out sample for sample if the port's song start and ticks sit the same
+        // distance from the reset; the start's own writes are made in the first tick.
+        m.bus.clock += a.start_return();
+    }
     Some(Box::new(a))
 }
 

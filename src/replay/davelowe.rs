@@ -244,6 +244,10 @@ pub struct DaveLowe {
     vbase: i64,
     vadj: bool,
     last_vol: Option<i64>,
+    /// Layout B: the delay the DMA enable writes have put on the rest of the tick, and the voice
+    /// that is the first with the longest order list.
+    fill: i64,
+    special_voice: usize,
 }
 
 fn rows_key(d: &[u8], n: usize) -> Cfg {
@@ -358,10 +362,6 @@ fn new_dl(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
 /// Colour clocks the original's init routine runs before the host starts its timer, beyond the
 /// one period (measured in the reference runs).
 const DL_INIT_CLOCKS: u64 = 21093;
-
-/// Colour clocks the original's init routine runs before the host starts its timer, beyond the
-/// one period, for layout B (measured in the reference runs).
-const DLNB_INIT_CLOCKS: u64 = 5570;
 
 /// The same for layout A, with the write timing model: with `DLN_REF_START` the start constant
 /// equals the reference's for the Beneath a Steel Sky song `ingame_02`, which puts every write on
@@ -497,6 +497,104 @@ fn dln_init_clocks(d: &[u8]) -> u64 {
     (DLN_INIT_CLOCKS + w).saturating_sub(DLN_REF_START)
 }
 
+/// Module quantities the reference's start-up work for a layout B module is proportional to
+/// (fitted on the write logs of the 17 corpus files; the rare terms rest on one or two files).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DlnbStartFeatures {
+    /// Words read in the four order lists of subsong 1, terminators included.
+    list_words: u32,
+    /// Of those four lists, how many are strictly longer than every earlier one.
+    longer_lists: u32,
+    /// Sample records walked back from the first referenced one to the start of its run.
+    run_back: u32,
+    /// Sample records of the run walked forward (one less when the run is entered late), + 1.
+    run_forward: u32,
+    /// Voice 0's first sequence begins with the filter command.
+    filter_first: u32,
+    /// The word in front of the run is 0.
+    before_zero: u32,
+    /// The word in front of the run is neither 0 nor 8.
+    before_odd: u32,
+}
+
+fn dlnb_start_features(d: &[u8]) -> DlnbStartFeatures {
+    let w0 = be16(d, 0) as usize;
+    let mut f = DlnbStartFeatures::default();
+    let lists = [0usize, 1, 2, 3].map(|v| be32(d, w0 + 4 + 4 * v) as usize);
+    let mut lens = [0u32; 4];
+    for (k, &e) in lists.iter().enumerate() {
+        let mut q = e;
+        while q + 4 <= d.len() && be32(d, q) != 0 {
+            lens[k] += 1;
+            q += 4;
+        }
+    }
+    f.list_words = lens.iter().map(|k| k + 1).sum();
+    f.longer_lists = (0..4).filter(|&i| lens[i] > lens[..i].iter().copied().max().unwrap_or(0)).count() as u32;
+    let mut sp = None;
+    for (v, &l) in lists.iter().enumerate() {
+        let mut q = be32(d, l) as usize;
+        let filt = be16(d, q) == 0x30;
+        if filt {
+            q += 2;
+        }
+        if be16(d, q) == 0x0C && be16(d, q + 6) == 4 {
+            sp = Some(be32(d, q + 8) as usize);
+            f.filter_first = (v == 0 && filt) as u32;
+            break;
+        }
+    }
+    if let Some(sp) = sp.filter(|&sp| be16(d, sp) == 1) {
+        let mut a = sp;
+        let mut first;
+        loop {
+            first = a;
+            f.run_back += 1;
+            if a < 14 {
+                break;
+            }
+            a -= 14;
+            if be16(d, a) != 1 {
+                break;
+            }
+        }
+        if first >= 2 {
+            match be16(d, first - 2) {
+                0 => f.before_zero = 1,
+                8 => {}
+                _ => {
+                    f.before_odd = 1;
+                    first += 14;
+                }
+            }
+        }
+        while be16(d, first) == 1 {
+            f.run_forward += 1;
+            first += 14;
+        }
+        f.run_forward += 1;
+    }
+    f
+}
+
+/// The start-up work in half colour clocks.
+fn dlnb_start_work2(f: &DlnbStartFeatures) -> u64 {
+    2 * 4736
+        + 29 * f.list_words as u64
+        + 16 * f.longer_lists as u64
+        + 41 * f.run_back as u64
+        + 47 * f.run_forward as u64
+        + 8 * f.filter_first as u64
+        + 21 * f.before_zero as u64
+        + 29 * f.before_odd as u64
+        + 25 * (f.run_forward == 19) as u64 // (one file has such a run: it cannot be validated)
+}
+
+/// The start constant of a layout B module: the layout A constant plus the start-up work.
+fn dlnb_init_clocks(d: &[u8]) -> u64 {
+    DLN_INIT_CLOCKS - DLN_REF_START + dlnb_start_work2(&dlnb_start_features(d)) / 2
+}
+
 fn new_dln(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_dln(d) {
         return None;
@@ -541,7 +639,7 @@ fn new_dln(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             }
         }
     }
-    m.bus.clock += if layout_a { dln_init_clocks(d) } else { DLNB_INIT_CLOCKS };
+    m.bus.clock += if layout_a { dln_init_clocks(d) } else { dlnb_init_clocks(d) };
     Some(Box::new(DaveLowe::build(img, base, Cfg::dln(kind), String::new(), subs, Vec::new(), 0)))
 }
 
@@ -647,6 +745,8 @@ impl DaveLowe {
             // (a layout A rest's envelope is still stepping for a few ticks, which shows only
             // in the time the voice takes)
             &[0, 0, 0, 0, 0, 0, 0, END]
+        } else if cfg.kind == Kind::DlnB {
+            &[0, 0, 0, 0, 0, 0, 0, 0, END]
         } else {
             &[0, END]
         };
@@ -685,6 +785,8 @@ impl DaveLowe {
             vbase: 0,
             vadj: true,
             last_vol: None,
+            fill: 0,
+            special_voice: 0,
         };
         s.start(1);
         s
@@ -712,6 +814,22 @@ impl DaveLowe {
             *v = Voice { ch: c.min(3), seq: NONE, order: NONE, order0: if c < 4 { lists[c] } else { NONE }, env0: 0, ..Default::default() };
         }
         self.v[4].dead = true;
+        // the first voice with the longest order list
+        let mut best = 0;
+        let mut sv = 0;
+        for c in 0..4 {
+            let mut n = 0;
+            let mut q = lists[c];
+            while q != 0 && q + 4 <= self.img.len() && be32(&self.img, q) != 0 {
+                n += 1;
+                q += 4;
+            }
+            if n > best {
+                best = n;
+                sv = c;
+            }
+        }
+        self.special_voice = sv;
         self.songcnt = [0xFE; 4];
         self.songend = false;
         self.tickno = 0;
@@ -748,12 +866,21 @@ impl DaveLowe {
     /// Layout A: the original's work between writes is modelled per voice slot (the `SLOT_*`
     /// tables); `tw` lets the clock run to the moment `t` (colour clocks after the tick's entry).
     fn timed(&self) -> bool {
-        self.cfg.kind == Kind::DlnA
+        matches!(self.cfg.kind, Kind::DlnA | Kind::DlnB)
+    }
+
+    /// Layout B differs from layout A in some of the slot constants: `a` for A, `b` for B.
+    fn kb(&self, a: i64, b: i64) -> i64 {
+        if self.cfg.kind == Kind::DlnB {
+            b
+        } else {
+            a
+        }
     }
 
     fn tw(&self, hw: &mut Hw, t: i64) {
         if self.timed() {
-            let target = (self.base as i64 + t).max(0) as u64;
+            let target = (self.base as i64 + t + self.fill).max(0) as u64;
             if hw.bus.clock < target {
                 hw.bus.clock = target;
             }
@@ -768,7 +895,10 @@ impl DaveLowe {
         let bit = 1u16 << self.v[vi].ch;
         hw.dmacon(if on { 0x8000 | bit } else { bit });
         if self.cfg.kind == Kind::DlnB {
+            // the enable follows 10 colour clocks later and delays all that comes after
+            hw.bus.clock += 10;
             hw.dmacon(FILLER);
+            self.fill += 10;
         }
     }
 
@@ -870,7 +1000,7 @@ impl DaveLowe {
             self.songcnt = [0xFF; 4];
             end = true;
         }
-        self.cmd += if rest { REST_FLAG_COST[vi] } else { WRAP_COST[(zero || first) as usize][vi] } + if end { WRAP_END } else { 0 };
+        self.cmd += if rest { REST_FLAG_COST[vi] } else { WRAP_COST[(zero || (first && self.cfg.kind != Kind::DlnB)) as usize][vi] + self.kb(0, B_WRAP) } + if end { WRAP_END } else { 0 };
     }
 
     // ------------------------------------------------------------ the voice
@@ -914,9 +1044,10 @@ impl DaveLowe {
             self.vol_step(vi, hw);
         }
         if self.timed() {
+            let extra = self.kb(0, B_TAIL[k]);
             self.slot = match self.last_vol {
-                Some(t) => t + SLOT_TAIL[k],
-                None => s0 + SLOT_PLAIN[k],
+                Some(t) => t + SLOT_TAIL[k] + extra,
+                None => s0 + SLOT_PLAIN[k] + extra,
             };
         }
         if self.cfg.dma_tick && !self.v[vi].dead {
@@ -932,12 +1063,14 @@ impl DaveLowe {
         // (cost of the work done, and when in the slot the period is written)
         let mut cost = 0;
         let mut pt = 0;
+        let mut stepped = 0;
         if v.pmode != 0 {
             if v.pdelay != 0 {
                 v.pdelay -= 1;
                 cost += SLOT_DELAY;
             } else {
                 changed = true;
+                stepped += 1;
                 pt = SLOT_PORTA;
                 if v.pmode == 1 {
                     p = p.wrapping_add(v.pstep);
@@ -964,6 +1097,7 @@ impl DaveLowe {
             } else {
                 v.vcount = v.vreload;
                 changed = true;
+                stepped += 1;
                 if v.vstate < 3 {
                     p = p.wrapping_sub(v.vdown);
                     v.vstate += 1;
@@ -982,6 +1116,9 @@ impl DaveLowe {
         if changed {
             v.period = p;
             self.add += cost;
+            if stepped == 2 && self.cfg.kind == Kind::DlnB {
+                self.add += B_SLIDE_BOTH;
+            }
             let s0 = self.slot;
             self.tt = s0 + self.add + pt;
             self.vbase = self.tt + SLOT_PERVOL[vi & 3];
@@ -1046,9 +1183,14 @@ impl DaveLowe {
                     }
                     let mut order = v.order;
                     let order_was_none = order == NONE;
-                    self.cmd += CMD_NEXT;
+                    let next = if self.cfg.kind == Kind::DlnB {
+                        CMD_NEXT + B_NEXT + if vi == self.special_voice { B_NEXT_SPECIAL } else { 0 }
+                    } else {
+                        CMD_NEXT
+                    };
+                    self.cmd += next;
                     if order == NONE || self.l(order) == 0 {
-                        self.cmd -= CMD_NEXT;
+                        self.cmd -= next;
                         order = self.v[vi].order0;
                         self.wrap_test(vi, false, order_was_none);
                     }
@@ -1092,6 +1234,7 @@ impl DaveLowe {
                     pos += 14;
                 }
                 6 => {
+                    self.cmd += self.kb(0, B_CMD6);
                     self.v[vi].pmode = 0;
                     pos += 2;
                 }
@@ -1125,10 +1268,12 @@ impl DaveLowe {
                 9 | 10 => pos += 2,
                 // bclr / bset.b #1,$bfe001: the LED filter on, off
                 11 => {
+                    self.cmd += self.kb(0, B_CMD11);
                     hw.bus.ciaa.pra &= !2;
                     pos += 2;
                 }
                 12 => {
+                    self.cmd += self.kb(0, B_CMD11);
                     hw.bus.ciaa.pra |= 2;
                     pos += 2;
                 }
@@ -1177,7 +1322,8 @@ impl DaveLowe {
             self.dma(vi, true, hw);
         }
         self.vbase = tdma + NOTE_VOL[k];
-        self.vadj = false;
+        // (layout B: a note whose envelope steps also takes the 9 less)
+        self.vadj = self.cfg.kind == Kind::DlnB;
         self.vol_step(vi, hw);
     }
 
@@ -1257,54 +1403,6 @@ static DL_GAPS: WriteGaps = WriteGaps::new(
     &[(0, 4), (8, 179), (12, 236), (16, 0)],
 );
 
-/// And for the Super Street Fighter 2 songs (layout B); the model's start gaps need the timer 23
-/// colour clocks earlier.
-static DLNB_GAPS: WriteGaps = WriteGaps::new(
-    &[
-        (0, 4, 10), // LOC0 -> LEN0 x369
-        (1, 5, 10), // LOC1 -> LEN1 x206
-        (2, 6, 10), // LOC2 -> LEN2 x472
-        (3, 7, 10), // LOC3 -> LEN3 x441
-        (4, 12, 220), // LEN0 -> VOL0 x184
-        (4, 20, 147), // LEN0 -> DMA_ON x185
-        (5, 13, 254), // LEN1 -> VOL1 x95
-        (5, 20, 178), // LEN1 -> DMA_ON x111
-        (6, 14, 232), // LEN2 -> VOL2 x235
-        (6, 20, 209), // LEN2 -> DMA_ON x237
-        (7, 15, 246), // LEN3 -> VOL3 x219
-        (7, 20, 217), // LEN3 -> DMA_ON x222
-        (8, 0, 147), // PER0 -> LOC0 x185
-        (9, 1, 170), // PER1 -> LOC1 x111
-        (9, 13, 234), // PER1 -> VOL1 x294
-        (10, 2, 178), // PER2 -> LOC2 x237
-        (11, 3, 182), // PER3 -> LOC3 x222
-        (11, 15, 270), // PER3 -> VOL3 x127
-        (12, 1, 287), // VOL0 -> LOC1 x95
-        (12, 9, 425), // VOL0 -> PER1 x385
-        (12, 13, 515), // VOL0 -> VOL1 x1044
-        (12, 16, 283), // VOL0 -> DMA_OFF x107
-        (13, 2, 303), // VOL1 -> LOC2 x235
-        (13, 10, 540), // VOL1 -> PER2 x237
-        (13, 14, 510), // VOL1 -> VOL2 x917
-        (13, 16, 299), // VOL1 -> DMA_OFF x242
-        (14, 3, 318), // VOL2 -> LOC3 x219
-        (14, 11, 321), // VOL2 -> PER3 x344
-        (14, 14, 155), // VOL2 -> VOL2 x3
-        (14, 15, 539), // VOL2 -> VOL3 x845
-        (14, 16, 314), // VOL2 -> DMA_OFF x223
-        (16, 20, 10), // DMA_OFF -> DMA_ON x760
-        (20, 9, 164), // DMA_ON -> PER1 x20
-        (20, 11, 155), // DMA_ON -> PER3 x5
-        (20, 12, 212), // DMA_ON -> VOL0 x373
-        (20, 13, 160), // DMA_ON -> VOL1 x198
-        (20, 14, 215), // DMA_ON -> VOL2 x479
-        (20, 15, 178), // DMA_ON -> VOL3 x440
-        (20, 20, 10), // DMA_ON -> DMA_ON x755
-    ],
-    &[(0, 147), (1, 170), (2, 178), (3, 190), (4, 10), (5, 10), (6, 10), (7, 10), (9, 425), (10, 540), (11, 321), (12, 212), (13, 491), (14, 510), (15, 539), (16, 299), (20, 10)],
-    &[(0, 4), (8, 6), (12, 198), (16, 0)],
-);
-
 /// Layout A: the part of `TIMER_DELAY` the write model takes into its own start offsets.
 const DLNA_TIMER_SHIFT: u64 = 565;
 
@@ -1358,6 +1456,19 @@ const REST_FLAG_COST: [i64; 4] = [103, 104, 105, 106];
 /// More when that wrap ends the song.
 const WRAP_END: i64 = 52;
 
+/// Layout B against layout A (colour clocks): the first slot after the tick's entry, the extra at
+/// the end of each voice's slot, the next-sequence command (less one for all voices, 27 more for
+/// the first voice with the longest order list), the wrap of an order list, commands 6, 11 and 12,
+/// and a voice that steps a portamento and a vibrato in one tick.
+const B_FIRST: i64 = 259;
+const B_TAIL: [i64; 4] = [29, 30, 29, 29];
+const B_NEXT: i64 = -1;
+const B_NEXT_SPECIAL: i64 = 27;
+const B_WRAP: i64 = -17;
+const B_CMD6: i64 = 54;
+const B_CMD11: i64 = 58;
+const B_SLIDE_BOTH: i64 = 57;
+
 /// A note's length write follows its address later than a loop update's does: colour clocks more,
 /// by channel.
 const NOTE_LEN: [u64; 4] = [52, 68, 83, 87];
@@ -1379,8 +1490,7 @@ impl Replayer for DaveLowe {
         TIMER_DELAY
             - match self.cfg.kind {
                 Kind::Dl => 141,
-                Kind::DlnA => DLNA_TIMER_SHIFT,
-                Kind::DlnB => 23,
+                Kind::DlnA | Kind::DlnB => DLNA_TIMER_SHIFT,
                 _ => 0,
             }
     }
@@ -1418,13 +1528,12 @@ impl Replayer for DaveLowe {
         }
         match self.cfg.kind {
             Kind::Dl => hw.gaps(&DL_GAPS),
-            Kind::DlnA => {}
-            Kind::DlnB => hw.gaps(&DLNB_GAPS),
-            Kind::Older => {}
+            Kind::DlnA | Kind::DlnB | Kind::Older => {}
         }
         let first = self.tickno == 1;
         self.base = hw.bus.clock;
-        self.slot = SLOT_FIRST;
+        self.fill = 0;
+        self.slot = self.kb(SLOT_FIRST, B_FIRST);
         for vi in 0..3 {
             self.voice(vi, hw);
         }
@@ -1701,5 +1810,31 @@ mod tests {
             assert_eq!(got, v, "{name}");
             assert_eq!(dln_init_clocks(&d), 28375 + t, "{name}");
         }
+    }
+
+    /// Layout B start-up cost of the Super Street Fighter 2 songs (the measured duration of the
+    /// reference's start-up call, from its write logs; the model is exact to half a clock).
+    #[test]
+    fn dlnb_start_cost_corpus() {
+        let dir = Path::new("/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/davelowe/mods/dln");
+        let cases = [
+            ("Balrog", 5304), ("Blanka", 5469), ("Cammy", 5963), ("ChunLi", 5767), ("DeeJay", 5616),
+            ("Dhalsim", 6334), ("E.Honda", 5563), ("FeiLong", 5543), ("Guile", 5457), ("Jingles", 5280),
+            ("Ken", 5437), ("M.Bison", 5743), ("Ryu", 5963), ("Sagat", 5853), ("T.Hawk", 5593),
+            ("Vega", 6332), ("Zangief", 5633),
+        ];
+        for (name, t) in cases {
+            let Ok(d) = std::fs::read(dir.join(format!("dln.Super_Street_Fighter_2_TNC__{name}"))) else { continue };
+            let w = dlnb_start_work2(&dlnb_start_features(&d));
+            assert!((w as i64 - 2 * t).abs() <= 1, "{name}: {} vs {t}", w as f64 / 2.0);
+            assert_eq!(dlnb_init_clocks(&d), 28375 + w / 2, "{name}");
+        }
+    }
+
+    #[test]
+    fn dlnb_features_of_a_synthetic_module() {
+        // the four lists of dln_b() hold one sequence each; no sample command there
+        let f = dlnb_start_features(&dln_b());
+        assert_eq!((f.list_words, f.longer_lists), (8, 1));
     }
 }

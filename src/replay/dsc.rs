@@ -31,6 +31,9 @@ pub const OPEN: Open = Open { name: "Digital Sonix & Chrome", detect, new };
 
 // Times of the original's code, in colour clocks, measured in the reference runs
 // (UADE, 68020): they place the writes relative to Paula's events.
+/// Colour clocks from the start-up writes to the point where the original's host begins to
+/// render (measured in the reference runs).
+const START_EXTRA: u64 = 2330;
 /// A tick that starts no row.
 const T_IDLE: u64 = 283;
 /// From the tick's start of a row to the first voice.
@@ -397,6 +400,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let terminators = (0..lay.np).filter(|&e| d[16 + 6 * e] == 0).count() as u64;
     // in half clocks: 4362 + 264 per sample record + 274 per song-table entry + 4.5 per terminator, rounded up
     let init_cost = (8724 + 528 * d[2] as u64 + 548 * lay.np as u64 + 9 * terminators + 1) / 2;
+    // The part of it that precedes the start-up writes (the same loops, run first for the
+    // check) and the part up to the point where the original's host starts rendering are
+    // not rendered audio: they are spent before the player runs.
+    let pre = (4070 + 528 * d[2] as u64 + 548 * lay.np as u64 + 9 * terminators + 1) / 2;
+    m.bus.clock += pre;
     let zero = m.alloc(4);
     let title = m.bus.read_cstr(m.deli.file_buf);
     let mut p = Dsc {
@@ -405,7 +413,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         base,
         zero,
         title,
-        init_cost,
+        init_cost: init_cost - pre - START_EXTRA,
         frac: 0,
         starts,
         sub: 0,
@@ -430,6 +438,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     for ch in 0..4 {
         Dsc::intena(&mut hw, 0x8000 | 0x80 << ch);
     }
+    m.bus.clock += START_EXTRA;
     Some(Box::new(p))
 }
 

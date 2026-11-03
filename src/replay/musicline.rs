@@ -97,6 +97,16 @@
 //! does under the engine (it touches no register meanwhile). UADE has none of this
 //! (a faster CPU: its ticks stay on the timer's period).
 //!
+//! The time before the first tick (4 voices) is priced the same way, chunk by chunk of the
+//! loader: a price per chunk and per line, sequence, instrument check and sample (a wave
+//! sample, a decrunched one, the decrunch's literals, runs and deltas), and for the step
+//! from one chunk kind to the next, plus the first row's work (`Cost::four_clocks`). Fitted
+//! on the loader's time in the references' library-call traces of 192 four-voice modules,
+//! it is right to a median 96 colour clocks and 1.3k at worst (the earlier model: thousands
+//! on small modules, 100k and more on big ones). A tune whose first row sets the tempo
+//! (effect $42) has the timer's latch loaded before the player starts, so the first tick comes
+//! after that period (`preload`) rather than the default one.
+//!
 //! The tables (`musicline_tables.rs`) come from NostalgicPlayer's Tables.cs; the
 //! 68k player was used only to check them, none of its code or data is copied.
 
@@ -354,6 +364,40 @@ const LOOP_FIRST: [u64; 4] = [188, 197, 207, 216];
 const LOOP_NEXT: [u64; 3] = [63, 73, 82];
 const LOOP_LAST_TO_END: [u64; 4] = [126, 117, 107, 98];
 const LOOP_NONE_END: u64 = 260;
+
+// The original's loading and init, with 4 voices (see `Cost::four_clocks`): colour clocks
+// from the start to the opening of the file (the player's own setup, the open), then what
+// each chunk costs as the loader reads it, and the init after the last chunk.
+const LOAD_FIXED: f64 = 33_498.0;
+const TUNE_CHUNK: f64 = 366.27;
+const TUNE_CHANNEL: f64 = 54.09;
+const TUNE_SEQUENCE: f64 = 1_475.53;
+const PART_CHUNK: f64 = 251.59;
+const PART_LINE_LOAD: f64 = 120.50;
+const PART_WORD: f64 = 14.00;
+const ARPG_CHUNK: f64 = 297.0;
+const INST_CHUNK: f64 = 264.0;
+const SMPL_CHUNK: f64 = 564.66;
+const SMPL_CRUNCHED: f64 = 279.72;
+const SMPL_WAVE: f64 = 7_591.44;
+const SMPL_INST_CHECK: f64 = 29.0;
+const SMPL_INST_MATCH: f64 = 51.82;
+const DECRUNCH_LITERAL: f64 = 32.0;
+const DECRUNCH_RUN: f64 = 86.88;
+const DECRUNCH_DELTA: f64 = 36.75;
+const DECRUNCH_NEGATIVE: f64 = 4.0;
+const INFO_CHUNK: f64 = 212.78;
+// ... and the time the reading of a chunk's header takes after the chunk before it, by the
+// pair of kinds.
+const PART_TO_ARPG: f64 = 16.0;
+const PART_TO_INST: f64 = 31.03;
+const PART_TO_END: f64 = 249.42;
+const ARPG_TO_INST: f64 = 15.0;
+const INST_TO_SMPL: f64 = 105.40;
+const SMPL_TO_END: f64 = 13.54;
+/// The init after the loading: a fixed part and a part of the pre-roll row's price.
+const INIT_FIXED: f64 = 187_752.9;
+const INIT_ROW: f64 = 0.96;
 
 #[derive(Clone, Copy, Default)]
 struct Counter {
@@ -654,6 +698,11 @@ pub struct Musicline {
     tempo: u16,
     /// The CIA timer's latch (the engine reloads it at the next tick).
     timer: u16,
+    /// The timer has been started once (by `start_int`).
+    started: bool,
+    /// The latch a tempo effect of the pre-roll row wrote while the timer was stopped: the
+    /// write of its high byte loaded the counter, so the timer counts from there.
+    preload: Option<u16>,
     mix_length: u16,
     half: u16,
     dma_mask: u16,
@@ -757,6 +806,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         tune_groove: 0,
         tempo: 125,
         timer: 0,
+        started: false,
+        preload: None,
         mix_length: 0,
         half: 0,
         dma_mask: 0,
@@ -774,12 +825,14 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the original's loading and init take a time that follows the module: the
     // timer starts then (4 voices), or the first write is made (8 voices, at the
     // engine's start phase after it; InitSound's first writes)
-    let at = cost.clocks();
     if hw.bus.r8(hw.bus.r32(tab + T_TUNES) + TU_PLAY_MODE) != 0 {
+        let at = cost.clocks();
         hw.wait((at + crate::engine::START_PHASE).saturating_sub(hw.bus.clock));
         ml.init_sound(&mut hw, 0);
     } else {
         ml.init_sound(&mut hw, 0);
+        // the pre-roll's row is priced in `owed`
+        let at = cost.four_clocks(ml.owed);
         hw.wait(at.saturating_sub(hw.bus.clock));
     }
     ml.start_int(&mut hw);
@@ -841,6 +894,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
         f.pos += 8;
         match &id.to_be_bytes() {
             b"TUNE" => {
+                cost.chunk(Chunk::Tune);
                 let t = m.alloc(0x48);
                 if t == 0 {
                     return None;
@@ -850,6 +904,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                     return None;
                 }
                 let ch = (m.bus.r8(t + TU_CHANNELS) as u32).min(8);
+                cost.four += TUNE_CHUNK + TUNE_CHANNEL * ch as f64;
                 let mut k = 0;
                 if ch != 0 {
                     if f.read(m, t + TU_SEQ, ch * 4) == 0 {
@@ -860,6 +915,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                         if size == 0 {
                             m.bus.w32(t + TU_SEQ + 4 * k, tab + T_ZERO_CHANNEL);
                         } else {
+                            cost.four += TUNE_SEQUENCE;
                             let s = m.alloc(0x200);
                             if s == 0 {
                                 return None;
@@ -882,6 +938,8 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                 tunes += 1;
             }
             b"PART" => {
+                cost.chunk(Chunk::Part);
+                cost.four += PART_CHUNK;
                 let p = m.alloc(0x600);
                 if p == 0 {
                     return None;
@@ -901,6 +959,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                         break;
                     }
                     cost.part_lines += 1;
+                    cost.four += PART_LINE_LOAD + PART_WORD * (flag & 0x3f).count_ones() as f64;
                     let mut fl = flag;
                     for j in 0..6 {
                         if fl & 1 != 0 {
@@ -916,6 +975,8 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                 }
             }
             b"ARPG" => {
+                cost.chunk(Chunk::Arpg);
+                cost.four += ARPG_CHUNK;
                 let a = m.alloc(0x300);
                 if a == 0 {
                     return None;
@@ -930,6 +991,8 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                 }
             }
             b"INST" => {
+                cost.chunk(Chunk::Inst);
+                cost.four += INST_CHUNK;
                 let a = m.alloc(0xce);
                 if a == 0 {
                     return None;
@@ -941,6 +1004,8 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                 }
             }
             b"SMPL" => {
+                cost.chunk(Chunk::Smpl);
+                cost.four += SMPL_CHUNK;
                 // the original length and the delta command; then the header
                 if f.pos + 6 > f.d.len() {
                     return None;
@@ -950,6 +1015,9 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                 f.pos += 6;
                 let extra = if orig == 0x100 { 0xf0 } else { 0 };
                 cost.waves += (orig == 0x100) as u64;
+                if orig == 0x100 {
+                    cost.four += SMPL_WAVE;
+                }
                 let s = m.alloc((orig + extra).wrapping_add(0x32));
                 if s == 0 {
                     return None;
@@ -963,6 +1031,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                         return None;
                     }
                 } else {
+                    cost.four += SMPL_CRUNCHED;
                     let tmp = m.alloc(crunched);
                     let start = f.pos;
                     let n = (crunched as usize).min(f.d.len() - start);
@@ -993,7 +1062,9 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                     if inst == zero {
                         break;
                     }
+                    cost.four += SMPL_INST_CHECK;
                     if m.bus.r8(inst + IS_NUMBER) == samples as u8 {
+                        cost.four += SMPL_INST_MATCH;
                         let st = m.bus.r16(inst + I_START) as u32;
                         let rs = m.bus.r16(inst + I_REPEAT_START) as u32;
                         m.bus.w32(inst + IS_POINTER, data + 2 * st);
@@ -1005,6 +1076,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                 m.bus.w32(s + IS_REPEAT, data.wrapping_add(off.max(0) as u32));
             }
             b"INFO" => {
+                cost.four += INFO_CHUNK;
                 if !f.skip(len as usize) {
                     break;
                 }
@@ -1012,6 +1084,7 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
             _ => break,
         }
     }
+    cost.end();
     Some(tunes)
 }
 
@@ -1028,9 +1101,56 @@ struct Cost {
     part_bytes: u64,
     /// 256-byte waveform samples.
     waves: u64,
+    /// The 4-voice loading time, priced chunk by chunk (see `Cost::four_clocks`).
+    four: f64,
+    prev: Option<Chunk>,
+}
+
+/// The kinds of chunk that make the loader allocate.
+#[derive(Clone, Copy, PartialEq)]
+enum Chunk {
+    Tune,
+    Part,
+    Arpg,
+    Inst,
+    Smpl,
 }
 
 impl Cost {
+    /// A chunk starts: the one before it pays for the reading of this one's header,
+    /// which depends on what it is.
+    fn chunk(&mut self, k: Chunk) {
+        self.four += match (self.prev, Some(k)) {
+            (Some(Chunk::Part), Some(Chunk::Arpg)) => PART_TO_ARPG,
+            (Some(Chunk::Part), Some(Chunk::Inst)) => PART_TO_INST,
+            (Some(Chunk::Arpg), Some(Chunk::Inst)) => ARPG_TO_INST,
+            (Some(Chunk::Inst), Some(Chunk::Smpl)) => INST_TO_SMPL,
+            _ => 0.0,
+        };
+        self.prev = Some(k);
+    }
+
+    /// The file ends.
+    fn end(&mut self) {
+        self.four += match self.prev {
+            Some(Chunk::Part) => PART_TO_END,
+            Some(Chunk::Smpl) => SMPL_TO_END,
+            _ => 0.0,
+        };
+    }
+
+    /// Colour clocks from the start to the original's timer start with 4 voices: the
+    /// open of the file, the chunks (priced as the loader works through them, `four`)
+    /// and the init after the last (its row, which `preroll` prices, and a fixed
+    /// part). Measured on the Eagleplayer's runs on the engine's 68000 clock: the gaps
+    /// between its library calls over 192 four-voice modules, each chunk's time regressed
+    /// on what the chunk holds; the whole is within 1.4k colour clocks of the original's
+    /// start on every module (median 0.1k, held-out modules the same), where the
+    /// whole-module fit it replaces was off by 3.8k (median) and 286k at worst.
+    fn four_clocks(&self, preroll: f64) -> u64 {
+        (LOAD_FIXED + self.four + INIT_FIXED + INIT_ROW * preroll).max(0.0) as u64
+    }
+
     /// Colour clocks from the start to the original's timer start (4 voices) or to
     /// its first write (8 voices, less 100): its InitPlayer's loading and the rest of
     /// its init. A least-squares fit on 74 tunes (the 20 of the refcmp corpus and 54
@@ -1059,22 +1179,27 @@ fn decrunch(c: &[u8], cmd: u8, m: &mut Machine, mut to: u32, cost: &mut Cost) {
     while let Some(b) = next() {
         if b != cmd {
             cost.literals += 1;
+            cost.four += DECRUNCH_LITERAL;
             m.bus.w8(to, b);
             to += 1;
             continue;
         }
+        cost.four += DECRUNCH_RUN;
         let (Some(mut s), Some(hi), Some(lo)) = (next(), next(), next()) else { return };
         let mut n = (hi as u16) << 8 | lo as u16;
         cost.deltas += n as u64;
+        cost.four += DECRUNCH_DELTA * n as f64;
         m.bus.w8(to, s);
         to += 1;
         while n != 0 {
             let Some(d) = next() else { return };
+            cost.four += DECRUNCH_NEGATIVE * (d >> 7) as f64;
             s = s.wrapping_add(ext(d >> 4));
             m.bus.w8(to, s);
             to += 1;
             n -= 1;
             if n != 0 {
+                cost.four += DECRUNCH_NEGATIVE * ((d >> 3) & 1) as f64;
                 s = s.wrapping_add(ext(d & 15));
                 m.bus.w8(to, s);
                 to += 1;
@@ -1262,11 +1387,19 @@ impl Musicline {
             // timer counts down from $FFFF: its first interrupt comes 65536
             // E-clocks after the start (the tick's first write 47 colour clocks
             // later) and the ticks are regular from there. The DMA-on write is
-            // 131 colour clocks after the timer starts.
+            // 131 colour clocks after the timer starts. A tempo effect in the
+            // pre-roll row has written the latch before (the timer being stopped,
+            // that loaded the counter): the first interrupt then comes after
+            // that latch's period.
+            let first_tick = match self.preload.take() {
+                Some(latch) if !self.started => (latch as u64 + 1) * ECLOCK + 47,
+                _ => FIRST_TICK,
+            };
+            self.started = true;
             let t0 = hw.bus.clock;
             hw.wait(131);
             hw.dmacon(0x8000 | self.dma_mask);
-            self.used.set(FIRST_TICK.saturating_sub(CALL_TO_ACK + hw.bus.clock - t0).max(1));
+            self.used.set(first_tick.saturating_sub(CALL_TO_ACK + hw.bus.clock - t0).max(1));
             self.grid = None;
             self.tb = TimerB::default();
             self.isr_step = 1;
@@ -2416,6 +2549,9 @@ impl Musicline {
                 } else {
                     self.tempo = a16;
                     self.timer = (0x1b0f88 / a as u32) as u16;
+                    if !self.started && !self.eight {
+                        self.preload = Some(self.timer);
+                    }
                 }
             }
             0x43 => {

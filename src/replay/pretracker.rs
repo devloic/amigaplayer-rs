@@ -182,6 +182,8 @@ pub struct PreTracker {
     ch: [Chan; 4],
     /// Colour clocks per frame (the player runs on the vertical blank).
     frame: u64,
+    /// Alternates the colour clock the original's loop spends half of (see `output`).
+    half: u64,
     songend: bool,
     /// When the last silence (song start) began, whether the first tick after
     /// it is still to come, and the vertical blank of the last tick.
@@ -274,6 +276,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         period_table: [0; 16 * 12 * 3],
         ch: [Chan::default(); 4],
         frame: m.bus.frame,
+        half: 0,
         songend: false,
         silence_at: 0,
         first: true,
@@ -1475,8 +1478,15 @@ impl PreTracker {
 
     /// The Paula part of a tick, as the V1.5 replay writes it.
     fn output(&mut self, hw: &mut Hw) {
+        // the loop over the voices, as the reference's writes time it: a voice that restarts
+        // (DMA off, LOC, LEN, volume 0, period $71) leaves 26.5 colour clocks to the next voice's
+        // first write, one that does not (volume, period) 21.5 and then 6 more before its first
+        // write, so the next voice's volume comes 27.5 after this one's period, its DMA off 26.5
+        // after a restarting one's
         for c in 0..4 {
             let o = self.ch[c].out;
+            self.half += 1;
+            let j = self.half & 1;
             if o.trg != 0 {
                 self.ch[c].out.trg = 0;
                 hw.dmacon(1 << c);
@@ -1488,17 +1498,24 @@ impl PreTracker {
                 hw.vol(c, 0);
                 hw.wait(18);
                 hw.per(c, 0x71);
-                hw.wait(21);
+                if c < 3 {
+                    hw.wait(26 + j);
+                }
             } else {
+                if c > 0 {
+                    hw.wait(6);
+                }
                 hw.vol(c, o.vol as u16);
                 hw.wait(12);
                 hw.per(c, o.per);
-                hw.wait(16);
+                if c < 3 {
+                    hw.wait(21 + j);
+                }
             }
         }
-        raster_wait(hw);
+        raster_wait(hw, 2 * 637);
         hw.dmacon(0x800f);
-        raster_wait(hw);
+        raster_wait(hw, 2 * 632 + 139);
         for c in 0..4 {
             let o = self.ch[c].out;
             hw.dmacon(0x8000 | 1 << c);
@@ -1525,13 +1542,23 @@ impl PreTracker {
 /// this before one).
 const SONG_START_WORK: u64 = 7000;
 
-/// The original's wait for the beam to go to a fourth line, the one it reads
-/// first counting: three line starts, then its polling loop's time (the
-/// writes after come 84 to 153 colour clocks into the line).
-fn raster_wait(hw: &mut Hw) {
+/// The original's wait for the beam to go three lines on, as its writes show (measured on UADE's
+/// replay, 499 ticks of one module): it reads the line number 23 colour clocks after the call
+/// (the previous write) and polls on a grid of 69.5 colour clocks from there, so the write comes
+/// at the first of `base / 2 + k * 69.5` after the call (base in half colour clocks) that is at
+/// least 84 colour clocks into the third line after the one it read.
+fn raster_wait(hw: &mut Hw, base: u64) {
     let now = hw.bus.clock;
-    let line = now / LINE + 3;
-    hw.wait(line * LINE + 118 - now);
+    let target = ((now + 23) / LINE + 3) * LINE + 84;
+    let need = 2 * (target - now);
+    let mut gap = base;
+    while gap < need {
+        gap += 139;
+    }
+    while gap >= need + 139 {
+        gap -= 139;
+    }
+    hw.wait(gap / 2);
 }
 
 enum Next {

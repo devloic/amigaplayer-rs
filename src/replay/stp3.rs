@@ -14,10 +14,13 @@
 //! used.
 //!
 //! What the Eagleplayer does, as the runs showed it (each point checked against it):
-//! - The header's speed, fraction and CIA timer are not read: the song starts at speed 6 and the
-//!   default 50 Hz timer, and the first row plays at the sixth interrupt (the five before it only
-//!   write volume). `0Fxy` sets the speed to x and the fraction to y/4 tick (the timer of every
-//!   tick is then scaled by (4x+y)/4x), `4Fxx` is the speed for xx below 0x20 and a tempo
+//! - The header's speed, fraction and CIA timer are not read (version 2): the song starts at speed 6
+//!   and the default 50 Hz timer, and the first row plays at the sixth interrupt (the five before
+//!   it only write volume). The older versions, which the Eagleplayer refuses, start at the
+//!   header's speed, fraction and tempo and read the fraction of `0Fxy` with its low two bits, as
+//!   libopenmpt does (the version 1 file in the archive sets `0F4E` throughout, with speed 4 and
+//!   fraction 2 in its header). `0Fxy` sets the speed to x and the fraction to y/4 tick (the timer
+//!   of every tick is then scaled by (4x+y)/4x), `4Fxx` is the speed for xx below 0x20 and a tempo
 //!   (`1773447 / xx`, the CIA timer value) from there on. The 12-bit CIA tempo commands (`Fxxx`
 //!   in OpenMPT's reading) do nothing.
 //! - Four channels, Paula direct. A note is: the old period, DMA off, length, address, the
@@ -25,12 +28,35 @@
 //!   (address plus loop start, length the loop's words, or 0 when it is under 2 words).
 //! - The period table is its own (83 notes, 3232 down to 28), and the commands the player knows
 //!   are `00` (arpeggio), `01`/`02` (slides), `0B` (volume slide each row), `0C` (volume),
-//!   `0F`, `10` (vibrato), `12`, `13` (tone portamento), `14`, `4E` (fine slides), `4F`. The
-//!   others OpenMPT converts (`03`..`09`, `0A`, `0D`, `0E`, `11`, `16`..`22`, `49`) do nothing
-//!   in it.
+//!   `0F`, `10` (vibrato), `12`, `13` (tone portamento), `14`, `4E` (fine slides), `4F`, and
+//!   two that change the start of a note: `49` (sample offset: that many 256-byte steps into the
+//!   part that plays first; an offset past its end leaves the address alone and writes a length
+//!   of 0) and `21` (a note delay with a delay never starts the note, it only sets the period).
+//!   The others OpenMPT converts (`03`..`09`, `0A`, `0D`, `0E`, `11`, `16`..`20`, `22`) do
+//!   nothing in it. An arpeggio looks the period up in a table of its own (the finest tuning,
+//!   856 to 113, then a zero and what follows in the player's memory) and the slides stop at 113
+//!   (`01`, from above) and 856 (`02`), in 12 bits.
 //! - Only version 2 files are accepted by the Eagleplayer; versions 0 and 1 (and their loop
 //!   lists, whose commands 16..19 it does not know either) are read as OpenMPT reads them and
-//!   played the same way.
+//!   played the same way. That part can not be checked against the original (it refuses the
+//!   files); it was compared with libopenmpt's rendering instead.
+//!
+//! Timing (what lets the register writes land on the Eagleplayer's colour clocks):
+//! - The writes of a tick are placed by waits that add up per channel and per command, as the
+//!   68000 code takes its time: a row tick writes, for each channel, the old period (unless the
+//!   channel did something the row before), DMA off, length, address and the periods of a note,
+//!   then the volume; ten raster lines after the DMA on come the loop registers. The waits depend on
+//!   what the sample is (looping from its start, from further in, or not at all), on whether the
+//!   channel was busy the row before, and on the command and its parameter (`handler_delta`,
+//!   `later_4e`, the arpeggio, vibrato, slide and portamento costs of `later_tick`). A full
+//!   volume, a loop length of 0 and a command parameter above 64 each take two clocks more.
+//! - The start: the song is set up in a time that depends on the order list and the samples it
+//!   uses (`init_clocks`; the player scans the orders to find the samples in use), which moves the
+//!   output sample grid relative to the first writes.
+//! - Left out: a channel that reads past the end of the module (a length of 0 is 65536 words, and
+//!   the original reads its own memory there), an arpeggio or slide on a channel that never had a
+//!   note (the original's period is then whatever its memory held), `0F00`/`0F` with a fraction
+//!   and no speed, and `14` jumps to the row it is on.
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -46,6 +72,83 @@ const PERIODS: [u16; 83] = [
     47, 45, 42, 40, 37, 35, 33, 31, 30, 28,
 ];
 
+
+/// The arpeggio's table: three octaves (periods of the finest tuning), a zero, and then what the
+/// player's memory holds after it, as the reference's runs show it (observed values, ProTracker-like).
+const ARP: [u16; 50] = [
+    856, 808, 762, 720, 678, 640, 604, 570, 538, 508, 480, 453, 428, 404, 381, 360, 339, 320, 302, 285, 269, 254, 240, 226, 214,
+    202, 190, 180, 170, 160, 151, 143, 135, 127, 120, 113, 0, 850, 802, 757, 715, 674, 637, 601, 567, 535, 505, 477, 450, 425,
+];
+
+/// Colour clocks from the interrupt to where the least code of a tick writes.
+const PRE: u64 = 90;
+
+/// How much longer (or shorter, as the player does not write the final period then) the player takes
+/// to get from the row's period to the volume for a command it does on the row, than for none; all
+/// from the reference's runs (command, then parameter).
+fn handler_delta(cmd: u8, p: u8) -> i64 {
+    match cmd {
+        0x0B => -104,
+        0x0C => -74 + if p > 64 { 2 } else { 0 },
+        0x0F => 99 + if p & 15 != 0 { 104 } else { 0 },
+        // (the row as two decimal digits)
+        0x12 => -71 + if (p >> 4) as u32 * 10 + (p & 15) as u32 > 64 { 2 } else { 0 },
+        0x14 => -121,
+        0x21 => {
+            if p == 0 {
+                -59
+            } else {
+                -71
+            }
+        }
+        0x49 => {
+            if p == 0 {
+                -116
+            } else {
+                -110
+            }
+        }
+        0x4E => match (p >> 4, p & 15) {
+            (0, _) => -81,
+            (1, 0) => 75,
+            (1, _) => 55,
+            (2, _) => 64,
+            (3, _) => -62,
+            (4, _) => -52,
+            (5, _) => -55,
+            (6, 0) => -10,
+            (6, _) => 22,
+            (7, _) => -7,
+            (8, _) => 62,
+            (9, _) => 5,
+            (10, _) => 36,
+            (11, 0) => 37,
+            (11, _) => 45,
+            (12, 0) => 32,
+            (12, _) => 24,
+            (13, _) => 5,
+            (14, _) => 18,
+            (15, 15) => 220,
+            (15, 0) => 63,
+            _ => 140,
+        },
+        0x4F => match p {
+            0 => -119,
+            1..=0x1F => -88,
+            _ => 160,
+        },
+        _ => 0,
+    }
+}
+
+/// A volume write: the full volume takes the player two colour clocks longer to get to.
+fn vol(hw: &mut Hw, i: usize, v: u16) {
+    if v >= 64 {
+        hw.wait(2);
+    }
+    hw.vol(i, v);
+}
+
 /// The vibrato's sine (ProTracker's).
 const SINE: [u8; 32] = [
     0, 24, 49, 74, 97, 120, 141, 161, 180, 197, 212, 224, 235, 244, 250, 253, 255, 253, 250, 244, 235, 224, 212, 197, 180, 161, 141,
@@ -55,8 +158,6 @@ const SINE: [u8; 32] = [
 const DEFAULT_TIMER: u32 = crate::deli::DEFAULT_TIMER as u32;
 /// The CIA timer value of a tempo: this over the tempo (709379 Hz * 2.5).
 const TEMPO_CONST: u32 = 1_773_447;
-const MIN_PERIOD: i32 = 14;
-const MAX_PERIOD: i32 = 3424;
 
 #[derive(Clone, Copy, Default)]
 struct Cell {
@@ -87,6 +188,13 @@ struct Song {
     patterns: Vec<Option<Pattern>>,
     /// Indexed by sample number (0 is unused).
     samples: Vec<Smp>,
+    /// How many samples the file lists.
+    num_samples: usize,
+    /// The file's version, and the header's speed, speed fraction and CIA timer count.
+    version: u16,
+    head_speed: u16,
+    head_frac: u16,
+    head_timer: u16,
 }
 
 struct Reader<'a> {
@@ -128,7 +236,7 @@ impl Song {
         let pat_len = r.u8()? as usize;
         let order_list = d.get(8..136)?;
         r.p = 136;
-        let (_speed, _frac, timer, _flags, _res) = (r.u16()?, r.u16()?, r.u16()?, r.u16()?, r.u32()?);
+        let (speed, frac, timer, _flags, _res) = (r.u16()?, r.u16()?, r.u16()?, r.u16()?, r.u32()?);
         let midi_count = r.u16()?;
         r.skip(50)?;
         let num_samples = r.u16()? as usize;
@@ -226,7 +334,41 @@ impl Song {
                 off = off.saturating_add(s.len);
             }
         }
-        Some(Song { orders: order_list[..num_orders].to_vec(), pat_len, patterns, samples })
+        Some(Song {
+            orders: order_list[..num_orders].to_vec(),
+            pat_len,
+            patterns,
+            samples,
+            num_samples,
+            version,
+            head_speed: speed,
+            head_frac: frac,
+            head_timer: timer,
+        })
+    }
+
+    /// Colour clocks from the start (Paula's reset) to the first write of the player's init (the
+    /// LED), as the Eagleplayer's runs show it. It scans the order list: a song whose patterns
+    /// are all 0 takes a fixed time; otherwise the time grows with the highest pattern number
+    /// (143 per step), with each order that raises the maximum (12) and each one equal to the
+    /// running maximum (6), and by 72 for every sample after the first.
+    fn init_clocks(&self) -> u64 {
+        let max = self.orders.iter().copied().max().unwrap_or(0) as u64;
+        let base = if max == 0 {
+            16369
+        } else {
+            let (mut run, mut raises, mut equal) = (0u8, 0u64, 0u64);
+            for &o in &self.orders {
+                if o > run {
+                    raises += 1;
+                    run = o;
+                } else if o == run {
+                    equal += 1;
+                }
+            }
+            15756 + 143 * (max - 1) + 12 * (raises - 1) + 6 * equal
+        };
+        base + 72 * (self.num_samples.max(1) as u64 - 1)
     }
 
     fn pattern(&self, order: usize) -> Option<&Pattern> {
@@ -284,27 +426,38 @@ struct Stp3 {
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let song = Song::parse(d)?;
+    // the player's init takes its time (the song starts, for the sample grid's phase, when it is done)
+    let t0 = m.bus.clock;
+    let init = song.init_clocks();
+    m.bus.clock = t0 + init;
     // the filter off (the LED), as the player's init does
     let pra = m.bus.read_byte(0xbfe001);
     m.bus.write_byte(0xbfe001, pra | 2);
     // every volume to 0
     {
         let mut hw = Hw { bus: &mut m.bus };
-        // (the raster line phase the player's start-up leaves it at)
-        hw.wait(71);
+        hw.wait(14);
         for i in 0..4 {
             hw.vol(i, 0);
             hw.wait(6);
         }
     }
+    m.bus.clock = t0 + init + 310;
     let mut visited = vec![false; song.orders.len()];
     visited[0] = true;
+    // (the Eagleplayer starts every file it takes at speed 6 and 50 Hz, whatever the header says;
+    // the older versions it refuses start at the header's speed, fraction and tempo, as libopenmpt has them)
+    let (speed, frac, tempo_timer) = if song.version < 2 && song.head_speed != 0 {
+        (song.head_speed as u32, (song.head_frac & 15) as u32, (TEMPO_CONST as u64 * song.head_timer as u64 / 443_250) as u32)
+    } else {
+        (6, 0, DEFAULT_TIMER)
+    };
     Some(Box::new(Stp3 {
         song,
         base,
-        speed: 6,
-        frac: 0,
-        tempo_timer: DEFAULT_TIMER,
+        speed,
+        frac,
+        tempo_timer,
         // (the first row plays at the sixth interrupt)
         counter: 1,
         pos: 0,
@@ -336,7 +489,7 @@ impl Replayer for Stp3 {
 
     /// The first interrupt comes 661 colour clocks later than the timer's period.
     fn timer_delay(&self) -> u64 {
-        661
+        661 - PRE - 272
     }
 
     fn tick(&mut self, hw: &mut Hw) {
@@ -388,14 +541,28 @@ impl Stp3 {
         for (i, cell) in cells.iter().enumerate() {
             // the volume slide of the earlier rows comes first
             let c = &mut self.ch[i];
+            // (a slide takes its time off the row: a little more going up than going down, and more
+            // when it hits the end of the range)
+            let mut slide_cost = 0i64;
             if c.auto_vol != 0 {
-                c.vol = (c.vol + c.auto_vol).clamp(0, 64);
+                let v = c.vol + c.auto_vol;
+                // (a slide that gets to the top stops, which takes a little longer)
+                slide_cost = if c.auto_vol > 0 { 54 } else { 53 };
+                if v >= 64 {
+                    slide_cost += 16;
+                    c.auto_vol = 0;
+                } else if v < 0 {
+                    // (going down it carries on, at the bottom)
+                    slide_cost += 8;
+                }
+                c.vol = v.clamp(0, 64);
             }
             // (whether the channel started a note or had a command on the row before)
             let prev_fresh = c.fresh;
             let new_idle = cell.cmd == 0 && cell.param == 0;
             let has_cmd = !new_idle;
-            let immediate = row_class(cell.cmd);
+            // (a fine slide writes the period, the other commands of the class do not)
+            let immediate = row_class(cell.cmd) && !(cell.cmd == 0x4E && matches!(cell.param >> 4, 1 | 2));
             // the sample first
             if cell.inst != 0 {
                 let s = self.sample(cell.inst as usize);
@@ -405,36 +572,92 @@ impl Stp3 {
                 c.auto_vol = 0;
                 self.set_loop(i);
             }
-            let tone = cell.cmd == 0x13;
+            let tone = cell.cmd == 0x13 && cell.param != 0;
             let note_period = Self::period_of(cell.note);
-            let starts = !tone && note_period.is_some();
+            // (a note delay never starts the note in the Eagleplayer: the period is set and the
+            // channel goes on with what it was playing)
+            let delayed = cell.cmd == 0x21 && cell.param != 0 && note_period.is_some();
+            let starts = !tone && note_period.is_some() && !delayed;
             // the period as it was is written first unless the channel did something the row before
             // (the waits are the time the player's code takes, as the reference's runs show it)
+            let mut delta = if row_class(cell.cmd) { handler_delta(cell.cmd, cell.param) } else { 0 };
+            if tone {
+                // a tone portamento to a note: the player compares the periods
+                if let Some(t) = note_period {
+                    delta = if t > self.ch[i].period { 104 } else { 114 };
+                }
+            }
+            // (on a channel that did something the row before, a command that is done on the row
+            // leaves the period alone and takes its time off the wait)
+            if delayed {
+                delta += 125;
+            }
+            if !starts {
+                delta += slide_cost;
+            }
+            if cell.cmd == 0x49 && cell.param == 0 && self.ch[i].smp != 0 {
+                // (with a sample on the channel the offset command takes longer to find nothing to do)
+                delta += 17;
+            }
+            let fresh_cmd = if prev_fresh && !starts { delta } else { 0 };
+            if i == 0 {
+                hw.wait((PRE as i64 + if prev_fresh { if starts { 0 } else { 85 + fresh_cmd } } else { -76 }) as u64);
+            }
+            let s = self.sample(self.ch[i].smp);
+            // (the code that sets the sample up takes a little longer for a sample that loops
+            // from its start, and a lot longer for one that loops further in)
+            let kind = if s.loop_len < 2 {
+                0
+            } else if s.loop_start == 0 {
+                1
+            } else {
+                2
+            };
             if !prev_fresh {
                 if i > 0 {
                     hw.wait(206);
                 }
                 hw.per(i, self.ch[i].period as u16);
             } else if i > 0 && !starts {
-                hw.wait(367);
+                hw.wait((367 + fresh_cmd) as u64);
             }
             if starts {
                 let np = note_period.unwrap();
-                let s = self.sample(self.ch[i].smp);
                 let c = &mut self.ch[i];
-                hw.wait(if !prev_fresh {
-                    if i == 0 { 475 } else { 477 }
+                // (the sample offset, 49: the player starts that many 256-byte steps into the part of the
+                // sample that plays first; one that reaches its end leaves the address alone and gives a length of 0)
+                let played = if s.loop_start == 0 { s.len } else { s.loop_start + s.loop_len };
+                let (mut skip, mut words, mut off_adj, mut len_gap) = (0u32, played / 2, 0i64, 147u64);
+                if cell.cmd == 0x49 {
+                    off_adj = 121;
+                }
+                if cell.cmd == 0x13 {
+                    off_adj = -9;
+                }
+                if cell.cmd == 0x49 && cell.param != 0 {
+                    let o = cell.param as u32 * 256;
+                    if o < played {
+                        skip = o;
+                        words = (played - o) / 2;
+                        off_adj += 6;
+                    } else {
+                        words = 0;
+                        off_adj -= 11;
+                        len_gap = 149;
+                    }
+                }
+                hw.wait((off_adj + if !prev_fresh {
+                    [477, 475, 503][kind]
                 } else if i == 0 {
-                    475
+                    [303, 301, 330][kind]
                 } else {
-                    585
-                });
+                    [585, 583, 612][kind]
+                }) as u64);
                 hw.dmacon(1 << i);
-                hw.wait(147);
-                let words = if s.loop_start == 0 { s.len / 2 } else { (s.loop_start + s.loop_len) / 2 };
+                hw.wait(len_gap);
                 hw.len(i, words.min(0xFFFF) as u16);
                 hw.wait(91);
-                hw.loc(i, self.base.wrapping_add(s.off));
+                hw.loc(i, self.base.wrapping_add(s.off).wrapping_add(skip));
                 hw.wait(105);
                 c.period = np;
                 c.note = cell.note;
@@ -443,33 +666,32 @@ impl Stp3 {
                 hw.per(i, np as u16);
                 mask |= 1 << i;
                 self.set_loop(i);
+                hw.wait((235 + delta) as u64);
                 if !immediate {
-                    hw.wait(235);
-                    hw.per(i, np as u16);
+                    self.fine_slide(i, cell);
+                    hw.per(i, self.ch[i].period as u16);
                 }
-            } else if !immediate {
+            } else {
+                // a sample number without a note sets the sample up (and the volume) at once
+                if cell.inst != 0 {
+                    hw.wait((206 + [0, -2, 26][kind] + if prev_fresh && kind == 2 { 1 } else { 0 }) as u64);
+                }
                 // (the final period)
                 if !prev_fresh {
-                    hw.wait(259);
+                    hw.wait((259 + delta) as u64);
                 }
-                // (a command the player does not know costs its dispatch)
-                if has_cmd && !matches!(cell.cmd, 0x00..=0x02 | 0x10 | 0x13) {
-                    hw.wait(232);
+                if !immediate {
+                    self.fine_slide(i, cell);
+                    hw.per(i, self.ch[i].period as u16);
                 }
-                hw.per(i, self.ch[i].period as u16);
             }
-            // what the command's handler costs
-            hw.wait(match cell.cmd {
-                0x0C if starts => 159,
-                0x0C if !prev_fresh => 186,
-                0x0C => 168,
-                0x4E => 242,
-                0x4F => 393,
-                _ => 0,
-            });
             // the command
             {
                 let c = &mut self.ch[i];
+                if delayed {
+                    c.period = note_period.unwrap();
+                    c.note = cell.note;
+                }
                 c.cmd = cell.cmd;
                 c.param = cell.param;
                 c.fresh = starts || has_cmd;
@@ -477,7 +699,7 @@ impl Stp3 {
             self.row_command(i, cell, note_period, tone);
             let c = &self.ch[i];
             hw.wait([219, 231, 242, 242][i]);
-            hw.vol(i, c.vol.clamp(0, 64) as u16);
+            vol(hw, i, c.vol.clamp(0, 64) as u16);
         }
         hw.wait(158);
         hw.dmacon(0x8000 | mask);
@@ -485,11 +707,23 @@ impl Stp3 {
         for i in 0..4 {
             let c = self.ch[i];
             hw.loc(i, c.loop_loc);
-            hw.wait(102);
+            hw.wait(if c.loop_words == 0 { 104 } else { 102 });
             hw.len(i, c.loop_words);
-            hw.wait(100);
+            hw.wait(101);
         }
         self.advance();
+    }
+
+    /// A fine slide (`4E1x`, `4E2x`) moves the period before the row's last write of it.
+    fn fine_slide(&mut self, i: usize, cell: &Cell) {
+        if cell.cmd == 0x4E {
+            let c = &mut self.ch[i];
+            match cell.param >> 4 {
+                0x1 => c.period = (c.period - (cell.param & 15) as i32) & 0xFFF,
+                0x2 => c.period = (c.period + (cell.param & 15) as i32) & 0xFFF,
+                _ => {}
+            }
+        }
     }
 
     /// The command of a row, at its first tick.
@@ -507,7 +741,7 @@ impl Stp3 {
             }
             0x0F => {
                 self.speed = (p >> 4) as u32;
-                self.frac = (p & 15) as u32;
+                self.frac = (p & if self.song.version < 2 { 3 } else { 15 }) as u32;
             }
             0x10 => {
                 if p >> 4 != 0 {
@@ -525,14 +759,10 @@ impl Stp3 {
                 if p != 0 {
                     c.tp_speed = p as i32;
                 }
-                c.tp_active = c.tp_target != 0;
+                // (a speed of 0 is no portamento: the note just plays)
+                c.tp_active = p != 0 && c.tp_target != 0;
             }
             0x14 => self.jump = Some(p as usize),
-            0x4E => match p >> 4 {
-                0x1 => c.period = (c.period - (p & 15) as i32).max(MIN_PERIOD),
-                0x2 => c.period = (c.period + (p & 15) as i32).min(MAX_PERIOD),
-                _ => {}
-            },
             0x4F => {
                 if p >= 0x20 {
                     self.tempo_timer = TEMPO_CONST / p as u32;
@@ -584,6 +814,9 @@ impl Stp3 {
             let c = &mut self.ch[i];
             let mut write = c.cmd != 0 && c.cmd != 0x4E || c.cmd == 0 && c.param != 0 || c.tp_active;
             let mut out = c.period;
+            // what the player's code costs on top of a plain period write and the volume after it
+            // (colour clocks, as the Eagleplayer's runs show them)
+            let (mut pre_d, mut vol_d, mut twice) = (0i64, 0i64, false);
             match c.cmd {
                 0x00 if c.param != 0 => {
                     let n = match k % 3 {
@@ -591,20 +824,48 @@ impl Stp3 {
                         2 => c.param & 15,
                         _ => 0,
                     };
-                    out = Self::period_of(c.note.saturating_add(n)).unwrap_or(c.period);
+                    // (the arpeggio looks the period up in a table of its own, from the top down to the first
+                    // entry that is not above it, and steps on from there; the longer the search the dearer)
+                    let start = ARP[..36].iter().position(|&v| v as i32 <= c.period).unwrap_or(36);
+                    out = if n == 0 { c.period } else { ARP[(start + n as usize).min(ARP.len() - 1)] as i32 };
+                    pre_d = if n == 0 { 58 } else { 133 + 49 * start as i64 / 2 };
+                    vol_d = -27;
                 }
-                0x01 if k >= 2 => {
-                    c.period = (c.period - c.param as i32).max(MIN_PERIOD);
-                    out = c.period;
+                0x01 => {
+                    pre_d = 15;
+                    vol_d = -27;
+                    if k >= 2 {
+                        // (the period wraps in 12 bits and stops at 113 from above)
+                        c.period = (c.period - c.param as i32) & 0xFFF;
+                        if c.period < 113 {
+                            c.period = 113;
+                            pre_d += 20;
+                        }
+                        out = c.period;
+                    }
                 }
-                0x02 if k >= 2 => {
-                    c.period = (c.period + c.param as i32).min(MAX_PERIOD);
-                    out = c.period;
+                0x02 => {
+                    pre_d = 24;
+                    vol_d = -27;
+                    if k >= 2 {
+                        c.period = (c.period + c.param as i32) & 0xFFF;
+                        if c.period > 856 {
+                            c.period = 856;
+                            pre_d += 20;
+                        }
+                        out = c.period;
+                    }
                 }
                 0x10 => {
                     let delta = (SINE[(c.vib_pos & 31) as usize] as i32 * c.vib_depth as i32) >> 7;
                     out = if c.vib_pos & 32 != 0 { c.period - delta } else { c.period + delta };
                     c.vib_pos = c.vib_pos.wrapping_add(c.vib_speed) & 63;
+                    pre_d = match (c.param >> 4 != 0, c.param & 15 != 0) {
+                        (false, false) => 105,
+                        (true, true) => 152,
+                        _ => 146,
+                    };
+                    vol_d = 10;
                 }
                 _ => {}
             }
@@ -614,22 +875,67 @@ impl Stp3 {
                 } else if c.period < c.tp_target {
                     c.period = (c.period + c.tp_speed).min(c.tp_target);
                 }
+                pre_d = 12;
                 if c.period == c.tp_target {
                     c.tp_active = false;
+                    pre_d = 30;
                 }
                 out = c.period;
                 write = true;
+                // (it writes the period twice on the row it is on and once on the rows after)
+                twice = c.cmd == 0x13;
+                if !twice {
+                    vol_d = 3;
+                }
             }
             if write {
-                hw.wait(if i == 0 { 0 } else { 333 });
+                hw.wait((if i == 0 { PRE as i64 - 18 } else { 333 } + pre_d) as u64);
                 hw.per(i, out.clamp(0, 0xFFFF) as u16);
-                hw.wait(if i == 0 { 194 } else { 215 });
+                if twice {
+                    hw.wait(177);
+                    hw.per(i, out.clamp(0, 0xFFFF) as u16);
+                }
+                hw.wait(([192, 204, 215, 215][i] + vol_d) as u64);
             } else {
-                hw.wait(if i == 0 { 0 } else if i == 1 { 363 } else { 375 });
+                hw.wait(if i == 0 { PRE } else if i == 1 { 363 } else { 375 });
             }
-            hw.vol(i, c.vol.clamp(0, 64) as u16);
+            if c.cmd == 0x4E {
+                hw.wait(later_4e(c.param, k));
+            }
+            vol(hw, i, c.vol.clamp(0, 64) as u16);
         }
     }
+}
+
+/// What the fine commands (`4E`) cost on the ticks after the first.
+fn later_4e(p: u8, k: i32) -> u64 {
+    let lo = (p & 15) as i32;
+    (match p >> 4 {
+        0 => 124,
+        1 => 113,
+        2 => 122,
+        3 => 143,
+        4 => 153,
+        5 => 150,
+        6 => 169,
+        7 => 198,
+        8 => 8776,
+        9 => 210,
+        10 => 199,
+        11 => 207,
+        12 => if lo == k { 237 } else { 229 },
+        13 => 210,
+        14 => 188,
+        _ => {
+            if lo == 0 {
+                226
+            } else if lo == 15 || lo + k == 15 {
+                329
+            } else {
+                257
+            }
+        }
+    }) as u64
 }
 
 #[cfg(test)]
@@ -679,6 +985,66 @@ mod tests {
         d.extend([0u8; 34]); // the drum pad
         d.extend((0..256).map(|i| (i as i8).wrapping_mul(3) as u8));
         d
+    }
+
+    /// The same song as a version 1 module (82-byte sample structure, a loop list per sample, no
+    /// chunk sizes) with the given header speed.
+    fn module_v1(speed: u16) -> Vec<u8> {
+        let mut d = b"STP3".to_vec();
+        d.extend(1u16.to_be_bytes());
+        d.push(1);
+        d.push(8);
+        d.extend([0u8; 128]);
+        for v in [speed, 0, 3546, 2] {
+            d.extend(v.to_be_bytes());
+        }
+        d.extend(0u32.to_be_bytes());
+        d.extend(50u16.to_be_bytes());
+        d.extend([0u8; 50]);
+        d.extend(1u16.to_be_bytes()); // one sample
+        d.extend(82u16.to_be_bytes()); // its structure size
+        d.extend(1u16.to_be_bytes()); // sample 1
+        let mut chunk = vec![0u8; 31 + 1];
+        chunk.extend(b"s".iter().chain([0u8; 29].iter()));
+        chunk.extend(256u32.to_be_bytes());
+        chunk.extend([48, 0]);
+        chunk.extend(0u32.to_be_bytes());
+        chunk.extend(256u32.to_be_bytes());
+        chunk.extend([0u8; 6]);
+        assert_eq!(chunk.len(), 82);
+        d.extend(&chunk);
+        d.extend(0u16.to_be_bytes()); // no loop list
+        for v in [0u16, 8, 4] {
+            d.extend(v.to_be_bytes());
+        }
+        let mut cells = vec![[0u8; 4]; 8 * 4];
+        cells[0] = [1, 25, 0, 0];
+        for c in &cells {
+            d.extend(c);
+        }
+        d.extend(0xFFFFu16.to_be_bytes());
+        d.extend(0xFFFFu16.to_be_bytes());
+        d.extend([0u8; 34]);
+        d.extend((0..256).map(|i| (i as i8).wrapping_mul(3) as u8));
+        d
+    }
+
+    #[test]
+    fn version_1_starts_at_the_headers_speed() {
+        // (the Eagleplayer starts at speed 6 whatever the header says; the older versions it
+        // refuses follow the header, as libopenmpt does)
+        for speed in [3u16, 5] {
+            let mut e = Engine::new(48000.0);
+            e.open_replayers = true;
+            e.m.bus.write_log = Some(Vec::new());
+            e.play_data(Path::new("test.stp"), module_v1(speed)).unwrap();
+            let mut out = vec![0f32; 2 * 24000];
+            e.render(&mut out);
+            let log = e.m.bus.write_log.take().unwrap();
+            let vol: Vec<u16> = log.iter().filter(|w| w.0 == 0xDFF0A8).map(|w| w.1 as u16).collect();
+            assert!(vol[..speed as usize].iter().all(|&v| v == 0), "speed {speed}: {vol:?}");
+            assert_eq!(vol[speed as usize], 48, "speed {speed}");
+        }
     }
 
     #[test]

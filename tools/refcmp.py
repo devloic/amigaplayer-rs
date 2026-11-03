@@ -589,10 +589,15 @@ def find_reference(ctx, mod, po, port_short=False):
         tries += [(t + '+player', d, ('--player', variant)) for t, d in dirs]
     fallback = None
     bads = []
+    refused = []   # the preferred (special / verified / named) tries that did not produce a render
     for i, (tag, eagle, extra) in enumerate(tries):
         rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, eagle, extra, fast_cpu=po.get('reference-cpu') == 'fast')
         o = parse_output(rout)
         if not (rw and rplay and o.get('backend') == '68k'):
+            # a preferred try whose player exists in its directory but did not run (crash, refusal) is
+            # worth reporting if a generic search then finds another original
+            if i < first and not (extra and extra[0] == '--player' and not os.path.exists(os.path.join(eagle, extra[1]))):
+                refused.append(f'{tag}: ' + (rlines[-1] if rlines else 'no output')[:90])
             continue
         got = re.sub(r'[^a-z0-9]', '', o.get('format', '').lower())
         cand = dict(kind='engine', wav=rw, data=None, out=rout, led=rled or '', player=f'{tag}: {rplay}', o=o, note='')
@@ -614,6 +619,10 @@ def find_reference(ctx, mod, po, port_short=False):
     fallback = fallback or (bads[0] if bads else None)
     if not fallback:
         return dict(none, note='no original player plays it in the engine')
+    if refused and fallback['player'].split(': ')[0] not in [t for t, _, _ in tries[:first]]:
+        # the original this port is checked against did not run, and another player stands in for it:
+        # its FILTER/DIFF classes are not about the port's original
+        fallback['fallback'] = 'REF-FALLBACK (' + '; '.join(refused) + ')'
     if want in REFUSED_NO_FALLBACK:
         got = re.sub(r'[^a-z0-9]', '', fallback['o'].get('format', '').lower())
         if not (want in got or got in want):
@@ -671,6 +680,8 @@ def process(ctx, f):
         if lr and lp and lr != lp:
             mm.append(f'led-start/switch ref={lr} port={lp}')
         row['cls'] = cls
+        if ref.get('fallback'):
+            mm.append(ref['fallback'])
         row['note'] = ' '.join(mm + ([cut_note] if cut_note else []))
     except Exception as e:  # noqa
         row['note'] = f'{type(e).__name__}: {e}'[:160]
@@ -791,6 +802,12 @@ def main():
         elif not bad_now and bad_then:
             fixed.append(r)
     text = summary(rows)
+    fbs = [r for r in rows if 'REF-FALLBACK' in r['note']]
+    newfb = [r for r in fbs if 'REF-FALLBACK' not in (base.get(r['path']) or {}).get('note', '')]
+    if fbs:
+        text += f'\nreference fallbacks (the original this port is checked against did not run; classes below are against a stand-in): {len(fbs)}\n'
+        for r in fbs:
+            text += f'  FALLBACK {r["cls"]:15s} {r["fmt"]} #{r["id"]} {r["note"][:200]}\n'
     text += f'\n\nvs baseline ({len(base)} files): NEW inconsistencies {len(new)}, FIXED {len(fixed)}, class changed {len(changed)}\n'
     for r in new:
         text += f'  NEW   {r["cls"]:15s} {r["fmt"]} #{r["id"]} {r.get("level_db", "")} dB {r["note"]}\n'
@@ -798,6 +815,8 @@ def main():
         text += f'  FIXED {r["fmt"]} #{r["id"]} now {r["cls"]}\n'
     for r, was in changed:
         text += f'  CHANGED {r["fmt"]} #{r["id"]} {was} -> {r["cls"]}\n'
+    for r in newfb:
+        text += f'  NEW REFERENCE FALLBACK {r["cls"]} {r["fmt"]} #{r["id"]}\n'
     open(os.path.join(a.out, 'summary.txt'), 'w').write(text)
     write_html(os.path.join(a.out, 'report.html'), rows, new, fixed)
     print('\n' + text)
@@ -805,7 +824,7 @@ def main():
         write_tsv(a.baseline, rows)
         print('baseline updated:', a.baseline)
         return 0
-    return 1 if new else 0
+    return 1 if new or newfb else 0
 
 
 if __name__ == '__main__':

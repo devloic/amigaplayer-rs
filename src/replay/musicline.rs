@@ -331,6 +331,15 @@ const PHASE_RESTART: [f64; 4] = [0.0, 0.0, 11.0, 0.0];
 const TAIL: [[u64; 4]; 4] = [[347, 0, 0, 0], [320, 263, 0, 0], [276, 241, 192, 0], [250, 201, 166, 131]];
 const PER_TO_VOL: u64 = 114;
 const VOL_TO_PER: u64 = 58;
+// The writes of the voices that do not restart (measured on the original): from a voice's
+// volume write to the next written voice's period write, by that voice (the last one comes
+// 9 sooner), plus a price for each voice skipped between; from the last volume write to the
+// DMA-off write, by the mask of the voices written, plus a price for each voice that
+// restarts and sets its DMA bit.
+const VOL_TO_NEXT: [u64; 4] = [58, 58, 58, 49];
+const SKIPPED_VOICE: u64 = 35;
+const TAIL_TO_DMA: [u64; 16] = [0, 333, 298, 263, 262, 227, 227, 192, 236, 200, 200, 166, 201, 165, 165, 131];
+const TAIL_ADD: u64 = 14;
 // The tick's entry to its first write (the acknowledge), after the timer's underflow.
 const CALL_TO_ACK: u64 = 50;
 // The DMA routine at a tick's end: DMA off, 90 colour clocks to the low byte of timer B's
@@ -1481,18 +1490,34 @@ impl Musicline {
     }
 
     fn period_volume_play(&mut self, hw: &mut Hw) {
+        let mut prev: Option<usize> = None;
+        let mut written = 0;
         for v in 0..4 {
             if self.voices[v].play & P_RETRIGGER != 0 {
                 continue;
+            }
+            if let Some(p) = prev {
+                hw.wait(VOL_TO_NEXT[v] + SKIPPED_VOICE * (v - p - 1) as u64);
             }
             hw.per(v, self.voices[v].period);
             if !self.voices[v].muted {
                 hw.wait(PER_TO_VOL);
                 hw.vol(v, self.amiga_volume(v));
             }
-            hw.wait(VOL_TO_PER);
+            prev = Some(v);
+            written |= 1 << v;
         }
-        hw.wait(self.tail_extra() as u64);
+        if prev.is_some() {
+            // the voices that restart cost more when their DMA bit is set
+            let mut adds = 0;
+            for v in 0..4 {
+                let x = &self.voices[v];
+                if x.play & P_RETRIGGER != 0 && (x.wave_or_sample == SAMPLE || x.wave_number != x.wave_number_old) {
+                    adds += 1;
+                }
+            }
+            hw.wait(TAIL_TO_DMA[written] + TAIL_ADD * adds);
+        }
     }
 
     /// The time from the last voice's volume write to the DMA routine's first write is

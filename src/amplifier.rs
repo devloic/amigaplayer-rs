@@ -96,7 +96,7 @@ pub enum Poke {
     /// OctaMED SoundStudio's does, play samples that long). Latched like LEN.
     LenBytes(u32),
     Per(u16),
-    /// The period in 1/64 colour clocks, for a player that hands its mixer a pitch finer than
+    /// The period in 1/PER_SUB colour clocks, for a player that hands its mixer a pitch finer than
     /// Paula's whole periods (its log entry is the rounded period).
     PerFine(u32),
     Vol(u16),
@@ -104,7 +104,7 @@ pub enum Poke {
 }
 
 /// Units of a direct voice's period in a colour clock.
-pub const PER_SUB: u32 = 64;
+pub const PER_SUB: u32 = 1024;
 
 /// A virtual voice fed by pokes: Paula's registers and its DMA's position.
 #[derive(Clone, Default)]

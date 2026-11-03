@@ -34,8 +34,11 @@
 //!   interpolation; a 16-bit sample keeps its high byte;
 //! - effect 1 slides the pitch down and 2 up (libxmp's loader maps them the other way round),
 //!   as the Eagleplayer does (measured with synthetic modules on it, plain, fine and extra fine);
-//! - the voice's pitch is not rounded to a whole Paula period (`Hw::voice_per_fine`, 1/64 colour
+//! - the voice's pitch is not rounded to a whole Paula period (`Hw::voice_per_fine`, 1/1024 colour
 //!   clock): the genie's mix steps by the exact pitch, where whole periods were up to 0.1% off;
+//! - the sample rate is a whole number of Hz (rounded down) and a sample's C4 speed acts as the exact
+//!   ratio to 8363 Hz, not cut to a semitone shift and a 1/128 semitone fine tune (both measured
+//!   with synthetic modules on the Eagleplayer: its pitches are multiples of 1 Hz, to 1 ppm);
 //! - a bidirectional loop plays forward only, as the Eagleplayer hands the loop to the NotePlayer
 //!   genie (measured with a ramp sample on the genie);
 //! - a pattern's cell for a channel beyond the module's count is read and dropped,
@@ -155,6 +158,8 @@ struct Smp {
     vol: u8,
     xpo: i32,
     fin: i32,
+    /// The C4 speed over the semitone shift and fine tune it was cut to (1 for 8363 Hz).
+    corr: f64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -397,7 +402,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             (lps, lpe, looped) = (0, 0, false);
         }
         let (xpo, fin) = c2spd_to_note(c4spd);
-        let mut s = Smp { usable: false, addr: 0, end: 0, loop_start: 0, loop_len: 0, vol: d[o + 13].min(64), xpo, fin };
+        let corr = if c4spd == 0 { 1.0 } else { c4spd as f64 / 8363.0 / 2f64.powf((xpo * 128 + fin) as f64 / 1536.0) };
+        let mut s = Smp { usable: false, addr: 0, end: 0, loop_start: 0, loop_len: 0, vol: d[o + 13].min(64), xpo, fin, corr };
         if typ & 3 == 1 && len > 0 && len <= 16 << 20 {
             // byte-wise deltas; a short file ends the sample in zeros
             let bytes = len * if wide { 2 } else { 1 };
@@ -1129,7 +1135,11 @@ impl Ptm {
             bend += 12800 * arp;
         }
         let fin = PERIOD_BASE / 2f64.powf((xc.note as f64 + bend as f64 / 12800.0) / 12.0);
-        let per = (fin * PAULA_PAL / (428.0 * 8363.0) * PER_SUB as f64).round().clamp(PER_SUB as f64, 65535.0 * PER_SUB as f64) as i32;
+        // the sample rate in whole Hz (C4 at 8363 Hz for the period 428), rounded down, as the
+        // Eagleplayer hands it to the genie, with the C4 speed's exact ratio (not cut to 1/128
+        // semitones); the voice's period is the clock over that rate
+        let rate = (428.0 * 8363.0 / fin * self.smps[xc.smp].corr).floor().max(1.0);
+        let per = (PAULA_PAL / rate * PER_SUB as f64).round().clamp(PER_SUB as f64, 65535.0 * PER_SUB as f64) as i32;
         Some((per, out_vol))
     }
 

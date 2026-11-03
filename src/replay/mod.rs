@@ -416,7 +416,7 @@ impl Hw<'_> {
     pub fn voice_per(&mut self, v: usize, period: u16) {
         self.bus.amp_poke(v, Poke::Per(period));
     }
-    /// The period in 1/64 colour clocks (`amplifier::PER_SUB`).
+    /// The period in 1/PER_SUB colour clocks (`amplifier::PER_SUB`).
     pub fn voice_per_fine(&mut self, v: usize, period: u32) {
         self.bus.amp_poke(v, Poke::PerFine(period));
     }

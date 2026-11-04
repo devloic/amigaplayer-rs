@@ -22,6 +22,7 @@ pub mod beathoven;
 pub mod cinemaware;
 mod beathoven_tables;
 pub mod davelowe;
+mod davelowe_cpu;
 mod davelowe_gaps;
 mod davelowe_tables;
 pub mod davidwhittaker;
@@ -257,6 +258,7 @@ pub const REPLAYERS: &[Open] = &[
     ptm::OPEN,
     richardjoseph::OPEN,
     sonix::OPEN,
+    davelowe_cpu::OPEN,
     davelowe::OPEN_DL,
     davelowe::OPEN_DLN,
     jesperolsen::OPEN,

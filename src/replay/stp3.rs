@@ -53,10 +53,20 @@
 //! - The start: the song is set up in a time that depends on the order list and the samples it
 //!   uses (`init_clocks`; the player scans the orders to find the samples in use), which moves the
 //!   output sample grid relative to the first writes.
-//! - Left out: a channel that reads past the end of the module (a length of 0 is 65536 words, and
-//!   the original reads its own memory there), an arpeggio or slide on a channel that never had a
-//!   note (the original's period is then whatever its memory held), `0F00`/`0F` with a fraction
-//!   and no speed, and `14` jumps to the row it is on.
+//! - Notes the runs showed for commands on channels in a state the usual songs never reach (all
+//!   checked tick for tick on small modules against the Eagleplayer): `14` jumps to the order it
+//!   names and never ends the song by itself (a jump back or to the order it is in plays on for
+//!   good; only an order past the list wraps and ends); a slide up (`01`) on a channel that never
+//!   had a note stops at 113 on the first tick after the row; a fine slide (`4E`) below 0 is kept
+//!   in 16 bits (the row's own write shows the low 12); a tone portamento (`13xx`, xx not 0)
+//!   without a note starts the channel's sample again at the period 3424 (no table entry); a note
+//!   on a channel that never had a sample points at address 0 and writes the length twice; a row
+//!   with only a sample number counts as busy for the row after it.
+//! - Left out, accepted gaps: a channel that reads past the end of the module (a length of 0 is 65536
+//!   words, and a sample not looping that is played past its end: the original reads its own memory
+//!   there, which is not in the register-write logs), the first-row period of `0F03` and `0F00`
+//!   (a fraction and no speed), and a few writes of a tone portamento to a note (`13xx` with a
+//!   note) that are 4 or 5 clocks off late in a pattern.
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -420,7 +430,6 @@ struct Stp3 {
     break_row: Option<usize>,
     jump: Option<usize>,
     songend: bool,
-    visited: Vec<bool>,
     ch: [Chan; 4],
 }
 
@@ -443,8 +452,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         }
     }
     m.bus.clock = t0 + init + 310;
-    let mut visited = vec![false; song.orders.len()];
-    visited[0] = true;
     // (the Eagleplayer starts every file it takes at speed 6 and 50 Hz, whatever the header says;
     // the older versions it refuses start at the header's speed, fraction and tempo, as libopenmpt has them)
     let (speed, frac, tempo_timer) = if song.version < 2 && song.head_speed != 0 {
@@ -465,7 +472,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         break_row: None,
         jump: None,
         songend: false,
-        visited,
         ch: [Chan::default(); 4],
     }))
 }
@@ -526,7 +532,8 @@ impl Stp3 {
         let s = self.sample(self.ch[i].smp);
         let words = s.loop_len / 2;
         let c = &mut self.ch[i];
-        c.loop_loc = self.base.wrapping_add(s.off).wrapping_add(s.loop_start);
+        // (a channel that never had a sample points at address 0)
+        c.loop_loc = if c.smp == 0 { 0 } else { self.base.wrapping_add(s.off).wrapping_add(s.loop_start) };
         c.loop_words = if words > 1 { words.min(0xFFFF) as u16 } else { 0 };
     }
 
@@ -572,8 +579,11 @@ impl Stp3 {
                 c.auto_vol = 0;
                 self.set_loop(i);
             }
-            let tone = cell.cmd == 0x13 && cell.param != 0;
-            let note_period = Self::period_of(cell.note);
+            // (a tone portamento without a note does not glide: it starts the channel's sample again at
+            // 3424, a period that is no table entry, as the runs show it)
+            let stale = cell.cmd == 0x13 && cell.param != 0 && cell.note == 0;
+            let tone = cell.cmd == 0x13 && cell.param != 0 && !stale;
+            let note_period = if stale { Some(3424) } else { Self::period_of(cell.note) };
             // (a note delay never starts the note in the Eagleplayer: the period is set and the
             // channel goes on with what it was playing)
             let delayed = cell.cmd == 0x21 && cell.param != 0 && note_period.is_some();
@@ -633,6 +643,10 @@ impl Stp3 {
                 }
                 if cell.cmd == 0x13 {
                     off_adj = -9;
+                    if stale {
+                        // (the portamento without a note looks the table up before it starts the note)
+                        off_adj += if prev_fresh && c.smp != 0 { -185 } else { 19 };
+                    }
                 }
                 if cell.cmd == 0x49 && cell.param != 0 {
                     let o = cell.param as u32 * 256;
@@ -646,6 +660,13 @@ impl Stp3 {
                         len_gap = 149;
                     }
                 }
+                // (a note on a channel that never had a sample: the player gets to the DMA off sooner,
+                // writes the length twice and points at address 0)
+                let nosmp = c.smp == 0;
+                if nosmp {
+                    off_adj -= 206;
+                    len_gap = 149;
+                }
                 hw.wait((off_adj + if !prev_fresh {
                     [477, 475, 503][kind]
                 } else if i == 0 {
@@ -657,8 +678,15 @@ impl Stp3 {
                 hw.wait(len_gap);
                 hw.len(i, words.min(0xFFFF) as u16);
                 hw.wait(91);
-                hw.loc(i, self.base.wrapping_add(s.off).wrapping_add(skip));
-                hw.wait(105);
+                if nosmp {
+                    hw.loc(i, 0);
+                    hw.wait(133);
+                    hw.len(i, 0);
+                    hw.wait(93);
+                } else {
+                    hw.loc(i, self.base.wrapping_add(s.off).wrapping_add(skip));
+                    hw.wait(105);
+                }
                 c.period = np;
                 c.note = cell.note;
                 c.vib_pos = 0;
@@ -669,7 +697,8 @@ impl Stp3 {
                 hw.wait((235 + delta) as u64);
                 if !immediate {
                     self.fine_slide(i, cell);
-                    hw.per(i, self.ch[i].period as u16);
+                    let p = self.ch[i].period;
+                    hw.per(i, (if cell.cmd == 0x4E { p & 0xFFF } else { p }) as u16);
                 }
             } else {
                 // a sample number without a note sets the sample up (and the volume) at once
@@ -682,7 +711,8 @@ impl Stp3 {
                 }
                 if !immediate {
                     self.fine_slide(i, cell);
-                    hw.per(i, self.ch[i].period as u16);
+                    let p = self.ch[i].period;
+                    hw.per(i, (if cell.cmd == 0x4E { p & 0xFFF } else { p }) as u16);
                 }
             }
             // the command
@@ -694,9 +724,12 @@ impl Stp3 {
                 }
                 c.cmd = cell.cmd;
                 c.param = cell.param;
-                c.fresh = starts || has_cmd;
+                c.fresh = starts || has_cmd || cell.inst != 0;
             }
-            self.row_command(i, cell, note_period, tone);
+            self.row_command(i, cell, if stale { None } else { note_period }, tone);
+            if stale {
+                self.ch[i].tp_active = false;
+            }
             let c = &self.ch[i];
             hw.wait([219, 231, 242, 242][i]);
             vol(hw, i, c.vol.clamp(0, 64) as u16);
@@ -719,8 +752,11 @@ impl Stp3 {
         if cell.cmd == 0x4E {
             let c = &mut self.ch[i];
             match cell.param >> 4 {
-                0x1 => c.period = (c.period - (cell.param & 15) as i32) & 0xFFF,
-                0x2 => c.period = (c.period + (cell.param & 15) as i32) & 0xFFF,
+                // (kept in 16 bits: the row's own write shows the low 12, the writes after it the whole
+                // value, which only matters when the period was below the slide, as on a channel that
+                // never had a note)
+                0x1 => c.period = (c.period - (cell.param & 15) as i32) & 0xFFFF,
+                0x2 => c.period = (c.period + (cell.param & 15) as i32) & 0xFFFF,
                 _ => {}
             }
         }
@@ -797,10 +833,7 @@ impl Stp3 {
             if o >= self.song.orders.len() {
                 o = 0;
                 self.songend = true;
-            } else if self.visited[o] {
-                self.songend = true;
             }
-            self.visited[o] = true;
             self.pos = o;
         }
         let rows = self.song.pattern(self.pos).map_or(self.song.pat_len, |p| p.rows);
@@ -834,6 +867,13 @@ impl Stp3 {
                 0x01 => {
                     pre_d = 15;
                     vol_d = -27;
+                    if k == 1 && c.period < 113 {
+                        // (a channel that never had a note, period 0: the first tick after the row
+                        // already stops it at 113, as the runs show it)
+                        c.period = 113;
+                        pre_d += 20;
+                        out = c.period;
+                    }
                     if k >= 2 {
                         // (the period wraps in 12 bits and stops at 113 from above)
                         c.period = (c.period - c.param as i32) & 0xFFF;

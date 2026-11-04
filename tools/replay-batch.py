@@ -2,7 +2,7 @@
 
     python3 -I tools/replay-batch.py --player 'SIDMon 2.0' --format SidMon2 \
         --out DIR [--seconds 20] [--bin target/release/amigaplayer-rs] [--in-place]
-        [--tick-gap CLOCKS] [--eagleplayers DIR] LIST
+        [--tick-gap CLOCKS] [--eagleplayers DIR] [--no-isolate] LIST
 
 LIST has one module path per line (a missing file is also looked for as
 PATH.xz). Modules are copied into DIR, except with --in-place, where one found
@@ -14,8 +14,11 @@ replayer or the built-in ProTracker can play it and the 68k player never stands
 in for the port; its "playing" line must show exactly [FORMAT], case
 included), and the write logs are compared with replay-cmp.py. Prints how
 many are identical, differ (with the first line of the comparison), or were
-refused by either side (--tick-gap goes to replay-cmp.py). The logs, renders
-and modules stay in DIR.
+refused by either side (--tick-gap goes to replay-cmp.py). By default both runs are
+isolated as in refcmp.py: HOME and every player directory empty, the reference given
+EP206's Eagleplayers (--eagleplayers overrides; --no-isolate restores the old
+behaviour of inheriting the shell environment and ~/.config/deliplayer). The logs,
+renders and modules stay in DIR.
 """
 import argparse, hashlib, lzma, os, subprocess, sys
 
@@ -29,10 +32,15 @@ ap.add_argument('--bin', default=os.path.join(HERE, '..', 'target', 'release', '
 ap.add_argument('--in-place', action='store_true')
 ap.add_argument('--tick-gap')
 ap.add_argument('--eagleplayers', help='Eagleplayer directory for the reference run (the port runs with none)')
+ap.add_argument('--no-isolate', action='store_true',
+                help='keep the shell environment and ~/.config/deliplayer (default: isolated like refcmp.py)')
 ap.add_argument('list')
 a = ap.parse_args()
 os.makedirs(a.out, exist_ok=True)
 
+EP206 = '/media/lolo/kingston2tb/claude-scratch/deliplayerrust/eplicense/x/Eagleplayer_2.06/Eagleplayers'
+if not a.no_isolate and not a.eagleplayers and os.path.isdir(EP206):
+    a.eagleplayers = EP206   # as refcmp.py: the reference is EP206's player, never a config-dir one
 empty = os.path.abspath(os.path.join(a.out, '.empty'))
 os.makedirs(empty, exist_ok=True)
 seen, res = set(), {}
@@ -57,6 +65,10 @@ for p in (l.strip() for l in open(a.list)):
 
     def run(tag, extra):
         env = dict(os.environ, DELI_WRITE_LOG=f'{out}.{tag}.log', SDL_AUDIO_DRIVER='dummy')
+        if not a.no_isolate:
+            # as refcmp.py: no player directory from the environment or ~/.config/deliplayer
+            env.update(HOME=empty, DELIPLAYERS=empty, DELIGENIES=empty, EAGLEPLAYERS=empty)
+            env.pop('XDG_CONFIG_HOME', None)
         if tag == 'port':
             # no 68k player can load: the reference must not stand in for the port
             env.update(DELIPLAYERS=empty, EAGLEPLAYERS=empty, DELIGENIES=empty)

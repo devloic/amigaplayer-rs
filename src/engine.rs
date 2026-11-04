@@ -976,6 +976,9 @@ impl Engine {
                         a.all_off();
                     }
                     r.set_subsong(n as u16, &mut crate::replay::Hw { bus: &mut self.m.bus });
+                    if let Some(t) = r.subsong_tick_at() {
+                        self.next_timer = Some(t);
+                    }
                     crate::amplifier::restart(&mut self.m.bus);
                     (*sub, *frames) = (n as u16, 0);
                     self.song_starts();

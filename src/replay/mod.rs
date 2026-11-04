@@ -138,6 +138,11 @@ pub trait Replayer: Send {
     fn next_tick_at(&self) -> Option<u64> {
         None
     }
+    /// The time (colour clocks, absolute) of the first tick after `set_subsong`, when the
+    /// original's change of subsong takes time before its timer runs again.
+    fn subsong_tick_at(&mut self) -> Option<u64> {
+        None
+    }
     /// The music comes from a PC tracker: the output stage is the PC one (no Amiga filters),
     /// as for the 68k players of PC formats.
     fn pc_music(&self) -> bool {

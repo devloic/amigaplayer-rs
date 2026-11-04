@@ -17,9 +17,11 @@
 //! are read where the specification says they are, and the per-game differences of
 //! the routine are a table (`davelowe_tables.rs`) and a few special cases.
 
-use super::davelowe_tables::{PATCHES, ROWS};
+use super::davelowe_gaps::{DL_GAP_SETS, START_SHIFT};
+use super::davelowe_tables::{DL_INIT_COST, PATCHES, ROWS};
 use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
 use crate::machine::Machine;
+use m68k::AddressBus;
 
 pub const OPEN_DL: Open = Open { name: "Dave Lowe", detect: detect_dl, new: new_dl };
 pub const OPEN_DLN: Open = Open { name: "Dave Lowe New", detect: detect_dln, new: new_dln };
@@ -248,6 +250,11 @@ pub struct DaveLowe {
     /// that is the first with the longest order list.
     fill: i64,
     special_voice: usize,
+    /// The `dl` driver's write spacing inside a tick.
+    /// (later ticks, the first tick: its start gaps are the first note's set-up).
+    gaps: Option<(WriteGaps, WriteGaps)>,
+    /// The `dl` build's DMA start writes carry the master enable bit.
+    dma_master: bool,
 }
 
 fn rows_key(d: &[u8], n: usize) -> Cfg {
@@ -355,13 +362,247 @@ fn new_dl(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     let mut s = DaveLowe::build(img, mem, cfg, title, subs, fades, special);
     s.patched = patched;
-    m.bus.clock += DL_INIT_CLOCKS;
+    let start_t = if older {
+        DL_OLDER_T
+    } else {
+        let h = &d[32..];
+        DlStart::of(h, (n as u32, be32(h, 12), be32(h, 16), be32(h, 20))).t()
+    };
+    // the write spacing of this build; a module of another build takes Line of Fire's
+    let key = if older { (n as u32, 0, 0, 0) } else { (n as u32, be32(&d[32..], 12), be32(&d[32..], 16), be32(&d[32..], 20)) };
+    let set = DL_GAP_SETS.iter().find(|g| g.key == key).or_else(|| dl_gap_fallback(d, key));
+    s.dma_master = set.is_some_and(|g| g.master);
+    s.gaps = set.map(|g| (WriteGaps::new(g.pairs, g.any, g.start), WriteGaps::new(g.pairs, g.any, g.first)));
+    let origin = m.bus.clock;
+    if older {
+        // the older Eagleplayer starts its chain two aligned frames late; the init writes the four
+        // volumes and switches DMA off
+        let chain = origin + DL_OLDER_SHIFT;
+        for (i, ch) in [0xA8u32, 0xB8, 0xC8, 0xD8].into_iter().enumerate() {
+            m.bus.clock = chain + 669 + 6 * i as u64;
+            m.bus.write_word(0xDFF000 + ch, 0);
+        }
+        m.bus.clock = chain + 669 + 24 + 2;
+        m.bus.write_word(0xDFF096, 0x000F);
+        m.bus.clock = chain + start_t - DL_START_PHASE;
+        return Some(Box::new(s));
+    }
+    let h = &d[32..];
+    let st = DlStart::of(h, (n as u32, be32(h, 12), be32(h, 16), be32(h, 20)));
+    if let Some(b) = st.burst() {
+        dl_reset_burst(m, origin + b, st.m == 5648);
+    }
+    m.bus.clock = origin + start_t - DL_START_PHASE;
     Some(Box::new(s))
 }
 
-/// Colour clocks the original's init routine runs before the host starts its timer, beyond the
-/// one period (measured in the reference runs).
-const DL_INIT_CLOCKS: u64 = 21093;
+/// The write spacing of a build not in the table: that of a measured build whose init routine costs
+/// the same (the same driver build), else Line of Fire's.
+fn dl_gap_fallback(d: &[u8], key: (u32, u32, u32, u32)) -> Option<&'static super::davelowe_gaps::GapSet> {
+    let cost = |k: (u32, u32, u32, u32)| DL_INIT_COST.iter().find(|c| (c.0, c.1, c.2, c.3) == k).map(|c| c.4);
+    let m = DlStart::of(&d[32..], key).m;
+    DL_GAP_SETS
+        .iter()
+        .find(|g| g.key.1 != 0 && cost(g.key) == Some(m as u32))
+        .or_else(|| DL_GAP_SETS.iter().find(|g| g.key.0 == 14024))
+}
+
+/// `T` of the two `older` files (the check call, the chain of back-to-back calls ending in the
+/// state-clearing loop): 4083 and 4082 measured.
+const DL_OLDER_T: u64 = 4083;
+
+/// The older Eagleplayer's start-up chain begins this many colour clocks after the frame-aligned
+/// start (two aligned 5-frame periods).
+const DL_OLDER_SHIFT: u64 = 710510;
+
+/// The module's init resets Paula: DMA off, the four channels' address, length 16, volume 0 and period 1
+/// (21 writes). The writes of the channels' registers go 18 colour clocks apart (16 in the build of
+/// the Games pole and rings), the lengths, volumes and periods 10 apart.
+fn dl_reset_burst(m: &mut Machine, at: u64, tight: bool) {
+    let step = if tight { 16 } else { 18 };
+    m.bus.clock = at;
+    m.bus.write_word(0xDFF096, 0x000F);
+    for c in 0..4u32 {
+        m.bus.clock = at + step * (c as u64 + 1);
+        m.bus.write_word(0xDFF0A0 + 16 * c, 0);
+        m.bus.write_word(0xDFF0A2 + 16 * c, 0);
+    }
+    let mut t = at + 4 * step;
+    for reg in [0xA4u32, 0xA8, 0xA6] {
+        for c in 0..4u32 {
+            t += 10;
+            m.bus.clock = t;
+            m.bus.write_word(0xDFF000 + reg + 16 * c, if reg == 0xA4 { 16 } else if reg == 0xA6 { 1 } else { 0 });
+        }
+    }
+}
+
+/// The reference's logs start 100 colour clocks after the origin its start-up work counts from.
+const DL_START_PHASE: u64 = 100;
+
+/// The 68000 cycles of the original's start-up work for a `dl` module, split as the reference runs
+/// it: the player-init call and the song-init call, and the quantities of the module they depend on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DlStart {
+    steps: u64,
+    subs: u64,
+    bra: u64,
+    zterm: u64,
+    list_words: u64,
+    longer_lists: u64,
+    midwinter: bool,
+    timescanner: bool,
+    init_player: bool,
+    no_table: bool,
+    /// The module's own init routine (cycles) and the module's sample fix-up routine (cycles).
+    m: u64,
+    x: u64,
+}
+
+impl DlStart {
+    /// Reads the quantities of the start-up work from the hunk image `h` (file offset 32 on).
+    fn of(h: &[u8], key: (u32, u32, u32, u32)) -> DlStart {
+        let mut s = DlStart::default();
+        // the volume-write search: 380 bytes into the play routine, a window at every even position
+        // until the store of a word to displacement 8 of the channel block
+        let play = be32(h, 16) as usize;
+        let mut p = play + 380;
+        let mut found = false;
+        while p + 4 <= h.len() {
+            s.steps += 1;
+            if be16(h, p) == 0x3540 && be16(h, p + 2) == 8 {
+                found = true;
+                break;
+            }
+            p += 2;
+        }
+        s.bra = (found && be16(h, p + 4) == 0x6000) as u64;
+        let table = be32(h, 44) as usize;
+        s.no_table = table == 0;
+        if !s.no_table {
+            s.subs = 1;
+            let mut i = 1;
+            loop {
+                let e = table + 16 * i;
+                let v = be32(h, e);
+                if e + 4 > h.len() || v < 256 {
+                    s.zterm = (e + 4 <= h.len() && v == 0) as u64;
+                    break;
+                }
+                s.subs += 1;
+                i += 1;
+            }
+            let (l, u) = Self::lists(h, table);
+            s.list_words = l;
+            s.longer_lists = u;
+        }
+        s.midwinter = be32(h, 60) == 77554 && s.subs == 17;
+        s.timescanner = be32(h, 76) == 38;
+        s.init_player = be32(h, 40) != 0;
+        s.m = 5664;
+        if let Some(c) = DL_INIT_COST.iter().find(|c| (c.0, c.1, c.2, c.3) == key) {
+            s.m = c.4 as u64;
+            s.x = c.5 as u64;
+        }
+        s
+    }
+
+    /// `L` and `U` of the subsong table entry at `e`: the words of its four order lists up to and
+    /// including the terminator, and how many of the voices' lists are as long as the longest so far.
+    fn lists(h: &[u8], e: usize) -> (u64, u64) {
+        let (mut l, mut u, mut best) = (0, 0, 0);
+        for c in 0..4 {
+            let mut q = be32(h, e + 4 * c) as usize;
+            let mut n = 1;
+            while q + 4 <= h.len() && be32(h, q) != 0 {
+                n += 1;
+                q += 4;
+            }
+            l += n;
+            if n >= best {
+                u += 1;
+                best = n;
+            }
+        }
+        (l, u)
+    }
+
+    fn c_player_init(&self) -> u64 {
+        let mut c = 1191 + 76 * self.steps + 72 * self.subs + 20 * self.bra - 25 * self.zterm;
+        if self.subs == 0 {
+            c -= 2;
+        }
+        if self.midwinter {
+            c += 395;
+        }
+        if self.init_player {
+            c += self.x + 20;
+        }
+        c
+    }
+
+    fn c_song_init(&self) -> u64 {
+        let mut c = 1605 + 29 * self.list_words + 16 * self.longer_lists + 37 * self.timescanner as u64 + self.m;
+        if self.no_table {
+            c -= 290;
+        }
+        c
+    }
+
+    /// Colour clocks from the frame-aligned start to the end of the start-up work: the check call and
+    /// the four small calls (392), the player-init call (it contains host calls: ceil(cycles / 2) - 1
+    /// colour clocks) and the song-init call (floor(cycles / 2)).
+    /// Colour clocks from the start to the module's Paula reset (SPEC section 6); none for the builds
+    /// whose init does not reset.
+    fn burst(&self) -> Option<u64> {
+        let p = match self.m {
+            5400 | 5420 | 5648 | 5664 => 20,
+            6081 => 71,
+            6009 | 6113 => 73,
+            6095 | 5876 | 4213 => 74,
+            _ => return None,
+        };
+        let eagle = self.c_song_init() - self.m;
+        Some(392 + self.c_player_init().div_ceil(2) - 1 + eagle / 2 + p)
+    }
+
+    fn t(&self) -> u64 {
+        392 + self.c_player_init().div_ceil(2) - 1 + self.c_song_init() / 2
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    /// `T` of every corpus file against the specification's table (skipped without the corpus).
+    #[test]
+    fn dl_start_matches_table() {
+        let dir = "/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/davelowe/mods/dl/";
+        let Ok(tsv) = std::fs::read_to_string("/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/dl/logs/T_components.tsv") else { return };
+        let mut n = 0;
+        for l in tsv.lines().skip(1) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let Ok(d) = std::fs::read(format!("{dir}dl.{}", f[0])) else { continue };
+            let h = &d[32..];
+            let s = DlStart::of(h, (be32(&d, 28), be32(h, 12), be32(h, 16), be32(h, 20)));
+            let col = |name: &str| -> u64 {
+                let i = tsv.lines().next().unwrap().split('\t').position(|c| c == name).unwrap();
+                f[i].parse().unwrap_or(0)
+            };
+            assert_eq!(s.steps, col("steps"), "{} steps", f[0]);
+            assert_eq!(s.subs, col("subsongs"), "{} subs", f[0]);
+            assert_eq!(s.zterm, col("zero_term"), "{} zterm", f[0]);
+            assert_eq!(s.list_words, col("L"), "{} L", f[0]);
+            assert_eq!(s.longer_lists, col("U"), "{} U", f[0]);
+            assert_eq!(s.bra, col("vol_patch_follows"), "{} bra", f[0]);
+            assert_eq!(s.m, col("M_cycles"), "{} M", f[0]);
+            assert_eq!(s.t(), col("T_true"), "{} T", f[0]);
+            n += 1;
+        }
+        eprintln!("checked {n} files");
+    }
+}
 
 /// The same for layout A, with the write timing model: with `DLN_REF_START` the start constant
 /// equals the reference's for the Beneath a Steel Sky song `ingame_02`, which puts every write on
@@ -787,6 +1028,8 @@ impl DaveLowe {
             last_vol: None,
             fill: 0,
             special_voice: 0,
+            gaps: None,
+            dma_master: false,
         };
         s.start(1);
         s
@@ -893,7 +1136,9 @@ impl DaveLowe {
         }
         self.tw(hw, self.tt);
         let bit = 1u16 << self.v[vi].ch;
-        hw.dmacon(if on { 0x8000 | bit } else { bit });
+        // (the original's DMA start also sets the master enable bit)
+        let master = if self.cfg.kind == Kind::Dl && self.dma_master { 0x0200 } else { 0 };
+        hw.dmacon(if on { 0x8000 | master | bit } else { bit });
         if self.cfg.kind == Kind::DlnB {
             // the enable follows 10 colour clocks later and delays all that comes after
             hw.bus.clock += 10;
@@ -1353,56 +1598,6 @@ impl DaveLowe {
 /// in the reference runs).
 const TIMER_DELAY: u64 = 565;
 
-/// Where the writes of a tick fall in the original's run (Line of Fire), by the previous write: a
-/// voice's work between two writes takes this long. The tick's first write sits at its start plus
-/// the `start` gap (shifted by 141 colour clocks, which `timer_delay` takes off again).
-static DL_GAPS: WriteGaps = WriteGaps::new(
-    &[
-        (0, 4, 10), // LOC0 -> LEN0 x87
-        (1, 5, 10), // LOC1 -> LEN1 x73
-        (2, 6, 10), // LOC2 -> LEN2 x135
-        (3, 7, 10), // LOC3 -> LEN3 x23
-        (4, 12, 257), // LEN0 -> VOL0 x43
-        (4, 20, 83), // LEN0 -> DMA_ON x44
-        (5, 13, 270), // LEN1 -> VOL1 x36
-        (5, 20, 98), // LEN1 -> DMA_ON x37
-        (6, 14, 269), // LEN2 -> VOL2 x67
-        (6, 20, 113), // LEN2 -> DMA_ON x68
-        (7, 15, 307), // LEN3 -> VOL3 x11
-        (7, 20, 118), // LEN3 -> DMA_ON x12
-        (8, 0, 185), // PER0 -> LOC0 x44
-        (9, 1, 200), // PER1 -> LOC1 x37
-        (10, 2, 215), // PER2 -> LOC2 x68
-        (11, 3, 228), // PER3 -> LOC3 x12
-        (11, 15, 317), // PER3 -> VOL3 x183
-        (12, 1, 235), // VOL0 -> LOC1 x36
-        (12, 9, 247), // VOL0 -> PER1 x37
-        (12, 12, 193), // VOL0 -> VOL0 x4
-        (12, 13, 475), // VOL0 -> VOL1 x374
-        (12, 16, 231), // VOL0 -> DMA_OFF x50
-        (13, 2, 250), // VOL1 -> LOC2 x67
-        (13, 10, 263), // VOL1 -> PER2 x68
-        (13, 13, 201), // VOL1 -> VOL1 x13
-        (13, 14, 494), // VOL1 -> VOL2 x295
-        (13, 16, 246), // VOL1 -> DMA_OFF x67
-        (14, 3, 265), // VOL2 -> LOC3 x11
-        (14, 11, 414), // VOL2 -> PER3 x191
-        (14, 15, 559), // VOL2 -> VOL3 x284
-        (14, 16, 262), // VOL2 -> DMA_OFF x11
-        (16, 11, 177), // DMA_OFF -> PER3 x4
-        (16, 12, 249), // DMA_OFF -> VOL0 x48
-        (16, 13, 257), // DMA_OFF -> VOL1 x50
-        (16, 14, 261), // DMA_OFF -> VOL2 x67
-        (16, 15, 311), // DMA_OFF -> VOL3 x7
-        (20, 12, 188), // DMA_ON -> VOL0 x44
-        (20, 13, 201), // DMA_ON -> VOL1 x37
-        (20, 14, 205), // DMA_ON -> VOL2 x68
-        (20, 15, 214), // DMA_ON -> VOL3 x12
-    ],
-    &[(0, 185), (1, 200), (2, 216), (3, 228), (4, 10), (5, 10), (6, 10), (7, 10), (9, 247), (10, 263), (11, 414), (12, 249), (13, 475), (14, 494), (15, 523), (16, 246), (20, 98)],
-    &[(0, 4), (8, 179), (12, 236), (16, 0)],
-);
-
 /// Layout A: the part of `TIMER_DELAY` the write model takes into its own start offsets.
 const DLNA_TIMER_SHIFT: u64 = 565;
 
@@ -1489,9 +1684,9 @@ impl Replayer for DaveLowe {
         // the write-spacing models' start gaps are shifted so that none is negative
         TIMER_DELAY
             - match self.cfg.kind {
-                Kind::Dl => 141,
+                Kind::Dl => 141 + START_SHIFT,
                 Kind::DlnA | Kind::DlnB => DLNA_TIMER_SHIFT,
-                _ => 0,
+                Kind::Older => START_SHIFT,
             }
     }
 
@@ -1527,8 +1722,12 @@ impl Replayer for DaveLowe {
             }
         }
         match self.cfg.kind {
-            Kind::Dl => hw.gaps(&DL_GAPS),
-            Kind::DlnA | Kind::DlnB | Kind::Older => {}
+            Kind::Dl | Kind::Older => {
+                if let Some(g) = &self.gaps {
+                    hw.gaps(if self.tickno == 1 { &g.1 } else { &g.0 });
+                }
+            }
+            Kind::DlnA | Kind::DlnB => {}
         }
         let first = self.tickno == 1;
         self.base = hw.bus.clock;
@@ -1673,7 +1872,9 @@ mod tests {
         let mut out = vec![0f32; 2 * (960 * ticks + 100)];
         e.render(&mut out);
         let end = e.songend();
-        (format, end, e.m.bus.write_log.take().unwrap())
+        // (without the start-up writes: the `dl` flavour's reset burst, the older files' init)
+        let log = e.m.bus.write_log.take().unwrap().into_iter().filter(|w| w.2 >= 60000).collect();
+        (format, end, log)
     }
 
     fn reg(log: &[(u32, u16, u64)], a: u32) -> Vec<u16> {
@@ -1767,7 +1968,7 @@ mod tests {
         }
         assert!(detect_dl(&d));
         let (_, _, log) = play(d, 2);
-        let a: Vec<u32> = log.iter().map(|w| w.0).filter(|a| (0xDFF0A0..0xDFF0B0).contains(a) || *a == 0xDFF096).take(6).collect();
+        let a: Vec<u32> = log.iter().filter(|w| w.2 > DL_OLDER_SHIFT + 1000).map(|w| w.0).filter(|a| (0xDFF0A0..0xDFF0B0).contains(a) || *a == 0xDFF096).take(6).collect();
         assert_eq!(a, [0xDFF0A0, 0xDFF0A2, 0xDFF0A4, 0xDFF0A6, 0xDFF0A8, 0xDFF096]);
     }
 

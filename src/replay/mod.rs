@@ -22,6 +22,7 @@ pub mod beathoven;
 pub mod cinemaware;
 mod beathoven_tables;
 pub mod davelowe;
+mod davelowe_gaps;
 mod davelowe_tables;
 pub mod davidwhittaker;
 pub mod digibooster;

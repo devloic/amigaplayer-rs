@@ -483,7 +483,10 @@ DELI_REF = {'amosmusicbank': 'AmosMusicBank'}
 # the engine's detection that is the engine's own library tables (A-line stubs), noise the port
 # cannot and should not play; with the player named, nothing lies there. Seen in SIDMon 2.0
 # (3 of 10 files) and SCUMM (3 of 10).
-FORCED_PLAYER = {'sidmon20': 'SIDMon 2.0', 'scumm': 'SCUMM_Player'}
+# Sonic Arranger: EP206's SonicArranger (V4.11) takes only "SOARV1.0" modules; the Lionheart-format
+# ones (sa.drachenflug.SA, ...) are played by UADE's player, which names itself "Sonic Arranger"
+# (file SonicArranger, prefixes sa/sonic/sa-p/lion/sa_old) and is the original for them.
+FORCED_PLAYER = {'sidmon20': 'SIDMon 2.0', 'scumm': 'SCUMM_Player', 'sonicarranger': 'Sonic Arranger'}
 
 
 # Formats no Amiga player plays (README: HVL is checked against the C replayer only): whatever

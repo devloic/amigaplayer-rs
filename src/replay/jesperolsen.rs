@@ -32,125 +32,20 @@ const PERIODS: [u16; 96] = [
     339, 320, 302, 285, 269, 254, 240, 226, 214, 202, 190, 180, 170, 160, 151, 143, 135, 127, 120, 0,
 ];
 
-/// Extra time of a 0x7FFE jump over the word it lands on (the table gives 117.2 against 103.2).
-/// Cycle costs of the events of a tick (68000 cycles; see `Ab::cyc`), measured from the reference's write logs.
-const COST: [u32; 46] = [
-    250, // START
-    140, // AFTER_OFF
-    61, // EMPTY
-    148, // END
-    490, // END_TRACK
-    82, // END_TRACK_POST
-    40, // JUMP_TRK
-    53, // PARAM_WORD
-    10, // SP_7E
-    38, // SP_7F
-    490, // NOTRIG
-    747, // TRIG_SKIP
-    793, // TRIG_NODMA
-    206, // TRIG_AFTER
-    784, // TRIG_PLAIN
-    75, // REP_END
-    42, // REP_CONT
-    1, // WROTE
-    127, // SILENT
-    46, // CARRY
-    16, // REC2
-    74, // WAVE_FIRST
-    94, // WAVE_NEXT
-    508, // T_FIRST_IFF
-    532, // T_FIRST
-    478, // T_NEXT_IFF
-    434, // T_NEXT
-    238, // GAP_IFF1
-    206, // GAP
-    202, // GAP_IFF_NEXT
-    600, // VOL_FIRST
-    592, // VOL_IFF
-    590, // VOL_NEXT
-    264, // PER_A
-    276, // PER_B
-    82, // NEXT_SLOT
-    32, // SCR_WAIT
-    28, // SCR_JUMP
-    176, // SCR_7E_POS
-    158, // SCR_7E_NEG_END
-    178, // SCR_7E_NEG
-    158, // SCR_END
-    206, // SCR_CMD
-    4, // FLAG19
-    48, // CARRY_IFF
-    47, // CARRY_SILENT
-];
-const K_START: usize = 0;
-const K_AFTER_OFF: usize = 1;
-const K_EMPTY: usize = 2;
-const K_END: usize = 3;
-const K_END_TRACK: usize = 4;
-const K_END_TRACK_POST: usize = 5;
-const K_JUMP_TRK: usize = 6;
-const K_PARAM_WORD: usize = 7;
-const K_SP_7E: usize = 8;
-const K_SP_7F: usize = 9;
-const K_NOTRIG: usize = 10;
-const K_TRIG_SKIP: usize = 11;
-const K_TRIG_NODMA: usize = 12;
-const K_TRIG_AFTER: usize = 13;
-const K_TRIG_PLAIN: usize = 14;
-const K_REP_END: usize = 15;
-const K_REP_CONT: usize = 16;
-const K_WROTE: usize = 17;
-const K_SILENT: usize = 18;
-const K_CARRY: usize = 19;
-const K_REC2: usize = 20;
-const K_WAVE_FIRST: usize = 21;
-const K_WAVE_NEXT: usize = 22;
-const K_T_FIRST_IFF: usize = 23;
-const K_T_FIRST: usize = 24;
-const K_T_NEXT_IFF: usize = 25;
-const K_T_NEXT: usize = 26;
-const K_GAP_IFF1: usize = 27;
-const K_GAP: usize = 28;
-const K_GAP_IFF_NEXT: usize = 29;
-const K_VOL_FIRST: usize = 30;
-const K_VOL_IFF: usize = 31;
-const K_VOL_NEXT: usize = 32;
-const K_PER_A: usize = 33;
-const K_PER_B: usize = 34;
-const K_NEXT_SLOT: usize = 35;
-const K_SCR_WAIT: usize = 36;
-const K_SCR_JUMP: usize = 37;
-const K_SCR_7E_POS: usize = 38;
-const K_SCR_7E_NEG_END: usize = 39;
-const K_SCR_7E_NEG: usize = 40;
-const K_SCR_END: usize = 41;
-const K_SCR_CMD: usize = 42;
-const K_FLAG19: usize = 43;
-const K_CARRY_IFF: usize = 44;
-const K_CARRY_SILENT: usize = 45;
-
-fn kc(i: usize) -> u32 {
-    COST[i]
-}
-
 /// Engine C timing, in colour clocks measured from the reference's write logs: the first write of the
 /// title music after Paula's reset, the clock the player starts at (its first tick, at 79784, follows
 /// one period later), the lead of a tick before its first voice (and before a DMA-off write), the time
 /// before a voice's period write, from period to volume (title; in-game: period to volume, volume to
 /// loc, loc to len), after the last write of a voice, and for a voice that wrote nothing.
 const C_FIRST_WRITE: u64 = 8408;
-const C_TICK0: u64 = 8844;
-const C_LEAD: u64 = 80;
-const C_LEAD_OFF: u64 = 61;
-const C_PRE_T: u64 = 450;
-const C_PV_T: u64 = 173;
-const C_POST_T: u64 = 138;
-const C_PRE_G: u64 = 343;
-const C_PV_G: u64 = 205;
-const C_VL_G: u64 = 123;
-const C_LL_G: u64 = 103;
-const C_POST_G: u64 = 234;
-const C_IDLE: u64 = 100;
+/// The title music's first tick (the reference's own start phase; the 18 colour clocks beyond the
+/// round figure are taken as measured, not explained).
+const C_TICK0: u64 = 8844 + 18;
+/// The in-game music's first tick, measured the same way, for subsong 0, and the further delay of
+/// each subsong the host steps through before the music starts (the reference's host makes a
+/// DMA off/on pair per step).
+const C_TICK0_G: u64 = 8844 + 1239;
+const C_SUB_STEP: u64 = 3757;
 
 /// Loops over streams that never end (a jump to itself) give up after this many steps.
 const GUARD: u32 = 4096;
@@ -414,35 +309,36 @@ struct Ab {
     /// The song is started by the first tick or the first change of subsong, whichever
     /// comes first (the host may change subsong before it plays).
     started: bool,
-    /// 68000 cycles the tick has spent since its call (engine B), and the colour clocks of them
-    /// already let pass. The reference's clock is the call's start plus half the cumulative cycle
-    /// count, rounded down (every instruction has a fixed count, branches an odd mean one).
+    /// 68000 cycles executed since the last host call's re-base (engine B), the tick-relative
+    /// colour clock of that re-base, and the colour clocks of the tick already let pass.
     cyc: u64,
+    seg: u64,
     emitted: u64,
-    /// A carry out of the voice's accumulator that fetched nothing, this tick.
-    carry_only: bool,
-    /// Fetch bookkeeping for the cost model: extra parameter words read, and whether
-    /// the trigger wrote DMACON in the middle of the fetch.
-    fetch_extra: u32,
-    fetch_wrote: bool,
 }
 
 impl Ab {
-    /// Adds `cc` colour clocks to the time before the next write (the additive cost model of
-    /// the reference's tick, measured from its write logs; engine B only).
+    /// Adds executed 68000 cycles to the current segment (engine B only).
     fn adv(&mut self, cyc: u32) {
         if self.eng == Eng::B {
             self.cyc += cyc as u64;
         }
     }
 
-    /// Lets the pending time pass: called before every Paula write.
-    fn sync(&mut self, hw: &mut Hw) {
-        let t = self.cyc / 2;
+    /// A host call: the stub's `pre` cycles run, the write is stamped at the segment's re-base clock plus
+    /// half the segment's cycles (rounded down), the clock re-bases there, and the call's `post` cycles
+    /// start the next segment.
+    fn call(&mut self, hw: &mut Hw, pre: u32, post: u32) {
+        if self.eng != Eng::B {
+            return;
+        }
+        self.cyc += pre as u64;
+        let t = self.seg + self.cyc / 2;
         if t > self.emitted {
             hw.wait(t - self.emitted);
             self.emitted = t;
         }
+        self.seg = t;
+        self.cyc = post as u64;
     }
 
     fn w8(&mut self, o: usize, v: u8) {
@@ -476,15 +372,6 @@ impl Ab {
             guard += 1;
         }
         p
-    }
-
-    /// `params` and the extra time of the words it reads.
-    fn params_cost(&mut self, s: usize, p: usize) -> usize {
-        let q = self.params(s, p);
-        for _ in 0..(q - p) / 2 {
-            self.fetch_extra += kc(K_PARAM_WORD);
-        }
-        q
     }
 
     /// Command "start song n".
@@ -597,15 +484,16 @@ impl Ab {
     fn tick_ab(&mut self, hw: &mut Hw) {
         let modelled = self.eng == Eng::B;
         self.cyc = 0;
+        self.seg = 0;
         self.emitted = 0;
-        // the first write of a tick falls 125 colour clocks after the tick call
-        self.adv(kc(K_START));
-        self.sync(hw);
+        // entry up to the DMA-off write (its stub included), then the stub's tail
+        self.adv(251);
+        self.call(hw, 0, 68);
         hw.dmacon(self.pend_off as u16);
         self.pend_off = 0;
         self.pend_on = 0;
         if modelled {
-            self.adv(kc(K_AFTER_OFF));
+            self.adv(72);
         } else {
             hw.wait(1000);
         }
@@ -618,20 +506,21 @@ impl Ab {
                     }
                 }
                 // a voice without a track (or none): the slot is passed over
-                _ => self.adv(kc(K_EMPTY)),
+                _ => self.adv(61),
             }
         }
         if modelled {
-            self.adv(kc(K_END));
+            self.adv(54);
+            self.call(hw, 94, 68);
         } else {
             hw.wait(2270);
         }
-        self.sync(hw);
         hw.dmacon(0x8000 | self.pend_on as u16);
     }
 
     fn voice(&mut self, ch: usize, s: usize, hw: &mut Hw) {
         let b3 = self.r8(s + 3);
+        self.adv(51 + 39);
         let fetch_tick = match self.eng {
             Eng::A => {
                 let cnt = self.r8(s + 0x41);
@@ -649,15 +538,14 @@ impl Ab {
             Eng::B => {
                 let (sum, carry) = self.r8(s + 0x41).overflowing_add(b3);
                 self.w8(s + 0x41, sum);
-                self.carry_only = carry;
                 carry
             }
         };
         if fetch_tick {
+            self.adv(47);
             let step = (self.r8(s + 0x33) & 0x7F).wrapping_sub(1);
             self.w8(s + 0x33, step);
             if step == 0 {
-                self.carry_only = false;
                 self.fetch(ch, s, hw);
                 return;
             }
@@ -665,29 +553,38 @@ impl Ab {
         self.effects(ch, s, hw);
     }
 
+    /// Stores the parameter words at `p` (first byte 0x80 or more), 53 cycles a word.
+    fn params_cost(&mut self, s: usize, p: usize) -> usize {
+        let q = self.params(s, p);
+        for _ in 0..(q - p) / 2 {
+            self.adv(53);
+        }
+        q
+    }
+
     fn fetch(&mut self, ch: usize, s: usize, hw: &mut Hw) {
         let bit = 1u8 << ch;
-        self.fetch_extra = 0;
-        self.fetch_wrote = false;
+        self.adv(33);
         // the track
         let mut t = self.r16(s + 0x34) as usize;
         let mut guard = 0;
+        let mut jumped = false;
         loop {
             match self.r16(t) {
                 0x7FFF => {
                     self.w16(s + 0x34, 0);
-                    // not covered by the measurements: taken as a fetch without a trigger
-                    self.adv(kc(K_END_TRACK));
-                    self.sync(hw);
+                    self.adv(50);
+                    self.call(hw, 100, 60);
                     hw.vol(ch, 0);
-                    self.adv(kc(K_END_TRACK_POST));
+                    self.adv(38);
                     self.w8(s + 0x40, 0);
                     self.voice_end(ch);
+                    self.adv(10);
                     return;
                 }
                 0x7FFE => {
-                    // a jump in the track costs a further 20.5 (from the 165/168/9017 logs)
-                    self.adv(kc(K_JUMP_TRK));
+                    self.adv(21 + 40);
+                    jumped = true;
                     t = self.r16(t + 2) as usize;
                     self.w16(s + 0x34, t as u16);
                     self.voice_end(ch);
@@ -696,35 +593,46 @@ impl Ab {
                         return;
                     }
                 }
-                _ => break,
+                _ => {
+                    // (the probe of the word a jump lands on is the jump's own)
+                    if !jumped {
+                        self.adv(21);
+                    }
+                    break;
+                }
             }
         }
+        self.adv(8 + 17);
         let t = self.params_cost(s, t);
         self.w16(s + 0x34, t as u16);
         let phrase = self.r16(t) as usize;
         let ppos = self.r16(s + 0x36) as usize;
         let start = phrase + ppos;
         self.w16(s + 0x0C, 0);
+        self.adv(88 + 17);
         let item = self.params_cost(s, start);
         let (first, second) = (self.r8(item), self.r8(item + 1));
+        self.adv(21);
         if first == 0x7E || first == 0x7F {
-            self.adv(kc(K_NOTRIG) + self.fetch_extra + if first == 0x7F { kc(K_SP_7F) } else { kc(K_SP_7E) });
+            self.adv(61);
             self.w8(s + 4, first);
             self.w8(s + 5, second);
             self.w8(s + 0x33, second);
             if first == 0x7F {
+                self.adv(58);
                 self.w8(s + 0x32, 0x7F);
                 self.pend_off |= bit;
             } else {
+                self.adv(30);
                 self.w8(s + 4, 0);
                 self.w8(s + 5, second & 0x80);
             }
         } else {
+            self.adv(21);
             if second & 0x80 == 0 {
                 self.trigger(ch, s, hw);
-            } else {
-                self.adv(kc(K_NOTRIG) + self.fetch_extra);
             }
+            self.adv(60);
             self.w8(s + 0x32, first);
             self.w8(s + 0x33, second);
             if self.eng == Eng::B {
@@ -735,21 +643,21 @@ impl Ab {
         }
         // advance
         let next = item + 2;
+        self.adv(47);
         self.w16(s + 0x36, (next - phrase) as u16);
         if self.r16(next) == 0 {
             self.w16(s + 0x36, 0);
             let rep = self.r8(s + 7).wrapping_sub(1);
             self.w8(s + 7, rep);
-            let w = if self.fetch_wrote { kc(K_WROTE) } else { 0 };
+            self.adv(43);
             if rep & 0x80 != 0 {
-                self.adv(kc(K_REP_END) + w);
+                self.adv(32);
                 self.w8(s + 7, 0);
                 let t = self.r16(s + 0x34);
                 self.w16(s + 0x34, t.wrapping_add(2));
-            } else {
-                self.adv(kc(K_REP_CONT) + w);
             }
         }
+        self.adv(20);
     }
 
     /// The instrument record of the voice's current instrument.
@@ -782,36 +690,40 @@ impl Ab {
                 }
             }
             Eng::B => {
+                self.adv(216 + 9);
                 if flags & 4 != 0 {
+                    self.adv(21);
                     if self.r8(s + 0x1C) != 0 {
-                        self.adv(kc(K_TRIG_SKIP) + self.fetch_extra);
+                        self.adv(10);
                         return;
                     }
+                    self.adv(26);
                     self.w8(s + 0x1C, 0xFF);
                 } else {
+                    self.adv(16);
                     self.w8(s + 0x1C, 0);
                 }
                 self.pend_off |= bit;
+                self.adv(44 + 9);
                 if flags & 1 == 0 {
-                    self.adv(kc(K_TRIG_NODMA) + self.fetch_extra);
-                    self.sync(hw);
+                    self.adv(42);
+                    self.call(hw, 94, 68);
                     hw.dmacon(bit as u16);
-                    self.fetch_wrote = true;
-                    self.adv(kc(K_TRIG_AFTER));
-                } else {
-                    self.adv(kc(K_TRIG_PLAIN) + self.fetch_extra);
+                    self.adv(12);
                 }
             }
         }
     }
 
     fn effects(&mut self, ch: usize, s: usize, hw: &mut Hw) {
+        self.adv(27);
         if self.r8(s + 0x32) == 0x7F {
-            // a silent voice: the slot passes in 63.5 colour clocks
-            self.adv(kc(K_SILENT) + if self.carry_only { kc(K_CARRY_SILENT) } else { 0 });
+            // a silent voice
+            self.adv(10);
             return;
         }
         self.pend_on |= 1 << ch;
+        self.adv(127);
         let eng = self.eng;
         if eng == Eng::A {
             self.w16(s + 0x0E, 0);
@@ -827,28 +739,9 @@ impl Ab {
         let lstart = be32(&self.img, rec + 20);
         let llen = self.r16(rec + 24);
         let iff = eng == Eng::B && start & 0x8000_0000 != 0;
-        let carry_only = self.carry_only;
-        let carry = || if carry_only { kc(K_CARRY) } else { 0 };
-        let rec2 = || if flags & 2 != 0 { kc(K_REC2) } else { 0 };
         let wave_flag = flags & 0x80 != 0;
-        // time from the slot's top to the first write, the gap to the second, and
-        // the time from the second write to the volume write (before the scripts)
-        let (gap_id, vol_id) = if first {
-            (if iff { K_GAP_IFF1 } else { K_GAP }, K_VOL_FIRST)
-        } else if iff {
-            (K_GAP_IFF_NEXT, K_VOL_IFF)
-        } else {
-            (K_GAP, K_VOL_NEXT)
-        };
-        let t_first = if first {
-            if iff { kc(K_T_FIRST_IFF) + rec2() } else { kc(K_T_FIRST) + rec2() + if wave_flag { kc(K_WAVE_FIRST) } else { 0 } }
-        } else if iff {
-            kc(K_T_NEXT_IFF) + if carry_only { kc(K_CARRY_IFF) } else { 0 }
-        } else {
-            kc(K_T_NEXT) + carry() + if wave_flag { kc(K_WAVE_NEXT) } else { 0 }
-        };
-        self.adv(t_first);
         if first {
+            self.adv(80 + 9);
             self.w8(s + 0x42, 0);
             self.w8(s + 5, 0xFF);
             if eng == Eng::B {
@@ -858,51 +751,66 @@ impl Ab {
                 self.w16(s + 0x0E, 0);
                 self.w16(s + 0x08, 0);
             }
+            if flags & 2 != 0 {
+                self.adv(16);
+            }
+            self.adv(29);
             let wave = if eng == Eng::B && flags & 2 != 0 { 0 } else { wave };
             if iff {
                 let data = start & 0x7FFF_FFFF;
                 let hdr = data as usize - 0x68.min(data as usize);
                 let one = self.r16(hdr + 0x16);
                 let rep = self.r16(hdr + 0x1A);
-                self.sync(hw);
+                self.adv(62);
+                self.call(hw, 84, 60);
                 hw.loc(ch, base.wrapping_add(data));
-                self.adv(kc(gap_id));
-                self.sync(hw);
+                self.adv(62);
+                self.call(hw, 116, 68);
                 hw.len(ch, one.wrapping_add(rep) >> 1);
+                self.adv(22);
             } else {
                 let mut a = start;
-                if eng == Eng::B && flags & 0x80 != 0 {
+                self.adv(53);
+                if eng == Eng::B && wave_flag {
                     a = a.wrapping_add(wave.wrapping_mul(alen as u32).wrapping_mul(2));
+                    self.adv(74);
                 }
-                self.sync(hw);
+                self.adv(34);
+                self.call(hw, 84, 60);
                 hw.loc(ch, base.wrapping_add(a));
-                self.adv(kc(gap_id));
-                self.sync(hw);
+                self.adv(30);
+                self.call(hw, 116, 68);
                 hw.len(ch, alen);
+                self.adv(22);
             }
         } else if iff {
             let data = start & 0x7FFF_FFFF;
             let hdr = data as usize - 0x68.min(data as usize);
             let one = self.r16(hdr + 0x16);
             let rep = self.r16(hdr + 0x1A);
-            self.sync(hw);
+            self.adv(29 + 90);
+            self.call(hw, 116, 68);
             hw.len(ch, rep >> 1);
-            self.adv(kc(gap_id));
-            self.sync(hw);
+            self.adv(50);
+            self.call(hw, 84, 60);
             hw.loc(ch, base.wrapping_add(data).wrapping_add(one as u32));
+            self.adv(22);
         } else {
             let mut a = lstart;
-            if flags & 0x80 != 0 {
+            self.adv(29 + 43);
+            if wave_flag {
                 let unit = if eng == Eng::A { llen } else { alen } as u32;
                 a = a.wrapping_add(wave.wrapping_mul(unit).wrapping_mul(2));
+                self.adv(94);
             }
-            self.sync(hw);
+            self.adv(34);
+            self.call(hw, 84, 60);
             hw.loc(ch, base.wrapping_add(a));
-            self.adv(kc(gap_id));
-            self.sync(hw);
+            self.adv(30);
+            self.call(hw, 116, 68);
             hw.len(ch, llen);
+            self.adv(12);
         }
-        self.adv(kc(vol_id));
         self.scripts(s);
         // the slide
         let slide = self.r16(s + 0x20).wrapping_add(self.r8(s + 0x0D) as i8 as i16 as u16);
@@ -913,74 +821,91 @@ impl Ab {
         v = v * self.r8(s + 0x13) as u32 / 63;
         v = v * self.master as u32 / 63;
         v = v * self.r8(rec + 12) as u32 / 63;
+        self.adv(109);
         if self.r8(s + 0x19) & 1 != 0 {
-            self.adv(kc(K_FLAG19));
+            self.adv(4);
         }
-        self.sync(hw);
+        self.adv(238);
+        self.call(hw, 100, 60);
         hw.vol(ch, v as u16);
         // period
         let mut n = self.r8(s + 0x09);
-        self.adv(if n & 0x80 != 0 { kc(K_PER_A) } else { kc(K_PER_B) });
+        self.adv(41);
+        if n & 0x80 == 0 {
+            self.adv(12);
+        }
+        self.adv(72);
         if n & 0x80 == 0 {
             n = n.wrapping_add(self.r8(s + 0x32));
             if eng == Eng::A {
                 n = n.wrapping_add(self.r8(s + 0x0B));
             }
         }
-        let mut per = PERIODS[(n & 0x7F) as usize] as i32 - self.r8(s + 0x11) as i8 as i32;
+        let idx = (n & 0x7F) as usize;
+        let tab = if idx < 95 { PERIODS[idx] as i32 } else { 64 * (idx as i32 - 95) };
+        let mut per = tab - self.r8(s + 0x11) as i8 as i32;
         if self.r8(s + 0x19) & 1 == 0 {
             per -= self.r8(s + 0x0F) as i8 as i32;
         }
         per -= slide as i32;
-        self.sync(hw);
+        self.call(hw, 92, 60);
         hw.per(ch, per as u16);
-        // the next slot's top
-        self.adv(kc(K_NEXT_SLOT));
+        self.adv(12 + 10);
     }
 
     fn scripts(&mut self, s: usize) {
         for i in 0..3 {
             let (pp, cp, rp) = (s + 0x22 + 4 * i, s + 0x24 + 4 * i, s + 0x25 + 4 * i);
+            self.adv(21);
             let pos = self.r16(pp) as usize;
             if pos == 0 {
                 continue;
             }
+            self.adv(33);
             let c = self.r8(cp).wrapping_sub(1);
             self.w8(cp, c);
             if (c as i8) >= 0 {
-                self.adv(kc(K_SCR_WAIT));
                 continue;
             }
+            self.adv(57);
             self.w8(cp, 0);
             let mut pos = pos;
             let mut w = self.r16(pos);
-            if w == 0x7FFE {
-                self.adv(kc(K_SCR_JUMP));
-                pos = self.r16(pos + 2) as usize;
-                self.w16(pp, pos as u16);
-                w = self.r16(pos);
-            }
             let (k, v) = ((w >> 8) as u8, w as u8);
             if k == 0x7E {
+                self.adv(21);
                 if v < 0x80 {
-                    self.adv(kc(K_SCR_7E_POS));
+                    self.adv(20);
                     self.w8(rp, v);
-                } else if self.r8(s + 5) & 0x80 != 0 {
-                    self.adv(kc(K_SCR_7E_NEG_END));
-                    self.w8(cp, 0);
-                    continue;
                 } else {
-                    self.adv(kc(K_SCR_7E_NEG));
+                    self.adv(21);
+                    if self.r8(s + 5) & 0x80 != 0 {
+                        self.adv(26);
+                        self.w8(cp, 0);
+                        continue;
+                    }
                 }
+                self.adv(26);
                 self.w16(pp, (pos + 2) as u16);
-            } else if w == 0x7FFF {
-                self.adv(kc(K_SCR_END));
-                continue;
             } else {
-                self.adv(kc(K_SCR_CMD));
-                self.w8(s + (k & 0x7F) as usize + 1, v);
+                self.adv(21);
+                if w == 0x7FFE {
+                    self.adv(50);
+                    pos = self.r16(pos + 2) as usize;
+                    self.w16(pp, pos as u16);
+                    w = self.r16(pos);
+                } else {
+                    self.adv(21);
+                    if w == 0x7FFF {
+                        self.adv(26);
+                        continue;
+                    }
+                }
+                self.adv(54);
+                self.w8(s + ((w >> 8) as u8 & 0x7F) as usize + 1, w as u8);
                 self.w16(pp, (pos + 2) as u16);
             }
+            self.adv(20);
             let r = self.r8(rp);
             self.w8(cp, r);
         }
@@ -1048,7 +973,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             m.bus.clock += C_TICK0 - C_FIRST_WRITE;
         } else {
             m.bus.ciaa.pra |= 2;
-            m.bus.clock += C_TICK0 - 100;
+            m.bus.clock += C_TICK0_G - 100;
         }
         return Some(Box::new(C::new(d, base, lay, title)));
     }
@@ -1071,10 +996,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         started: false,
         cyc: 0,
+        seg: 0,
         emitted: 0,
-        carry_only: false,
-        fetch_extra: 0,
-        fetch_wrote: false,
     };
     if a.eng == Eng::B {
         // The reference's start returns `start_return()` colour clocks after Paula's reset and
@@ -1145,6 +1068,8 @@ struct C {
     nsongs: u16,
     sub: u16,
     started: bool,
+    /// The first tick has been played.
+    ticked: bool,
     songend: bool,
     // global state
     master: u16,
@@ -1160,8 +1085,11 @@ struct C {
     retune: bool,
     alive: u8,
     alive0: u8,
-    /// The voice being processed wrote its period and volume (the engine's timing).
-    wrote: bool,
+    /// Engine C's clock: the cycles since the last host call's re-base, the tick-relative colour
+    /// clock of that re-base, and the colour clocks of the tick already let pass.
+    cyc: u64,
+    seg: u64,
+    emitted: u64,
     v: [Cv; 4],
 }
 
@@ -1178,6 +1106,7 @@ impl C {
             nsongs: n,
             sub: 0,
             started: false,
+            ticked: false,
             songend: false,
             master: 0,
             tempo_hi: 0,
@@ -1191,7 +1120,9 @@ impl C {
             retune: false,
             alive: 0,
             alive0: 0,
-            wrote: false,
+            cyc: 0,
+            seg: 0,
+            emitted: 0,
             v: Default::default(),
         }
     }
@@ -1298,6 +1229,47 @@ impl C {
         Some(p)
     }
 
+    /// Adds executed 68000 cycles to the current segment.
+    fn adv(&mut self, c: u32) {
+        self.cyc += c as u64;
+    }
+
+    /// Lets the colour clocks of the segment pass (the segment's re-base clock plus half its cycles,
+    /// rounded down); returns that clock.
+    fn sync(&mut self, hw: &mut Hw) -> u64 {
+        let t = self.seg + self.cyc / 2;
+        if t > self.emitted {
+            hw.wait(t - self.emitted);
+            self.emitted = t;
+        }
+        t
+    }
+
+    /// A write the player makes itself: the segment goes on.
+    fn direct(&mut self, hw: &mut Hw) {
+        self.sync(hw);
+    }
+
+    /// A host call: `pre` cycles of the stub up to the trap, the write, then the clock re-bases and
+    /// the call's `post` cycles start the next segment.
+    fn call(&mut self, hw: &mut Hw, pre: u32, post: u32) {
+        self.cyc += pre as u64;
+        self.seg = self.sync(hw);
+        self.cyc = post as u64;
+    }
+
+    /// The item of a list at `*ptr` with the cost of looking (an end probe, a jump).
+    fn item_c(&mut self, ptr: &mut u16) -> Option<usize> {
+        if self.rw(*ptr as usize) == 0x7FFE {
+            self.adv(44);
+        }
+        let r = self.item(ptr);
+        if r.is_some() {
+            self.adv(21);
+        }
+        r
+    }
+
     fn tick_c(&mut self, hw: &mut Hw) {
         if self.retune {
             if self.tcount == 1 {
@@ -1310,20 +1282,26 @@ impl C {
             return;
         }
         let g = self.lay.kind == CKind::G;
+        self.cyc = 0;
+        self.seg = 0;
+        self.emitted = 0;
+        self.adv(if g { 102 + 183 } else { 102 + 161 });
         if self.tcount == 1 {
-            hw.wait(C_LEAD_OFF);
+            self.adv(24);
+            self.direct(hw);
             hw.dmacon(self.dma_off as u16);
-            hw.wait(500);
-        } else {
-            hw.wait(C_LEAD);
         }
+        self.adv(25);
         if fires(&mut self.tcount) {
             if g {
+                self.adv(33 + 46);
                 self.tcount = self.tempo_lo;
             } else if self.tphase == 0 {
+                self.adv(21 + 46);
                 self.tcount = self.tempo_hi;
                 self.tphase = 1;
             } else {
+                self.adv(21 + 36);
                 self.tcount = self.tempo_lo;
                 self.tphase = 0;
             }
@@ -1331,51 +1309,62 @@ impl C {
         self.dma_on = 0;
         self.dma_off = 0;
         for i in 0..4 {
+            self.adv(match (g, i) {
+                (false, 0) => 74,
+                (false, _) => 42,
+                (true, 0) => 92,
+                (true, _) => 56,
+            });
             if self.active & (1 << i) == 0 {
-                hw.wait(C_IDLE);
+                self.adv(if g { 18 + 11 } else { 31 });
+                self.adv(16);
                 continue;
             }
             let bit = 1u8 << i;
-            self.wrote = false;
+            self.adv(if g { 18 + 11 + 31 } else { 31 + 31 });
             if self.tcount != 0 {
+                self.adv(25);
                 let v = &self.v[i];
                 let early = if g { v.cnt == 1 } else { v.cnt == 0 };
-                if v.len >> 8 < 0x40 && early {
-                    self.dma_off |= bit;
-                }
-                if !self.v[i].rest {
-                    if g {
-                        self.process_g(i, hw);
-                    } else {
-                        self.process_t(i, hw);
+                if v.len >> 8 < 0x40 {
+                    self.adv(if g { 25 } else { 21 });
+                    if early {
+                        self.adv(if g { 12 + 9 + 16 } else { 16 });
+                        self.dma_off |= bit;
                     }
                 }
-            } else {
-                let fire = if g {
-                    self.v[i].cnt = self.v[i].cnt.wrapping_sub(1);
-                    self.v[i].cnt == 0
+                self.adv(23);
+                if self.v[i].rest {
+                    self.adv(16);
+                } else if g {
+                    self.process_g(i, hw);
                 } else {
-                    self.v[i].cnt = self.v[i].cnt.wrapping_sub(1);
-                    self.v[i].cnt & 0x8000 != 0
-                };
+                    self.process_t(i, hw);
+                }
+            } else {
+                self.adv(27);
+                self.v[i].cnt = self.v[i].cnt.wrapping_sub(1);
+                let fire = if g { self.v[i].cnt == 0 } else { self.v[i].cnt & 0x8000 != 0 };
                 if fire {
                     if g {
                         self.fetch_g(i, hw);
                     } else {
                         self.fetch_t(i, hw);
                     }
-                } else if !self.v[i].rest {
-                    if g {
+                } else {
+                    self.adv(23);
+                    if self.v[i].rest {
+                        self.adv(16);
+                    } else if g {
                         self.process_g(i, hw);
                     } else {
                         self.process_t(i, hw);
                     }
                 }
             }
-            if !self.wrote {
-                hw.wait(C_IDLE);
-            }
         }
+        self.adv(20 + 12 + 18);
+        self.call(hw, 94, 0);
         hw.dmacon(0x8000 | self.dma_on as u16);
     }
 
@@ -1385,28 +1374,34 @@ impl C {
         let raw = self.per_of(self.v[i].note);
         let last = raw.wrapping_add(slide);
         self.v[i].lastper = last;
-        hw.wait(C_PRE_T);
+        self.adv(88 + 4 + 18);
+        self.call(hw, 92, 60);
         hw.per(i, last.wrapping_sub(vib));
         let v = &self.v[i];
         let a = (v.ivol as u32 * v.vvol as u32) >> 4;
         let vol = (a * self.master as u32) >> 4;
-        hw.wait(C_PV_T);
+        self.adv(4 + 12 + 62 + 14 + 62 + 14 + 18);
+        self.call(hw, 100, 60);
         hw.vol(i, (vol & 0xFF) as u16);
-        hw.wait(C_POST_T);
-        self.wrote = true;
+        self.adv(16 + 40 + 16);
     }
 
     fn fetch_t(&mut self, i: usize, hw: &mut Hw) {
         let bit = 1u8 << i;
         let mut guard = 0;
+        let mut jumped = false;
+        self.adv(47);
         loop {
             match self.rw(self.v[i].trk) {
                 0x7FFF => {
+                    self.adv(32);
                     self.active &= !bit;
                     self.voice_end(i);
                     return;
                 }
                 0x7FFE => {
+                    self.adv(21 + 44);
+                    jumped = true;
                     self.v[i].trk = self.rw(self.v[i].trk + 2) as usize;
                     self.voice_end(i);
                     guard += 1;
@@ -1414,37 +1409,54 @@ impl C {
                         return;
                     }
                 }
-                _ => break,
+                _ => {
+                    // (the probe of the word a jump lands on is the jump's own)
+                    if !jumped {
+                        self.adv(21);
+                    }
+                    break;
+                }
             }
         }
         // prefix commands, each once, in this order
         let mut p = self.v[i].trk;
         let mut fetch_slide = 0u8;
+        self.adv(25);
         if self.rb(p) == 0xFF {
+            self.adv(28);
             self.v[i].rep = self.rb(p + 1);
             p += 2;
         }
+        self.adv(21);
         if self.rb(p) == 0xFE {
+            self.adv(40);
             let t = self.rb(p + 1).wrapping_add(0x0B);
             self.v[i].trans = t;
             fetch_slide = t;
             p += 2;
         }
+        self.adv(21);
         if self.rb(p) == 0xFD {
+            self.adv(28);
             self.master = (self.master & 0xFF00) | self.rb(p + 1) as u16;
             p += 2;
         }
+        self.adv(21);
         if self.rb(p) == 0xFC {
+            self.adv(70);
             let a = self.rb(p + 1);
             self.tempo_lo = a & 15;
             self.tempo_hi = a >> 4;
             p += 2;
         }
+        self.adv(21);
         if self.rw(p) >= 0xE000 {
+            self.adv(24);
             self.v[i].insmap = self.rw(p);
             p += 2;
         }
         self.v[i].trk = p;
+        self.adv(119);
         let r = self.rw(p) as i16 as isize;
         let mut q = (self.lay.pattern_base as isize + r + self.v[i].cursor as isize) as usize;
         let start = q;
@@ -1453,82 +1465,117 @@ impl C {
         if x >= 0x7001 {
             q += 2;
             self.v[i].cnt = x;
+            self.adv(36);
+            self.direct(hw);
             self.lc_write(hw, i, self.lay.silent as u32);
+            self.adv(16);
+            self.direct(hw);
             hw.len(i, 1);
+            self.adv(34);
             self.v[i].rest = true;
         } else {
+            self.adv(21);
             if x >= 0x6000 {
+                self.adv(72);
                 let idx = (x.wrapping_add(self.v[i].insmap) & 0x0FFF) as usize;
                 self.v[i].ins = self.rw(self.lay.insmap + 2 * idx);
                 q += 2;
             }
+            self.adv(49);
             let rec = self.lay.ins_table + self.v[i].ins as usize;
             if self.v[i].len >> 8 < 0x40 {
+                self.adv(28 + 12 + 14 + 4 + 18);
+                self.call(hw, 84, 60);
                 let a = be32(&self.d, rec);
                 self.lc_write(hw, i, a);
+                self.adv(12 + 18);
+                self.call(hw, 116, 68);
                 hw.len(i, self.rw(rec + 4));
+                self.adv(12 + 16 + 64);
                 self.v[i].ivol = self.rb(rec + 18);
                 self.v[i].vvol = self.rb(rec + 19);
                 self.v[i].age = 0;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w == 0x5003 {
+                self.adv(28);
                 self.v[i].mod_smp = self.rw(q + 2);
                 q += 4;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w == 0x5002 {
+                self.adv(28);
                 self.v[i].mod_vol = self.rw(q + 2);
                 q += 4;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w == 0x5001 {
+                self.adv(28);
                 self.v[i].mod_note = self.rw(q + 2);
                 q += 4;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w >= 0x4001 {
+                self.adv(24);
                 self.v[i].len = w;
                 q += 2;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w >= 0x3001 {
+                self.adv(24);
                 self.v[i].len = w;
                 q += 2;
             }
+            self.adv(16 + 9);
             if self.v[i].pflags & 2 == 0 {
+                self.adv(16);
                 self.v[i].step = 0;
             }
+            self.adv(16 + 9);
             if self.v[i].pflags & 4 == 0 {
+                self.adv(16);
                 self.v[i].pos = 0;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w >= 0x2000 {
+                self.adv(44);
                 self.v[i].pflags = (w >> 8) as u8;
                 self.v[i].ptarget = w as u8;
                 self.v[i].step = self.rw(q + 2);
                 q += 4;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w >= 0x1000 {
+                self.adv(24);
                 self.v[i].flagsw = w;
                 q += 2;
             }
-            match self.rb(q) {
-                0x02 => {
-                    self.master = (self.master & 0xFF00) | self.rb(q + 1) as u16;
-                    q += 2;
-                }
-                _ => {}
+            self.adv(21);
+            if self.rb(q) == 0x02 {
+                self.adv(28);
+                self.master = (self.master & 0xFF00) | self.rb(q + 1) as u16;
+                q += 2;
             }
+            self.adv(21);
             if self.rb(q) == 0x01 {
+                self.adv(28);
                 self.v[i].ivol = self.rb(q + 1);
                 q += 2;
             }
+            self.adv(21);
             let mut n = self.rb(q + 1);
             if n < 0x80 {
+                self.adv(12);
                 n = n.wrapping_add(self.v[i].trans);
             }
+            self.adv(60);
             self.v[i].base = n & 0x7F;
             self.v[i].note = n & 0x7F;
             q += 2;
@@ -1537,16 +1584,20 @@ impl C {
         self.v[i].cnt = (self.v[i].cnt & 0x0FFF).wrapping_sub(1);
         self.dma_on |= bit;
         self.v[i].cursor = self.v[i].cursor.wrapping_add((q - start) as u16);
+        self.adv(107);
         // pattern end
         if self.rb(q + 1) == 0x7F {
+            self.adv(43);
             self.v[i].cursor = 0;
             let rep = self.v[i].rep.wrapping_sub(1);
             self.v[i].rep = rep;
             if rep & 0x80 != 0 {
+                self.adv(42);
                 self.v[i].rep = 0;
                 self.v[i].trk += 2;
             }
         }
+        // (the reference's log shows the period and volume writes after a rest item too)
         self.out_t(i, fetch_slide as u16, 0, hw);
     }
 
@@ -1554,7 +1605,9 @@ impl C {
         let rec = self.lay.ins_table + self.v[i].ins as usize;
         let mut slide = 0u16;
         let mut vib = 0u16;
+        self.adv(47);
         if self.v[i].age == 0 {
+            self.adv(134);
             let s = ((self.rw(rec + 6) as u32) << 16 | self.rw(rec + 8) as u32)
                 .wrapping_add((self.v[i].mod_smp as u32) << 16 | self.v[i].mod_note as u32);
             let r = ((self.rw(rec + 10) as u32) << 16 | self.rw(rec + 12) as u32).wrapping_add((self.v[i].mod_vol as u32) << 16);
@@ -1568,14 +1621,18 @@ impl C {
             v.c_vol = 0;
             v.c_rel = 0;
         } else {
+            self.adv(21);
             let mut reached = false;
             if self.v[i].ptarget & 0x80 == 0 {
+                self.adv(93);
                 let t = self.v[i].ptarget.wrapping_add(self.v[i].trans);
                 let tp = self.rw(self.lay.period_table + 2 * t as usize);
                 let neg = t.wrapping_sub(self.v[i].base) >= 0x80;
                 let lt = tp < self.v[i].lastper;
+                self.adv(if neg { 21 } else { 23 });
                 if (neg && lt) || (!neg && !lt) {
                     reached = true;
+                    self.adv(86);
                     let v = &mut self.v[i];
                     v.step = 0;
                     v.pos = 0;
@@ -1586,66 +1643,98 @@ impl C {
                 }
             }
             if !reached {
+                self.adv(56 + 9);
                 let v = &mut self.v[i];
                 v.pos = v.pos.wrapping_sub(v.step);
                 slide = v.pos;
                 let v = &self.v[i];
                 let fl = v.flagsw as u8;
-                if fl & 2 == 0 && v.pflags & 1 == 0 && (fl & 1 != 0 || v.age > self.rb(rec + 14) as u16) {
-                    let mut rp = self.v[i].rel_ptr;
-                    if let Some(p) = self.item(&mut rp) {
-                        vib = self.rw(p);
-                        let n = self.rb(rec + 16) & 15;
-                        let v = &mut self.v[i];
-                        v.rel_ptr = rp;
-                        if v.c_rel == n {
-                            v.c_rel = 0;
-                            v.rel_ptr = v.rel_ptr.wrapping_add(2);
-                        } else {
-                            v.c_rel += 1;
+                let (pf, age) = (v.pflags, v.age);
+                if fl & 2 == 0 {
+                    self.adv(16 + 9);
+                    if pf & 1 == 0 {
+                        self.adv(16 + 9);
+                        if fl & 1 == 0 {
+                            self.adv(41);
                         }
-                    } else {
-                        self.v[i].rel_ptr = rp;
+                        if fl & 1 != 0 || age > self.rb(rec + 14) as u16 {
+                            self.adv(45);
+                            let mut rp = self.v[i].rel_ptr;
+                            if let Some(p) = self.item_c(&mut rp) {
+                                self.adv(49);
+                                vib = self.rw(p);
+                                let n = self.rb(rec + 16) & 15;
+                                let wrap = self.v[i].c_rel == n;
+                                self.adv(if wrap { 42 } else { 20 });
+                                let v = &mut self.v[i];
+                                v.rel_ptr = rp;
+                                if wrap {
+                                    v.c_rel = 0;
+                                    v.rel_ptr = v.rel_ptr.wrapping_add(2);
+                                } else {
+                                    v.c_rel += 1;
+                                }
+                            } else {
+                                self.v[i].rel_ptr = rp;
+                            }
+                        }
                     }
                 }
             }
         }
         // volume list
-        {
-            if fires(&mut self.v[i].c_vol) {
-                self.v[i].c_vol = self.rb(rec + 16) >> 4;
-                let mut vp = self.v[i].vol_ptr;
-                if let Some(p) = self.item(&mut vp) {
-                    self.v[i].vol_ptr = vp;
-                    self.v[i].vvol = self.rb(p + 1);
-                    let hold = self.rb(p) & 1 != 0 && (self.rb(rec + 17) as u16) < self.v[i].cnt;
-                    if !hold {
-                        self.v[i].vol_ptr = vp.wrapping_add(2);
-                    }
-                } else {
-                    self.v[i].vol_ptr = vp;
+        self.adv(25);
+        if fires(&mut self.v[i].c_vol) {
+            self.adv(91);
+            self.v[i].c_vol = self.rb(rec + 16) >> 4;
+            let mut vp = self.v[i].vol_ptr;
+            if let Some(p) = self.item_c(&mut vp) {
+                self.adv(40 + 9);
+                self.v[i].vol_ptr = vp;
+                self.v[i].vvol = self.rb(p + 1);
+                let flag = self.rb(p) & 1 != 0;
+                if flag {
+                    self.adv(37);
                 }
-            }
-            if fires(&mut self.v[i].c_note) {
-                self.v[i].c_note = self.rb(rec + 15) & 15;
-                let mut np = self.v[i].note_ptr;
-                if let Some(p) = self.item(&mut np) {
-                    self.v[i].note = self.v[i].base.wrapping_add(self.rb(p + 1));
-                    np = np.wrapping_add(2);
+                let hold = flag && (self.rb(rec + 17) as u16) < self.v[i].cnt;
+                if !hold {
+                    self.adv(16);
+                    self.v[i].vol_ptr = vp.wrapping_add(2);
                 }
-                self.v[i].note_ptr = np;
-            }
-            if fires(&mut self.v[i].c_smp) {
-                self.v[i].c_smp = self.rb(rec + 15) >> 4;
-                let mut sp = self.v[i].smp_ptr;
-                if let Some(p) = self.item(&mut sp) {
-                    self.lc_write(hw, i, be32(&self.d, p));
-                    hw.len(i, self.rw(p + 4));
-                    sp = sp.wrapping_add(6);
-                }
-                self.v[i].smp_ptr = sp;
+            } else {
+                self.v[i].vol_ptr = vp;
             }
         }
+        self.adv(25);
+        if fires(&mut self.v[i].c_note) {
+            self.adv(97);
+            self.v[i].c_note = self.rb(rec + 15) & 15;
+            let mut np = self.v[i].note_ptr;
+            if let Some(p) = self.item_c(&mut np) {
+                self.adv(40);
+                self.v[i].note = self.v[i].base.wrapping_add(self.rb(p + 1));
+                np = np.wrapping_add(2);
+            }
+            self.v[i].note_ptr = np;
+        }
+        self.adv(25);
+        if fires(&mut self.v[i].c_smp) {
+            self.adv(83);
+            self.v[i].c_smp = self.rb(rec + 15) >> 4;
+            let mut sp = self.v[i].smp_ptr;
+            if let Some(p) = self.item_c(&mut sp) {
+                self.adv(34);
+                self.direct(hw);
+                self.lc_write(hw, i, be32(&self.d, p));
+                self.adv(20);
+                self.direct(hw);
+                hw.len(i, self.rw(p + 4));
+                self.adv(16);
+                sp = sp.wrapping_add(6);
+            }
+            self.v[i].smp_ptr = sp;
+        }
+        self.adv(16);
         self.v[i].age = self.v[i].age.wrapping_add(1);
         self.out_t(i, slide, vib, hw);
     }
@@ -1656,33 +1745,43 @@ impl C {
         let raw = self.per_of(self.v[i].note);
         let last = raw.wrapping_add(slide);
         self.v[i].lastper = last;
-        hw.wait(C_PRE_G);
+        self.adv(12 + 9 + 100 + 4 + 18);
+        self.call(hw, 92, 60);
         hw.per(i, last.wrapping_sub(vib));
         let v = &self.v[i];
         let a = (v.ivol as u32 * v.vvol as u32) >> 4;
         let vol = (a * self.master as u32) >> 4;
-        hw.wait(C_PV_G);
+        self.adv(4 + 12 + 62 + 16 + 36 + 14 + 12 + 62 + 14 + 18);
+        self.call(hw, 100, 60);
         hw.vol(i, (vol & 0xFF) as u16);
-        hw.wait(C_VL_G);
+        self.adv(16 + 20 + 20 + 12 + 16 + 18);
+        self.call(hw, 84, 60);
         self.lc_write(hw, i, self.v[i].lc);
-        hw.wait(C_LL_G);
+        self.adv(12 + 18);
+        self.call(hw, 116, 68);
         hw.len(i, self.v[i].ln);
-        hw.wait(C_POST_G);
-        self.wrote = true;
+        self.adv(12 + 16 + 8 + 16);
     }
 
     fn fetch_g(&mut self, i: usize, hw: &mut Hw) {
         let bit = 1u8 << i;
         let mut guard = 0;
+        let mut jumped = false;
+        self.adv(47);
         loop {
             match self.rw(self.v[i].trk) {
                 0x7FFF => {
-                    self.active &= !bit;
+                    self.adv(20 + 16 + 12 + 4 + 18);
+                    self.call(hw, 100, 60);
                     hw.vol(i, 0);
+                    self.adv(12 + 8 + 16);
+                    self.active &= !bit;
                     self.voice_end(i);
                     return;
                 }
                 0x7FFE => {
+                    self.adv(21 + 46);
+                    jumped = true;
                     self.v[i].trk = self.rw(self.v[i].trk + 2) as usize;
                     self.voice_end(i);
                     guard += 1;
@@ -1690,88 +1789,124 @@ impl C {
                         return;
                     }
                 }
-                _ => break,
+                _ => {
+                    if !jumped {
+                        self.adv(21);
+                    }
+                    break;
+                }
             }
         }
         let mut p = self.v[i].trk;
+        self.adv(25);
         if self.rb(p) == 0xFE {
+            self.adv(16);
             self.trans2 = self.rb(p + 1);
             p += 2;
         }
+        self.adv(21);
         if self.rb(p) == 0xFD {
+            self.adv(16);
             self.v[i].trans1 = self.rb(p + 1);
             p += 2;
         }
+        self.adv(21);
         if self.rb(p) == 0xFC {
+            self.adv(16);
             self.master = self.rb(p + 1) as u16;
             p += 2;
         }
+        self.adv(21);
         if self.rb(p) == 0xFB {
+            self.adv(16);
             self.tempo_lo = self.rb(p + 1) & 15;
             p += 2;
         }
         self.v[i].trk = p;
+        self.adv(111);
         let r = self.rw(p) as usize;
         let mut q = self.lay.pattern_base + r + self.v[i].cursor as usize;
         let start = q;
         self.v[i].rest = false;
         let x = self.rw(q);
         if x >= 0x7001 {
+            self.adv(82);
             q += 2;
             self.v[i].cnt = x;
             self.v[i].lc = self.lay.silent as u32;
             self.v[i].ln = 1;
             self.v[i].rest = true;
         } else {
+            self.adv(23);
             if x >= 0x6000 {
+                self.adv(16);
                 self.v[i].ins = x;
                 q += 2;
             }
+            self.adv(49);
             let rec = (self.lay.ins_table as isize + self.v[i].ins as isize - 0x6000) as usize;
             if self.v[i].len >> 8 < 0x40 {
+                self.adv(130);
                 self.v[i].lc = be32(&self.d, rec);
                 self.v[i].ln = self.rw(rec + 4);
                 self.v[i].ivol = self.rb(rec + 18);
                 self.v[i].vvol = self.rb(rec + 19) & 15;
                 self.v[i].age = 0;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w >= 0x4001 {
+                self.adv(16);
                 self.v[i].len = w;
                 q += 2;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w >= 0x3001 {
+                self.adv(16);
                 self.v[i].len = w;
                 q += 2;
             }
+            self.adv(22 + 9);
             if self.v[i].pflags & 1 == 0 {
+                self.adv(12);
                 self.v[i].step = 0;
             }
+            self.adv(10 + 9);
             if self.v[i].pflags & 2 == 0 {
+                self.adv(24);
                 self.v[i].pos = 0;
                 self.v[i].ptarget = 0;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w >= 0x2000 {
+                self.adv(32);
                 self.v[i].pflags = (w >> 8) as u8;
                 self.v[i].ptarget = w as u8;
                 self.v[i].step = self.rw(q + 2);
                 q += 4;
             }
+            self.adv(21);
             let w = self.rw(q);
             if w >= 0x1000 {
+                self.adv(16);
                 self.v[i].flagsw = w;
                 q += 2;
             }
+            self.adv(9 + 21);
             if self.rb(q) == 0x01 {
+                self.adv(16);
                 self.v[i].ivol = self.rb(q + 1);
                 q += 2;
             }
+            self.adv(21);
             let mut n = self.rb(q + 1);
             if n < 0x80 {
+                self.adv(24);
                 n = n.wrapping_add(self.v[i].trans1).wrapping_add(self.trans2);
             }
+            self.adv(72);
             n = n.wrapping_add(self.rb(rec + 17)) & 0x7F;
             self.v[i].note0 = n;
             self.v[i].note = n;
@@ -1781,14 +1916,23 @@ impl C {
         self.v[i].cnt &= 0x0FFF;
         self.dma_on |= bit;
         self.v[i].cursor = self.v[i].cursor.wrapping_add((q - start) as u16);
+        self.adv(32 + 9 + 16 + 55);
         if self.rb(q + 1) == 0x7F {
+            self.adv(28);
             self.v[i].cursor = 0;
             self.v[i].trk += 2;
         }
+        self.adv(23);
         if self.v[i].rest {
+            self.adv(20 + 12 + 16 + 18);
+            self.call(hw, 84, 60);
             self.lc_write(hw, i, self.v[i].lc);
+            self.adv(12 + 18);
+            self.call(hw, 116, 68);
             hw.len(i, self.v[i].ln);
+            self.adv(12 + 16 + 8 + 16);
         } else {
+            self.adv(10);
             self.out_g(i, 0, 0, hw);
         }
     }
@@ -1797,7 +1941,9 @@ impl C {
         let rec = (self.lay.ins_table as isize + self.v[i].ins as isize - 0x6000) as usize;
         let mut slide = 0u16;
         let mut vib = 0u16;
+        self.adv(47);
         if self.v[i].age == 0 {
+            self.adv(126);
             let (s, n, vo, rl) = (self.rw(rec + 6), self.rw(rec + 8), self.rw(rec + 10), self.rw(rec + 12));
             let v = &mut self.v[i];
             v.smp_ptr = s;
@@ -1809,14 +1955,17 @@ impl C {
             v.c_vol = 0;
             v.c_rel = 0;
         } else {
+            self.adv(25);
             let b = self.v[i].ptarget;
             let mut reached = false;
             if b != 0 {
+                self.adv(11 + 59);
                 let x = b.wrapping_add(self.v[i].note0);
                 let tp = self.per_of(x);
                 let d = tp.wrapping_sub(self.v[i].lastper) as i16;
                 if (b < 0x80 && d >= 0) || (b >= 0x80 && d < 0) {
                     reached = true;
+                    self.adv(74);
                     let v = &mut self.v[i];
                     v.note0 = x & 0x7F;
                     v.note = x & 0x7F;
@@ -1827,62 +1976,95 @@ impl C {
                 }
             }
             if !reached {
+                self.adv(56 + 9);
                 let v = &mut self.v[i];
                 v.pos = v.pos.wrapping_sub(v.step);
                 slide = v.pos;
                 let v = &self.v[i];
                 let fl = v.flagsw as u8;
-                if fl & 2 == 0 && v.pflags & 1 == 0 && (fl & 1 != 0 || v.age > self.rb(rec + 14) as u16) {
-                    let mut rp = self.v[i].rel_ptr;
-                    if let Some(p) = self.item(&mut rp) {
-                        vib = self.rw(p);
-                        let n = self.rb(rec + 16) & 15;
-                        let v = &mut self.v[i];
-                        v.rel_ptr = rp;
-                        if v.c_rel == n {
-                            v.c_rel = 0;
-                            v.rel_ptr = v.rel_ptr.wrapping_add(2);
-                        } else {
-                            v.c_rel += 1;
+                let (pf, age) = (v.pflags, v.age);
+                if fl & 2 == 0 {
+                    self.adv(16 + 9);
+                    if pf & 1 == 0 {
+                        self.adv(16 + 9);
+                        if fl & 1 == 0 {
+                            self.adv(41);
                         }
-                    } else {
-                        self.v[i].rel_ptr = rp;
+                        if fl & 1 != 0 || age > self.rb(rec + 14) as u16 {
+                            self.adv(45);
+                            let mut rp = self.v[i].rel_ptr;
+                            if let Some(p) = self.item_c(&mut rp) {
+                                self.adv(49);
+                                vib = self.rw(p);
+                                let n = self.rb(rec + 16) & 15;
+                                let wrap = self.v[i].c_rel == n;
+                                self.adv(if wrap { 38 } else { 20 });
+                                let v = &mut self.v[i];
+                                v.rel_ptr = rp;
+                                if wrap {
+                                    v.c_rel = 0;
+                                    v.rel_ptr = v.rel_ptr.wrapping_add(2);
+                                } else {
+                                    v.c_rel += 1;
+                                }
+                            } else {
+                                self.v[i].rel_ptr = rp;
+                            }
+                        }
                     }
                 }
             }
         }
+        self.adv(25);
         if fires(&mut self.v[i].c_vol) {
+            self.adv(91);
             self.v[i].c_vol = self.rb(rec + 16) >> 4;
             let mut vp = self.v[i].vol_ptr;
-            if let Some(p) = self.item(&mut vp) {
+            if let Some(p) = self.item_c(&mut vp) {
+                self.adv(37);
                 self.v[i].vvol = self.rb(p + 1);
                 let first = self.rb(p);
-                let adv = first & 0x80 == 0 || (self.v[i].len < 0x4000 && (first & 0x7F) as u16 >= self.v[i].cnt);
+                let mut adv = first & 0x80 == 0;
+                if first & 0x80 != 0 {
+                    self.adv(43);
+                    if self.v[i].len < 0x4000 {
+                        self.adv(21);
+                        adv = (first & 0x7F) as u16 >= self.v[i].cnt;
+                    }
+                }
                 if adv {
+                    self.adv(16);
                     vp = vp.wrapping_add(2);
                 }
             }
             self.v[i].vol_ptr = vp;
         }
+        self.adv(25);
         if fires(&mut self.v[i].c_note) {
+            self.adv(97);
             self.v[i].c_note = self.rb(rec + 15) & 15;
             let mut np = self.v[i].note_ptr;
-            if let Some(p) = self.item(&mut np) {
+            if let Some(p) = self.item_c(&mut np) {
+                self.adv(40);
                 self.v[i].note = self.v[i].note0.wrapping_add(self.rb(p + 1));
                 np = np.wrapping_add(2);
             }
             self.v[i].note_ptr = np;
         }
+        self.adv(25);
         if fires(&mut self.v[i].c_smp) {
+            self.adv(83);
             self.v[i].c_smp = self.rb(rec + 15) >> 4;
             let mut sp = self.v[i].smp_ptr;
-            if let Some(p) = self.item(&mut sp) {
+            if let Some(p) = self.item_c(&mut sp) {
+                self.adv(74);
                 self.v[i].lc = be32(&self.d, p);
                 self.v[i].ln = self.rw(p + 4);
                 sp = sp.wrapping_add(6);
             }
             self.v[i].smp_ptr = sp;
         }
+        self.adv(16);
         self.v[i].age = self.v[i].age.wrapping_add(1);
         self.out_g(i, slide, vib, hw);
     }
@@ -1905,12 +2087,18 @@ impl Replayer for C {
         (0, self.nsongs - 1, self.sub)
     }
 
-    fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        if !self.ticked && self.lay.kind == CKind::G {
+            // the reference's host steps to the subsong one at a time before the music starts
+            let d = (n as i64 - self.sub as i64) * C_SUB_STEP as i64;
+            hw.bus.clock = (hw.bus.clock as i64 + d).max(0) as u64;
+        }
         self.sub = n;
         self.started = false;
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.ticked = true;
         if !self.started {
             self.start(hw);
         }

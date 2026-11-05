@@ -127,6 +127,7 @@ pub mod quadracomposer;
 mod quadracomposer_tables;
 pub mod richardjoseph;
 pub mod richardjosephrj;
+pub mod bendaglishsid;
 pub mod riffraff;
 pub mod fashiontracker;
 pub mod seanconnolly;
@@ -402,6 +403,8 @@ pub const REPLAYERS: &[Open] = &[
     scottjohnston::OPEN,
     majortom::OPEN,
     riffraff::OPEN,
+    // the DAGLISH! tag at file offset 0x24 is an exact magic (the Dave Lowe wrapper has another tag): no order dependence
+    bendaglishsid::OPEN,
     nickpelling::OPEN,
     anders0land::OPEN,
     thomashermann::OPEN,

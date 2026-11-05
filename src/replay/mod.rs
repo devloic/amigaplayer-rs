@@ -85,6 +85,7 @@ pub mod onescapee;
 pub mod ntspsystem;
 pub mod dariuszendeh;
 pub mod speedysystem;
+pub mod futurecomposerbsi;
 pub mod speedya1system;
 pub mod gluemon;
 pub mod kimchristensen;
@@ -363,6 +364,7 @@ pub const REPLAYERS: &[Open] = &[
     onescapee::OPEN,
     ntspsystem::OPEN,
     speedysystem::OPEN,
+    futurecomposerbsi::OPEN,
     dariuszendeh::OPEN,
     tronic::OPEN,
     forgottenworlds::OPEN,

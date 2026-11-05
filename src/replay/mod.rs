@@ -97,6 +97,7 @@ pub mod forgottenworlds;
 pub mod futureplayer;
 pub mod anders0land;
 pub mod jochenhippelst;
+pub mod medley;
 pub mod artandmagic;
 pub mod robhubbard;
 pub mod robhubbardst;
@@ -373,6 +374,7 @@ pub const REPLAYERS: &[Open] = &[
     laxity::OPEN,
     // strict content rule, no real module known: after every other replayer
     tomytracker::OPEN,
+    medley::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

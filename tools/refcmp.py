@@ -383,6 +383,12 @@ def _fallback_stage(path, cache):
         for f in os.listdir(os.path.dirname(src) or '.'):
             if f.lower().endswith('.ins') and os.path.splitext(f)[0] == stem:
                 shutil.copy(os.path.join(os.path.dirname(src), f), os.path.join(d, f))
+        # Nick Pelling Packer: the song file NPP.<name> needs its sample set SMP.<name> (or SMP.set)
+        if name[:4].lower() == 'npp.':
+            for c in ('SMP.' + name[4:], 'SMP.set'):
+                cs = os.path.join(os.path.dirname(path), c)
+                if os.path.exists(cs):
+                    shutil.copy(cs, os.path.join(d, c))
     return mod
 
 

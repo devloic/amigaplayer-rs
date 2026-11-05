@@ -15,12 +15,16 @@ players-native = { path = "crates/players-native" }
 sdl3 = { version = "0.20", optional = true }
 
 [features]
-default = ["ui", "native"]
+default = ["ui", "native", "host-68k"]
+# Hosting of the original 68k DeliPlayers / Eagleplayers / DeliGenies (loading them from
+# disk, running their code on the emulated 68000, the `Engine` methods that drive them).
+# The application needs it; the open-replayer library (`default-features = false`) does not.
+host-68k = []
 # The SDL3 player window. The library (engine only) builds without it.
-ui = ["dep:sdl3"]
+ui = ["dep:sdl3", "host-68k"]
 # The players recompiled to Rust (crates/players-native/gen), when generated. They
 # are derived from the user's player files: leave this off in a build to distribute.
-native = ["players-native/gen"]
+native = ["host-68k", "players-native/gen"]
 
 [lib]
 name = "amigaplayer_rs"

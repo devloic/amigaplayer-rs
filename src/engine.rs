@@ -9,13 +9,16 @@ use crate::paulaout::Filter;
 use crate::protracker::ProTracker;
 use anyhow::{anyhow, bail, Result};
 use m68k::CpuType;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "host-68k")]
+use std::path::PathBuf;
 
 pub const SCOPE_LEN: usize = 512;
 
 /// The NotePlayer genies played through when none was chosen, cheapest first (the
 /// first with enough voices plays); players needing more voices than any has are left
 /// to the built-in renderer.
+#[cfg(feature = "host-68k")]
 const NOTE_GENIES: &[&str] = &["4Voices-NotePlayer", "8Voices-NotePlayer", "32Voices-NotePlayer"];
 use crate::bus::ECLOCK_DIV;
 /// Players of formats from the PC, played without the Amiga's output filters.
@@ -154,6 +157,7 @@ pub struct Engine {
     /// Play the formats the open replayers know with them, not the 68k players.
     pub open_replayers: bool,
     /// Where the players from `load_eagleplayers` begin.
+    #[cfg_attr(not(feature = "host-68k"), allow(dead_code))]
     eagle_from: Option<usize>,
     /// DeliGenies (`load_genies`): external code that is not a player.
     pub genies: Vec<Player>,
@@ -162,12 +166,15 @@ pub struct Engine {
     note_genie: Option<usize>,
     /// No NotePlayer genie was chosen: `note_genie` is the default one for modules
     /// with no more voices than it has, and none for the others.
+    #[cfg_attr(not(feature = "host-68k"), allow(dead_code))]
     note_genie_auto: bool,
     /// The other genies chosen, told about each module (DTP_InitPlayer/DTP_EndPlayer).
+    #[cfg_attr(not(feature = "host-68k"), allow(dead_code))]
     active_genies: Vec<usize>,
     /// The genies playing or told about the current module.
     running_genies: Vec<usize>,
     /// Guest memory for the NoteStruct a NotePlayer genie reads (0: not allocated yet).
+    #[cfg_attr(not(feature = "host-68k"), allow(dead_code))]
     genie_mem: u32,
     /// INTENA as `audio_irqs` last saw it.
     intena_seen: u16,
@@ -233,6 +240,7 @@ impl Engine {
         self.settings.volume = 1.0;
     }
 
+    #[cfg(feature = "host-68k")]
     /// Loads the DeliGenies under `dir`. Like Eagleplayers they go to the top of the
     /// heap, so that loading them does not move the memory players and modules get.
     pub fn load_genies(&mut self, dir: &Path) -> usize {
@@ -266,6 +274,7 @@ impl Engine {
         self.genies.len()
     }
 
+    #[cfg(feature = "host-68k")]
     /// Chooses a genie by name: a NotePlayer genie plays `_note` players from now on, any
     /// other is told about each module. `builtin` has the built-in renderer play them.
     pub fn use_genie(&mut self, name: &str) -> Result<()> {
@@ -285,6 +294,7 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(feature = "host-68k")]
     /// The NotePlayer genie for a player with `voices` voices: DeliTracker picks the
     /// cheapest one that has enough (CPU use first, so the Paula based 4 and 8 voice
     /// genies before the software mixer of the 32 voice one).
@@ -309,6 +319,7 @@ impl Engine {
         }
     }
 
+    #[cfg(feature = "host-68k")]
     /// The module started (after the player's InitPlayer): the genies hear of it. A
     /// NotePlayer genie gets the player's NoteStruct and takes over its notes.
     fn start_genies(&mut self) {
@@ -367,12 +378,14 @@ impl Engine {
         }
     }
 
+    #[cfg(feature = "host-68k")]
     /// Loads every DeliPlayer found (recursively) under `dir`.
     pub fn load_players(&mut self, dir: &Path) -> usize {
         self.m.os.progdir = dir.parent().unwrap_or(dir).to_path_buf();
         self.load_dir(dir)
     }
 
+    #[cfg(feature = "host-68k")]
     /// Loads every Eagleplayer found under `dir`. They are tried last, after the
     /// players loaded before them and the SoundTracker heuristic, so call this
     /// after `load_players`.
@@ -385,6 +398,7 @@ impl Engine {
         n
     }
 
+    #[cfg(feature = "host-68k")]
     fn load_dir(&mut self, dir: &Path) -> usize {
         let first = self.players.len();
         let mut files = Vec::new();
@@ -427,6 +441,7 @@ impl Engine {
         n
     }
 
+    #[cfg(feature = "host-68k")]
     fn configure(&mut self, idx: usize) -> Result<()> {
         if self.players[idx].configured {
             return Ok(());
@@ -585,6 +600,8 @@ impl Engine {
             }
         }
 
+        #[cfg(feature = "host-68k")]
+        {
         if let Some(want) = self.only_player.clone() {
             let found = (0..self.builtin_players).find(|&i| self.players[i].name.eq_ignore_ascii_case(&want));
             if let Some(idx) = found {
@@ -598,6 +615,7 @@ impl Engine {
                 Some(_) => bail!("{want} does not recognise this module"),
                 None => bail!("no player named {want}"),
             }
+        }
         }
         // 1. the built-in ProTracker for 31-instrument modules
         if let Some(fmt) = ProTracker::detect(&data).filter(|f| *f != "SoundTracker") {
@@ -623,6 +641,10 @@ impl Engine {
                 return self.start_mix(Box::new(x), path);
             }
         }
+        #[cfg(feature = "host-68k")]
+        let eagle_from = self.eagle_from.unwrap_or(self.builtin_players);
+        #[cfg(feature = "host-68k")]
+        {
         // 2. a custom module carries its own player
         if crate::hunk::is_hunk_file(&data) {
             if let Ok(p) = deli::load_player(&mut self.m, &data, path) {
@@ -634,17 +656,19 @@ impl Engine {
             }
         }
         // 3. external players
-        let eagle_from = self.eagle_from.unwrap_or(self.builtin_players);
         for idx in 0..eagle_from {
             if by_name_only(&self.players[idx].name, path) && self.check_player(idx)? {
                 log::info!("{} recognised by {}", path.display(), self.players[idx].name);
                 return self.start_deli(idx, path, false);
             }
         }
+        }
         // 4. the 15-instrument SoundTracker heuristic
         if ProTracker::detect(&data) == Some("SoundTracker") {
             return self.start_native(path, &data, addr, "SoundTracker");
         }
+        #[cfg(feature = "host-68k")]
+        {
         // 5. last resort: the Eagleplayers, whose checks are often looser
         for idx in eagle_from..self.builtin_players {
             if by_name_only(&self.players[idx].name, path) && self.check_player(idx)? {
@@ -652,11 +676,13 @@ impl Engine {
                 return self.start_deli(idx, path, false);
             }
         }
+        }
         self.m.deli.list.clear();
         self.m.heap.free(addr);
         bail!("unknown module format")
     }
 
+    #[cfg(feature = "host-68k")]
     fn check_player(&mut self, idx: usize) -> Result<bool> {
         // every player is checked from the start phase with Paula just reset, so the one that
         // takes the module runs on the same timeline whatever was checked before it (and the
@@ -773,6 +799,7 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(feature = "host-68k")]
     fn start_deli(&mut self, idx: usize, path: &Path, custom: bool) -> Result<()> {
         if custom {
             self.configure(idx)?;
@@ -893,6 +920,7 @@ impl Engine {
         self.start_sound(idx)
     }
 
+    #[cfg(feature = "host-68k")]
     /// An Eagleplayer's ModuleInfo tag list, once InitPlayer has filled it.
     fn module_info(&mut self, idx: usize) -> Option<u32> {
         let pl = &self.players[idx];
@@ -1522,6 +1550,7 @@ impl Engine {
 /// takes most files of other formats that hold 256 zero bytes where it looks
 /// for its tables, and plays them silent; so, as UADE's eagleplayer.conf does,
 /// it is asked only for files named as TME modules ("tme." or ".tme").
+#[cfg(feature = "host-68k")]
 fn by_name_only(player: &str, path: &Path) -> bool {
     if !player.eq_ignore_ascii_case("TME") {
         return true;
@@ -1534,6 +1563,7 @@ fn file_name(p: &Path) -> String {
     p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
 }
 
+#[cfg(feature = "host-68k")]
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {

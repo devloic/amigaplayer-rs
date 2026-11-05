@@ -219,3 +219,114 @@ fn real_modules_when_present() {
         assert_eq!(song_count(&d, &l), subs, "{name}");
     }
 }
+
+// --- the commands and effects, on small modules built here (expected values follow the
+// specification's rules; the reference runs of the real and edited modules were compared
+// register write by register write, value, order and tick-relative time, outside the repository)
+
+/// The writes of each tick, and the engine (for the sample memory).
+fn run_ticks(d: &[u8], ticks: usize) -> (Engine, Vec<Vec<(u32, u16, u64)>>, bool) {
+    let mut e = Engine::new(48000.0);
+    e.m.bus.write_bytes(BASE, d);
+    e.m.bus.write_log = Some(Vec::new());
+    let mut s = new(d, BASE, &mut e.m).unwrap();
+    let mut out = Vec::new();
+    for _ in 0..ticks {
+        let n0 = e.m.bus.write_log.as_ref().unwrap().len();
+        s.tick(&mut Hw { bus: &mut e.m.bus });
+        out.push(e.m.bus.write_log.as_ref().unwrap()[n0..].to_vec());
+        e.m.bus.clock += super::super::DT_TICK;
+    }
+    let end = s.songend();
+    (e, out, end)
+}
+
+/// A module whose voice 0 plays `stream` with instrument 0 patched by `ins` (offset, value) words.
+fn with_stream(stream: &[u8], ins: &[(usize, u16)]) -> Vec<u8> {
+    let mut d = module();
+    d[0x5A0..0x5B0].fill(0);
+    d[0x5A0..0x5A0 + stream.len()].copy_from_slice(stream);
+    for &(o, v) in ins {
+        put_w(&mut d, INS + o, v);
+    }
+    d
+}
+
+fn per_writes(ticks: &[Vec<(u32, u16, u64)>], reg: u32) -> Vec<u16> {
+    ticks.iter().flatten().filter(|w| w.0 == reg).map(|w| w.1).collect()
+}
+
+fn base_period() -> u16 {
+    (((4096.0 / 2f64.powf(10.0 / 12.0)) as u32 * (3_579_545 / 8363)) >> 10) as u16
+}
+
+#[test]
+fn slide_steps_the_period_each_tick() {
+    let d = with_stream(&[0x80, 0, 0x81, 0xFE, 5, 10, 0x84], &[]);
+    let (_, t, _) = run_ticks(&d, 6);
+    let p = base_period();
+    assert_eq!(per_writes(&t, 0xDFF0A6)[..4], [p, p - 2, p - 4, p - 6]);
+}
+
+#[test]
+fn vibrato_adds_the_sequence_and_reloads_at_its_end() {
+    // divisor 4, sequence 1 2 3 then the terminator
+    let d = with_stream(&[0x80, 0, 5, 10, 0x84], &[(0x10, 4), (0x12, 0)]);
+    let (_, t, _) = run_ticks(&d, 7);
+    let p = base_period();
+    let q = p / 4;
+    assert_eq!(per_writes(&t, 0xDFF0A6)[..6], [p, p + q, p + 2 * q, p + 3 * q, p + q, p + 2 * q]);
+}
+
+#[test]
+fn waveform_modulation_changes_the_sample_memory_in_place() {
+    // limit 3, start 0: the index climbs storing 0, past the limit it stores 0x3C and turns
+    let d = with_stream(&[0x80, 0, 5, 10, 0x84], &[(0x14, 3), (0x16, 0)]);
+    let w = BASE + BANK as u32 + 6;
+    let (mut e, _, _) = run_ticks(&d, 2);
+    assert_eq!(e.m.bus.read_byte(w + 1), 0);
+    assert_eq!(e.m.bus.read_byte(w + 2), 16);
+    let (mut e2, _, _) = run_ticks(&d, 5);
+    assert_eq!((1..4).map(|i| e2.m.bus.read_byte(w + i)).collect::<Vec<_>>(), [0, 0, 0]);
+    assert_eq!(e2.m.bus.read_byte(w + 4), 0x3C);
+    let (mut e3, _, _) = run_ticks(&d, 6);
+    // turned: counting down, 0x3C again from the limit
+    assert_eq!(e3.m.bus.read_byte(w + 3), 0x3C);
+}
+
+#[test]
+fn rest_points_at_the_silent_area_and_switches_dma_off_one_tick_early() {
+    let d = module();
+    // voice 2: rest of 3 units of tempo 2 = 6 ticks
+    let (_, t, _) = run_ticks(&d, 7);
+    let silent = BASE + SILENT as u32;
+    let loc: Vec<_> = t[0].iter().filter(|w| (0xDFF0C0..0xDFF0C6).contains(&w.0)).map(|w| (w.0, w.1)).collect();
+    // the first tick's loop set-up and then the rest each point the channel at the silent area
+    let one = [(0xDFF0C0, (silent >> 16) as u16), (0xDFF0C2, silent as u16), (0xDFF0C4, 0x20)];
+    assert_eq!(loc, [one, one].concat());
+    for (k, tick) in t.iter().enumerate() {
+        let off = tick.iter().any(|w| (w.0, w.1) == (0xDFF096, 0x0004));
+        assert_eq!(off, k == 5, "tick {k}");
+    }
+}
+
+#[test]
+fn first_tick_timing_follows_the_cycle_model() {
+    let (_, t, _) = run_ticks(&module(), 1);
+    let w = &t[0];
+    // voice 3's loop set-up: LC (hi, lo at one time stamp), then LEN 16 cycles = 8 cc later
+    assert_eq!(w[1].2, w[0].2);
+    assert_eq!(w[2].2 - w[0].2, 8);
+}
+
+#[test]
+fn song_end_fires_when_all_voices_wrapped_and_play_continues() {
+    let d = module();
+    let (_, t, end) = run_ticks(&d, 80);
+    assert!(end);
+    // the player keeps going: voice 0 restarts its first pattern (its note is written again)
+    let notes = t.iter().flatten().filter(|w| (w.0, w.1) == (0xDFF096, 0x8201)).count();
+    assert!(notes > 2, "{notes}");
+    let (_, _, early) = run_ticks(&d, 3);
+    assert!(!early);
+}

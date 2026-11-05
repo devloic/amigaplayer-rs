@@ -43,13 +43,32 @@ before publication so that it describes behaviour only; what was removed or rewo
 | `speedysystem/` | Speedy System (Michael Winterberg, 1988) - behaviour specification | `src/replay/speedysystem.rs` |
 | `suntronic/` | SUN-Tronic ("SUNtronic") replayer: behaviour spec | `src/replay/suntronic.rs` |
 | `syntracker/` | SynTracker (Eagleplayer "SynTracker", UADE player name SynTracker) - behaviour spec | `src/replay/syntracker.rs` |
-| `tfmxst/` | TFMX ST (mdst.*) - behaviour specification | port in progress |
+| `tfmxst/` | TFMX ST (mdst.*) - behaviour specification | `src/replay/tfmxst.rs` |
 | `thomashermann/` | Thomas Hermann (1989 game driver) - behaviour specification | `src/replay/thomashermann.rs` |
 | `tomytracker/` | Tomy Tracker (`sg.*`) replayer: behaviour spec | `src/replay/tomytracker.rs` |
 | `tronic/` | Tronic ("TronicTracker(?)") replayer: behaviour spec | `src/replay/tronic.rs` |
 | `ufo/` | UFO replayer (MicroProse, 1994): behaviour spec | `src/replay/ufo.rs` |
 | `voodoosupremesynthesizer/` | Voodoo Supreme Synthesizer (`vss.*`, `*.vss`) replayer: behaviour spec | `src/replay/voodoosupremesynthesizer.rs` |
 | `ym2149/` | YM-2149 / MYST (`ym.*`, `ymst.*`) player: behaviour spec | `src/replay/ym2149.rs` |
+| `aprosys/` | AProSys: behaviour specification | not ported yet |
+| `audiosculpture/` | AudioSculpture (`adsc.*`, `mod_adsc4.*`) replayer: behaviour spec | `src/replay/audiosculpture.rs` |
+| `earache/` | EarAche (Amiga, `EA.*`) replayer: behaviour spec | not ported yet |
+| `futurecomposerbsi/` | Future Composer BSI (Amiga, `BFC.*`, `BSI.*`, `FC-BSI.*`) replayer: behaviour spec | `src/replay/futurecomposerbsi.rs` |
+| `gluemon/` | GlueMon (Amiga, `glue.*` / `gm.*`) replayer: behaviour spec | `src/replay/gluemon.rs` |
+| `infogrames/` | Infogrames (Amiga, `*.dum` + `*.ins`) replayer: behaviour spec | `src/replay/infogrames.rs` |
+| `jannesalmijarvi/` | Janne Salmijarvi Optimizer (`JS.*`) replayer: behaviour spec | not ported yet |
+| `kimchristensen/` | Kim Christensen (Amiga, `KIM.*`) replayer: behaviour spec | `src/replay/kimchristensen.rs` |
+| `majortom/` | Major Tom (ARP.) - behaviour specification | `src/replay/majortom.rs` |
+| `markcookseyold/` | Mark Cooksey (old player, "MarkCookseyOld", prefix `mco`): behaviour spec | `src/replay/markcookseyold.rs` |
+| `mcmd/` | MCMD replayer: behaviour spec | `src/replay/mcmd.rs` |
+| `midiloriciel/` | MIDI - Loriciel: behaviour spec | `src/replay/midiloriciel.rs` |
+| `nickpelling/` | Nick Pelling Packer: behaviour spec | `src/replay/nickpelling.rs` |
+| `paultonge/` | Paul Tonge replayer: behaviour spec | not ported yet |
+| `quartetst/` | Quartet ST replayer: behaviour spec | `src/replay/quartetst.rs` |
+| `riffraff/` | Riff Raff: behaviour specification | `src/replay/riffraff.rs` |
+| `scottjohnston/` | Scott Johnston ("SoundPlayer", `SJ.*`) replayer: behaviour spec | `src/replay/scottjohnston.rs` |
+| `specialfxst/` | Special FX ST (`doda.*`) player: behaviour spec | not ported yet |
+| `tfhd/` | TFMX single-file container (TFHD): behaviour spec | `src/replay/tfhd.rs` |
 
 Each directory holds `SPEC.md` (the spec), `LOGS.md` (how the evidence was produced) and `README.md` (what is solved and what
 stays unknown). Files and scripts they call `logs/...`, `scripts/...` or "traces" are not shipped: the reference logs are

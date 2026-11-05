@@ -86,6 +86,7 @@ pub mod onescapee;
 pub mod ntspsystem;
 pub mod dariuszendeh;
 pub mod audiosculpture;
+pub mod earache;
 pub mod speedysystem;
 pub mod futurecomposerbsi;
 pub mod speedya1system;
@@ -409,6 +410,8 @@ pub const REPLAYERS: &[Open] = &[
     // a Standard MIDI File with a sample bank beside it: strict header, after every other replayer
     midiloriciel::OPEN,
     audiosculpture::OPEN,
+    // the plain kind is recognised by the header longs alone (first word zero): after every other replayer with a magic word
+    earache::OPEN,
     // weak detection (first byte, a size field, one zero byte): after everything else but Infogrames
     markcookseyold::OPEN,
     // after the others: its detection is loose (two bytes of the first envelope)

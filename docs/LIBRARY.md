@@ -73,7 +73,7 @@ while !song.songend() && song.elapsed_secs() < 120.0 {
 
 Rates from 1000 to 768000 Hz are accepted; 44100 and 48000 are what the output stage is
 tuned for. A `Song` is `Send`, not `Sync`; use one per thread. It allocates the emulated machine's
-memory when opened (a few MB to a few tens of MB), so open songs when needed, not in bulk.
+memory when opened (about 6 MB resident for a ProTracker song), so open songs when needed, not in bulk.
 
 Output is deterministic: the same bytes, rate and subsong give the same samples, run after run.
 Garbage input gives `Err`, and a replayer bug that would panic is caught and reported as

@@ -161,6 +161,7 @@ pub mod tronic;
 pub mod ufo;
 pub mod wallybeben;
 pub mod ym2149;
+pub mod zoundmonitor;
 
 use crate::amplifier::Poke;
 use crate::bus::Bus;
@@ -416,6 +417,8 @@ pub const REPLAYERS: &[Open] = &[
     audiosculpture::OPEN,
     // the plain kind is recognised by the header longs alone (first word zero): after every other replayer with a magic word
     earache::OPEN,
+    // weak detection (a trailer of the form "df?:" or "?amp" after the computed end of the patterns; sng.* files are also ProTracker / STK modules): after every other replayer with a magic word
+    zoundmonitor::OPEN,
     // weak detection (first byte, a size field, one zero byte): after everything else but Infogrames
     markcookseyold::OPEN,
     // after the others: its detection is loose (two bytes of the first envelope)

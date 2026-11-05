@@ -25,6 +25,7 @@ pub mod davelowe;
 mod davelowe_cpu;
 mod davelowe_gaps;
 mod davelowe_tables;
+pub mod davidhanney;
 pub mod davidwhittaker;
 pub mod digibooster;
 pub mod digitalmugician;
@@ -306,6 +307,7 @@ pub const REPLAYERS: &[Open] = &[
     stp3::OPEN,
     maxtrax::OPEN,
     syntracker::OPEN,
+    davidhanney::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -17,3 +17,6 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Its own workspace root: it keeps its own Cargo.lock and release profile (see the root Cargo.toml).
+[workspace]

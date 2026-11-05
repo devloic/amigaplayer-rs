@@ -687,6 +687,38 @@ plain modules, as Devils Replay and HCD Protector keep the `M.K.` mark.
   reference refuses Magnetic Fields Packer, NovoTrade Packer, Devils Replay and
   HCD Protector, so their playback is unchecked.
 
+## Using as a library
+
+The open replayers, the libxmp port, the built-in ProTracker, the decrunchers and the AIFF
+decoder are a library with no SDL and no 68k player hosting (`default-features = false`, or the
+`host-68k` feature off). Rust, C and WebAssembly front ends; full guide in
+[`docs/LIBRARY.md`](docs/LIBRARY.md).
+
+```toml
+# Rust: a git dependency (the package is named amigaplayer-rs)
+amigaplayer = { git = "https://fg.lolo.asia/adminlolo/amigaplayer-rs.git", package = "amigaplayer-rs", default-features = false }
+```
+
+```rust
+let mut song = amigaplayer::Song::open("tune.mod", &bytes, 48000)?;
+let mut pcm = vec![0i16; 2 * 4800];      // interleaved stereo
+song.render_i16(&mut pcm);               // repeat until song.songend() or a time limit
+```
+
+* **C**: `cargo build --release -p amigaplayer-capi` gives `libamigaplayer.so` / `.a`; the
+  header is `crates/amigaplayer-capi/include/amigaplayer.h`, a complete program
+  `examples/c/play.c` (`ap_open`, `ap_render_s16`, `ap_subsongs`, `ap_close`, ...).
+* **WebAssembly**: `crates/amigaplayer-wasm` (the `dp_*` ABI; protocol and a JavaScript example
+  in its README).
+* **Rust examples**: `cargo run --release --no-default-features --example play_to_wav -- tune.mod
+  out.wav`, `--example list_formats`.
+* `tools/lib-check.sh` builds and tests all of it.
+
+The library is GPL-2.0-or-later like the rest, with the per-file attributions and `LICENSE-*`
+texts of the code it is ported from: **linking it makes your program a combined work that must
+be distributed under GPL-2.0-or-later compatible terms.** The API is 0.x (documented items at
+the crate root are stable within a `0.y` series; the modules behind them are not).
+
 ## Licence
 
 amigaplayer-rs is free software under the GNU General Public License, version 2 or

@@ -1,0 +1,15 @@
+[package]
+name = "amigaplayer-capi"
+description = "C API of amigaplayer-rs's open replayers: a small opaque-handle interface (see include/amigaplayer.h) over the Song type of the Rust library."
+edition = "2024"
+version = "0.1.0"
+license = "GPL-2.0-or-later"
+repository = "https://fg.lolo.asia/adminlolo/amigaplayer-rs.git"
+
+[lib]
+name = "amigaplayer"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+# The open-replayer library only: no SDL, no 68k player hosting.
+amigaplayer-rs = { path = "../..", default-features = false }

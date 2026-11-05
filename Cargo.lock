@@ -12,6 +12,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "amigaplayer-capi"
+version = "0.1.0"
+dependencies = [
+ "amigaplayer-rs",
+]
+
+[[package]]
 name = "amigaplayer-rs"
 version = "0.1.0"
 dependencies = [
@@ -216,6 +223,9 @@ checksum = "91cac6cd830bba6da0f6d75dc59d3f2315fb207b4557c5ae7851f212a801f454"
 [[package]]
 name = "m68k-rc"
 version = "0.1.0"
+dependencies = [
+ "m68k",
+]
 
 [[package]]
 name = "memchr"

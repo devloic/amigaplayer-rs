@@ -3,6 +3,19 @@ name = "amigaplayer-rs"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-2.0-or-later"
+description = "Amiga music replayers as a library and player: ProTracker and about a hundred other Amiga formats on an emulated Paula, the PC tracker formats of libxmp, AIFF. Deterministic, no audio device needed."
+repository = "https://fg.lolo.asia/adminlolo/amigaplayer-rs.git"
+readme = "README.md"
+keywords = ["amiga", "tracker", "mod", "chiptune", "audio"]
+categories = ["multimedia::audio", "emulators"]
+exclude = ["tools/", "crates/players-native/gen/"]
+
+[workspace]
+# The C API shares the root's lock file and target directory; m68k-rc and players-native
+# are path dependencies and so members too. The WebAssembly crate keeps a lock file and
+# release profile of its own (panic = abort, LTO), which a workspace member could not.
+members = [".", "crates/amigaplayer-capi"]
+exclude = ["crates/amigaplayer-wasm"]
 
 [dependencies]
 anyhow = "1.0.104"

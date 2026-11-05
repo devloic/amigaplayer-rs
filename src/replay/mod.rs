@@ -106,6 +106,7 @@ pub mod pumatracker;
 pub mod quadracomposer;
 mod quadracomposer_tables;
 pub mod richardjoseph;
+pub mod richardjosephrj;
 pub mod fashiontracker;
 pub mod seanconnolly;
 pub mod seanconran;
@@ -289,6 +290,7 @@ pub const REPLAYERS: &[Open] = &[
     agi::OPEN,
     ptm::OPEN,
     richardjoseph::OPEN,
+    richardjosephrj::OPEN,
     sonix::OPEN,
     davelowe_cpu::OPEN,
     fredgray::OPEN,

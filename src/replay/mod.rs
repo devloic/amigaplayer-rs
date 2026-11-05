@@ -102,6 +102,7 @@ pub mod quartetst;
 pub mod voodoosupremesynthesizer;
 pub mod suntronic;
 pub mod paulrobotham;
+pub mod paultonge;
 pub mod howiedavies;
 pub mod professionalsoundartists;
 pub mod thomashermann;
@@ -419,6 +420,9 @@ pub const REPLAYERS: &[Open] = &[
     earache::OPEN,
     // weak detection (a trailer of the form "df?:" or "?amp" after the computed end of the patterns; sng.* files are also ProTracker / STK modules): after every other replayer with a magic word
     zoundmonitor::OPEN,
+    // weak detection (a word 12 and three list offsets whose first pattern follows a pattern end): after every other
+    // format with a stricter rule, before the two weakest
+    paultonge::OPEN,
     // weak detection (first byte, a size field, one zero byte): after everything else but Infogrames
     markcookseyold::OPEN,
     // after the others: its detection is loose (two bytes of the first envelope)

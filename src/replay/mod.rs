@@ -404,9 +404,9 @@ pub const REPLAYERS: &[Open] = &[
     mcmd::OPEN,
     // a Standard MIDI File with a sample bank beside it: strict header, after every other replayer
     midiloriciel::OPEN,
-    // weak detection (first byte, a size field, one zero byte): after everything else
-    markcookseyold::OPEN,
     audiosculpture::OPEN,
+    // weak detection (first byte, a size field, one zero byte): after everything else but Infogrames
+    markcookseyold::OPEN,
     // after the others: its detection is loose (two bytes of the first envelope)
     infogrames::OPEN,
 ];

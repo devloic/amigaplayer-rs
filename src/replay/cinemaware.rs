@@ -47,7 +47,7 @@ const REC: usize = 138;
 
 /// The record count, if the file starts as a module does.
 fn records(d: &[u8]) -> Option<usize> {
-    (d.len() >= 6 && d[..4] == *b"IBLK" && (1..=128).contains(&d[4])).then_some(d[4] as usize)
+    (d.len() >= 6 && d[..4] == *b"IBLK" && (1..=128).contains(&d[4])).then(|| d[4] as usize)
 }
 
 /// Recognition: `IBLK`, 1-128 records, and `ASEQ` at an even distance (0..254)

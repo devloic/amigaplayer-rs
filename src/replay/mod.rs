@@ -98,6 +98,7 @@ pub mod forgottenworlds;
 pub mod futureplayer;
 pub mod anders0land;
 pub mod jochenhippelst;
+pub mod mcmd;
 pub mod medley;
 pub mod artandmagic;
 pub mod robhubbard;
@@ -382,6 +383,8 @@ pub const REPLAYERS: &[Open] = &[
     ym2149::OPEN,
     // weak detection (first byte, a size field, one zero byte): after everything else
     markcookseyold::OPEN,
+    // the magic only, no real module known: after every other replayer
+    mcmd::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

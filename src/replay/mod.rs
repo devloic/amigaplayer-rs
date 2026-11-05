@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod actionamics;
+pub mod adpcmmono;
 pub mod amcomposer;
 pub mod alcatrazpacker;
 pub mod andrewparton;
@@ -427,6 +428,8 @@ pub const REPLAYERS: &[Open] = &[
     markcookseyold::OPEN,
     // after the others: its detection is loose (two bytes of the first envelope)
     infogrames::OPEN,
+    // last: its content check takes anything (the file name is checked in `new`)
+    adpcmmono::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

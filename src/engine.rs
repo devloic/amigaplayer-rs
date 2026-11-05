@@ -625,7 +625,11 @@ impl Engine {
             return self.start_native(path, &data, addr, fmt);
         }
         if self.open_replayers {
-            if let Some(o) = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data)) {
+            // (the format recognised by its file name needs it to be told)
+            crate::replay::adpcmmono::set_name(&file_name(path));
+            let found = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data));
+            crate::replay::adpcmmono::set_name("");
+            if let Some(o) = found {
                 // a replayer's InitSound may write Paula's registers, as the 68k
                 // players' do after start_deli's reset; it starts at the same phase
                 self.align_start();

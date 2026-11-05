@@ -143,6 +143,7 @@ pub mod tme;
 pub mod tronic;
 pub mod ufo;
 pub mod wallybeben;
+pub mod ym2149;
 
 use crate::amplifier::Poke;
 use crate::bus::Bus;
@@ -375,6 +376,7 @@ pub const REPLAYERS: &[Open] = &[
     // strict content rule, no real module known: after every other replayer
     tomytracker::OPEN,
     medley::OPEN,
+    ym2149::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -521,6 +521,21 @@ ORIGINAL_PLAYS_ON = {'pretracker', 'scumm', 'jesperolsen'}
 REFUSED_NO_FALLBACK = {'hippel7v'}
 
 
+# Formats whose Eagleplayer is pre-empted in the full player directory by another player's looser
+# check (UADE's Soundtracker IV takes MYST files before YM-2149 is asked): the original runs from a
+# directory holding that player alone.
+ALONE = {'ym2149': 'YM-2149'}
+
+
+def alone_dir(ctx, name):
+    d = os.path.join(ctx.cache, 'alone-' + re.sub(r'[^A-Za-z0-9]', '_', name))
+    os.makedirs(d, exist_ok=True)
+    link = os.path.join(d, name)
+    if not os.path.lexists(link):
+        os.symlink(os.path.join(UADE_PLAYERS, name), link)
+    return d
+
+
 def retext_empty(ctx, mod):
     """TFMX Pro modules whose text is the editor's "(Empty) ": EP206's TFMX_Pro takes only four it
     knows and leaves the rest to TFMX_1.5, which refuses them, while UADE's newer TFMX_Pro plays
@@ -584,6 +599,8 @@ def find_reference(ctx, mod, po, port_short=False):
     dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
     if want in UADE_FIRST:
         dirs = dirs[::-1]
+    if want in ALONE:
+        dirs = (('uade', alone_dir(ctx, ALONE[want])),)
     if want == 'tfmxpro':
         mod = retext_empty(ctx, mod)
     # the player the port was verified against comes first, then the generic search

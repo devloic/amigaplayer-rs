@@ -94,7 +94,9 @@ UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 
               # EP206's MCMD is another build than UADE's, which the port's write logs come from
               'mcmd',
               # EP206's GlueMon differs from UADE's V1.13 build, which the port follows
-              'gluemon')
+              'gluemon',
+              # Infogrames exists only in UADE's set
+              'infogrames')
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's
@@ -374,6 +376,11 @@ def _fallback_stage(path, cache):
         if b[:6] == b'\xfd7zXZ\x00':
             b = lzma.decompress(b)
         open(mod, 'wb').write(b)
+        # a companion of the same stem (Infogrames' NAME.ins bank) goes along
+        stem = os.path.splitext(os.path.basename(src))[0]
+        for f in os.listdir(os.path.dirname(src) or '.'):
+            if f.lower().endswith('.ins') and os.path.splitext(f)[0] == stem:
+                shutil.copy(os.path.join(os.path.dirname(src), f), os.path.join(d, f))
     return mod
 
 

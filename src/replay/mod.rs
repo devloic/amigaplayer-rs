@@ -45,6 +45,7 @@ pub mod fred;
 pub mod futurecomposer;
 pub mod gamemusiccreator;
 pub mod iffsmus;
+pub mod infogrames;
 pub mod instereo1;
 pub mod instereo2;
 pub mod hippel;
@@ -396,6 +397,8 @@ pub const REPLAYERS: &[Open] = &[
     midiloriciel::OPEN,
     // weak detection (first byte, a size field, one zero byte): after everything else
     markcookseyold::OPEN,
+    // after the others: its detection is loose (two bytes of the first envelope)
+    infogrames::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

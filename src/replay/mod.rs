@@ -103,6 +103,7 @@ pub mod soundtracker;
 pub mod st26;
 pub mod synthdream;
 pub mod synthesis;
+pub mod syntracker;
 pub mod synthpack;
 pub mod tfmx;
 pub mod timfollin;
@@ -304,6 +305,7 @@ pub const REPLAYERS: &[Open] = &[
     coredesign::OPEN,
     stp3::OPEN,
     maxtrax::OPEN,
+    syntracker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

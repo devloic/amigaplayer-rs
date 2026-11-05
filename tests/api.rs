@@ -190,7 +190,7 @@ const MAGICS: &[&[u8]] = &[
     b"AHX\x00", b"AHX\x01", b"THX\x01", b"HVL\x01", b"OKTASONG", b"RJP", b"DIGI Booster module", b"DBM0",
     b"IMPM", b"Extended Module: ", b"FORM", b"MTM", b"FAR\xfe", b"MThd", b"SYMMUSIC", b"BeEp", b"MUGICIAN",
     b" MUGICIAN2", b"ADPCM", b"SOARV1.0", b"SONIC ARRANGER", b"Fuchs Tracker", b"CUST", b"DSM\x00", b"JamCracker",
-    b"BP30", b"MaxTrax", b"SPS", b"PSID", b"PTM ", b"STM", b"UN05", b"S3M",
+    b"BP30", b"MaxTrax", b"SPS", b"PSID", b"PTM ", b"STM", b"UN05", b"S3M", b"SYNTRACKER-SONG:",
 ];
 
 #[test]

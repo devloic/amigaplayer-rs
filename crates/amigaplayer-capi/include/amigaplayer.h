@@ -67,7 +67,7 @@ size_t ap_detect(const uint8_t *data, size_t len, char *out, size_t cap);
 ap_song *ap_open(const char *name, const uint8_t *data, size_t len, uint32_t rate);
 
 /*
- * As ap_open, with n companion files in memory (TFMX smpl.*, IFF-SMUS Instruments/ files):
+ * As ap_open, with n companion files in memory (TFMX smpl.NAME, IFF-SMUS Instruments/ files):
  * paths[i] is the path relative to the module (e.g. "smpl.tune"), datas[i] / lens[i] its
  * content.
  */

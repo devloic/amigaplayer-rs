@@ -618,7 +618,10 @@ impl Engine {
         }
         }
         // 1. the built-in ProTracker for 31-instrument modules
-        if let Some(fmt) = ProTracker::detect(&data).filter(|f| *f != "SoundTracker") {
+        // (a StarTrekker-tagged module with an AudioSculpture companion beside it is not one)
+        if let Some(fmt) = ProTracker::detect(&data).filter(|f| *f != "SoundTracker").filter(|f| {
+            !(self.open_replayers && *f == "StarTrekker" && crate::replay::audiosculpture::takes_over(&self.m, &data))
+        }) {
             return self.start_native(path, &data, addr, fmt);
         }
         if self.open_replayers {

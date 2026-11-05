@@ -84,6 +84,7 @@ pub mod oktalyzer;
 pub mod onescapee;
 pub mod ntspsystem;
 pub mod dariuszendeh;
+pub mod audiosculpture;
 pub mod speedysystem;
 pub mod futurecomposerbsi;
 pub mod speedya1system;
@@ -401,6 +402,7 @@ pub const REPLAYERS: &[Open] = &[
     midiloriciel::OPEN,
     // weak detection (first byte, a size field, one zero byte): after everything else
     markcookseyold::OPEN,
+    audiosculpture::OPEN,
     // after the others: its detection is loose (two bytes of the first envelope)
     infogrames::OPEN,
 ];

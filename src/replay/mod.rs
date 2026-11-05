@@ -129,6 +129,7 @@ pub mod richardjoseph;
 pub mod richardjosephrj;
 pub mod bendaglishsid;
 pub mod markii;
+pub mod pokeynoise;
 pub mod riffraff;
 pub mod fashiontracker;
 pub mod seanconnolly;
@@ -250,6 +251,9 @@ pub struct Open {
 }
 
 pub const REPLAYERS: &[Open] = &[
+    // first: the strict SAP header test ("SAP", TYPE B, M or C) takes no other format's file, but
+    // some weaker tests below take SAP files
+    pokeynoise::OPEN,
     pumatracker::OPEN,
     sidmon2::OPEN,
     jamcracker::OPEN,

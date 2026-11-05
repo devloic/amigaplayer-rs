@@ -60,6 +60,7 @@ pub mod dirkbialluch;
 pub mod kh;
 pub mod legglessmusiceditor;
 pub mod markcooksey;
+pub mod markcookseyold;
 pub mod maximumeffect;
 pub mod soundprogramminglanguage;
 pub mod med;
@@ -377,6 +378,8 @@ pub const REPLAYERS: &[Open] = &[
     tomytracker::OPEN,
     medley::OPEN,
     ym2149::OPEN,
+    // weak detection (first byte, a size field, one zero byte): after everything else
+    markcookseyold::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

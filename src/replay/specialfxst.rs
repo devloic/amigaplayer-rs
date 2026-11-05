@@ -31,8 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const OPEN: Open = Open { name: "Special-FX ST", detect, new };
 
 /// The phase (colour clocks modulo the raster line of 227) of the tick calls; the reference
-/// host's differs per run. `u64::MAX` selects the default (or `SPECIALFXST_PHASE`). A test and
-/// measurement knob.
+/// host's differs per run. `u64::MAX` selects the default. A test and measurement knob.
 pub static PHASE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 const LINE: u64 = 227;
@@ -403,7 +402,7 @@ pub struct SpecialFxSt {
 
 fn phase() -> u64 {
     match PHASE.load(Ordering::Relaxed) {
-        u64::MAX => std::env::var("SPECIALFXST_PHASE").ok().and_then(|s| s.parse::<u64>().ok()).map_or(DEFAULT_PHASE, |p| p % LINE),
+        u64::MAX => DEFAULT_PHASE,
         p => p % LINE,
     }
 }

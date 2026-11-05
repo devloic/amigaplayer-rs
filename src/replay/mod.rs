@@ -55,6 +55,7 @@ pub mod jankomrsicflogel;
 pub mod jasonpage;
 pub mod jeroentel;
 pub mod jesperolsen;
+pub mod laxity;
 pub mod dirkbialluch;
 pub mod kh;
 pub mod legglessmusiceditor;
@@ -363,6 +364,8 @@ pub const REPLAYERS: &[Open] = &[
     voodoosupremesynthesizer::OPEN,
     // last: Hippel COSO and TFMX files are taken by the Hippel replayers above
     jochenhippelst::OPEN,
+    // weak detection (two flag bytes and a signature): after every format with a magic word
+    laxity::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -18,6 +18,7 @@ pub mod amosmusicbank;
 pub mod ahx;
 pub mod artofnoise;
 pub mod bendaglish;
+pub mod bladepacker;
 pub mod beathoven;
 pub mod cinemaware;
 mod beathoven_tables;
@@ -332,6 +333,7 @@ pub const REPLAYERS: &[Open] = &[
     forgottenworlds::OPEN,
     artandmagic::OPEN,
     howiedavies::OPEN,
+    bladepacker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

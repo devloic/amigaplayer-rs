@@ -93,6 +93,7 @@ pub mod paulsummers;
 pub mod forgottenworlds;
 pub mod futureplayer;
 pub mod anders0land;
+pub mod jochenhippelst;
 pub mod artandmagic;
 pub mod robhubbard;
 pub mod robhubbardst;
@@ -360,6 +361,8 @@ pub const REPLAYERS: &[Open] = &[
     anders0land::OPEN,
     thomashermann::OPEN,
     voodoosupremesynthesizer::OPEN,
+    // last: Hippel COSO and TFMX files are taken by the Hippel replayers above
+    jochenhippelst::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

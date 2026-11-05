@@ -78,6 +78,7 @@ mod pretracker_tables;
 pub mod musicline;
 pub mod oktalyzer;
 pub mod onescapee;
+pub mod ntspsystem;
 pub mod paulrobotham;
 pub mod howiedavies;
 pub mod paulsummers;
@@ -329,6 +330,7 @@ pub const REPLAYERS: &[Open] = &[
     soundprogramminglanguage::OPEN,
     paulsummers::OPEN,
     onescapee::OPEN,
+    ntspsystem::OPEN,
     tronic::OPEN,
     forgottenworlds::OPEN,
     artandmagic::OPEN,

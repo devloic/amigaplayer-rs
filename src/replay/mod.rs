@@ -110,7 +110,6 @@ pub mod professionalsoundartists;
 pub mod thomashermann;
 pub mod paulsummers;
 pub mod forgottenworlds;
-pub mod forgottenworlds_redo;
 pub mod futureplayer;
 pub mod anders0land;
 pub mod jochenhippelst;

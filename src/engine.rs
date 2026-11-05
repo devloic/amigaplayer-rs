@@ -627,7 +627,7 @@ impl Engine {
         if self.open_replayers {
             // (the format recognised by its file name needs it to be told)
             crate::replay::adpcmmono::set_name(&file_name(path));
-            let found = crate::replay::forgottenworlds_redo::selected(&data).or_else(|| crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data)));
+            let found = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data));
             crate::replay::adpcmmono::set_name("");
             if let Some(o) = found {
                 // a replayer's InitSound may write Paula's registers, as the 68k

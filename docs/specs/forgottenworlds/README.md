@@ -37,3 +37,11 @@ produced.
 
 Real modules: game_end, level_1_and_3 (full 30 s logs), title, jingle, level_2_and_4 (only as variants with a
 delayed channel 0 because of the hang). No synthetic modules were composed from scratch.
+
+## Errata found while implementing (second, blind implementation)
+
+- Command 0x80: the event pointer stays on the 0x80, not after it; the channel reads it again when its wrapped counter next runs out, and that halts the tick again (needed for the jingle after tick 577).
+- A channel's first pattern call costs 3 cycles more than the 130 given.
+- The poll must read the interrupt request register at call + (ts-1)/2 to match "raised strictly before the sample time".
+- The first init write sits 680 cc after the engine's fixed run start.
+- No log covers: the stop sequence, volume and balance scaling, restart, a note with no instrument, commands above 0x8A.

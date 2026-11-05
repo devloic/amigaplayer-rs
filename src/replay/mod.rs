@@ -80,6 +80,7 @@ pub mod musicline;
 pub mod oktalyzer;
 pub mod onescapee;
 pub mod ntspsystem;
+pub mod dariuszendeh;
 pub mod speedysystem;
 pub mod speedya1system;
 pub mod paulrobotham;
@@ -340,6 +341,7 @@ pub const REPLAYERS: &[Open] = &[
     onescapee::OPEN,
     ntspsystem::OPEN,
     speedysystem::OPEN,
+    dariuszendeh::OPEN,
     tronic::OPEN,
     forgottenworlds::OPEN,
     artandmagic::OPEN,

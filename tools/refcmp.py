@@ -92,7 +92,9 @@ UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 
               # EP206's SUNtronic build does not report the song end; UADE's does
               'suntronic',
               # EP206's MCMD is another build than UADE's, which the port's write logs come from
-              'mcmd')
+              'mcmd',
+              # EP206's GlueMon differs from UADE's V1.13 build, which the port follows
+              'gluemon')
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's

@@ -72,6 +72,7 @@ before publication so that it describes behaviour only; what was removed or rewo
 | `adpcmmono/` | ADPCM mono (Eagleplayer "ADPCM_mono", player name "Adaptative Delta Pulse Code Modulation") — behaviour spec | `src/replay/adpcmmono.rs` |
 | `zoundmonitor/` | ZoundMonitor (Amiga, `sng.*`) replayer: behaviour spec | `src/replay/zoundmonitor.rs` |
 | `bendaglishsid/` | Benn Daglish SID (`bds.*`, tag `DAGLISH!`): hosted-driver behaviour spec | `src/replay/bendaglishsid.rs` |
+| `markii/` | Mark II Sound-System (`mk2.*`): hosted-driver behaviour spec | `src/replay/markii.rs` |
 
 Each directory holds `SPEC.md` (the spec), `LOGS.md` (how the evidence was produced) and `README.md` (what is solved and what
 stays unknown). Files and scripts they call `logs/...`, `scripts/...` or "traces" are not shipped: the reference logs are

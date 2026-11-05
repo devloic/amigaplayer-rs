@@ -99,6 +99,7 @@ pub mod quadracomposer;
 mod quadracomposer_tables;
 pub mod richardjoseph;
 pub mod fashiontracker;
+pub mod seanconnolly;
 pub mod seanconran;
 pub mod soundplayer;
 pub mod ronklaren;
@@ -346,6 +347,7 @@ pub const REPLAYERS: &[Open] = &[
     futureplayer::OPEN,
     professionalsoundartists::OPEN,
     maximumeffect::OPEN,
+    seanconnolly::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

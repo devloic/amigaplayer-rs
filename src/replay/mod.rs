@@ -121,6 +121,7 @@ pub mod quadracomposer;
 mod quadracomposer_tables;
 pub mod richardjoseph;
 pub mod richardjosephrj;
+pub mod riffraff;
 pub mod fashiontracker;
 pub mod seanconnolly;
 pub mod seanconran;
@@ -385,6 +386,7 @@ pub const REPLAYERS: &[Open] = &[
     kimchristensen::OPEN,
     scottjohnston::OPEN,
     majortom::OPEN,
+    riffraff::OPEN,
     anders0land::OPEN,
     thomashermann::OPEN,
     voodoosupremesynthesizer::OPEN,

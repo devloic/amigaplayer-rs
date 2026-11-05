@@ -54,6 +54,7 @@ pub mod jeroentel;
 pub mod jesperolsen;
 pub mod dirkbialluch;
 pub mod kh;
+pub mod legglessmusiceditor;
 pub mod markcooksey;
 pub mod med;
 pub(crate) mod m68kdec;
@@ -312,6 +313,7 @@ pub const REPLAYERS: &[Open] = &[
     syntracker::OPEN,
     davidhanney::OPEN,
     markcooksey::OPEN,
+    legglessmusiceditor::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

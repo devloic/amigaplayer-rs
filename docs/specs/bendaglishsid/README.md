@@ -21,7 +21,7 @@
 - **data/.** `data/site_keys.bin` holds the five search keys (for each key a byte with its word
   count, then the words) and `data/scan_words.bin` the three words of the audio-routine scan (end
   word, replacement, volume-load word). They are words of the modules' own driver code as the
-  player matches them, not bytes of the player; the lead decides on embedding them.
+  player matches them, not bytes of the player; the port embeds them on the project owner's decision.
 - **Publication screening.** The spec names 68000 registers (D0-D6, A0, A4, A5) only as the
   calling state the host and the driver exchange (which a port must read or set). The lead may
   want to look at that and at the hex words in data/ before publishing.

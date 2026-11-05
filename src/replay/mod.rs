@@ -83,6 +83,7 @@ pub mod ntspsystem;
 pub mod dariuszendeh;
 pub mod speedysystem;
 pub mod speedya1system;
+pub mod quartet;
 pub mod paulrobotham;
 pub mod howiedavies;
 pub mod professionalsoundartists;
@@ -353,6 +354,7 @@ pub const REPLAYERS: &[Open] = &[
     maximumeffect::OPEN,
     seanconnolly::OPEN,
     speedya1system::OPEN,
+    quartet::OPEN,
     anders0land::OPEN,
 ];
 

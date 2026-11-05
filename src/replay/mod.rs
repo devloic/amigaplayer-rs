@@ -62,6 +62,7 @@ pub mod kh;
 pub mod legglessmusiceditor;
 pub mod markcooksey;
 pub mod markcookseyold;
+pub mod nickpelling;
 pub mod maximumeffect;
 pub mod soundprogramminglanguage;
 pub mod med;
@@ -387,6 +388,7 @@ pub const REPLAYERS: &[Open] = &[
     scottjohnston::OPEN,
     majortom::OPEN,
     riffraff::OPEN,
+    nickpelling::OPEN,
     anders0land::OPEN,
     thomashermann::OPEN,
     voodoosupremesynthesizer::OPEN,

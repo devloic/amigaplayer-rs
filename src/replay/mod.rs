@@ -72,6 +72,7 @@ mod pretracker_tables;
 pub mod musicline;
 pub mod oktalyzer;
 pub mod paulrobotham;
+pub mod robhubbard;
 pub mod robhubbardst;
 pub mod stevebarrett;
 pub mod paulshields;
@@ -300,6 +301,7 @@ pub const REPLAYERS: &[Open] = &[
     ems::OPEN,
     steveturner::OPEN,
     synthdream::OPEN,
+    robhubbard::OPEN,
     robhubbardst::OPEN,
     stevebarrett::OPEN,
     ashleyhogg::OPEN,

@@ -62,7 +62,7 @@ while !song.songend() && song.elapsed_secs() < 120.0 {
 |------|--|
 | `detect(&[u8]) -> Option<String>` | which format would play the bytes (after unpacking), without starting it |
 | `formats() -> Vec<&'static str>` | the formats the library knows |
-| `Song::open(name, bytes, rate)` / `open_with(.., companions, ..)` | start a module. Companions (TFMX `smpl.*`, IFF-SMUS `Instruments/*`, ...) are `(relative path, bytes)` pairs |
+| `Song::open(name, bytes, rate)` / `open_with(.., companions, ..)` | start a module. Companions (TFMX `smpl.*`, Mark Cooksey `mcs.*`, IFF-SMUS `Instruments/*`, ...) are `(relative path, bytes)` pairs |
 | `render_f32` / `render_i16` | fill interleaved stereo; return frames written |
 | `subsongs()` / `set_subsong(n)` | `Subsongs { first, last, current }`; out of range is an `Error` |
 | `songend()` | the replayer reported the end (many never do: use a time limit and/or silence detection) |

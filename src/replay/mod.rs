@@ -54,6 +54,7 @@ pub mod jeroentel;
 pub mod jesperolsen;
 pub mod dirkbialluch;
 pub mod kh;
+pub mod markcooksey;
 pub mod med;
 pub(crate) mod m68kdec;
 #[cfg(test)]
@@ -310,6 +311,7 @@ pub const REPLAYERS: &[Open] = &[
     maxtrax::OPEN,
     syntracker::OPEN,
     davidhanney::OPEN,
+    markcooksey::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

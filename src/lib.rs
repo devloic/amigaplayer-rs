@@ -27,7 +27,7 @@
 //!
 //! * [`detect`] and [`formats`]: ask what would play some bytes, without starting it.
 //! * [`Song`]: [`open`](Song::open) / [`open_with`](Song::open_with) (companion files such as
-//!   TFMX `smpl.*` are passed in memory: nothing touches the file system),
+//!   TFMX `smpl.*`, Mark Cooksey `mcs.*` are passed in memory: nothing touches the file system),
 //!   [`render_f32`](Song::render_f32) / [`render_i16`](Song::render_i16),
 //!   [`subsongs`](Song::subsongs) / [`set_subsong`](Song::set_subsong),
 //!   [`songend`](Song::songend), [`duration_hint`](Song::duration_hint),

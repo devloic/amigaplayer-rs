@@ -86,6 +86,7 @@ pub mod speedysystem;
 pub mod speedya1system;
 pub mod quartet;
 pub mod voodoosupremesynthesizer;
+pub mod suntronic;
 pub mod paulrobotham;
 pub mod howiedavies;
 pub mod professionalsoundartists;
@@ -361,6 +362,7 @@ pub const REPLAYERS: &[Open] = &[
     seanconnolly::OPEN,
     speedya1system::OPEN,
     quartet::OPEN,
+    suntronic::OPEN,
     anders0land::OPEN,
     thomashermann::OPEN,
     voodoosupremesynthesizer::OPEN,

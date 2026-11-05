@@ -150,10 +150,14 @@ impl Song {
         if !(MIN_RATE..=MAX_RATE).contains(&rate) {
             return Err(Error::InvalidRate(rate));
         }
-        if open::detect(data).is_none() {
+        let name = clean_name(name);
+        // (the format recognised by its file name needs it to be told)
+        crate::replay::adpcmmono::set_name(&name);
+        let known = open::detect(data).is_some();
+        crate::replay::adpcmmono::set_name("");
+        if !known {
             return Err(Error::NotRecognised);
         }
-        let name = clean_name(name);
         let files: Vec<(PathBuf, Vec<u8>)> =
             companions.iter().map(|(rel, d)| (PathBuf::from(DIR).join(clean_rel(rel)), d.to_vec())).collect();
         let e = Self::start(&name, data, &files, rate)?;

@@ -56,3 +56,9 @@
   or bits 6-7 of the synth length byte; neither was tested.
 - Tick-handler overruns (long synthesis) delay the next tick in the reference; ports that model
   time per write will see the same shift only if their synthesis costs match LOGS.md.
+
+## Errata found while implementing
+
+- Modules t1-t4 listed in LOGS are missing from the spec's module set, and no DMA logs were shipped.
+- Handler and row timings depend on channel index and event type; the port fits them from the logs.
+- Unspecified: running-sum width of mode 2 op 7 (port: 16-bit); portamento fall and wrap (port: volume-style).

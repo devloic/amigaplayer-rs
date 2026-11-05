@@ -50,3 +50,9 @@ No player data (tables, samples) is needed: the container holds everything. Ther
    engine is not tick-equal to its own reference (e.g. Turrican 2 title: it misses the first
    tick's volumes and periods). This was seen while checking. It is a `Seven` port issue,
    unrelated to the container.
+
+## Errata found while implementing
+
+- The existing 7V engine's voices 0-2 must start with the leftover volume and period values the reference writes on its first music tick (e.g. VOL0 $2E, VOL1/VOL2 $20, PER0 $017D, PER1 $012F, PER2 $0168 in the Turrican 2 intro); the spec omits these constants.
+- SPEC 4.2 ('right after the volume write') is imprecise: DMA on is written at the macro command itself, with no wait.
+- Pro start-up timing varies from run to run in the reference; one Pro module (Turrican 2 loader) differs by one tick in voice 3's first macro, cause not found.

@@ -41,3 +41,8 @@ The driver file itself is not needed by a port and is not included.
   the base or place the bank at the same address.
 - The reference's volume scaling by the host's volume/balance and voice mask is in SPEC 5.2; with default settings
   it is the identity except for the out-of-range index 15 value.
+
+## Errata found while implementing
+
+- The first-tick phase differs per module in the reference (98306 for six songs; 98269, 98346 and 97900 for others) and cannot be derived from the files.
+- The sample bank lies 0x800, 0x810 or 0xC08 bytes after the song start depending on song size (fitted).

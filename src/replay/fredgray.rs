@@ -32,18 +32,96 @@ pub const OPEN: Open = Open { name: "Fred Gray", detect, new };
 /// reference's first write of a tick).
 const TICK_WRAP: u64 = 0;
 
-/// What the reference's wrapper does before the first init (it patches the module: the time it
-/// takes depends on the module, in a way the specification does not give) and the timer delay of
-/// the four known modules, keyed by hunk size in longwords and the play and init entries:
-/// (size, play, init, colour clocks before the init, timer delay).
-const KNOWN: [(u32, u32, u32, u64, u64); 4] = [
-    (0x4C6, 0xE2, 0x8C, 42504, 140),
-    (0x5E5, 0x1DA, 0xA6, 40486, 120),
-    (0x72D, 0xE4, 0x8E, 38665, 140),
-    (0x740, 0xEC, 0xA6, 34589, 140),
-];
-/// The start of a module not in the table: about the mean of the four.
-const START_OTHER: (u64, u64) = (39000, 140);
+/// The first tick comes this long after the last init's final DMA-enable store (the 50 Hz timer
+/// period) plus the interrupt wrapper's set-up; `TICK_K` is the engine-side calibration of the
+/// timer start (colour clocks, on top of the specification's 126).
+/// Colour clocks from the start of the init routine to its first Paula store, in the builds that
+/// store soonest after a start at the run's first phase (the clock of a start is 100 into a frame).
+const FIRST_STORE: u64 = 33;
+const WRAP_CC: u64 = 126;
+
+/// The wrapper's scan of the module's code before the first init (specification section 12.1):
+/// the counts of words it steps over in its four stages and the flags that change the cost.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Scan {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    /// The jump table ends in a zero long rather than the return routine.
+    zero_end: bool,
+    /// The marker long of the last stage was found before its limit.
+    found: bool,
+    /// The word behind the patched area has a zero low byte (the long branch form).
+    long_form: bool,
+}
+
+fn w16(h: &[u8], o: usize) -> Option<u16> {
+    h.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+}
+
+fn w32(h: &[u8], o: usize) -> Option<u32> {
+    h.get(o..o + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Counts the scan stages. `play` is the play entry, `entry0` the offset of the first jump table
+/// entry. A marker that is not in the image ends its stage at the image's end.
+fn scan(h: &[u8], play: usize, entry0: usize) -> Scan {
+    let mut sc = Scan::default();
+    // stage A: from the play entry to the first word 0xE586, inclusive
+    let mut p = play;
+    while p + 2 <= h.len() && w16(h, p) != Some(0xE586) {
+        p += 2;
+    }
+    sc.a = ((p - play) / 2 + 1) as u64;
+    // stage B: the table from entry 1 to its terminator
+    let e1 = entry0 + 4;
+    let mut t = e1;
+    while t + 4 <= h.len() && w16(h, t) != Some(0x4E75) && w32(h, t) != Some(0) {
+        t += 4;
+    }
+    sc.zero_end = w16(h, t) != Some(0x4E75) && w32(h, t) == Some(0);
+    sc.b = 1 + ((t - e1) / 4) as u64;
+    // stage C: after the marker, to the first 0x40E7 and then the first 0x46DF behind it
+    let from = p + 2;
+    let mut q = from;
+    while q + 2 <= h.len() && w16(h, q) != Some(0x40E7) {
+        q += 2;
+    }
+    while q + 2 <= h.len() && w16(h, q) != Some(0x46DF) {
+        q += 2;
+    }
+    sc.c = (q.saturating_sub(from) / 2).saturating_sub(1) as u64;
+    // stage D: from behind the patched area to the marker long, or the limit
+    sc.long_form = w16(h, q + 2).is_some_and(|w| w & 0xFF == 0);
+    let st = q + if sc.long_form { 6 } else { 4 };
+    let lim = play + 0xD48;
+    let mut r = st;
+    while r < lim && r + 4 <= h.len() {
+        if w32(h, r) == Some(0x3BBC_0080) {
+            sc.found = true;
+            break;
+        }
+        r += 2;
+    }
+    sc.d = (r.saturating_sub(st) / 2).saturating_sub(1) as u64;
+    sc
+}
+
+/// The time of the first write of the first init, from the start of the run (specification 12.1),
+/// in colour clocks, rounded to the nearest.
+fn first_init_time(sc: &Scan) -> u64 {
+    // in half colour clocks
+    let t2 = 2 * 1686
+        + 21 * sc.a
+        + 60 * sc.b
+        + 44 * sc.c
+        + 52 * sc.d
+        + if sc.zero_end { 22 } else { 0 }
+        + if sc.found { 28 } else { 0 }
+        + if sc.long_form { 17 } else { 0 };
+    t2.div_ceil(2)
+}
 /// A change of subsong: colour clocks from the end of the last init to the host's DMA stop, and to
 /// the next init.
 const STOP_AT: u64 = 14;
@@ -70,12 +148,15 @@ struct Extra {
     len: u64,
     pre: u64,
     pre_loc: u64,
+    /// Timer start calibration: the specification's 122-131 colour clocks of play-entry delay is
+    /// a cycle estimate; the first store of a tick measured against the logs sets this.
+    tick_k: u64,
 }
 
 /// The builds that store through the `a5` base (Black Lamp, Star Goose, Victory Road).
-const EXTRA_A: Extra = Extra { per: [6, 6, 58], vol: [52, 52, 64], loc: 10, len: 92, pre: 0, pre_loc: 0 };
+const EXTRA_A: Extra = Extra { per: [6, 6, 58], vol: [52, 52, 64], loc: 10, len: 92, pre: 0, pre_loc: 0, tick_k: 22 };
 /// The build that stores to absolute addresses (Eco).
-const EXTRA_B: Extra = Extra { per: [22, 30, 74], vol: [52, 52, 64], loc: 10, len: 0, pre: 34, pre_loc: 24 };
+const EXTRA_B: Extra = Extra { per: [22, 30, 74], vol: [52, 52, 64], loc: 10, len: 0, pre: 34, pre_loc: 24, tick_k: 1 };
 
 /// The bus the routine sees: in the play routine its audio stores take the wrapper's time.
 struct HookBus<'a> {
@@ -85,6 +166,7 @@ struct HookBus<'a> {
     extra: u64,
     /// Pointer stores in a row so far.
     run: u32,
+    l: Option<u64>,
 }
 
 impl HookBus<'_> {
@@ -124,6 +206,9 @@ impl AddressBus for HookBus<'_> {
     }
     fn write_word(&mut self, a: u32, v: u16) {
         self.store(a);
+        if !self.play && a & 0xFF_FFFF == 0xDF_F096 && v == 0x8007 {
+            self.l = Some(self.bus.clock);
+        }
         self.bus.write_word(a, v)
     }
     fn write_long(&mut self, a: u32, v: u32) {
@@ -140,13 +225,15 @@ struct Cpu68 {
     sp: u32,
     run: u32,
     x: &'static Extra,
+    /// The time of the last DMA-enable store of an init run.
+    l: Option<u64>,
 }
 
 impl Cpu68 {
     fn new(sp: u32, x: &'static Extra) -> Cpu68 {
         let mut cpu = CpuCore::new();
         cpu.set_cpu_type(CpuType::M68000);
-        Cpu68 { cpu, sp, run: 0, x }
+        Cpu68 { cpu, sp, run: 0, x, l: None }
     }
 
     /// Runs the routine at `entry` until it returns, from `start`, with `d0` in D0 and A5 at the
@@ -183,10 +270,13 @@ impl Cpu68 {
             let ins = m68k_rc::decode::decode_model(pc, &mut |a| bus.r16(a), m68k_rc::Model::M68000);
             cycles += m68k_rc::cycles::cycles(&ins) as u64;
             m68k_rc::Bus::cycles(bus, cycles);
-            let mut hb = HookBus { bus, play, x: self.x, extra: 0, run: self.run };
+            let mut hb = HookBus { bus, play, x: self.x, extra: 0, run: self.run, l: None };
             let r = self.cpu.step(&mut hb);
             let extra = hb.extra;
             self.run = hb.run;
+            if hb.l.is_some() {
+                self.l = hb.l;
+            }
             if extra != 0 {
                 bus.epoch.0 += extra;
                 bus.clock += extra;
@@ -212,8 +302,8 @@ struct FredGray {
     resume: Option<u64>,
     /// Ticks run so far: the reference's timer is not restarted by a change of subsong once it runs.
     ticks: u64,
-    /// Colour clocks before the first init and the timer delay.
-    start: (u64, u64),
+    /// Colour clocks from the end of the last init to the timer's start, on top of its period.
+    delay: u64,
 }
 
 /// Adds the load address to every longword the hunk's relocation list names; returns their
@@ -280,8 +370,9 @@ fn find_stop(h: &[u8], relocs: &[usize]) -> Option<usize> {
     best.map(|(_, o)| o)
 }
 
-/// Overwrites the glide decision of the note start with no-ops: `move sr,-(a7)` after the
-/// `bclr #7,d4`, and, further on, `move (a7)+,sr` with the conditional branch that follows it.
+/// Overwrites the glide decision of the note start with no-ops: the store of the status register
+/// right after the bit clear of the note's top bit, and, further on, the restore of the status
+/// register together with the conditional branch that follows it.
 fn patch_glide(h: &[u8], bus: &mut Bus, img: u32) {
     let mut p = 0;
     while p + 6 <= h.len() {
@@ -306,7 +397,8 @@ fn patch_glide(h: &[u8], bus: &mut Bus, img: u32) {
     }
 }
 
-/// Whether the output stage stores to absolute addresses (`move.w d0,$dff0a6.l`), as Eco's does.
+/// Whether the output stage stores its period words to absolute addresses (the first channel's
+/// period register as a long absolute operand of a register-to-memory word move), as Eco's does.
 fn absolute_stores(h: &[u8]) -> bool {
     (0..h.len().saturating_sub(6)).step_by(2).any(|p| be16(h, p) == 0x33C0 && be32(h, p + 2) == 0x00DF_F0A6)
 }
@@ -351,12 +443,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         resume: None,
         ticks: 0,
-        start: KNOWN
-            .iter()
-            .find(|k| (k.0, k.1, k.2) == (words as u32, be32(h, 0x0C), be32(h, 0x10)))
-            .map_or(START_OTHER, |k| (k.3, k.4)),
+        delay: 0,
     };
-    m.bus.clock += s.start.0;
+    // the first write of the first init falls at the time the scan gives (the init's own first
+    // store comes FIRST_STORE colour clocks after the start's clock, which holds the phase)
+    let t = first_init_time(&scan(h, be32(h, 0x0C) as usize, entry0));
+    m.bus.clock = t.saturating_sub(FIRST_STORE).max(m.bus.clock);
     s.init_song(&mut m.bus, 0)?;
     Some(Box::new(s))
 }
@@ -367,6 +459,9 @@ impl FredGray {
         let start = bus.clock;
         let (cyc, _) = self.cpu.call(bus, entry, start, 0, sub as u32, self.stop, false).map_err(|e| log::error!("{e}")).ok()?;
         bus.clock = start + cyc / 2;
+        if let Some(l) = self.cpu.l.take() {
+            self.delay = (l + WRAP_CC + self.cpu.x.tick_k).saturating_sub(bus.clock);
+        }
         Some(())
     }
 }
@@ -385,7 +480,7 @@ impl Replayer for FredGray {
     }
 
     fn timer_delay(&self) -> u64 {
-        self.start.1
+        self.delay
     }
 
     fn subsongs(&self) -> (u16, u16, u16) {
@@ -406,7 +501,7 @@ impl Replayer for FredGray {
             }
             hw.bus.clock = t0 + CHANGE_CC;
             if self.init_song(hw.bus, n).is_some() && self.ticks == 0 {
-                self.resume = Some(hw.bus.clock + super::DT_TICK + self.start.1);
+                self.resume = Some(hw.bus.clock + super::DT_TICK + self.delay);
             }
         }
     }
@@ -452,9 +547,9 @@ mod tests {
         put(0x1C, &0x70u32.to_be_bytes());
         put(0x20, &0x70u32.to_be_bytes());
         put(0x24, &0x80u32.to_be_bytes());
-        // play: move.w #$123,$dff0a6 ; movea.l $54.l,a0 ; jsr (a0) ; rts
+        // play: store a period word to the first channel, load the first table entry, call it, return
         put(0x30, &[0x33, 0xFC, 0x01, 0x23, 0x00, 0xDF, 0xF0, 0xA6, 0x20, 0x79, 0, 0, 0, 0x54, 0x4E, 0x90, 0x4E, 0x75]);
-        // init: move.w #8,$dff0a4 ; rts
+        // init: store a length word to the first channel, return
         put(0x44, &[0x33, 0xFC, 0x00, 0x08, 0x00, 0xDF, 0xF0, 0xA4, 0x4E, 0x75]);
         for i in 0..4 {
             put(0x54 + 4 * i, &0x68u32.to_be_bytes());
@@ -523,7 +618,7 @@ mod tests {
 
     #[test]
     fn glide_test_is_overwritten_with_nops() {
-        // bclr #7,d4 ; move sr,-(a7) ; move.b d4,2(a6,d6.w) ; move (a7)+,sr ; bne.b +4 ; move.w d4,$a(a6,d6.w)
+        // bit clear, status register save, a byte store, status register restore, short not-equal branch, a word store
         let code: [u16; 12] = [0x0884, 7, 0x40E7, 0x1D84, 0x6002, 0x46DF, 0x6604, 0x3D84, 0x600A, 0x4E75, 0, 0];
         let mut m = Machine::new(CpuType::M68000);
         for (i, w) in code.iter().enumerate() {
@@ -540,5 +635,61 @@ mod tests {
     fn absolute_output_stage_is_the_second_build() {
         assert!(absolute_stores(&[0x33, 0xC0, 0x00, 0xDF, 0xF0, 0xA6, 0, 0]));
         assert!(!absolute_stores(&[0x3B, 0x45, 0x00, 0xA6, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn scan_counts_the_stages() {
+        // words: 3 filler, marker (A = 4), 2 filler, first marker of the glide pair, 2 filler,
+        // second marker with a short branch behind it, 2 filler, the long marker, then the table
+        let mut w = vec![0x4E71u16; 60];
+        w[3] = 0xE586;
+        w[6] = 0x40E7;
+        w[9] = 0x46DF;
+        w[10] = 0x6604;
+        w[13] = 0x3BBC;
+        w[14] = 0x0080;
+        let mut h: Vec<u8> = w.iter().flat_map(|x| x.to_be_bytes()).collect();
+        let put = |h: &mut Vec<u8>, o: usize, v: u32| h[o..o + 4].copy_from_slice(&v.to_be_bytes());
+        for (o, v) in [(80, 0x20u32), (84, 0x20), (88, 0x20), (92, 0x20), (96, 0x4E75_0000)] {
+            put(&mut h, o, v);
+        }
+        let sc = scan(&h, 0, 80);
+        assert_eq!(sc, Scan { a: 4, b: 4, c: 4, d: 1, zero_end: false, found: true, long_form: false });
+        // a zero terminator and a long branch form
+        put(&mut h, 96, 0);
+        h[20..22].copy_from_slice(&0x6600u16.to_be_bytes());
+        let sc = scan(&h, 0, 80);
+        assert!(sc.zero_end && sc.long_form);
+        assert_eq!(sc.b, 4);
+        // no marker long within the image: the stage runs to its limit or the image's end
+        let h2 = vec![0x4Eu8; 40];
+        assert!(!scan(&h2, 0, 8).found);
+    }
+
+    #[test]
+    fn start_time_formula() {
+        let sc = Scan { a: 62, b: 20, c: 696, d: 938, ..Default::default() };
+        assert_eq!(first_init_time(&sc), 42637);
+        let sc = Scan { a: 75, b: 46, c: 1442, d: 123, zero_end: false, found: true, long_form: true };
+        assert_eq!(first_init_time(&sc), 38798);
+        let sc = Scan { a: 80, b: 26, c: 1174, d: 441, zero_end: true, found: false, long_form: true };
+        assert_eq!(first_init_time(&sc), 40620);
+    }
+
+    #[test]
+    fn unknown_module_start_comes_from_the_scan() {
+        let first_write = |d: &[u8]| {
+            let (m, _r) = start(d);
+            m.bus.write_log.as_ref().unwrap()[0].2
+        };
+        let d = module();
+        let t0 = first_write(&d);
+        // an edit that moves the first marker closer to the play entry changes the scan, hence the start
+        let mut e = d.clone();
+        e[0x20 + 0x30 + 2..0x20 + 0x30 + 4].copy_from_slice(&0xE586u16.to_be_bytes());
+        let t1 = first_write(&e);
+        assert_ne!(t0, t1);
+        assert!(t0 > 1686 && t1 > 1686);
+        assert_ne!(t0, 39000);
     }
 }

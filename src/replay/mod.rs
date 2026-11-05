@@ -31,6 +31,7 @@ pub mod davidwhittaker;
 pub mod digibooster;
 pub mod digitalmugician;
 pub mod digitalsoundstudio;
+pub mod dynamicsynthesizer;
 pub mod dsc;
 pub mod ems;
 pub mod deltamusic1;
@@ -231,6 +232,7 @@ pub const REPLAYERS: &[Open] = &[
     soundcontrol::OPEN,
     digitalmugician::OPEN1,
     digitalmugician::OPEN2,
+    dynamicsynthesizer::OPEN,
     artofnoise::OPEN4,
     artofnoise::OPEN8,
     ronklaren::OPEN,

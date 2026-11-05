@@ -84,7 +84,7 @@ TEMPO_MIN_CORR = 0.5    # segments whose envelopes correlate less than this are 
 # SoundMaster is another build, SCUMM's differs in its sweeps); Mark Cooksey was written against
 # UADE's (EP206's is another driver build: other hardware init, DMA sequence and volume scaling,
 # silent on Commando)
-UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 'tronic')
+UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 'tronic', 'dynamicsynthesizer')
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's

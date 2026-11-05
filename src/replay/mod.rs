@@ -89,6 +89,7 @@ pub mod speedya1system;
 pub mod gluemon;
 pub mod kimchristensen;
 pub mod scottjohnston;
+pub mod majortom;
 pub mod quartet;
 pub mod tomytracker;
 pub mod midiloriciel;
@@ -380,6 +381,7 @@ pub const REPLAYERS: &[Open] = &[
     gluemon::OPEN,
     kimchristensen::OPEN,
     scottjohnston::OPEN,
+    majortom::OPEN,
     anders0land::OPEN,
     thomashermann::OPEN,
     voodoosupremesynthesizer::OPEN,

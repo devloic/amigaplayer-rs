@@ -96,7 +96,9 @@ UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 
               # EP206's GlueMon differs from UADE's V1.13 build, which the port follows
               'gluemon',
               # Infogrames exists only in UADE's set
-              'infogrames')
+              'infogrames',
+              # EP206's Major Tom 2.01 is another build; the port follows UADE's MajorTom
+              'majortom')
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's

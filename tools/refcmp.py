@@ -84,7 +84,9 @@ TEMPO_MIN_CORR = 0.5    # segments whose envelopes correlate less than this are 
 # SoundMaster is another build, SCUMM's differs in its sweeps); Mark Cooksey was written against
 # UADE's (EP206's is another driver build: other hardware init, DMA sequence and volume scaling,
 # silent on Commando); Anders 0land exists only in UADE's set
-UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 'tronic', 'dynamicsynthesizer', 'anders0land')
+UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 'tronic', 'dynamicsynthesizer', 'anders0land',
+              # EP206's VSS plays silent in the engine; UADE's is the build the port follows
+              'voodoosupremesynthesizer')
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's
@@ -490,7 +492,9 @@ DELI_REF = {'amosmusicbank': 'AmosMusicBank'}
 # (file SonicArranger, prefixes sa/sonic/sa-p/lion/sa_old) and is the original for them.
 FORCED_PLAYER = {'sidmon20': 'SIDMon 2.0', 'scumm': 'SCUMM_Player', 'sonicarranger': 'Sonic Arranger',
                  # EP206's "Tronic" is another build; UADE's names itself TronicTracker(?)
-                 'tronic': 'TronicTracker(?)'}
+                 'tronic': 'TronicTracker(?)',
+                 # UADE's generic detection takes the .vss files for Soundtracker IV
+                 'voodoosupremesynthesizer': 'VSS'}
 
 
 # Formats no Amiga player plays (README: HVL is checked against the C replayer only): whatever

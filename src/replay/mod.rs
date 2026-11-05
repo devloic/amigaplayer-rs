@@ -81,6 +81,7 @@ pub mod oktalyzer;
 pub mod onescapee;
 pub mod ntspsystem;
 pub mod speedysystem;
+pub mod speedya1system;
 pub mod paulrobotham;
 pub mod howiedavies;
 pub mod professionalsoundartists;
@@ -348,6 +349,7 @@ pub const REPLAYERS: &[Open] = &[
     professionalsoundartists::OPEN,
     maximumeffect::OPEN,
     seanconnolly::OPEN,
+    speedya1system::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

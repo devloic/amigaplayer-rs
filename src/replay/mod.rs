@@ -84,6 +84,7 @@ pub mod paulrobotham;
 pub mod howiedavies;
 pub mod paulsummers;
 pub mod forgottenworlds;
+pub mod futureplayer;
 pub mod artandmagic;
 pub mod robhubbard;
 pub mod robhubbardst;
@@ -340,6 +341,7 @@ pub const REPLAYERS: &[Open] = &[
     howiedavies::OPEN,
     bladepacker::OPEN,
     ufo::OPEN,
+    futureplayer::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

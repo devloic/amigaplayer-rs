@@ -166,7 +166,7 @@ The player builds a COSO image from this data and then works only on the image:
   emits `$FD (r-1)` once before it). The compact stream ends with `$FF`.
   Behaviourally what matters: each real row is delivered with a *delay* (in ticks counted by the row
   speed) equal to 1 + number of empty rows that follow it; the first row of a pattern is delayed by the
-  number of empty rows that precede it. The reference's numbers are reproduced by the private model; the
+  number of empty rows that precede it. The reference numbers are reproduced by a model built from this text; the
   implementer may instead interpret the raw patterns directly with the same rule as long as the
   observable tick counts per row are identical (rows consumed one per `speed` ticks, empty rows
   consuming one slot each).
@@ -196,7 +196,7 @@ For subsong n:
 4. For each of the 3 voices: clear all voice variables; "null" instrument = the 8-byte stream
    `01 00 00 00 00 00 00 E1` used until the first row is loaded; "null" pitch program likewise. Set
    voice number 0..2, the position pointer to start*12 + voice*4 + position-list base, the position
-   advance offset to 12, the row-wait counters to 0, the volume-program wait counters (b22/b23) to 1,
+   advance offset to 12, the row-wait counters to 0, the two volume-program wait counters to 1,
    the SID-mode byte (voice 0 only) to $FF (none), and load the first position entry: pattern number,
    transpose A (voice variable "tA"), transpose B ("tB"), flag byte. If the high nibble of the flag byte
    is $F, the low nibble is the voice's volume reduction (section 7.3).
@@ -302,15 +302,14 @@ $7F; mode 2 (off) clears the tone bit and sets the noise bit. If a noise value i
 
 Run only if "vibrato delay" is zero; otherwise decrement the delay and skip vibrato.
 
-**Standard** (module tag `TFMX`): vibrato speed (b27), depth (b28), current position (b29), direction bit
-in b2b bit 5 (and bit 0, bit 7 as a toggle/hold control: if bit 7 is set and bit 0 is set the position is
-held for this tick). Position moves by speed per tick toward 0 (if direction bit clear) or toward
+**Standard** (module tag `TFMX`): vibrato speed, depth, current position, and a per-voice control byte holding the direction (bit 5)
+and a toggle/hold control (if bit 7 and bit 0 are both set the position is held for this tick). Position moves by speed per tick toward 0 (if direction bit clear) or toward
 2*depth/ ... in detail: depth' = depth*2 if depth bit 7 is clear else depth & $7F; if direction bit is
 clear: position -= speed, if it goes negative set direction bit and position = 0; else position +=
 speed, if it reaches or exceeds depth' set the direction bit clear and position = depth'. Then
 delta = position - depth'/2; the note-dependent scaling: let k = 2*n + $A0; if the addition does not
 carry out of 8 bits, repeat { delta = delta*2; k += $18 } until it carries. The period becomes p0 +
-delta. The bit 0 of b2b toggles each tick. (This mimics the Atari scaling of vibrato by the period.)
+delta. Bit 0 of the control byte toggles each tick. (This mimics the Atari scaling of vibrato by the period.)
 
 **MMME** (tag `MMME`): position moves by speed toward 0 or depth*2 as above (direction bit $20);
 delta = position - depth; period = p0 + (delta * p0) >> 10 (arithmetic shift: signed 16x16 product,
@@ -321,13 +320,11 @@ standard: speed << 12; the period is p0 minus the top 16 bits of the accumulator
 adds the signed 8-bit speed; period = p0 - ((acc(16 bit) * p0) >> 8 >> 2).
 
 The final period is stored as 16 bits into the YM period registers (high byte, low byte) of the voice.
-In the MMME path, if the flag byte at voice offset $33 (set by $EB... see table: only `$EB` writes it)
+In the MMME path, if the voice's pitch-end byte (written only by `$EB`)
 has bit 1 set, the period is forced to 0.
 
 Voice volume: v = (volume - volume reduction (from position flag F) - tracker-wide reduction) & $FF; if
-bit 7 set (negative) then 0. Stored as the YM volume byte of the channel. (Volume reduction applies to
-all three voices only through the voice's own position flag, so the two byte quantities b30 (from the
-position entry F) and b31 (always 0 here) are subtracted.)
+bit 7 set (negative) then 0. Stored as the YM volume byte of the channel. (The reduction comes from the voice's own position flag; a second tracker-wide reduction exists but is always 0 here.)
 
 ### 6.6 SID / "digital voice 3" section (after voice 0, old SID type)
 
@@ -366,7 +363,7 @@ voice. Otherwise reload the wait counter from the row speed and read the pattern
   continues (this consumes no tick).
 * `$FE n`: speed n, continue. `$FD n`: speed n, then stop parsing this tick (pointer is after the byte).
 * A row: store note byte (row note) and flag byte; if flag & $E0 non-zero read the third byte as the
-  "row parameter" (b2c); clear the portamento accumulator; if the row's note byte has bit 7 set it is a
+  "row parameter"; clear the portamento accumulator; if the row's note byte has bit 7 set it is a
   **tie**: stop (no new note, existing instrument continues). Else a new note: instrument number =
   (flag & $1F) + transpose B; if that exceeds the instrument count it becomes 0; load the instrument:
   its volume speed and the wait counters, vibrato fields, volume program pointer (volume index 0); pitch
@@ -415,10 +412,9 @@ stored lengths, then PER and VOL as above. If state is 2: write nothing.
 
 Index = the YM volume byte (0..$3F expected). Values for indices 0..17:
 0, 1, 2, 3, 4, 6, 8, 10, 13, 16, 20, 24, 30, 38, 48, 64, 32, 0. For larger indices the table is read
-beyond its end and returns bytes of the player's code; the first 52 entries (indices 0..51) are given
-in the data file `data/volume-table-overread.bin` (the values for indices 18..51 are instruction
-bytes). Real modules do not exceed volume index $3F normally; fuzzed modules showed that values
-above $10 occur only with deliberately large volumes. The lead decides on embedding.
+beyond its end and returns bytes of the player's code; the first 52 entries (indices 0..51)
+are 52 bytes long in total (the values for indices 18..51 are not a designed table). Real modules do not exceed volume index $3F normally; fuzzed modules showed that values
+above $10 occur only with deliberately large volumes. The port embeds those 52 bytes.
 
 ### 9.3 note-start sequence (exact write order)
 

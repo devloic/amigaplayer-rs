@@ -250,16 +250,45 @@ enum At {
     Note,
     TrackStep,
     PerOut,
+    /// The places the plain player waits for the DMA (nothing there in the TFHD player's
+    /// code, which has its own, much shorter, costs): DMA on at a macro's command, SID
+    /// start, SetBegin, and the end of the tick's DMA on.
+    WaitOn,
+    WaitSid,
+    WaitBegin,
+    WaitEnd,
     Count,
 }
 
 /// Fitted by least squares to the reference's write times (51 modules, 570000
 /// gaps between writes); Pending and Random had no samples and are estimates.
 const COST: [u64; At::Count as usize] = [
-    300, 0, 25, 119, 160, 163, 0, 93, 124, 178, 36, 150, 34, 228, 191, 43, 166, 76, 172, 464, 456, 17,
+    300, 0, 25, 119, 160, 163, 0, 93, 124, 178, 36, 150, 34, 228, 191, 43, 166, 76, 172, 464, 456, 17, 0, 0, 0, 0,
 ];
 
+/// The TFMX-Pro-TFHD player's costs (to fit): the same code paths as `COST`, but no waits
+/// for the audio DMA.
+const COST_TFHD: [u64; At::Count as usize] = [
+    300, 0, 27, 244, 160, 134, 0, 78, 109, 84, 56, 150, 263, 0, 191, 43, 50, 71, 127, 442, 304, 29, 0, 0, 5, 20,
+];
+
+// The TFMX-Pro-TFHD player's start-up, in colour clocks (SPEC 5.6; the parts that vary
+// between runs are set to one run's).
+const TFHD_PRO_LOAD_GAP: u64 = 30_000;
+const TFHD_PRO_GROUP_GAP: u64 = 1_700;
+const TFHD_PRO_DMA_GAP: u64 = 4_800;
+const TFHD_PRO_INTENA_GAP: u64 = 264;
+const TFHD_PRO_FILTER_GAP: u64 = 795;
+const TFHD_PRO_VOL_GAP: u64 = 429;
+const TFHD_PRO_TIMER_GAP: u64 = 1_750;
+/// From the timer's start to the first tick's first write.
+const TFHD_PRO_FIRST_TICK: u64 = 79_037;
+/// From a tick's start to its first write (the first tick's).
+const TFHD_PRO_FIRST_WRITE: u64 = 681;
+
 pub struct Pro {
+    /// Played from a TFHD file by the TFMX-Pro-TFHD player (`tfhd.rs`).
+    tfhd: bool,
     v: [Blk<VOICE_SIZE>; 4],
     g: Blk<0x4c>,
     p: Blk<0xc8>,
@@ -376,13 +405,28 @@ fn new_pro(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         Err(_) => return new_early(d, base, m),
     };
     let smpl = m.alloc((smpl_data.len() as u32).max(4));
-    let empty = m.alloc(EMPTY_PATTERN.len() as u32);
-    if smpl == 0 || empty == 0 {
+    if smpl == 0 {
         return None;
     }
     m.bus.write_bytes(smpl, &smpl_data);
+    make_pro(d, base, smpl, m, None)
+}
+
+/// The TFMX-Pro-TFHD player's engine: the song part `d` is in guest memory at `base`, its
+/// samples are at `smpl` (in the same file, no copy). `songs` is the number of subsongs the
+/// player lists (its compacted song table, see `tfhd.rs`).
+pub(super) fn new_pro_tfhd(d: &[u8], base: u32, smpl: u32, songs: u8, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    make_pro(d, base, smpl, m, Some(songs))
+}
+
+fn make_pro(d: &[u8], base: u32, smpl: u32, m: &mut Machine, tfhd: Option<u8>) -> Option<Box<dyn Replayer>> {
+    let empty = m.alloc(EMPTY_PATTERN.len() as u32);
+    if empty == 0 {
+        return None;
+    }
     m.bus.write_bytes(empty, &EMPTY_PATTERN);
     let mut p = Pro {
+        tfhd: tfhd.is_some(),
         v: std::array::from_fn(voice_init),
         g: Blk([0; 0x4c]),
         p: Blk([0; 0xc8]),
@@ -408,15 +452,27 @@ fn new_pro(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     p.g.sw(G_MASTER, 0x4040);
     p.g.sw(G_TRACK_LOOP, 0xffff);
     p.p.sw(P_SPEED, 6);
-    p.init_player(&mut m.bus)?;
     let mut hw = Hw { bus: &mut m.bus };
+    if let Some(n) = tfhd {
+        // the TFHD player does not refuse a module for what the plain player's tests find: what
+        // it takes from InitPlayer is the song table (done by the caller) and a subsong list
+        let _ = p.init_player(hw.bus);
+        p.songs = (0..n.max(1)).collect();
+        hw.bus.w8(base + 0xff, 0);
+        p.tfhd_load(&mut hw);
+    } else {
+        p.init_player(hw.bus)?;
+    }
     p.init_sound(0, &mut hw);
+    if tfhd.is_some() {
+        p.tfhd_started(&mut hw);
+    }
     Some(Box::new(p))
 }
 
 impl Pro {
     fn at(&mut self, a: At) {
-        self.spent += COST[a as usize];
+        self.spent += if self.tfhd { COST_TFHD[a as usize] } else { COST[a as usize] };
         self.counts[a as usize] += 1;
     }
 
@@ -436,6 +492,14 @@ impl Pro {
     fn reg(&mut self, hw: &mut Hw, a: u32, v: u16) {
         self.flush(hw, "w");
         hw.bus.write_word(a, v);
+    }
+
+    /// A write made by the audio interrupt handler (not by the tick): only the trace sees it.
+    fn trace_write(&mut self, hw: &mut Hw) {
+        if let Some(f) = &mut self.trace {
+            use std::io::Write;
+            let _ = writeln!(f, "{} w", hw.bus.clock);
+        }
     }
 
     fn dmacon(&mut self, hw: &mut Hw, v: u16) {
@@ -469,7 +533,12 @@ impl Pro {
     }
 
     /// $107ee: waits for the beam to start 9 new lines.
-    fn dma_wait(&mut self, hw: &mut Hw) {
+    fn dma_wait(&mut self, hw: &mut Hw, place: At) {
+        if self.tfhd {
+            // the TFHD player has none of these waits, only its code's own time there
+            self.at(place);
+            return;
+        }
         self.flush(hw, "d");
         let now = hw.bus.clock;
         hw.wait((now / LINE + 9) * LINE - now);
@@ -792,6 +861,33 @@ impl Pro {
             v.sw(V_SID, 0);
             v.sb(V_RND, 0);
         }
+        if self.tfhd {
+            // the TFHD player: two groups of volume zeros, then the interrupts off, then
+            // the volumes again, at the spacing its own code has (measured, a few hundred
+            // colour clocks of it vary from run to run)
+            for g in 0..2 {
+                for (ch, gap) in [0u64, 139, 150, 143].into_iter().enumerate() {
+                    self.spent += gap;
+                    self.reg(hw, 0xdff0a8 + 16 * ch as u32, 0);
+                }
+                if g == 0 {
+                    self.spent += TFHD_PRO_GROUP_GAP;
+                }
+            }
+            self.spent += TFHD_PRO_DMA_GAP;
+            self.dmacon(hw, 0x000f);
+            self.spent += 12;
+            self.intreq(hw, 0x0780);
+            self.spent += 6;
+            self.intena(hw, 0x0780);
+            self.spent += 4;
+            self.intreq(hw, 0x0780);
+            for ch in 0..4 {
+                self.spent += 8;
+                self.reg(hw, 0xdff0a8 + 16 * ch, 0);
+            }
+            return;
+        }
         for ch in 0..4 {
             self.reg(hw, 0xdff0a8 + 16 * ch, 0);
         }
@@ -799,6 +895,18 @@ impl Pro {
         self.intreq(hw, 0x0780);
         self.intena(hw, 0x0780);
         self.intreq(hw, 0x0780);
+    }
+
+    /// The TFHD player at load: the audio interrupts off, then a wait before InitSound.
+    fn tfhd_load(&mut self, hw: &mut Hw) {
+        self.intena(hw, 0x0780);
+        self.spent += TFHD_PRO_LOAD_GAP;
+    }
+
+    /// The end of the TFHD player's start (after `init_sound`): the timer starts.
+    fn tfhd_started(&mut self, hw: &mut Hw) {
+        self.spent += TFHD_PRO_TIMER_GAP;
+        self.flush(hw, "s");
     }
 
     /// $12b22: starts song `song`.
@@ -834,9 +942,30 @@ impl Pro {
         self.g.sb(G_START, 0);
         self.g.sw(G_DMA_ON, 0);
         self.fade_lock = 0;
+        if self.tfhd {
+            // the TFHD player sets the master volume to $3F (and stops any fade the
+            // first track steps began) after it has read them, then switches the audio
+            // interrupt line on, the filter off and the volumes to 0
+            self.g.sb(G_MASTER, 0x3f);
+            self.g.sb(G_FADE_END, 0x3f);
+            self.g.sb(G_FADE_DIR, 0);
+            self.spent += TFHD_PRO_INTENA_GAP;
+            self.intena(hw, 0xa000);
+            self.spent += TFHD_PRO_FILTER_GAP;
+        }
         // the filter off, no modulation
         hw.bus.ciaa.pra |= 2;
+        if self.tfhd {
+            self.spent += 10;
+        }
         self.reg(hw, 0xdff09e, 0x00ff);
+        if self.tfhd {
+            self.spent += TFHD_PRO_VOL_GAP;
+            for (ch, gap) in [0u64, 139, 150, 143].into_iter().enumerate() {
+                self.spent += gap;
+                self.reg(hw, 0xdff0a8 + 16 * ch as u32, 0);
+            }
+        }
         self.g.sb(G_ON, 1);
     }
 
@@ -907,7 +1036,8 @@ impl Pro {
                         }
                         if (c as i16) < 0 {
                             let n = hw.bus.r16(a0 + 2);
-                            if (n as i16) <= 0 {
+                            // the TFHD player signals the song end at the first pass
+                            if (n as i16) <= 0 || self.tfhd {
                                 self.songend = true;
                             }
                             self.g.sw(G_TRACK_LOOP, n.wrapping_sub(1));
@@ -986,7 +1116,9 @@ impl Pro {
         }
         self.g.sw(G_SPEED_CNT, self.p.w(P_SPEED));
         for k in 0..8 {
-            self.p.sw(P_MUTE + 4 * k, hw.bus.r16(self.mdat + 0x1c0 + 2 * k as u32));
+            // the TFHD player has no track mute table
+            let w = if self.tfhd { 0 } else { hw.bus.r16(self.mdat + 0x1c0 + 2 * k as u32) };
+            self.p.sw(P_MUTE + 4 * k, w);
         }
         'again: for _ in 0..256 {
             self.g.sb(G_RESTART, 0);
@@ -1351,7 +1483,7 @@ impl Pro {
                 self.intreq(hw, m);
                 self.v[i].sb(V_EFX, b1);
                 self.step_on(i);
-                self.dma_wait(hw);
+                self.dma_wait(hw, At::WaitOn);
                 let m = self.g.w(G_DMA_ON) | self.v[i].w(V_DMA_ON);
                 self.g.sw(G_DMA_ON, m);
                 Next::Read
@@ -1593,7 +1725,7 @@ impl Pro {
                 self.v[i].sl(V_SID_SRC, a);
                 self.v[i].sl(V_ADDR, a);
                 let buf = self.g.l(G_SMPL).wrapping_add(self.v[i].l(V_SID_BUF));
-                self.dma_wait(hw);
+                self.dma_wait(hw, At::WaitSid);
                 self.loc(hw, ch, buf);
                 Next::Step
             }
@@ -1707,7 +1839,7 @@ impl Pro {
     /// SetBegin's location, out after the original's wait for the DMA.
     fn set_begin(&mut self, hw: &mut Hw, i: usize, a: u32) {
         self.v[i].sl(V_ADDR, a);
-        self.dma_wait(hw);
+        self.dma_wait(hw, At::WaitBegin);
         self.loc(hw, i, a);
         self.step_on(i);
     }
@@ -2044,7 +2176,7 @@ impl Pro {
     fn interrupt(&mut self, hw: &mut Hw) {
         self.flush(hw, "t");
         self.at(At::Tick);
-        if !self.sfx_module && (0..8).all(|k| self.p.b(P_NUM + 4 * k) == 0xff) {
+        if !self.tfhd && !self.sfx_module && (0..8).all(|k| self.p.b(P_NUM + 4 * k) == 0xff) {
             self.songend = true;
         }
         let saved = self.g.l(G_CMD);
@@ -2072,7 +2204,7 @@ impl Pro {
                 let p = self.v[ch].w(V_PER_OUT);
                 self.per(hw, ch, p);
             }
-            self.dma_wait(hw);
+            self.dma_wait(hw, At::WaitEnd);
             let m = self.g.w(G_DMA_ON);
             self.dmacon(hw, m);
             self.g.sw(G_DMA_ON, 0);
@@ -2097,6 +2229,7 @@ impl Replayer for Pro {
     fn audio_irq_ch(&mut self, ch: usize, hw: &mut Hw) -> bool {
         let bit = 0x80u16 << ch;
         hw.wait(10);
+        self.trace_write(hw);
         hw.bus.write_word(0xdff09c, bit);
         hw.wait(6);
         self.dma_count[ch] = self.dma_count[ch].wrapping_sub(1);
@@ -2106,6 +2239,7 @@ impl Replayer for Pro {
             hw.wait(4 + 8);
             self.dma_flag[ch] = true;
             hw.wait(10);
+            self.trace_write(hw);
             hw.bus.write_word(0xdff09a, bit);
             hw.wait(8);
         }
@@ -2122,6 +2256,15 @@ impl Replayer for Pro {
 
     fn tick_clocks(&self) -> u64 {
         (self.g.w(G_CIA) as u64 + 1) * 5
+    }
+
+    /// The TFHD player's first tick comes 79 037 colour clocks after its timer starts.
+    fn timer_delay(&self) -> u64 {
+        if self.tfhd {
+            TFHD_PRO_FIRST_TICK.saturating_sub(self.tick_clocks() + TFHD_PRO_FIRST_WRITE)
+        } else {
+            0
+        }
     }
 
     fn songend(&self) -> bool {
@@ -2147,7 +2290,7 @@ pub const OPEN_15: Open = Open { name: "TFMX 1.5", detect: detect_15, new: new_1
 
 /// CHECK5: "TFMX" not followed by "SONG" (the TFHD single file, which it also
 /// takes, is not supported here).
-fn detect_15(d: &[u8]) -> bool {
+pub(super) fn detect_15(d: &[u8]) -> bool {
     d.len() >= 0x800 && be32(d, 0) == 0x54464d58 && &d[5..9] != b"SONG"
 }
 
@@ -2224,17 +2367,38 @@ enum B {
     NewNote,
     MacroCmd,
     DmaOn,
+    DmaNow,
+    /// What the TFHD player's own pokes take before each kind of write.
+    PokeVol,
+    PokePer,
+    PokeLen,
+    PokeDma,
+    PokeLoc,
     Count,
 }
 
 /// Fitted by least squares to the reference's write times (18 modules, 120000
 /// gaps); the time from the interrupt to the first row or voice (Tick, with
 /// Tracks) cannot be told from the reference's timer phase and is estimated.
-const COST15: [u64; B::Count as usize] = [150, 0, 0, 62, 134, 377, 375, 58, 0, 142, 187, 80, 277, 0, 63, 205, 106];
+const COST15: [u64; B::Count as usize] = [150, 0, 0, 62, 134, 377, 375, 58, 0, 142, 187, 80, 277, 0, 63, 205, 106, 0, 0, 0, 0, 0, 0];
+
+/// The TFHD player's costs (to fit): the same code paths, written straight to Paula.
+const COST15_TFHD: [u64; B::Count as usize] = [150, 0, 0, 62, 134, 377, 375, 58, 0, 142, 187, 80, 277, 0, 63, 205, 106, 0, 0, 0, 0, 0, 0];
+
+/// Colour clocks from the end of `new` to the first of the TFHD player's start writes.
+const TFHD15_INIT_LEAD: u64 = 871;
+
+/// And from the last of them to the timer's start.
+const TFHD15_INIT_TAIL: u64 = 78;
 
 pub struct V15 {
     /// An early module (`new_early`): no fade to $3F at the start, as UADE's player.
     early: bool,
+    /// Played from a TFHD file by the TFMX-1.5-TFHD player (`tfhd.rs`): DMA on per voice,
+    /// its own start writes and its own cost table.
+    tfhd: bool,
+    /// The TFHD player's start writes (their spacing is their own, no poke cost is added).
+    raw: bool,
     g: Blk<0x46>,
     w: Blk<0x120>,
     p: Blk<0xc8>,
@@ -2263,6 +2427,12 @@ fn new_15(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     build_15(d, base, m, &smpl_data, false)
 }
 
+/// The TFMX-1.5-TFHD player's engine: the song part `d` is in guest memory at `base`, its
+/// samples are at `smpl` (in the same file, no copy).
+pub(super) fn new_15_tfhd(d: &[u8], base: u32, smpl: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    make_15(d, base, m, smpl, false, true)
+}
+
 /// An early `TFMX-SONG ` module (the fixed tables of TFMX 1.5, no offsets at
 /// $1D0), which the Pro replayer declined for want of `smpl.NAME`: its samples
 /// are one `smpl.set` for the whole game. UADE's TFMX 1.5 player plays these.
@@ -2280,6 +2450,10 @@ fn build_15(d: &[u8], base: u32, m: &mut Machine, smpl_data: &[u8], early: bool)
         return None;
     }
     m.bus.write_bytes(smpl, smpl_data);
+    make_15(d, base, m, smpl, early, false)
+}
+
+fn make_15(d: &[u8], base: u32, m: &mut Machine, smpl: u32, early: bool, tfhd: bool) -> Option<Box<dyn Replayer>> {
     // InitPlayer: the last subsong is before the second song starting at 0
     let (mut n, mut zeros) = (29i32, 2);
     for k in 0..31 {
@@ -2293,6 +2467,8 @@ fn build_15(d: &[u8], base: u32, m: &mut Machine, smpl_data: &[u8], early: bool)
     }
     let mut p = V15 {
         early,
+        tfhd,
+        raw: false,
         g: Blk([0; 0x46]),
         w: Blk([0; 0x120]),
         p: Blk([0; 0xc8]),
@@ -2316,13 +2492,31 @@ fn build_15(d: &[u8], base: u32, m: &mut Machine, smpl_data: &[u8], early: bool)
         p.w.sw(4 * ch + W_DMA_ON, 0x8200 | 1 << ch);
         p.w.sw(4 * ch + W_DMA_OFF, 1 << ch);
     }
+    if tfhd {
+        p.tfhd_init(&mut Hw { bus: &mut m.bus });
+    }
     p.init_sound(0);
     Some(Box::new(p))
 }
 
 impl V15 {
+    /// The TFHD player's start: three groups of volume zeros before the first interrupt.
+    fn tfhd_init(&mut self, hw: &mut Hw) {
+        let t0 = hw.bus.clock + TFHD15_INIT_LEAD;
+        for start in [0u64, 804, 2397] {
+            let mut t = t0 + start;
+            for (ch, gap) in [0u64, 136, 148, 143].into_iter().enumerate() {
+                t += gap;
+                let now = hw.bus.clock;
+                hw.wait(t.saturating_sub(now));
+                hw.bus.write_word(0xdff0a8 + 16 * ch as u32, 0);
+            }
+        }
+        hw.wait(TFHD15_INIT_TAIL);
+    }
+
     fn at(&mut self, a: B) {
-        self.spent += COST15[a as usize];
+        self.spent += if self.tfhd { COST15_TFHD[a as usize] } else { COST15[a as usize] };
         self.counts[a as usize] += 1;
     }
 
@@ -2339,6 +2533,17 @@ impl V15 {
     }
 
     fn reg(&mut self, hw: &mut Hw, a: u32, v: u16) {
+        if self.tfhd && !self.raw {
+            self.at(match a {
+                0xdff096 => B::PokeDma,
+                _ => match (a.wrapping_sub(0xdff0a0)) % 16 {
+                    4 => B::PokeLen,
+                    6 => B::PokePer,
+                    8 => B::PokeVol,
+                    _ => B::PokeDma,
+                },
+            });
+        }
         self.flush(hw, "w");
         hw.bus.write_word(a, v);
     }
@@ -2354,6 +2559,9 @@ impl V15 {
     }
 
     fn poke_adr(&mut self, hw: &mut Hw, ch: usize, a: u32) {
+        if self.tfhd {
+            self.at(B::PokeLoc);
+        }
         self.flush(hw, "w");
         hw.loc(ch, a);
     }
@@ -2421,6 +2629,18 @@ impl V15 {
     /// $11348: the pending song's start.
     fn start_song(&mut self, hw: &mut Hw) {
         self.at(B::Start);
+        if self.tfhd {
+            // the TFHD player's first interrupt: volumes off, DMA off, modulation off
+            self.raw = true;
+            for ch in 0..4 {
+                self.poke_vol(hw, ch, 0);
+                self.spent += 10;
+            }
+            self.dma_mask(hw, 0x000f);
+            self.spent += 1113;
+            self.reg(hw, 0xdff09e, 0x00ff);
+            self.raw = false;
+        }
         // $11588
         self.g.sw(H_PLAYING, 0);
         for ch in 0..4 {
@@ -2901,7 +3121,13 @@ impl V15 {
                     step_on(self);
                 }
                 0x01 => {
-                    if self.early {
+                    if self.tfhd {
+                        // the TFHD player switches the voice on at once, with its own
+                        // word (master enable set), and does not wait for the DMA
+                        self.at(B::DmaNow);
+                        let m = self.w.w(v + W_DMA_ON);
+                        self.reg(hw, 0xdff096, m);
+                    } else if self.early {
                         // UADE's player switches the voice on at once
                         let m = self.w.w(v + W_DMA_ON);
                         self.dma_mask(hw, m);
@@ -3156,7 +3382,7 @@ pub const OPEN_7V: Open = Open { name: "TFMX 7V", detect: detect_7v, new: new_7v
 
 /// Check2: a TFMX module whose first song starts with a 7 voices track step
 /// (`$EFFE 0003`) among the track commands before its first real step.
-fn detect_7v(d: &[u8]) -> bool {
+pub(super) fn detect_7v(d: &[u8]) -> bool {
     if d.len() < 0x200 || be32(d, 0) != 0x54464d58 {
         return false;
     }
@@ -3244,6 +3470,12 @@ fn voice7_init(i: usize) -> Blk<VOICE7_SIZE> {
     v.sw(V_LOCK, 0xffff);
     v.sb(V_LOOP, 0xff);
     v.sb(S_OFF_DONE, 0xff);
+    // The voices 0 to 2 hold a volume and a period before their first note: the first tick
+    // of the Eagleplayer writes them (the same on every module in its logs).
+    if i < 3 {
+        v.sb(V_VOL, [0x2e, 0x20, 0x20][i]);
+        v.sw(S_PER_OUT, [0x17d, 0x12f, 0x168][i]);
+    }
     v
 }
 
@@ -3380,12 +3612,26 @@ fn new_7v(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     let smpl_data = crate::deli::read_companion(m, &format!("smpl.{rest}")).1.ok()?;
     let smpl = m.alloc((smpl_data.len() as u32).max(4));
-    let empty = m.alloc(EMPTY_PATTERN.len() as u32);
-    let bss = m.alloc(0x5a0);
-    if smpl == 0 || empty == 0 || bss == 0 {
+    if smpl == 0 {
         return None;
     }
     m.bus.write_bytes(smpl, &smpl_data);
+    make_7v(d, base, smpl, m)
+}
+
+/// The TFMX-7V-TFHD player's engine, which is this one: the song part `d` is in guest memory
+/// at `base`, its samples are at `smpl` (in the same file, no copy).
+pub(super) fn new_7v_tfhd(d: &[u8], base: u32, smpl: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    make_7v(d, base, smpl, m)
+}
+
+fn make_7v(d: &[u8], base: u32, smpl: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    let _ = d;
+    let empty = m.alloc(EMPTY_PATTERN.len() as u32);
+    let bss = m.alloc(0x5a0);
+    if empty == 0 || bss == 0 {
+        return None;
+    }
     m.bus.write_bytes(empty, &EMPTY_PATTERN);
     // Check2 gives a module of the old layout its offsets
     if m.bus.r32(base + 0x1d4) == 0 {

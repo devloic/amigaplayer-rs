@@ -17,8 +17,39 @@ before publication so that it describes behaviour only; what was removed or rewo
 | `davidhanney/` | David Hanney replayer (`dh.*`): format, replay, Paula writes, timing | no `src/replay` file at this commit |
 | `markcooksey/` | Mark Cooksey / Richard Frankish replayer (`mc.*`, `mcr.*`/`mcs.*`) | no `src/replay` file at this commit |
 | `robhubbard/` | Rob Hubbard, Amiga `rh.*` (not the ST variant `rho.*`, which is `src/replay/robhubbardst.rs`) | no `src/replay` file at this commit |
-
-The Syntracker spec is not finished and is not included.
+| `anders0land/` | Anders 0land replayer: behaviour spec | `src/replay/anders0land.rs` |
+| `artandmagic/` | Art & Magic (`aam.*`) replayer: behaviour specification | `src/replay/artandmagic.rs` |
+| `bladepacker/` | Blade Packer replayer: behaviour spec | `src/replay/bladepacker.rs` |
+| `dariuszendeh/` | Darius Zendeh sound system (old Mark II) -- behaviour spec | `src/replay/dariuszendeh.rs` |
+| `dynamicsynthesizer/` | Dynamic Synthesizer (Chris Huelsbeck, 1987-88) - behaviour specification | `src/replay/dynamicsynthesizer.rs` |
+| `forgottenworlds/` | Forgotten Worlds game music ("FWMP" modules): behaviour specification | `src/replay/forgottenworlds.rs` |
+| `fredgray/` | Fred Gray ("gray.*") - behaviour specification | `src/replay/fredgray.rs` |
+| `futureplayer/` | Future Player (Amiga, `fp.*`) replayer: behaviour spec | `src/replay/futureplayer.rs` |
+| `howiedavies/` | Howie Davies ("hd.*") - behaviour specification | `src/replay/howiedavies.rs` |
+| `jochenhippelst/` | Jochen Hippel ST (hst.*, sdc.*) - behaviour specification | `src/replay/jochenhippelst.rs` |
+| `laxity/` | Laxity (`powt.*`, `pt.*`) replayer: behaviour spec | `src/replay/laxity.rs` |
+| `legglessmusiceditor/` | Leggless Music Editor: behaviour spec | `src/replay/legglessmusiceditor.rs` |
+| `maximumeffect/` | Maximum Effect (Jonathan Scarcliffe and Alastair Dukes, 1993) replayer: behaviour spec | `src/replay/maximumeffect.rs` |
+| `medley/` | Medley (Paul van der Valk, `mso.*`) replayer: behaviour spec | `src/replay/medley.rs` |
+| `ntspsystem/` | NTSP-system (`two.*`, magic `SPNT`) replayer: behaviour spec | `src/replay/ntspsystem.rs` |
+| `onescapee/` | onEscapee (Akos Divianszky, 1997) - behaviour specification | `src/replay/onescapee.rs` |
+| `paulsummers/` | Paul Summers (Amiga, `snk.*`) replayer: behaviour spec | `src/replay/paulsummers.rs` |
+| `professionalsoundartists/` | Professional Sound Artists (PSA) replayer: behaviour spec | `src/replay/professionalsoundartists.rs` |
+| `quartet/` | Quartet (Amiga) replayer: behaviour spec | `src/replay/quartet.rs` |
+| `richardjoseph/` | Richard Joseph (`RJ.*`, Eagleplayer "Richard Joseph") replayer: behaviour spec | `src/replay/richardjoseph.rs` |
+| `seanconnolly/` | Sean Connolly (Sean "Odie" Connolly, 1992-95): behaviour specification | `src/replay/seanconnolly.rs` |
+| `soundprogramminglanguage/` | Sound Programming Language (Holger Gehrmann): behaviour spec | `src/replay/soundprogramminglanguage.rs` |
+| `speedya1system/` | Speedy A1 System (Michael Winterberg, 1988-89) - behaviour specification | `src/replay/speedya1system.rs` |
+| `speedysystem/` | Speedy System (Michael Winterberg, 1988) - behaviour specification | `src/replay/speedysystem.rs` |
+| `suntronic/` | SUN-Tronic ("SUNtronic") replayer: behaviour spec | `src/replay/suntronic.rs` |
+| `syntracker/` | SynTracker (Eagleplayer "SynTracker", UADE player name SynTracker) - behaviour spec | `src/replay/syntracker.rs` |
+| `tfmxst/` | TFMX ST (mdst.*) - behaviour specification | port in progress |
+| `thomashermann/` | Thomas Hermann (1989 game driver) - behaviour specification | `src/replay/thomashermann.rs` |
+| `tomytracker/` | Tomy Tracker (`sg.*`) replayer: behaviour spec | `src/replay/tomytracker.rs` |
+| `tronic/` | Tronic ("TronicTracker(?)") replayer: behaviour spec | `src/replay/tronic.rs` |
+| `ufo/` | UFO replayer (MicroProse, 1994): behaviour spec | `src/replay/ufo.rs` |
+| `voodoosupremesynthesizer/` | Voodoo Supreme Synthesizer (`vss.*`, `*.vss`) replayer: behaviour spec | `src/replay/voodoosupremesynthesizer.rs` |
+| `ym2149/` | YM-2149 / MYST (`ym.*`, `ymst.*`) player: behaviour spec | `src/replay/ym2149.rs` |
 
 Each directory holds `SPEC.md` (the spec), `LOGS.md` (how the evidence was produced) and `README.md` (what is solved and what
 stays unknown). Files and scripts they call `logs/...`, `scripts/...` or "traces" are not shipped: the reference logs are

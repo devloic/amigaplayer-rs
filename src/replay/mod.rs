@@ -77,6 +77,7 @@ pub mod musicline;
 pub mod oktalyzer;
 pub mod onescapee;
 pub mod paulrobotham;
+pub mod howiedavies;
 pub mod paulsummers;
 pub mod forgottenworlds;
 pub mod artandmagic;
@@ -328,6 +329,7 @@ pub const REPLAYERS: &[Open] = &[
     tronic::OPEN,
     forgottenworlds::OPEN,
     artandmagic::OPEN,
+    howiedavies::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

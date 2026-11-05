@@ -124,6 +124,7 @@ pub mod timfollin;
 pub mod tcbtracker;
 pub mod tme;
 pub mod tronic;
+pub mod ufo;
 pub mod wallybeben;
 
 use crate::amplifier::Poke;
@@ -336,6 +337,7 @@ pub const REPLAYERS: &[Open] = &[
     artandmagic::OPEN,
     howiedavies::OPEN,
     bladepacker::OPEN,
+    ufo::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

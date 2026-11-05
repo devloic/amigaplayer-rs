@@ -85,6 +85,7 @@ pub mod dariuszendeh;
 pub mod speedysystem;
 pub mod speedya1system;
 pub mod quartet;
+pub mod tomytracker;
 pub mod voodoosupremesynthesizer;
 pub mod suntronic;
 pub mod paulrobotham;
@@ -370,6 +371,8 @@ pub const REPLAYERS: &[Open] = &[
     jochenhippelst::OPEN,
     // weak detection (two flag bytes and a signature): after every format with a magic word
     laxity::OPEN,
+    // strict content rule, no real module known: after every other replayer
+    tomytracker::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

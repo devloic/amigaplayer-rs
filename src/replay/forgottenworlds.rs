@@ -1,109 +1,102 @@
-//! Forgotten Worlds (`fw.*`, module header `FWMP`): the music routine of the Amiga game.
+//! Forgotten Worlds game music (module header `FWMP`, files `fw.*`).
 //!
-//! Clean-room, written from a behavioural specification drawn up from the Paula register writes of
-//! the 68k reference player; no original code. A module holds only data: the four channels' event
-//! streams, a pattern table, an instrument table and a waveform directory with the 8-bit samples.
-//! Four channels, one Paula channel each, 50 Hz. A tick sets the DMA bits, then serves the channels
-//! in order: a running channel steps its volume envelope (one AUDxVOL write), a channel whose
-//! duration has run out reads events (rest, call, return, restart, instrument select, note) and a
-//! note restarts the Paula channel through the sequence of the specification (DMA off, period 1,
-//! two manual data words each waiting for the channel's interrupt flag, sample, DMA on, wait for
-//! the flag, loop part).
+//! Clean-room, written from a behaviour specification and black-box runs of the reference
+//! player's register-write logs; no original code, nothing embedded (the 46-entry period
+//! table is the specification's). The module holds only data: four channel event streams,
+//! a pattern table, an instrument table and a waveform directory with 8-bit samples.
 //!
-//! The waits poll Paula's interrupt flag on the engine's Paula model, at the polling instants of
-//! the specification, so they last as long as the model makes them; each poll is bounded (the
-//! reference hangs where its Paula never raises the flag: a note on channel 0 in the first tick of
-//! three of the five tunes), after which the sequence goes on.
+//! Four voices at 50 Hz: notes, rests, pattern call and return, restart, instrument select
+//! and an attack / decay / hold / release envelope that writes only the volume register.
+//! A note start restarts the Paula channel through the specified sequence (DMA off, period
+//! 1, two manual data words, sample, DMA on, loop part), each wait polling the interrupt
+//! request flag of this engine's own Paula at the specification's polling instants. Every
+//! write is placed at the cycle the specification's cost model gives, counted from the
+//! tick's DMACON write, and ticks follow the specified schedule (a late tick runs as soon
+//! as the previous one is over).
 //!
-//! Every register write is placed at the cycle of the specification's cost model, counted from the
-//! tick's DMACON write; the tick schedule is the specification's (interrupt every 70,940 colour
-//! clocks, 185 before the tick's first write, a late tick runs as soon as the previous one ends).
-//!
-//! Choices where the specification leaves the behaviour open: command 0x80 ends the tick at once and
-//! the channel (its envelope runs on for the 255 ticks its counter wraps through, then it is silent);
-//! the song end is reported when every channel has ended; a note with no instrument selected writes
-//! nothing; a stage "invalid" (channel 1 before its first note) does nothing.
+//! Choices where the specification leaves it open (all safe):
+//! * the polls are bounded: a wait whose flag never rises (the reference hangs in the first
+//!   tick of three of the tunes, its Paula never raising the flag after a stop following one
+//!   word) is given up after a bounded time and the sequence goes on;
+//! * command 0x80 ends the tick; its counter stays 0, so the envelope runs on through the
+//!   wrapped counter (255 ticks), and the channel then reads the same command again (the
+//!   reference's logs show exactly that: the specification says the pointer moves past the
+//!   command, but the data after it is never read). The song end is reported when all four
+//!   channels have read 0x80;
+//! * commands above 0x8A end the channel for good (no more reads) but let the tick go on;
+//! * a note with no instrument selected sets its duration and writes nothing;
+//! * the invalid envelope stage of channel 1 (never exercised) behaves as the stopped stage;
+//! * reads outside the module give zero; a channel that reads more than a bounded number of
+//!   events in one turn ends.
 
-use super::{be16, be32, Hw, Open, Replayer};
+use super::{be16, Hw, Open, Replayer};
 use crate::machine::Machine;
 use m68k::AddressBus as _;
 
 pub const OPEN: Open = Open { name: "Forgotten Worlds", detect, new };
 
-const LINE: u64 = 227;
+/// Colour clocks between two ticks.
 const TICK: u64 = 70940;
 /// Colour clocks from the interrupt to the tick's DMACON write.
-const ENTRY: u64 = 185;
-/// Colour clocks from the start phase (the clock `new` is called at: Paula just reset, the raster
-/// line at the engine's start phase) to the first song-initialisation write of the reference run.
-const START_DELAY: u64 = 680;
-/// The song initialisation (spec 7.1) takes this long from the first to the last write.
-const INIT_SPAN: u64 = 182;
-/// The first tick's DMACON write follows the first initialisation write by this much.
+const IRQ_LEAD: u64 = 185;
+/// Colour clocks from the first initialisation write to the first tick's DMACON write.
 const FIRST_TICK: u64 = 71249;
+/// Colour clocks from the (fixed-phase) start of a run to the first initialisation write: the
+/// reference's own start-up takes this long. This puts the writes on the reference's raster
+/// line phase and on its output sample grid.
+const START_DELAY: u64 = 680;
+/// Events one channel may read in one turn before it is ended (bad data).
+const EVENT_CAP: u32 = 5000;
+/// A wait on the audio interrupt flag of the register setup gives up after this many colour clocks.
+const SETUP_WAIT_CAP: u64 = 4000;
+/// The wait after the DMA start gives up after this many colour clocks (a sample's first pass
+/// is at most 65535 words at period 65535: far longer; the cap only guards a hang).
+const START_WAIT_CAP: u64 = 12_000_000;
 
-/// Notes 0..45 in colour clocks.
 const PERIODS: [u16; 46] = [
-    1712, 1616, 1520, 1440, 1360, 1280, 1208, 1144, 1080, 1016, 960, 904, 856, 808, 760, 720, 680, 640, 604, 572, 540, 508,
-    480, 452, 428, 404, 380, 360, 340, 320, 302, 286, 270, 254, 240, 226, 214, 202, 190, 180, 170, 160, 151, 143, 135, 127,
+    1712, 1616, 1520, 1440, 1360, 1280, 1208, 1144, 1080, 1016, 960, 904, 856, 808, 760, 720, 680, 640, 604, 572, 540, 508, 480, 452, 428, 404,
+    380, 360, 340, 320, 302, 286, 270, 254, 240, 226, 214, 202, 190, 180, 170, 160, 151, 143, 135, 127,
 ];
 
-// Cycle costs (spec 7.4); two cycles make a colour clock.
-const C_PRO: u64 = 33;
-const C_EPI: [u64; 4] = [42, 42, 42, 46];
-const C_RUN_PLAIN: u64 = 74;
-const C_RUN_ENV: u64 = 105;
-const C_VOL_TAIL: u64 = 144;
-const C_AFTER_VOL: u64 = 10;
-const C_HEAD: u64 = 48;
-const C_NOTE: u64 = 134;
-const C_NOTE_END: u64 = 40;
-const C_RESTART: u64 = 83;
-const C_INSTR: u64 = 271;
-const C_REST: u64 = 92;
-const C_CALL: u64 = 130;
-const C_RETURN: u64 = 86;
-/// Longest wait of the three short polls (the old period is at most 1712) and slack, in colour clocks.
-const WAIT_CAP: u64 = 4000;
-
-fn detect(d: &[u8]) -> bool {
-    if d.len() < 20 || &d[..4] != b"FWMP" {
-        return false;
-    }
-    let (a, b, c) = (be32(d, 4) as usize, be32(d, 8) as usize, be32(d, 12) as usize);
-    let n = d.len();
-    16 + 8 <= n && 16usize.checked_add(a).map_or(false, |x| x <= n) && 16usize.checked_add(b).map_or(false, |x| x <= n)
-        && 16usize.checked_add(c).map_or(false, |x| x <= n) && a <= b && b <= c
+pub fn detect(d: &[u8]) -> bool {
+    d.len() >= 16 && &d[..4] == b"FWMP"
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Stage {
     Attack,
     Decay,
     Hold,
     Release,
     Stopped,
-    Invalid,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct Chan {
-    start: usize,
     ptr: usize,
+    start: usize,
     cnt: u8,
     ret: usize,
-    /// Offset of the current instrument's table entry.
-    ins: Option<usize>,
-    wave: usize,
-    wlen: u16,
-    loop_at: usize,
+    /// Offset of the current instrument entry (module offset), if one was selected.
+    inst: Option<usize>,
+    sample: u32,
+    slen: u16,
+    loop_at: u32,
     llen: u16,
-    level: u8,
     stage: Stage,
+    level: u8,
     hold: u8,
     ended: bool,
-    /// The wrapped counter has run through; nothing further is read.
+    /// The channel read something undefined and reads no more.
     dead: bool,
+    /// Whether the channel has called a pattern before (the first call costs 3 cycles more).
+    called: bool,
+}
+
+impl Chan {
+    fn new(level: u8, stage: Stage, hold: u8) -> Chan {
+        Chan { ptr: 0, start: 0, cnt: 1, ret: 0, inst: None, sample: 0, slen: 0, loop_at: 0, llen: 0, stage, level, hold, ended: false, dead: false, called: false }
+    }
 }
 
 pub struct ForgottenWorlds {
@@ -112,371 +105,383 @@ pub struct ForgottenWorlds {
     pt: usize,
     it: usize,
     wd: usize,
-    silent: u32,
     ch: [Chan; 4],
-    songend: bool,
-    /// The interrupt time of the next tick (colour clocks, absolute).
+    scale: [u32; 4],
+    silent: u32,
+    playing: bool,
+    /// The clock of the next tick's DMACON write, and the grid it is on time for.
     due: u64,
-    /// The clock of the first tick call.
-    first_n: u64,
-    started: bool,
-    /// Tick-local: the colour clock of the DMACON write and the cycle count since.
-    td: u64,
-    cy: u64,
-    /// The end of the last tick, in cycles (2 per colour clock).
-    end_cy: u64,
+    grid: u64,
+    // per tick
+    call: u64,
+    /// Cycles (half colour clocks) since the tick's DMACON write.
+    t: u64,
+    songend: bool,
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect(d) {
         return None;
     }
-    let silent = m.alloc(16);
+    let silent = m.alloc(8);
     if silent == 0 {
         return None;
     }
-    m.bus.write_bytes(silent, &[0; 16]);
-    let (a, b, c) = (be32(d, 4) as usize, be32(d, 8) as usize, be32(d, 12) as usize);
-    let mut chs: Vec<Chan> = Vec::new();
-    for i in 0..4 {
-        let start = 16 + be16(d, 16 + 2 * i) as usize;
-        let (level, stage, hold) = match i {
-            0 => (0x30, Stage::Hold, 45),
-            1 => (0x40, Stage::Invalid, 50),
-            _ => (0x28, Stage::Attack, 0),
-        };
-        chs.push(Chan {
-            start,
-            ptr: start,
-            cnt: 1,
-            ret: 0,
-            ins: None,
-            wave: 0,
-            wlen: 0,
-            loop_at: 0,
-            llen: 0,
-            level,
-            stage,
-            hold,
-            ended: false,
-            dead: false,
-        });
-    }
-    let ch: [Chan; 4] = chs.try_into().ok()?;
-    // the host's start: the reference's first write follows Paula's reset by a fixed time
-    let s = m.bus.clock + START_DELAY;
-    let mut r = Replay {
+    let off32 = |o: usize| -> usize { super::be32(d, o) as usize };
+    let pt = 16usize.saturating_add(off32(4));
+    let it = 16usize.saturating_add(off32(8));
+    let wd = 16usize.saturating_add(off32(12));
+    let mut s = ForgottenWorlds {
         d: d.to_vec(),
         base,
-        pt: 16 + a,
-        it: 16 + b,
-        wd: 16 + c,
+        pt,
+        it,
+        wd,
+        ch: [Chan::new(0x30, Stage::Hold, 45), Chan::new(0x40, Stage::Stopped, 50), Chan::new(0x28, Stage::Attack, 0), Chan::new(0x28, Stage::Attack, 0)],
+        scale: [64; 4],
         silent,
-        ch,
+        playing: false,
+        due: 0,
+        grid: 0,
+        call: 0,
+        t: 0,
         songend: false,
-        due: s + FIRST_TICK - ENTRY,
-        first_n: 0,
-        started: false,
-        td: 0,
-        cy: 0,
-        end_cy: 0,
     };
     let mut hw = Hw { bus: &mut m.bus };
-    r.init_writes(&mut hw, s);
-    Some(Box::new(r))
+    hw.bus.clock += START_DELAY;
+    s.start_song(&mut hw);
+    Some(Box::new(s))
 }
 
-type Replay = ForgottenWorlds;
-
-impl Replay {
+impl ForgottenWorlds {
     fn rb(&self, o: usize) -> u8 {
         self.d.get(o).copied().unwrap_or(0)
     }
 
-    /// Song initialisation (spec 7.1): the silence buffer on every channel, then the stray writes.
-    fn init_writes(&mut self, hw: &mut Hw, s: u64) {
-        for ch in 0..4usize {
-            let t = s + 39 * ch as u64;
-            hw.bus.clock = t;
+    fn rw(&self, o: usize) -> u16 {
+        be16(&self.d, o)
+    }
+
+    /// The song initialisation and the stop sequence's hardware writes (spec 7.1).
+    fn hw_silence(&mut self, hw: &mut Hw) {
+        for ch in 0..4 {
             hw.loc(ch, self.silent);
-            hw.bus.clock = t + 8;
+            hw.wait(8);
             hw.len(ch, 2);
-            hw.bus.clock = t + 16;
+            hw.wait(8);
             hw.per(ch, 0x7C);
-            hw.bus.clock = t + 24;
+            hw.wait(8);
             hw.vol(ch, 0);
+            if ch < 3 {
+                hw.wait(15);
+            }
         }
-        for (i, (a, v)) in [(0xDFF17Eu32, 0x00FFu16), (0xDFF176, 0x000F), (0xDFF17C, 0x0780), (0xDFF17A, 0x0780)].iter().enumerate() {
-            hw.bus.clock = s + 158 + 8 * i as u64;
-            hw.bus.write_word(*a, *v);
-        }
-        hw.bus.clock = s + INIT_SPAN;
-        // the engine starts the timer at the clock after `new`
-        let n = hw.bus.clock;
-        self.first_n = self.due.saturating_sub(n);
+        hw.wait(17);
+        hw.bus.write_word(0xDFF17E, 0x00FF);
+        hw.wait(8);
+        hw.bus.write_word(0xDFF176, 0x000F);
+        hw.wait(8);
+        hw.bus.write_word(0xDFF17C, 0x0780);
+        hw.wait(8);
+        hw.bus.write_word(0xDFF17A, 0x0780);
     }
 
-    /// Moves the clock to the current cycle.
+    /// Starts (or restarts) the song at the current clock. The envelope state, the current
+    /// instrument and the return pointers survive a restart.
+    fn start_song(&mut self, hw: &mut Hw) {
+        for c in 0..4 {
+            let w = self.rw(16 + 2 * c) as usize;
+            let ch = &mut self.ch[c];
+            ch.start = 16 + w;
+            ch.ptr = 16 + w;
+            ch.cnt = 1;
+            ch.ended = false;
+            ch.dead = false;
+        }
+        self.playing = true;
+        self.songend = false;
+        let s = hw.bus.clock;
+        self.hw_silence(hw);
+        self.grid = s + FIRST_TICK;
+        self.due = self.grid;
+        hw.bus.clock = hw.bus.clock.max(s);
+    }
+
+    fn clk(&self) -> u64 {
+        self.call + self.t / 2
+    }
+
     fn at(&self, hw: &mut Hw) {
-        hw.bus.clock = self.td + self.cy / 2;
+        hw.bus.clock = hw.bus.clock.max(self.clk());
     }
 
-    fn adv(&mut self, cycles: u64) {
-        self.cy += cycles;
-    }
-
-    /// A register write `cycles` after the previous event.
-    fn w(&mut self, hw: &mut Hw, cycles: u64, a: u32, v: u16) {
-        self.cy += cycles;
-        self.at(hw);
-        hw.bus.write_word(a, v);
-    }
-
-    /// Waits for the channel's interrupt flag: polls at 13 + 25 k cycles after the last write; the
-    /// flag counts if it was raised strictly before the sample. Returns the number of failed polls.
-    /// Gives up (the sequence goes on) after the colour clocks `cap`.
-    fn poll(&mut self, hw: &mut Hw, ch: usize, cap: u64) -> u64 {
-        let bit = 0x80u16 << ch;
-        let limit = self.td + (self.cy / 2) + cap;
+    /// Polls the audio interrupt flag `mask` the way the routine does: the k-th read samples
+    /// 13 + 25 k cycles after the write that preceded (cycle `t0`); returns k when the flag
+    /// was seen. A flag that never rises ends the wait after `cap` colour clocks.
+    fn poll(&mut self, hw: &mut Hw, mask: u16, t0: u64, cap: u64) -> u64 {
         let mut k = 0u64;
         loop {
-            let s = self.cy + 13 + 25 * k;
-            let t = self.td + (s - 1) / 2;
-            if t >= hw.bus.paula.now() {
-                hw.bus.paula.sync(t, &hw.bus.ram);
+            let ts = t0 + 13 + 25 * k;
+            let clock = self.call + (ts - 1) / 2;
+            hw.bus.clock = hw.bus.clock.max(clock);
+            let r = hw.bus.read_word(0xDFF01E);
+            if r & mask != 0 {
+                return k;
             }
-            if hw.bus.paula.intreq & bit != 0 || t > limit {
+            if clock.saturating_sub(self.call + t0 / 2) > cap {
                 return k;
             }
             k += 1;
         }
     }
 
-    // ---- event streams
+    fn period(note: u8) -> u16 {
+        PERIODS.get(note as usize).copied().unwrap_or(0)
+    }
 
     fn pattern_start(&self, p: i8) -> usize {
-        let w = be16(&self.d, (self.pt as i64 + 2 * p as i64).max(0) as usize) as i16 as i64;
-        (self.pt as i64 + w).max(0) as usize
+        let w = self.rw((self.pt as isize + 2 * p as isize).max(0) as usize) as i16;
+        (self.pt as isize + w as isize).max(0) as usize
     }
 
     fn select(&mut self, c: usize, i: i8) {
-        let ins = (self.it as i64 + 8 * i as i64).max(0) as usize;
-        let b0 = self.rb(ins) as i32;
-        let d3 = ((((i as i32) << 3) & 0xFF00) | b0) as u16 as i16 as i64;
-        let e = (self.wd as i64 + d3).max(0) as usize;
+        let it = (self.it as isize + 8 * i as isize).max(0) as usize;
+        let hi = (((i as i16 * 8) >> 8) & 255) as usize;
+        let e = self.wd + self.rb(it) as usize + 256 * hi;
+        let (s, ls, lo, ll) = (self.rw(e) as u32, self.rw(e + 2), self.rw(e + 4) as u32, self.rw(e + 6));
         let ch = &mut self.ch[c];
-        ch.ins = Some(ins);
-        let wave = self.wd + be16(&self.d, e) as usize;
-        let wlen = be16(&self.d, e + 2);
-        let loop_at = wave + be16(&self.d, e + 4) as usize;
-        let llen = be16(&self.d, e + 6);
-        let ch = &mut self.ch[c];
-        ch.wave = wave;
-        ch.wlen = wlen;
-        ch.loop_at = loop_at;
-        ch.llen = llen;
+        ch.inst = Some(it);
+        ch.sample = self.base.wrapping_add(self.wd as u32).wrapping_add(s);
+        ch.slen = ls;
+        ch.loop_at = ch.sample.wrapping_add(lo);
+        ch.llen = ll;
     }
 
-    // ---- the tick
+    fn vol_out(&self, c: usize, level: u8) -> u16 {
+        ((self.scale[c] * level as u32) >> 6) as u16
+    }
 
-    fn envelope(&mut self, c: usize) -> (u64, u8) {
-        let ins = self.ch[c].ins.unwrap_or(0);
-        let (sus, att, dec, hold, rel) = (self.rb(ins + 1), self.rb(ins + 2), self.rb(ins + 3), self.rb(ins + 4), self.rb(ins + 5));
+    /// The hardware sequence of a note start (spec 5). The cycle counter is at the first write.
+    fn note_start(&mut self, hw: &mut Hw, c: usize, note: u8) {
+        let ch = self.ch[c];
+        let Some(inst) = ch.inst else { return };
+        let b2 = self.rb(inst + 2);
+        let b = 1u16 << c;
+        let irq = 0x80u16 << c;
+        let r = 0xDFF0A0 + 0x10 * c as u32;
+        let per = Self::period(note);
+        // 1
+        self.at(hw);
+        hw.bus.write_word(0xDFF09C, irq);
+        // 2
+        self.t += 12;
+        self.at(hw);
+        hw.dmacon(b);
+        // 3
+        self.t += 16;
+        self.at(hw);
+        hw.per(c, 1);
+        // 4
+        self.t += 16;
+        self.at(hw);
+        hw.vol(c, 0);
+        // 5 W1
+        let t0 = self.t;
+        let k = self.poll(hw, irq, t0, SETUP_WAIT_CAP);
+        self.t = t0 + 25 * (k + 1) + 12;
+        // 6
+        self.at(hw);
+        hw.bus.write_word(0xDFF09C, irq);
+        // 7
+        self.t += 16;
+        self.at(hw);
+        hw.bus.write_word(r + 0xA, 0);
+        // 8 W2
+        let t0 = self.t;
+        let k = self.poll(hw, irq, t0, SETUP_WAIT_CAP);
+        self.t = t0 + 25 * (k + 1) + 16;
+        // 9
+        self.at(hw);
+        hw.bus.write_word(r + 0xA, 0);
+        // 10 W3
+        let t0 = self.t;
+        let k = self.poll(hw, irq, t0, SETUP_WAIT_CAP);
+        self.t = t0 + 25 * (k + 1) + 28;
+        // 11
+        self.at(hw);
+        hw.loc(c, ch.sample);
+        self.t += 20;
+        self.at(hw);
+        hw.len(c, ch.slen);
+        self.t += 20;
+        self.at(hw);
+        hw.per(c, per);
+        self.t += 168;
+        self.at(hw);
+        let v = self.vol_out(c, b2);
+        hw.vol(c, v);
+        // 12
+        self.t += 24;
+        self.at(hw);
+        hw.dmacon(0x8000 | b);
+        // 13
+        self.t += 26;
+        self.at(hw);
+        hw.bus.write_word(0xDFF09C, irq);
+        // 14 W4
+        let t0 = self.t;
+        let k = self.poll(hw, irq, t0, START_WAIT_CAP);
+        self.t = t0 + 25 * (k + 1) + 12;
+        // 15
+        self.at(hw);
+        hw.bus.write_word(0xDFF09C, irq);
+        // 16
+        self.t += 28;
+        self.at(hw);
+        hw.loc(c, ch.loop_at);
+        self.t += 20;
+        self.at(hw);
+        hw.len(c, ch.llen);
+        self.t += 40;
+        let chn = &mut self.ch[c];
+        chn.level = b2;
+        chn.stage = Stage::Attack;
+    }
+
+    /// One envelope step of a running channel, then the volume write (spec 4.2).
+    fn envelope(&mut self, hw: &mut Hw, c: usize, inst: usize) {
+        let (sus, att, dec, hold, rel) = (self.rb(inst + 1), self.rb(inst + 2), self.rb(inst + 3), self.rb(inst + 4), self.rb(inst + 5));
         let ch = &mut self.ch[c];
-        let mut l = ch.level;
-        let cost;
+        self.t += 105;
         match ch.stage {
             Stage::Attack => {
-                l = l.wrapping_add(att);
-                if l >= 0x40 {
-                    l = 0x40;
+                ch.level = ch.level.wrapping_add(att);
+                if ch.level >= 0x40 {
+                    ch.level = 0x40;
                     ch.stage = Stage::Decay;
-                    cost = 78;
+                    self.t += 78;
                 } else {
-                    cost = 46;
+                    self.t += 46;
                 }
             }
             Stage::Decay => {
-                l = l.wrapping_add(dec);
-                if l <= sus {
-                    l = sus;
+                ch.level = ch.level.wrapping_add(dec);
+                if ch.level <= sus {
+                    ch.level = sus;
                     ch.hold = hold;
                     ch.stage = Stage::Hold;
-                    cost = 106;
+                    self.t += 106;
                 } else {
-                    cost = 50;
+                    self.t += 50;
                 }
             }
             Stage::Hold => {
                 ch.hold = ch.hold.wrapping_sub(1);
                 if ch.hold == 0 {
                     ch.stage = Stage::Release;
-                    cost = 66;
+                    self.t += 66;
                 } else {
-                    cost = 42;
+                    self.t += 42;
                 }
             }
             Stage::Release => {
-                l = l.wrapping_add(rel);
-                if l & 0x80 != 0 {
-                    l = 0;
+                ch.level = ch.level.wrapping_add(rel);
+                if ch.level & 0x80 != 0 {
+                    ch.level = 0;
                     ch.stage = Stage::Stopped;
-                    cost = 66;
+                    self.t += 66;
                 } else {
-                    cost = 38;
+                    self.t += 38;
                 }
             }
-            Stage::Stopped | Stage::Invalid => cost = 17,
+            Stage::Stopped => {
+                self.t += 17;
+            }
         }
-        ch.level = l;
-        (cost, l)
+        self.t += 144;
+        let level = self.ch[c].level;
+        self.at(hw);
+        let v = self.vol_out(c, level);
+        hw.vol(c, v);
+        self.t += 10;
     }
 
-    fn turn(&mut self, c: usize, hw: &mut Hw) -> bool {
-        let reg = 0xDFF0A0 + 0x10 * c as u32;
+    /// Reads the events of channel `c` until a note or a rest ends the turn. False when the
+    /// command 0x80 ended the tick.
+    fn serve(&mut self, hw: &mut Hw, c: usize) -> bool {
+        self.t += 48;
         if self.ch[c].dead {
-            self.adv(C_RUN_PLAIN);
             return true;
         }
-        self.ch[c].cnt = self.ch[c].cnt.wrapping_sub(1);
-        if self.ch[c].cnt != 0 {
-            let has_env = self.ch[c].ins.map_or(false, |i| self.rb(i + 4) != 0);
-            if !has_env {
-                self.adv(C_RUN_PLAIN);
-            } else {
-                self.adv(C_RUN_ENV);
-                if self.ch[c].stage != Stage::Invalid {
-                    let (cost, l) = self.envelope(c);
-                    self.adv(cost);
-                    self.w(hw, C_VOL_TAIL, reg + 8, l as u16);
-                } else {
-                    self.adv(17);
-                    self.adv(C_VOL_TAIL);
-                }
-                self.adv(C_AFTER_VOL);
-            }
-            return true;
-        }
-        if self.ch[c].ended {
-            // the wrapped counter has run through: nothing is read past the end
-            self.ch[c].dead = true;
-            self.adv(C_RUN_PLAIN);
-            return true;
-        }
-        self.adv(C_HEAD);
-        let mut guard = 0;
-        loop {
-            guard += 1;
-            if guard > 100_000 {
-                self.ch[c].ended = true;
-                self.ch[c].dead = true;
-                return true;
-            }
-            let b = self.rb(self.ch[c].ptr);
-            self.ch[c].ptr += 1;
+        for _ in 0..EVENT_CAP {
+            let p = self.ch[c].ptr;
+            let b = self.rb(p);
+            self.ch[c].ptr = p + 1;
             if b < 0x80 {
-                let dur = self.rb(self.ch[c].ptr);
-                self.ch[c].ptr += 1;
-                self.ch[c].cnt = dur;
-                self.adv(C_NOTE);
-                self.note(c, b, hw);
-                self.adv(C_NOTE_END);
+                let d = self.rb(p + 1);
+                self.ch[c].ptr = p + 2;
+                self.ch[c].cnt = d;
+                self.t += 134 + 12;
+                self.note_start(hw, c, b);
                 return true;
             }
             match b {
                 0x80 => {
+                    // the pointer stays on the command: the channel reads it again
+                    // when its (wrapped) counter next runs out
+                    self.ch[c].ptr = p;
                     self.ch[c].ended = true;
                     self.ch[c].cnt = 0;
-                    if self.ch.iter().all(|x| x.ended) {
-                        self.songend = true;
-                    }
                     return false;
                 }
                 0x82 => {
                     self.ch[c].ptr = self.ch[c].start;
-                    self.adv(C_RESTART);
+                    self.t += 83;
                 }
                 0x84 => {
-                    self.adv(C_INSTR);
-                    let i = self.rb(self.ch[c].ptr) as i8;
-                    self.ch[c].ptr += 1;
+                    let i = self.rb(p + 1) as i8;
+                    self.ch[c].ptr = p + 2;
                     self.select(c, i);
+                    self.t += 271;
                 }
                 0x86 => {
-                    self.ch[c].cnt = self.rb(self.ch[c].ptr);
-                    self.ch[c].ptr += 1;
-                    self.adv(C_REST);
+                    let d = self.rb(p + 1);
+                    self.ch[c].ptr = p + 2;
+                    self.ch[c].cnt = d;
+                    self.t += 92;
                     return true;
                 }
                 0x88 => {
-                    self.adv(C_CALL);
-                    if self.ch[c].ret == 0 {
-                        // the channel's first call costs 3 cycles more (measured, first tick of a tune)
-                        self.adv(3);
+                    let n = self.rb(p + 1) as i8;
+                    self.ch[c].ptr = p + 2;
+                    self.ch[c].ret = p + 2;
+                    self.ch[c].ptr = self.pattern_start(n);
+                    self.t += 130;
+                    if !self.ch[c].called {
+                        self.ch[c].called = true;
+                        self.t += 3;
                     }
-                    let p = self.rb(self.ch[c].ptr) as i8;
-                    self.ch[c].ptr += 1;
-                    self.ch[c].ret = self.ch[c].ptr;
-                    self.ch[c].ptr = self.pattern_start(p);
                 }
                 0x8A => {
                     self.ch[c].ptr = self.ch[c].ret;
-                    self.adv(C_RETURN);
+                    self.t += 86;
                 }
                 _ => {
-                    // undefined commands: the channel ends
+                    // undefined command: the channel ends, the tick goes on
                     self.ch[c].ended = true;
                     self.ch[c].dead = true;
+                    self.ch[c].cnt = 0;
                     return true;
                 }
             }
         }
-    }
-
-    /// The note start (spec 5).
-    fn note(&mut self, c: usize, key: u8, hw: &mut Hw) {
-        let Some(ins) = self.ch[c].ins else {
-            return;
-        };
-        let level = self.rb(ins + 2);
-        self.ch[c].level = level;
-        self.ch[c].stage = Stage::Attack;
-        let period = PERIODS.get(key as usize).copied().unwrap_or(0);
-        let reg = 0xDFF0A0 + 0x10 * c as u32;
-        let (ib, bit) = (0x80u16 << c, 1u16 << c);
-        let (wave, wlen, loop_at, llen) = (self.ch[c].wave, self.ch[c].wlen, self.ch[c].loop_at, self.ch[c].llen);
-        self.w(hw, 12, 0xDFF09C, ib);
-        self.w(hw, 12, 0xDFF096, bit);
-        self.w(hw, 16, reg + 6, 1);
-        self.w(hw, 16, reg + 8, 0);
-        let k = self.poll(hw, c, WAIT_CAP);
-        self.w(hw, 25 * (k + 1) + 12, 0xDFF09C, ib);
-        self.w(hw, 16, reg + 0xA, 0);
-        let k = self.poll(hw, c, WAIT_CAP);
-        self.w(hw, 25 * (k + 1) + 16, reg + 0xA, 0);
-        let k = self.poll(hw, c, WAIT_CAP);
-        self.cy += 25 * (k + 1) + 28;
-        self.at(hw);
-        hw.loc(c, self.base + wave as u32);
-        self.w(hw, 20, reg + 4, wlen);
-        self.w(hw, 20, reg + 6, period);
-        self.w(hw, 168, reg + 8, level as u16);
-        self.w(hw, 24, 0xDFF096, 0x8000 | bit);
-        self.w(hw, 26, 0xDFF09C, ib);
-        // the flag rises at the first raster line start after the DMA-on write; if that comes
-        // before the clear, the wait lasts until the end of the first pass
-        let first_pass = 2 * period.max(1) as u64 * if wlen == 0 { 65536 } else { wlen as u64 };
-        let cap = 2 * LINE + first_pass + 1000;
-        let k = self.poll(hw, c, cap);
-        self.w(hw, 25 * (k + 1) + 12, 0xDFF09C, ib);
-        self.cy += 28;
-        self.at(hw);
-        hw.loc(c, self.base + loop_at as u32);
-        self.w(hw, 20, reg + 4, llen);
+        self.ch[c].ended = true;
+        self.ch[c].dead = true;
+        true
     }
 }
 
-impl Replayer for Replay {
+impl Replayer for ForgottenWorlds {
     fn format(&self) -> &'static str {
         "Forgotten Worlds"
     }
@@ -486,37 +491,57 @@ impl Replayer for Replay {
     }
 
     fn tick_clocks(&self) -> u64 {
-        if self.started {
-            TICK
-        } else {
-            self.first_n
-        }
-    }
-
-    fn next_tick_at(&self) -> Option<u64> {
-        Some(self.due)
+        TICK
     }
 
     fn songend(&self) -> bool {
         self.songend
     }
 
+    fn set_subsong(&mut self, _n: u16, hw: &mut Hw) {
+        self.start_song(hw);
+    }
+
+    fn subsong_tick_at(&mut self) -> Option<u64> {
+        Some(self.due.saturating_sub(IRQ_LEAD))
+    }
+
+    fn next_tick_at(&self) -> Option<u64> {
+        Some(self.due.saturating_sub(IRQ_LEAD))
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
-        self.started = true;
-        self.due += TICK;
-        self.td = hw.bus.clock + ENTRY;
-        self.cy = 0;
-        self.at(hw);
+        if !self.playing {
+            return;
+        }
+        self.call = hw.bus.clock.max(self.due);
+        hw.bus.clock = self.call;
+        self.t = 0;
         hw.dmacon(0x800F);
-        self.cy = C_PRO;
+        self.t = 33;
         for c in 0..4 {
-            if !self.turn(c, hw) {
+            self.ch[c].cnt = self.ch[c].cnt.wrapping_sub(1);
+            let mut go = true;
+            if self.ch[c].cnt != 0 {
+                match self.ch[c].inst {
+                    Some(i) if self.rb(i + 4) != 0 => self.envelope(hw, c, i),
+                    _ => self.t += 74,
+                }
+            } else {
+                go = self.serve(hw, c);
+            }
+            self.t += if c == 3 { 46 } else { 42 };
+            if !go {
                 break;
             }
-            self.adv(C_EPI[c]);
         }
-        self.end_cy = 2 * self.td + self.cy;
-        hw.bus.clock = (self.td + self.cy / 2).max(hw.bus.clock);
+        if self.ch.iter().all(|c| c.ended) {
+            self.songend = true;
+        }
+        let end = self.clk();
+        hw.bus.clock = hw.bus.clock.max(end);
+        self.grid += TICK;
+        self.due = self.grid.max(self.call + (self.t + 370) / 2);
     }
 }
 

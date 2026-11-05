@@ -292,7 +292,9 @@ impl Tronic {
             hw.per(c, 0);
             hw.vol(c, 0);
         }
-        hw.bus.clock = t0 + 102;
+        // the song's audio counts from one period before the first tick (the host starts its
+        // timer when the start returns), as the reference's wav origin does
+        hw.bus.clock = t0 + 102 + (FIRST_TICK_AFTER_INIT - TICK_CLOCKS);
     }
 
     // --- the clock
@@ -680,10 +682,6 @@ impl Replayer for Tronic {
 
     fn tick_clocks(&self) -> u64 {
         TICK_CLOCKS
-    }
-
-    fn timer_delay(&self) -> u64 {
-        FIRST_TICK_AFTER_INIT - TICK_CLOCKS
     }
 
     fn songend(&self) -> bool {

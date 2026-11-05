@@ -28,6 +28,9 @@ pub const OPEN: Open = Open { name: "Dynamic Synthesizer", detect, new };
 const LINK: i64 = 0x1F400;
 /// Colour clocks between two ticks.
 const TICK: u64 = 70940;
+/// Twice the colour clocks the reference's start-up takes before its first period, less the
+/// path-length term (measured from its write logs).
+const START_UP_X2: u64 = 1_083_151;
 /// The song-end tick's extra cost in cycles when the offset before it is even (one more when odd), so that the sum is odd.
 const WRAP_EXTRA: u64 = 221;
 
@@ -215,7 +218,20 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     m.bus.write_bytes(a, &smp);
-    Some(Box::new(DynamicSynthesizer::build(d.to_vec(), lay, subsongs, a)))
+    // the reference's DMA reads the sample's first long word as 0xFFFFFFFF whatever the file holds
+    // (seen in its DMA log on both corpus files), so it is stamped over at load
+    m.bus.write_bytes(a, &[0xFF; 4]);
+    let mut s = DynamicSynthesizer::build(d.to_vec(), lay, subsongs, a);
+    // the reference's first tick falls START_UP colour clocks after the start phase's first
+    // period; the song's audio counts from one period before it (the clock left after `new`)
+    // (the host copies the module's directory and file name once per character, 17 cycles each:
+    // the start-up time grows by 8.5 colour clocks per character of the path, from the logs of
+    // runs from directories of different name lengths)
+    let plen = (m.bus.read_cstr(m.deli.dir_buf).len() + file.len()) as u64;
+    let t = m.bus.clock + TICK + (START_UP_X2 + 17 * plen) / 2;
+    s.next_at = Some(t);
+    m.bus.clock = t - TICK;
+    Some(Box::new(s))
 }
 
 impl DynamicSynthesizer {

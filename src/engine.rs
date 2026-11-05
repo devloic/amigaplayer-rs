@@ -746,6 +746,12 @@ impl Engine {
         self.next_timer = None;
         let title = r.title();
         let (sub_min, sub_max, sub) = r.subsongs();
+        let mut r = r;
+        // a replayer that knows when its first tick falls (before the timer period it would
+        // get otherwise)
+        if let Some(t) = r.subsong_tick_at() {
+            self.next_timer = Some(t);
+        }
         self.playing = Some(Playing {
             module_name: if title.is_empty() { file_name(path) } else { title },
             format: r.format().to_string(),

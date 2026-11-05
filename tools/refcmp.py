@@ -95,6 +95,8 @@ UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 
               'mcmd',
               # EP206's GlueMon differs from UADE's V1.13 build, which the port follows
               'gluemon',
+              # EP206 ships another Mark II build; the port follows UADE's write logs
+              'markii',
               # Infogrames exists only in UADE's set
               'infogrames',
               # EP206's Major Tom 2.01 is another build; the port follows UADE's MajorTom

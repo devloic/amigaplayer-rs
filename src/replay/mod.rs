@@ -57,6 +57,7 @@ pub mod med;
 pub(crate) mod m68kdec;
 #[cfg(test)]
 mod m68kenc;
+pub mod maxtrax;
 pub mod mikedavies;
 pub mod medpacker;
 pub mod musicassembler;
@@ -302,6 +303,7 @@ pub const REPLAYERS: &[Open] = &[
     ashleyhogg::OPEN,
     coredesign::OPEN,
     stp3::OPEN,
+    maxtrax::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

@@ -53,6 +53,7 @@ pub mod hvl;
 pub mod jamcracker;
 pub mod jasonbrooke;
 pub mod jankomrsicflogel;
+pub mod jannesalmijarvi;
 pub mod jasonpage;
 pub mod jeroentel;
 pub mod jesperolsen;
@@ -293,6 +294,9 @@ pub const REPLAYERS: &[Open] = &[
     pretracker::OPEN,
     musicline::OPEN,
     hvl::OPEN,
+    // the magic `JS92` at 1080 (and the size rule), before the 15-instrument SoundTracker
+    // replayers, whose loose content rules take such a module (the 'JS.short' test module)
+    jannesalmijarvi::OPEN,
     soundtracker::OPEN_UST10,
     soundtracker::OPEN_UST18,
     soundtracker::OPEN_ST2,

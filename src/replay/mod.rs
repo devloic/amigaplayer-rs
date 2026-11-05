@@ -88,6 +88,7 @@ pub mod professionalsoundartists;
 pub mod paulsummers;
 pub mod forgottenworlds;
 pub mod futureplayer;
+pub mod anders0land;
 pub mod artandmagic;
 pub mod robhubbard;
 pub mod robhubbardst;
@@ -350,6 +351,7 @@ pub const REPLAYERS: &[Open] = &[
     maximumeffect::OPEN,
     seanconnolly::OPEN,
     speedya1system::OPEN,
+    anders0land::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

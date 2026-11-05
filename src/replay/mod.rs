@@ -10,6 +10,7 @@
 pub mod actionamics;
 pub mod adpcmmono;
 pub mod amcomposer;
+pub mod aprosys;
 pub mod alcatrazpacker;
 pub mod andrewparton;
 pub mod ashleyhogg;
@@ -404,6 +405,8 @@ pub const REPLAYERS: &[Open] = &[
     anders0land::OPEN,
     thomashermann::OPEN,
     voodoosupremesynthesizer::OPEN,
+    // the ADRVPACK magic is exact: no order dependence
+    aprosys::OPEN,
     // last: Hippel COSO and TFMX files are taken by the Hippel replayers above
     jochenhippelst::OPEN,
     // weak detection (two flag bytes and a signature): after every format with a magic word

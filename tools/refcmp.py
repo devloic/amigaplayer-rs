@@ -528,10 +528,11 @@ NO_AMIGA_PLAYER = {'hivelytracker'}
 
 # Formats whose original never reports a song end (UADE's PreTracker and SCUMM players are bare replay
 # routines: they play on; so does the Jesper Olsen Eagleplayer: 25 modules looped for 120 s each without
-# one, and the port's write log equals the original's over 30-40 s once the CLI ignores its song end)
+# one, and the port's write log equals the original's over 30-40 s once the CLI ignores its song end;
+# AProSys never tells the host, the original then goes on silently past the song end)
 # while the port signals one at the song's end (README), which stops
 # the CLI render there. The original is compared over the port's length.
-ORIGINAL_PLAYS_ON = {'pretracker', 'scumm', 'jesperolsen'}
+ORIGINAL_PLAYS_ON = {'pretracker', 'scumm', 'jesperolsen', 'aprosys'}
 
 
 # Formats whose original refuses some modules the port plays (Hippel 7V: the five COSO modules, README):

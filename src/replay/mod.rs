@@ -381,10 +381,10 @@ pub const REPLAYERS: &[Open] = &[
     tomytracker::OPEN,
     medley::OPEN,
     ym2149::OPEN,
-    // weak detection (first byte, a size field, one zero byte): after everything else
-    markcookseyold::OPEN,
     // the magic only, no real module known: after every other replayer
     mcmd::OPEN,
+    // weak detection (first byte, a size field, one zero byte): after everything else
+    markcookseyold::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

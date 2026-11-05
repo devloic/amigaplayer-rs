@@ -87,6 +87,7 @@ pub mod speedysystem;
 pub mod speedya1system;
 pub mod quartet;
 pub mod tomytracker;
+pub mod midiloriciel;
 pub mod voodoosupremesynthesizer;
 pub mod suntronic;
 pub mod paulrobotham;
@@ -383,6 +384,8 @@ pub const REPLAYERS: &[Open] = &[
     ym2149::OPEN,
     // the magic only, no real module known: after every other replayer
     mcmd::OPEN,
+    // a Standard MIDI File with a sample bank beside it: strict header, after every other replayer
+    midiloriciel::OPEN,
     // weak detection (first byte, a size field, one zero byte): after everything else
     markcookseyold::OPEN,
 ];

@@ -91,6 +91,10 @@ impl Song {
         self.e.playing.as_ref().map_or("", |p| &p.module_name)
     }
 
+    pub(crate) fn engine(&self) -> &Engine {
+        &self.e
+    }
+
     /// Seconds played since the subsong started.
     pub fn elapsed_secs(&self) -> f64 {
         self.e.elapsed_secs()

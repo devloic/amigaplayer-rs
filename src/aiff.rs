@@ -168,6 +168,11 @@ impl AiffPlayer {
         (self.src_rate, self.channels, self.bits)
     }
 
+    /// The recording's length in seconds.
+    pub fn duration_secs(&self) -> f64 {
+        if self.src_rate > 0.0 { self.frames as f64 / self.src_rate } else { 0.0 }
+    }
+
     pub fn ended(&self) -> bool {
         self.pos >= self.frames as f64
     }

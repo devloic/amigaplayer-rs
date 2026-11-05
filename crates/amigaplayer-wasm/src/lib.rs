@@ -10,21 +10,18 @@
 //! dp_pcm_ptr/len, dp_truncated, dp_close
 //! ```
 //!
-//! An AIFF file is decoded by `amigaplayer_rs::aiff` (a recording: played to its end).
+//! An AIFF file is decoded by the library's AIFF decoder (a recording: played to its end).
 //!
 //! The PCM is interleaved stereo s16le. A tune ends where its replayer says, after
 //! 10 s of silence, or at `max_bytes` (truncated): many Amiga players loop for ever.
 
-use amigaplayer_rs::open::{self, Song};
+use amigaplayer_rs::{Error, Song};
 use std::path::PathBuf;
 
-/// The module's directory: companions are added beside it, as `/mod/smpl.x` or
-/// `/mod/Instruments/x.instr`.
-const DIR: &str = "/mod";
 const SILENCE_S: u32 = 10;
 
 struct State {
-    files: Vec<(PathBuf, Vec<u8>)>,
+    files: Vec<(String, Vec<u8>)>,
     info: String,
     pcm: Vec<i16>,
     truncated: bool,
@@ -63,7 +60,7 @@ pub unsafe extern "C" fn dp_free(p: *mut u8, n: usize) {
 /// `p` points at `n` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dp_detect(p: *const u8, n: usize) -> i32 {
-    open::detect(unsafe { bytes(p, n) }).is_some() as i32
+    amigaplayer_rs::detect(unsafe { bytes(p, n) }).is_some() as i32
 }
 
 /// A companion file for the next `dp_open`, at `path` relative to the module.
@@ -74,7 +71,7 @@ pub unsafe extern "C" fn dp_detect(p: *const u8, n: usize) -> i32 {
 pub unsafe extern "C" fn dp_add_file(path: *const u8, path_len: usize, p: *const u8, n: usize) {
     let rel = String::from_utf8_lossy(unsafe { bytes(path, path_len) }).into_owned();
     let rel: PathBuf = rel.split(['/', '\\']).filter(|s| !s.is_empty() && *s != "." && *s != "..").collect();
-    st().files.push((PathBuf::from(DIR).join(rel), unsafe { bytes(p, n) }.to_vec()));
+    st().files.push((rel.to_string_lossy().into_owned(), unsafe { bytes(p, n) }.to_vec()));
 }
 
 /// Decodes the module named `name` (its own file name, which name checks see) at
@@ -98,27 +95,33 @@ pub unsafe extern "C" fn dp_open(
     s.truncated = false;
     let files = std::mem::take(&mut s.files);
     let data = unsafe { bytes(p, n) };
-    if open::detect(data).is_none() {
+    if amigaplayer_rs::detect(data).is_none() {
         return -2;
     }
     let name = String::from_utf8_lossy(unsafe { bytes(name, name_len) }).replace(['/', '\\'], "_");
-    let path = PathBuf::from(DIR).join(name);
-    let mut song = match Song::open_with(&path, data.to_vec(), files, rate) {
+    let companions: Vec<(&str, &[u8])> = files.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
+    let mut song = match Song::open_with(&name, data, &companions, rate) {
         Ok(song) => song,
         Err(e) => {
             // the reason, for the page to show (AIFF names the compression it cannot decode)
-            s.info = e.to_string();
+            s.info = match e {
+                Error::Invalid(why) => why,
+                e => e.to_string(),
+            };
             return -1;
         }
     };
-    let (lo, hi, first) = song.subsongs();
+    let (lo, hi, first) = {
+        let r = song.subsongs();
+        (r.first, r.last, r.current)
+    };
     let want = if subsong < 0 { first } else { (subsong as u16).clamp(lo, hi) };
     if song.set_subsong(want).is_err() {
         return -1;
     }
 
     let max_frames = max_bytes / 4;
-    let mut buf = vec![0f32; 2 * 1024];
+    let mut buf = vec![0i16; 2 * 1024];
     let mut quiet = 0u32;
     // a recording is played to its end, silent stretches included
     let recorded = song.format().starts_with("AIFF");
@@ -127,10 +130,9 @@ pub unsafe extern "C" fn dp_open(
             s.truncated = true;
             break;
         }
-        song.render(&mut buf);
+        song.render_i16(&mut buf);
         let mut silent = true;
-        for &x in &buf {
-            let v = (x * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+        for &v in &buf {
             silent &= v == 0;
             s.pcm.push(v);
         }
@@ -141,7 +143,7 @@ pub unsafe extern "C" fn dp_open(
     }
     s.pcm.truncate(max_frames * 2);
     // the subsong played: an empty one at the start is skipped for the next
-    let cur = song.subsongs().2;
+    let cur = song.subsongs().current;
     s.info = format!("{}\t{}\t{cur}\t{lo}\t{hi}", song.title(), song.format());
     0
 }

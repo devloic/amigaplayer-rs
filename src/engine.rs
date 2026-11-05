@@ -1583,6 +1583,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "host-68k")]
     fn tme_checks_only_tme_names() {
         assert!(by_name_only("TME", Path::new("x/tme.Labyrinth.msx")));
         assert!(by_name_only("TME", Path::new("x/hawkeye.TME")));

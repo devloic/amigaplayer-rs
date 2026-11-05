@@ -154,6 +154,7 @@ pub mod synthdream;
 pub mod synthesis;
 pub mod syntracker;
 pub mod synthpack;
+pub mod specialfxst;
 pub mod tfhd;
 pub mod tfmx;
 pub mod tfmxst;
@@ -415,6 +416,8 @@ pub const REPLAYERS: &[Open] = &[
     tomytracker::OPEN,
     medley::OPEN,
     ym2149::OPEN,
+    // strict byte patterns but no real module known (a file of any size can pass the first words): after the others
+    specialfxst::OPEN,
     // the magic only, no real module known: after every other replayer
     mcmd::OPEN,
     // a Standard MIDI File with a sample bank beside it: strict header, after every other replayer

@@ -452,6 +452,11 @@ pub fn parse_tags(bus: &crate::bus::Bus, list: u32) -> HashMap<u32, u32> {
 
 /// Calls a player function with A5 = `globals`. Returns the registers.
 pub fn call_fn(m: &mut Machine, globals: u32, entry: u32, regs: Option<Regs>) -> Result<Regs, String> {
+    // a function tag left at 0 (unrelocated, e.g. Mark II's DTP_Volume, DTP_Balance and
+    // EP_Voices) names no function: there is nothing to call (nor a process to send it to)
+    if entry == 0 {
+        return Ok(regs.unwrap_or([0; 16]));
+    }
     // a process player's function goes to its process, unless that is what calls it
     if let Some(i) = m.deli.procs.iter().position(|p| p.fns.contains(&entry) && (p.task.is_some() || !p.running)) {
         return proc_call(m, i, entry);

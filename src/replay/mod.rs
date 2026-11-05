@@ -75,6 +75,7 @@ pub mod pretracker;
 mod pretracker_tables;
 pub mod musicline;
 pub mod oktalyzer;
+pub mod onescapee;
 pub mod paulrobotham;
 pub mod paulsummers;
 pub mod robhubbard;
@@ -320,6 +321,7 @@ pub const REPLAYERS: &[Open] = &[
     legglessmusiceditor::OPEN,
     soundprogramminglanguage::OPEN,
     paulsummers::OPEN,
+    onescapee::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

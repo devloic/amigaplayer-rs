@@ -117,6 +117,7 @@ pub mod tfmx;
 pub mod timfollin;
 pub mod tcbtracker;
 pub mod tme;
+pub mod tronic;
 pub mod wallybeben;
 
 use crate::amplifier::Poke;
@@ -322,6 +323,7 @@ pub const REPLAYERS: &[Open] = &[
     soundprogramminglanguage::OPEN,
     paulsummers::OPEN,
     onescapee::OPEN,
+    tronic::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

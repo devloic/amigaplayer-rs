@@ -84,7 +84,7 @@ TEMPO_MIN_CORR = 0.5    # segments whose envelopes correlate less than this are 
 # SoundMaster is another build, SCUMM's differs in its sweeps); Mark Cooksey was written against
 # UADE's (EP206's is another driver build: other hardware init, DMA sequence and volume scaling,
 # silent on Commando)
-UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey')
+UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 'tronic')
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's
@@ -488,7 +488,9 @@ DELI_REF = {'amosmusicbank': 'AmosMusicBank'}
 # Sonic Arranger: EP206's SonicArranger (V4.11) takes only "SOARV1.0" modules; the Lionheart-format
 # ones (sa.drachenflug.SA, ...) are played by UADE's player, which names itself "Sonic Arranger"
 # (file SonicArranger, prefixes sa/sonic/sa-p/lion/sa_old) and is the original for them.
-FORCED_PLAYER = {'sidmon20': 'SIDMon 2.0', 'scumm': 'SCUMM_Player', 'sonicarranger': 'Sonic Arranger'}
+FORCED_PLAYER = {'sidmon20': 'SIDMon 2.0', 'scumm': 'SCUMM_Player', 'sonicarranger': 'Sonic Arranger',
+                 # EP206's "Tronic" is another build; UADE's names itself TronicTracker(?)
+                 'tronic': 'TronicTracker(?)'}
 
 
 # Formats no Amiga player plays (README: HVL is checked against the C replayer only): whatever

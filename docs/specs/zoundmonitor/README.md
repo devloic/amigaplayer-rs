@@ -28,3 +28,8 @@ folder: the format needs no data from the player beyond the 37-value period tabl
 - Host volume, balance and voice muting change the AUDxVOL values (SPEC 6); all logs use defaults.
 - The host's duration is computed from the end position only (SPEC 1.7) and is wrong when the start
   position is not 0.
+
+## Errata found while implementing
+
+- SPEC 4.3 step 4 says the voice note is set before the transpose, while 2.2 says it holds the note after transpose; the port stores the transposed value (the logs do not exercise it).
+- Portamento target 'masked to its low 6 bits' is ambiguous: mask the top byte of R2 first, then add the transpose (matches the logs).

@@ -21,3 +21,9 @@
 - Volumes are written raw (4 × byte). Values of 0x80 and above, or the period word written by command
   0x04, are passed to Paula unchanged, as in the reference.
 - a private working folder holds the spec author's notes, disassembly and scripts. The implementer does not open it.
+
+## Errata found while implementing
+
+- SPEC 5.3 (line wait): the 'add 9' is also taken after the sample that differs. Each spin step is 16, sample, 9, then the test; the other constants (lead-ins 46 and 56, 10 per change, 44 at the end) then fit all write times.
+- LOGS: the syn1 reference log stops at about tick 1000, not 60 s.
+- Undefined in the spec, clamped by the port: period indices before the table (entry 0) and past its end (last entry).

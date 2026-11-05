@@ -19,3 +19,8 @@ Unknowns:
 
 No data/ folder: all tables are small and given inline, and the noise buffer is generated (section 9).
 The lead decides on embedding if a data/ file is ever added.
+
+## Errata found while implementing
+
+- The first-tick start time varies per module (about 3k to 30k cc) and is not given; row costs and the all-stopped tick cost (131 vs 231) are fitted, not specified.
+- Pattern return restores track 0's saved place into track 0 and steps the running track; a track loop with count <= 0 signals the end and continues; the mixer shadow is 0xFF at song start without a register-7 write.

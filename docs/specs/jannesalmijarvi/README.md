@@ -32,3 +32,8 @@
   original player is recorded in the private notes.
 - A private working folder holds the spec author's notes, scripts and the private model; implementers
   do not open it.
+
+## Errata found while implementing
+
+- The reference's start clock depends slightly on the module (6 cc per pattern, 8 cc per non-empty sample, fitted); the spec does not give it.
+- A ProWizard conversion rewrites JS.short into a ProTracker module before any replayer is tried.

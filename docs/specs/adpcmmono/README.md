@@ -37,3 +37,8 @@ uses equals the formula in SPEC 2 exactly (checked for all 89 × 16 entries). No
    used the A500 filter (`filter=a500(auto)`). The lead decides whether that list entry should apply.
 8. Timing granularity: half-cc costs (6.5 per index clamp) are rounded once per fill; this leaves up to
    3 cc error on some write times.
+
+## Errata found while implementing
+
+- The 0.5 cc in the decode cost rounds half-down (fits better than half-up).
+- The first VOL write start phase varies per module in the reference (-8 to +21 cc); the port fixes it at 618.

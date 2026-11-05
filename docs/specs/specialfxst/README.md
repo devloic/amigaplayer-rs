@@ -24,3 +24,11 @@
 - **Periods** written by the replay are not range-checked: slides can wrap them, and the emulator masks to
   12 bits before converting.
 - Private reading notes and scripts exist in a private working folder (not for the implementer).
+
+## Errata found while implementing
+
+- Reference player internal name is 'Special FX ST' (with spaces).
+- Drum commands: the 'complete' cost of the 0x90+ entry does not include the duration, which costs another 45 plus 8, as after a note.
+- Sequence end: the 'return +44' of the song-end test applies on every pass; the song-end path adds 68, rounds t down to even, then adds 16.
+- Disable path: after a disable restart there is no '+10' and no extra tail; the +82 is entirely before the restart.
+- Hold path: a voice that needs no restart costs nothing extra, so the +25 belongs to the common cost.

@@ -149,6 +149,7 @@ pub mod synthdream;
 pub mod synthesis;
 pub mod syntracker;
 pub mod synthpack;
+pub mod tfhd;
 pub mod tfmx;
 pub mod tfmxst;
 pub mod timfollin;
@@ -259,6 +260,9 @@ pub const REPLAYERS: &[Open] = &[
     tfmx::OPEN_15,
     tfmx::OPEN_7V,
     tfmxst::OPEN,
+    tfhd::OPEN_15,
+    tfhd::OPEN_7V,
+    tfhd::OPEN_PRO,
     iffsmus::OPEN,
     bendaglish::OPEN,
     hippel::OPEN_COSO,

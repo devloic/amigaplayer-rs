@@ -87,6 +87,7 @@ pub mod quartet;
 pub mod paulrobotham;
 pub mod howiedavies;
 pub mod professionalsoundartists;
+pub mod thomashermann;
 pub mod paulsummers;
 pub mod forgottenworlds;
 pub mod futureplayer;
@@ -356,6 +357,7 @@ pub const REPLAYERS: &[Open] = &[
     speedya1system::OPEN,
     quartet::OPEN,
     anders0land::OPEN,
+    thomashermann::OPEN,
 ];
 
 /// The audio registers, written through the bus as guest code writes them (so

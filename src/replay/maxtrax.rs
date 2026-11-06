@@ -103,72 +103,36 @@ const MUST_HAVE_SIDE: u16 = 8;
 /// Events are 6 bytes.
 const EV: usize = 6;
 
-// The time the driver's code takes, in colour clocks, as the reference's write logs show it (fitted
-// to five modules, Darkseed MX06, Contraption Zack's BlueJam and march, and Might and Magic III's
-// bank and cyber2: nine in ten writes fall within 300 colour clocks of the reference's, and the
-// frame's voice writes within one). The costs depend on the path the code takes and on a few of
-// its operands, as the 68000's instruction times do; the ones of paths the five modules do not
-// reach are the nearest known.
+// The time the driver's code takes, as the reference's write logs show it. The reference's logs
+// carry the time in half colour clocks, that is in 68000 cycles (a colour clock is two cycles),
+// so the costs are whole cycles. They were fitted on five modules (Darkseed MX06, Contraption
+// Zack's BlueJam and march, Might and Magic III's bank and cyber2) and checked on fifty more
+// that were not in the fit: the paths a voice's envelope turn takes cost a fixed number of cycles
+// each (`voice_cycles`), the note calculation's and the voice pick's costs are sums of branch
+// terms, and every wait to the audio.device (a host call) truncates a half colour clock, which
+// `wh` keeps track of. The costs of paths none of the modules reach are the nearest known.
 
 /// The reference's timer interrupts come every 71 051 colour clocks.
 const TICK_CLOCKS: u64 = 71_051;
-/// Colour clocks from the start of the reference run to its first tick, to the end of its set-up
-/// with an empty module, and per 1000 bytes of module (fitted to reference runs): the set-up's
-/// time is not part of the audio, so the first tick falls the difference after the sound's start.
-const FIRST_TICK: u64 = 72_000;
-const SETUP_BASE: u64 = 28_000;
-const SETUP_PER_KB: u64 = 44;
-
-/// The first call's first write comes this much after the tick's grid (in the reference runs of all five
-/// modules, whatever the module's size or first events).
-const T_FIRST_CALL: u64 = 148;
-
-/// A frame's start to the end of its check of the note-offs, with no voice in use ...
-const T_FRAME: u64 = 289;
-/// ... to which a voice in use adds one, and a voice with a note-off still to come another.
-const T_LOOP_VOICE: u64 = 9;
-const T_LOOP_PENDING: u64 = 41;
-/// A note-off whose time has come.
-const T_NOTE_OFF: u64 = 223;
-/// A pitch bend event (the other events take no time worth the name).
+/// Colour clocks from the start of the reference run to its first tick: a constant of the
+/// reference's run for nearly every module (module size and start-up time do not move it).
+const FIRST_TICK_ABS: u64 = 71_150;
+/// The wait for the frame's set-up before the voices' turns, in 68000 cycles.
+const T_FRAME: u64 = 583;
+/// A pitch bend event (the other events take no time worth the name), in colour clocks.
 const T_EV_BEND: u64 = 358;
-
-/// A voice without a channel, and one that holds its volume, in the envelope manager; one that halts.
-const T_FREE: u64 = 38;
-const T_SUSRET: u64 = 96;
-const T_HALT: u64 = 300;
 /// One voice's envelope work up to its period and volume write, for the path not known otherwise;
 /// a multiplication of the volume calculation, which the code skips for a factor of 128 or more;
-/// the note calculation after a change of the channel's pitch.
+/// the note calculation after a change of the channel's pitch (colour clocks).
 const T_VOICE: u64 = 467;
 const T_MUL: u64 = 37;
 const T_EARLY: u64 = 288;
 const T_LOW_VOL: u64 = 131;
 const T_CALC_NOTE: u64 = 556;
-/// From the last voice of a frame to the end of the server, where the audio interrupts are taken.
-const T_TICK_END: u64 = 647;
-
-/// A note: from the start of its event to its first write (the audio.device's CMD_WRITE), plus a
-/// step for each octave the calculation of its period goes down the patch's samples; for a note
-/// that takes a voice over, the time before the voice's DMA stop and the one from there to the new
-/// write; with no period calculated (the note is out of range), the time is shorter.
-const T_CALC: u64 = 1518;
-const T_OCTAVE: u64 = 53;
-/// A walk down the octaves that stops at the end of the sample chain with the period still too
-/// high, the velocity flag's choice of the note volume (before the new write); the channel
-/// volume's multiplication costs T_MUL there too.
-const T_OCTAVE_END: u64 = 10;
-const T_VELOCITY: u64 = 10;
-const T_STEAL_PRE: u64 = 838;
-const T_CALC_STOLEN: u64 = 903;
-const T_NO_PERIOD: u64 = 158;
 /// The driver's DMA wait after the attack's write (nine raster lines' worth of polling in its code,
-/// which the emulated machine runs shorter), and what follows the sustain's.
+/// which the emulated machine runs shorter), and what follows the sustain's (colour clocks).
 const T_DMA_WAIT: u64 = 565;
 const T_NOTE_END: u64 = 17;
-/// A sample with no sustain part queues no second write: the wait is that much shorter (the
-/// reference's restarts of such samples show it, in 130 of them).
-const T_NO_SUSTAIN: u64 = 194;
 
 const ALOG: [u16; 257] = [
     0, 178, 356, 535, 714, 893, 1073, 1254, 1435, 1617, 1799, 1981, 2164, 2348, 2532, 2716, 2902, 3087, 3273, 3460,
@@ -360,6 +324,9 @@ pub struct MaxTrax {
     resume: Option<u64>,
     /// The half colour clock the events' times carry over.
     event_half: u64,
+    /// The cycles the voice choice took beyond its shortest path (see `pick_voice`).
+    pick_terms: i64,
+    pick_case: u8,
     title: String,
     /// The module (the score and, with samples in it, their data), as the driver reads it.
     d: Vec<u8>,
@@ -503,6 +470,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         resume: None,
         event_half: 0,
+        pick_terms: 0,
+        pick_case: 0,
         cls: String::new(),
         sub: 0,
         intena_set: false,
@@ -513,8 +482,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     mx.open_music();
     let mut hw = Hw { bus: &mut m.bus };
     mx.init_sound(&mut hw, 0);
-    let setup = SETUP_BASE + d.len() as u64 * SETUP_PER_KB / 1000;
-    mx.resume = Some(hw.bus.clock + FIRST_TICK.saturating_sub(setup));
+    mx.resume = Some(FIRST_TICK_ABS);
     Some(Box::new(mx))
 }
 
@@ -696,18 +664,21 @@ impl MaxTrax {
         } else {
             self.dev[ch].queue.push_back(r);
         }
+        self.event_half = 0;
     }
 
     /// ADCMD_PERVOL.
-    fn dev_pervol(hw: &mut Hw, ch: usize, per: u16, vol: u16) {
+    fn dev_pervol(&mut self, hw: &mut Hw, ch: usize, per: u16, vol: u16) {
         hw.per(ch, per);
         hw.vol(ch, vol);
+        self.event_half = 0;
     }
 
     /// CMD_FLUSH (`stop_audio`).
     fn dev_flush(&mut self, hw: &mut Hw, ch: usize) {
         self.dev[ch] = DevChan::default();
         Self::audio_dma(hw, ch, false);
+        self.event_half = 0;
     }
 
     fn new_req(&mut self, data: u32, len: u32, cycles: u16, pervol: bool, per: u16) -> Req {
@@ -752,6 +723,13 @@ impl MaxTrax {
 }
 
 impl MaxTrax {
+    /// Lets `h` cycles of the 68000 pass (two to the colour clock), carrying the odd cycle.
+    fn wh(&mut self, hw: &mut Hw, h: u64) {
+        let t = self.event_half + h;
+        self.event_half = t & 1;
+        hw.wait(t >> 1);
+    }
+
     fn rb(&self, o: usize) -> u8 {
         self.d.get(o).copied().unwrap_or(0)
     }
@@ -857,16 +835,37 @@ impl MaxTrax {
     /// `pick_voice`: the voice for a new note on `side` (0 or 1) at priority `pri`.
     fn pick_voice(&mut self, mut d0: usize, pri: u16) -> Option<usize> {
         let d5 = (pri & !MUST_HAVE_SIDE) as u8;
+        // the time of the choice's path, in cycles beyond the shortest one (fitted to the reference's exact times)
+        let mut terms: i64 = 0;
         if pri & MUST_HAVE_SIDE == 0 {
             let d1 = d0 ^ 1;
             let near = self.min_status(d0, d0 ^ 3);
             let far = self.min_status(d1, d1 ^ 3);
+            if (self.voices[d0].status as i8) < (self.voices[d0 ^ 3].status as i8) {
+                terms -= 4;
+            }
+            if (self.voices[d1].status as i8) < (self.voices[d1 ^ 3].status as i8) {
+                terms -= 4;
+            }
+            if !((near as i8) <= ENV_RELEASE as i8) {
+                terms += 17;
+            }
             if !((near as i8) <= ENV_RELEASE as i8 || (far as i8) > ENV_RELEASE as i8) {
+                terms += 4;
                 d0 = d1;
             }
         }
         let (v, mut left) = self.pick_voice1(d0);
+        {
+            let d2 = self.voices[d0].status.wrapping_sub(self.voices[d0 ^ 3].status);
+            self.pick_case = 0;
+            if (d2 as i8) >= 0 {
+                terms += if d2 != 0 { 9 } else { 38 };
+                self.pick_case = if d2 != 0 { 1 } else { 2 };
+            }
+        }
         d0 = v;
+        self.pick_terms = terms;
         let ok = |s: &Self, v: usize| s.voices[v].flags & (1 << 3) == 0 && (d5 as i8).wrapping_sub(s.voices[v].priority as i8) >= 0;
         let mut found = ok(self, d0);
         if !found {
@@ -896,6 +895,12 @@ impl MaxTrax {
         Some(d0)
     }
 
+    /// The cycles of the choice of voice `vi` for a note of channel `c` beyond the shortest path: the
+    /// path's own terms, the channel's side and the voice's number.
+    fn pick_cost(&self, vi: usize, c: usize) -> i64 {
+        self.pick_terms + if self.chans[c].flags & CHAN_PAN != 0 { 4 } else { 0 } + [0, -8, -4, 4][vi & 3]
+    }
+
     /// `KillVoice`.
     fn kill_voice(&mut self, hw: &mut Hw, vi: usize) {
         if let Some(c) = self.voices[vi].chan {
@@ -919,6 +924,8 @@ impl MaxTrax {
         }
         let velocity = |s: &Self| if s.flags & MUSIC_VELOCITY != 0 { vol as u16 + 1 } else { 128 };
         let vi;
+        self.pick_terms = 0;
+        self.pick_case = 0;
         if self.chans[c].flags & CHAN_MONO != 0 && self.chans[c].voices_active != 0 {
             let Some(i) = (0..NUM_VOICES).find(|&i| self.voices[i].chan == Some(c)) else { return };
             if self.voices[i].status >= ENV_SUSTAIN && self.chans[c].flags & CHAN_PORTAMENTO != 0 {
@@ -944,7 +951,7 @@ impl MaxTrax {
             vi = i;
         }
         if self.voices[vi].chan.is_some() {
-            hw.wait(T_STEAL_PRE);
+            self.wh(hw, (1663 + self.pick_cost(vi, c)) as u64);
             self.kill_voice(hw, vi);
             self.voices[vi].flags = VOICE_STOLEN;
         } else {
@@ -974,23 +981,23 @@ impl MaxTrax {
         };
         let smp = self.samples[s];
         let stolen = self.voices[vi].flags & VOICE_STOLEN != 0;
-        let calc = if stolen { T_CALC_STOLEN } else { T_CALC };
-        let calc = calc + (self.voices[vi].period_offset >> 16) as u64 * T_OCTAVE;
-        let calc = calc + if self.voices[vi].octave_end { T_OCTAVE_END } else { 0 };
-        let calc = calc + if self.flags & MUSIC_VELOCITY != 0 { T_VELOCITY } else { 0 };
-        let calc = calc + if self.chans[c].volume < 128 { T_MUL } else { 0 };
-        hw.wait(if self.voices[vi].last_period == 0 { calc - T_NO_PERIOD } else { calc });
+        let calc: u64 = if stolen { 1807 } else { (3023 + self.pick_cost(vi, c) + (self.pick_case == 1) as i64) as u64 };
+        let calc = calc + (self.voices[vi].period_offset >> 16) as u64 * 106;
+        let calc = calc + if self.voices[vi].octave_end { 20 } else { 0 };
+        let calc = calc + if self.flags & MUSIC_VELOCITY != 0 { 20 } else { 0 };
+        let calc = calc + if self.chans[c].volume < 128 { 74 } else { 0 };
+        self.wh(hw, if self.voices[vi].last_period == 0 { calc - 314 } else { calc });
         if smp.attack != 0 {
             let r = self.new_req(smp.wave, smp.attack, 1, true, per);
             self.dev_write(hw, vi, r);
         }
-        hw.wait(if smp.sustain == 0 { T_DMA_WAIT - T_NO_SUSTAIN } else { T_DMA_WAIT });
+        self.wh(hw, if smp.sustain == 0 { 2 * T_DMA_WAIT - 387 } else { 2 * T_DMA_WAIT });
         if smp.sustain != 0 {
             let pervol = smp.attack == 0;
             let r = self.new_req(smp.wave.wrapping_add(smp.attack), smp.sustain, 0, pervol, per);
             self.dev_write(hw, vi, r);
         }
-        hw.wait(T_NOTE_END);
+        self.wh(hw, 2 * (T_NOTE_END));
         self.chans[c].voices_active = self.chans[c].voices_active.wrapping_add(1);
         let ch = self.chans[c];
         if ch.flags & CHAN_MONO != 0 && ch.flags & CHAN_PORTAMENTO != 0 && (ch.last_note as i8) >= 0 {
@@ -1240,7 +1247,7 @@ impl MaxTrax {
     fn do_one_voice_inner(&mut self, hw: &mut Hw, vi: usize, delta: u32) {
         let Some(ci) = self.voices[vi].chan else {
             self.cls.push_str("free");
-            hw.wait(T_FREE);
+            self.wh(hw, 75);
             return;
         };
         let d2 = delta;
@@ -1258,13 +1265,14 @@ impl MaxTrax {
                 next = Some(Next::Calc);
             } else {
                 self.cls.push_str("susret");
-                hw.wait(T_SUSRET);
+                self.wh(hw, 192);
                 return;
             }
         } else if status == ENV_HALT {
             self.cls.push_str("halt");
-            hw.wait(T_HALT);
+            self.wh(hw, 520);
             self.kill_voice(hw, vi);
+            self.wh(hw, 79);
             return;
         }
         if next.is_none() {
@@ -1400,13 +1408,61 @@ impl MaxTrax {
         let nv = self.voices[vi].note_volume;
         let bv = self.voices[vi].base_volume >> 8;
         let cost = Self::voice_cost(&self.cls, nv, bv);
-        hw.wait(self.voice_adjust(cost, nv, bv));
+        let lp0 = self.voices[vi].last_period == 0;
+        self.wh(hw, self.voice_cycles(cost, nv, bv, lp0));
         let lp = self.voices[vi].last_period;
         if lp != 0 {
-            Self::dev_pervol(hw, vi, lp, vol);
+            self.dev_pervol(hw, vi, lp, vol);
         } else {
-            Self::dev_pervol(hw, vi, 1000, 0);
+            self.dev_pervol(hw, vi, 1000, 0);
         }
+    }
+
+    /// One voice's turn up to its period and volume write in 68000 cycles: the path's time (fitted
+    /// to the reference's exact cycle times), 74 less for each of the two volume factors of 128 or more
+    /// whose multiplication the code skips, 1112 more after a change of the note, 2 less with no period.
+    fn voice_cycles(&self, old_cost: u64, nv: u16, bv: u16, lp0: bool) -> u64 {
+        let alt = self.cls.ends_with("+alt") || self.cls.ends_with("+porta");
+        let base = self.cls.trim_end_matches("+alt").trim_end_matches("+porta");
+        let (c, muls) = match base {
+            "att/prog" => (935, true),
+            "att/segend/last" => (961, true),
+            "dec/prog" => (935, true),
+            "dec/segend/last+send" => (598, false),
+            "dec/segend~n" => (1751, true),
+            "rel~n/prog" => (1851, true),
+            "start~0/segend/last" => (1230, true),
+            "start~0/segend~n" => (2020, true),
+            "start~e/segend/last" => (1827, true),
+            "start~n/prog" => (1800, true),
+            "sus" => (715, true),
+            "att/segend~0" => (1143, true),
+            "att/segend~e" => (1746, true),
+            "att/segend~n" => (1751, true),
+            "dec/segend~0" => (1143, true),
+            "rel~0/segend/last+send" => (980, true),
+            "rel~0/segend~0" => (1451, true),
+            "rel~0/segend~n" => (2059, true),
+            "rel~e/segend/last+send" => (1509, true),
+            "rel~z/prog" => (1839, true),
+            "start~0/segend~z" => (2008, true),
+            "start~e/segend~n" => (2605, true),
+            "start~e/segend~z" => (2605, true),
+            "start~z/prog" => (1800, true),
+            _ => return 2 * self.voice_adjust(old_cost, nv, bv),
+        };
+        let mut c: u64 = c;
+        if muls {
+            let bskip = if base == "att/prog" || base == "dec/prog" || base == "rel~z/prog" { 56 } else { 74 };
+            c -= 74 * (nv >= 128) as u64 + bskip * (bv >= 128) as u64;
+        }
+        if alt {
+            c += 1112;
+        }
+        if lp0 {
+            c -= 2;
+        }
+        c
     }
 
     /// The start of an envelope whose first segment `calc_incrvol` returns early for (the segment is
@@ -1567,7 +1623,8 @@ impl MaxTrax {
 
     /// `MusicServer`: one frame.
     fn music_server(&mut self, hw: &mut Hw) {
-        hw.wait(T_FRAME);
+        self.event_half = 0;
+        self.wh(hw, T_FRAME);
         self.ticks = self.ticks.wrapping_add(self.tick_unit);
         let d4 = self.ticks >> 8;
         for v in 0..NUM_VOICES {
@@ -1575,18 +1632,18 @@ impl MaxTrax {
             if self.voices[v].chan.is_none() {
                 continue;
             }
-            hw.wait(T_LOOP_VOICE);
+            self.wh(hw, 17);
             let ne = self.note_off[v];
             if (ne.command as i8) < 0 {
                 continue;
             }
-            hw.wait(T_LOOP_PENDING);
+            self.wh(hw, 82);
             let st = ne.stop_time.wrapping_sub(self.tick_unit as i32);
             self.note_off[v].stop_time = st;
             if st > 0 {
                 continue;
             }
-            hw.wait(T_NOTE_OFF);
+            self.wh(hw, 446);
             self.note_off(ne.data as usize & 15, ne.command);
             self.note_off[v].command = 0xff;
         }
@@ -1609,9 +1666,7 @@ impl MaxTrax {
                 let cmd = self.rb(a2);
                 let data = self.rb(a2 + 1);
                 let stop = be16(&self.d, a2 + 4);
-                let half = self.event_half + self.event_cost(cmd, stop);
-                self.event_half = half & 1;
-                hw.wait(half >> 1);
+                self.wh(hw, self.event_cost(cmd, stop));
                 if (cmd as i8) >= 0 {
                     self.flags &= !MUSIC_ADDED_NOTE;
                     let vol = (data >> 1) & 0x78;
@@ -1688,7 +1743,7 @@ impl MaxTrax {
         }
         self.envelope_manager(hw, FRAME_UNIT);
         // the audio interrupts wait for the end of the server
-        hw.wait(T_TICK_END);
+        self.wh(hw, 1294);
     }
 
     /// The score's END position when the event pointer ran off the data.
@@ -1827,7 +1882,7 @@ impl Replayer for MaxTrax {
             // the audio.device's interrupt handlers: the four channels' interrupts on
             hw.bus.paula.write_intena(0x8000 | 0xF << 7);
             self.intena_set = true;
-            hw.wait(T_FIRST_CALL);
+            self.wh(hw, 298);
         }
         self.music_server(hw);
     }

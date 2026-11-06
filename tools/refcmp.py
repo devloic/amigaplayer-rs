@@ -100,7 +100,9 @@ UADE_FIRST = ('hippel7v', 'soundmaster', 'scumm', 'jesperolsen', 'markcooksey', 
               # Infogrames exists only in UADE's set
               'infogrames',
               # EP206's Major Tom 2.01 is another build; the port follows UADE's MajorTom
-              'majortom')
+              'majortom',
+              # MultiMedia Sound exists only in UADE's set (EP206's SoundFX 2.0 takes the same files)
+              'multimediasound')
 BAND_EDGES = [20, 500, 2000, 5000, 10000, 20000]   # Hz
 BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's

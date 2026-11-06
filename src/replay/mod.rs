@@ -144,6 +144,7 @@ pub mod sidmon2;
 pub mod soundcontrol;
 pub mod soundfactory;
 pub mod soundfx;
+pub mod multimediasound;
 pub mod soundimages;
 pub mod sonicarranger;
 pub mod sonix;
@@ -266,6 +267,8 @@ pub const REPLAYERS: &[Open] = &[
     soundmon::OPEN,
     deltamusic2::OPEN,
     fred::OPEN,
+    // before SoundFX 2.0, which takes the same files: this one only by file name (mms., sfx20.)
+    multimediasound::OPEN,
     soundfx::OPEN13,
     soundfx::OPEN20,
     deltamusic1::OPEN,

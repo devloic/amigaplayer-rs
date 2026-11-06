@@ -85,6 +85,12 @@ pub fn set_name(name: &str) {
     });
 }
 
+/// The name `set_name` was last given (empty when none), for the other open replayers whose
+/// detection depends on the file name.
+pub(crate) fn current_name() -> String {
+    NAME.with(|n| n.borrow().clone())
+}
+
 fn detect(d: &[u8]) -> bool {
     // the name (see `set_name`) ends in `.ADPCM`; anything but the other format's magic and
     // what another format takes: the built-in ProTracker, libxmp's formats and every other open

@@ -29,8 +29,18 @@ pub const OPEN: Open = Open { name: "TFMX ST", detect, new };
 
 /// Colour clocks between two ticks.
 const TICK: u64 = 70940;
-/// Colour clocks from the run's origin to the first tick.
-const E0: u64 = 230813;
+/// CPU cycles from the run's origin to the first tick of a module with one track step of one
+/// started track, seven stopped, a seven-step macro range (one step above $3F) and no sample.
+const E0H_BASE: i64 = 460391;
+/// Entry corrections (CPU cycles) of the first two ticks, which fall off the regular spacing of
+/// the others: the first early, the second late. Each is the middle of the range over which the
+/// reference's writes stay equal (the line wait makes the first writes insensitive to a shift
+/// within it), found on 19 modules; the first tick's range is wide, [-416, -206].
+const FIRST_TICKS: [i64; 2] = [-311, 25];
+/// The cycles the explicit-offset table layout takes less than the fixed one.
+const EXPLICIT_LAYOUT: i64 = 8235;
+/// The companion sample file's load, before the path and the file name (cycles).
+const SAMPLE_LOAD: i64 = 689;
 
 const PSG: [u16; 64] = [
     2703, 2551, 2407, 2273, 2145, 2025, 1911, 1804, 1703, 1607, 1517, 1432, 1351, 1275, 1203, 1136, 1072, 1012, 955, 902, 851, 803, 758, 716,
@@ -89,8 +99,9 @@ fn tables(d: &[u8]) -> (i64, i64, i64) {
     }
 }
 
-/// Detection (spec 2): the sample count (macro steps of command $48) of a module, if it is one.
-fn scan(d: &[u8]) -> Option<usize> {
+/// Detection (spec 2): the macro steps of the scan range by command-byte class (below $40, $40
+/// and above except $48, and $48 = digital sample) of a module, if it is one.
+fn scan_stats(d: &[u8]) -> Option<(usize, usize, usize)> {
     if d.len() < 0x1dc || &d[..10] != b"TFMX-SONG " {
         return None;
     }
@@ -106,16 +117,22 @@ fn scan(d: &[u8]) -> Option<usize> {
     if !ok(first) || !ok(end) || first >= end || end > d.len() {
         return None;
     }
-    let (mut big, mut samples) = (false, 0);
+    let (mut lo, mut hi, mut samples) = (0, 0, 0);
     for a in (first..end).step_by(4) {
-        if d[a] > 63 {
-            big = true;
-        }
-        if d[a] == 0x48 {
-            samples += 1;
+        match d[a] {
+            0..=63 => lo += 1,
+            0x48 => samples += 1,
+            _ => hi += 1,
         }
     }
-    big.then_some(samples)
+    // an ST command is a macro command byte above 63 ($48 is one too)
+    let big = (first..end).step_by(4).any(|a| d[a] > 63);
+    big.then_some((lo, hi, samples))
+}
+
+/// The sample count (macro steps of command $48) of a module, if it is one.
+fn scan(d: &[u8]) -> Option<usize> {
+    scan_stats(d).map(|s| s.2)
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -230,6 +247,10 @@ pub struct TfmxSt {
     songend: bool,
     /// CPU cycles spent so far in this tick.
     cy: i64,
+    /// Ticks run so far (the first two are timed off the regular spacing).
+    ticks_run: u32,
+    /// Half colour clock of the tick phase (the start clock is a whole number of cycles).
+    half: u64,
     noise: u32,
     pulse: u32,
     silent: u32,
@@ -245,9 +266,17 @@ struct Conv {
 }
 
 fn song_list(d: &[u8]) -> Vec<u8> {
+    song_list_cost(d).0
+}
+
+/// The subsong list and the CPU cycles its building takes beyond skipping an unused entry (spec 4).
+/// The costs are measured: taking a song 44; a song equal to the next one 141 the first time,
+/// 106 after; the skips by an unused first step or a zero last step cost nothing extra.
+fn song_list_cost(d: &[u8]) -> (Vec<u8>, i64) {
     let f = |k: usize| be16(d, 256 + 2 * k);
     let l = |k: usize| be16(d, 320 + 2 * k);
     let mut v = vec![0u8];
+    let mut cost = 0i64;
     let mut flag = false;
     for k in 1..32usize {
         if l(k) == 0 && flag {
@@ -260,6 +289,7 @@ fn song_list(d: &[u8]) -> Vec<u8> {
             continue;
         }
         if f(k) == f(k + 1) && l(k) == l(k + 1) {
+            cost += if flag { 106 } else { 141 };
             if !flag {
                 flag = true;
                 if l(k) == l(k - 1) {
@@ -275,12 +305,14 @@ fn song_list(d: &[u8]) -> Vec<u8> {
             if l(k) == l(k + 2) {
                 continue;
             }
+            cost += 44;
             v.push(k as u8);
             continue;
         }
+        cost += 44;
         v.push(k as u8);
     }
-    v
+    (v, cost)
 }
 
 impl TfmxSt {
@@ -1341,11 +1373,12 @@ impl TfmxSt {
 /// Time in CPU cycles from the tick's start (one colour clock is two cycles).
 struct Cur {
     t0: u64,
+    ph: u64,
 }
 
 impl Cur {
     fn cc(&self, tc: u64) -> u64 {
-        self.t0 + tc / 2
+        self.t0 + (tc + self.ph) / 2
     }
 
     fn at(&self, hw: &mut Hw, tc: u64) {
@@ -1452,7 +1485,7 @@ impl TfmxSt {
     }
 
     fn convert(&mut self, hw: &mut Hw, t0: u64, entry: u64) {
-        let c = Cur { t0 };
+        let c = Cur { t0, ph: self.half };
         let mut t = entry;
         let mm = !self.regs[7] & 0x3F;
         for v in 0..3 {
@@ -1573,7 +1606,10 @@ impl Replayer for TfmxSt {
     fn tick(&mut self, hw: &mut Hw) {
         let t0 = hw.bus.clock;
         self.run();
-        let entry = self.cy.max(0) as u64 + 1;
+        // the first two ticks come off the regular spacing (measured; see FIRST_TICKS)
+        let adj = FIRST_TICKS.get(self.ticks_run as usize).copied().unwrap_or(0);
+        self.ticks_run = self.ticks_run.saturating_add(1);
+        let entry = (self.cy.max(0) + 1 + adj).max(0) as u64;
         self.convert(hw, t0, entry);
     }
 }
@@ -1594,7 +1630,7 @@ fn noise_bytes() -> Vec<u8> {
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let _ = base;
-    let samples = scan(d)?;
+    let (n_lo, n_hi, samples) = scan_stats(d)?;
     let (steps_t, pat_t, mac_t) = tables(d);
     let mut mem = d.to_vec();
     let empty = mem.len() as i64;
@@ -1607,6 +1643,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let pulse = blk + 1024;
     m.bus.write_bytes(pulse, &[0xB2, 0xB2, 0x4D, 0x4D, 0, 0, 0, 0]);
     let mut smp: Vec<u8> = Vec::new();
+    let mut load_cost = 0i64;
     if samples > 0 {
         let file = m.bus.read_cstr(m.deli.file_buf);
         let rest = match file.get(..5) {
@@ -1620,6 +1657,13 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             for b in &mut smp {
                 *b = NIB[(*b & 15) as usize];
             }
+            load_cost += 55 + 49 * smp.len() as i64;
+        }
+        if !smp.is_empty() {
+            let dir = m.deli.module_dir.to_string_lossy();
+            let dir_len = dir.len() + usize::from(!dir.ends_with('/'));
+            let name_len = file.rsplit('/').next().unwrap_or(&file).len();
+            load_cost += SAMPLE_LOAD + 17 * dir_len as i64 + 21 * name_len as i64;
         }
     }
     let sa = m.alloc((smp.len() as u32).max(4) + 4);
@@ -1627,13 +1671,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     m.bus.write_bytes(sa, &smp);
+    let (songs, song_cost) = song_list_cost(d);
     let mut p = TfmxSt {
         mem,
         empty,
         steps_t,
         pat_t,
         mac_t,
-        songs: song_list(d),
+        songs,
         sub: 0,
         playing: false,
         song: 0,
@@ -1652,6 +1697,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         dig: Digital::default(),
         songend: false,
         cy: 0,
+        ticks_run: 0,
+        half: 0,
         noise: blk,
         pulse,
         silent: pulse + 4,
@@ -1659,9 +1706,25 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         conv: Conv::default(),
     };
     p.init();
-    // the first tick comes `E0` colour clocks after the run's origin (the engine adds one period)
+    // The first tick comes after the original's set-up: its fixed part, the scan of the macro
+    // steps (by class), the companion sample's load and conversion, the building of the subsong
+    // list and the first track step (the cost `init` left in `cy`); all in CPU cycles, the sum a
+    // whole number of cycles, so the tick phase may be half a colour clock.
+    let setup = E0H_BASE
+        + 65 * n_lo as i64
+        + 83 * n_hi as i64
+        + 913 * samples as i64 / 10
+        + load_cost
+        + song_cost
+        + p.cy
+        - if be32(d, 468) != 0 { EXPLICIT_LAYOUT } else { 0 };
+    // the run's origin is `START_PHASE` before the engine's aligned start; the engine adds one period
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
-    let e0 = E0;
+    // The tick is entered at a whole colour clock plus one cycle: of the cycles the set-up
+    // takes, the largest odd number not above them counts (measured: the reference's first
+    // write time is exact for it on every module, and a cycle off for the even sums).
+    let e0 = (setup.max(1) as u64 - 1) / 2;
+    p.half = 1;
     m.bus.clock = (origin + e0).saturating_sub(TICK).max(m.bus.clock);
     Some(Box::new(p))
 }

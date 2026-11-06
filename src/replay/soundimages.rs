@@ -1548,6 +1548,12 @@ impl Replayer for SoundImages {
         (0, self.lay.nsub as u16 - 1, self.sub)
     }
 
+    /// The first write of the first tick follows the timer call by this much (the interrupt's entry,
+    /// 205 colour clocks on the ten corpus modules).
+    fn timer_delay(&self) -> u64 {
+        205
+    }
+
     fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
         self.sub = n;
         self.started = false;

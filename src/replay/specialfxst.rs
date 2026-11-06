@@ -2,7 +2,8 @@
 //! Matthew Cannon and Jonathan Dunn (Special FX, 1989-92).
 //!
 //! Clean-room, written from a behaviour specification drawn up from the register writes and
-//! timing histograms of the 68k reference player; no original code, nothing embedded. A file is
+//! timing histograms of the 68k reference player; no original code is used. Only two small
+//! tables of the player's memory around its period table are embedded (see below). A file is
 //! an Atari ST memory image: the game's sound driver followed by its music tables. The replay
 //! never runs that driver. It finds the music tables by searching the image for fixed byte
 //! patterns, interprets the three voice sequences itself, keeps a YM2149 register image and
@@ -12,10 +13,12 @@
 //! interrupt flag. Every write is placed at the colour clock the specification's cycle ledger
 //! gives.
 //!
-//! Choices where the specification is silent or its data is not embedded (all safe):
-//! * a note index outside the 102-entry period table reads the player's own memory in the
-//!   original. Indices 102 to 121 give the table addresses as the specification describes, the
-//!   other out-of-range indices (below zero, 122 to 127) give a period of 0 here;
+//! Embedded data (taken from the original player on the project owner's decision): a note index
+//! outside the 102-entry period table reads the player's own memory in the original. Indices 102
+//! to 121 give the table addresses as the specification describes; indices -128 to -1 read
+//! `specialfxst_period_underflow.bin` and 122 to 127 read `specialfxst_period_overflow_tail.bin`.
+//!
+//! Choices where the specification is silent (all safe):
 //! * reads outside the image give zero; a voice that reads more than a bounded number of events
 //!   in one tick, or a sequence that never produces a pattern, ends (the voice stops);
 //! * the song-end restart after a tick that finds no active voice is done without extra timing
@@ -48,6 +51,11 @@ const PERIODS: [u16; 102] = [
     0x7E, 0x77, 0x70, 0x6B, 0x64, 0x5E, 0x59, 0x54, 0x4F, 0x4B, 0x47, 0x42, 0x3F, 0x3B, 0x38, 0x35, 0x32, 0x2F, 0x2C, 0x2A, 0x27, 0x25,
     0x23, 0x21, 0x1F, 0x1D, 0x1C, 0x1A, 0x19, 0x17, 0x16, 0x15, 0x13, 0x12, 0x11, 0x10, 0xF, 0xE, 0xD, 0xC, 0xB, 0xA, 0x9,
 ];
+
+/// The 128 words before the period table (index -1 is the last word), big-endian.
+static UNDERFLOW: &[u8; 256] = include_bytes!("specialfxst_period_underflow.bin");
+/// The 6 words after the table's addressed part (indices 122 to 127), big-endian.
+static OVERFLOW_TAIL: &[u8; 12] = include_bytes!("specialfxst_period_overflow_tail.bin");
 
 /// Paula volume by the YM volume register.
 const VT: [u16; 16] = [0, 1, 2, 3, 4, 5, 7, 9, 12, 16, 21, 27, 34, 42, 52, 64];
@@ -493,8 +501,8 @@ impl SpecialFxSt {
                     a as u16
                 }
             }
-            // below zero and 122..127: the player's own bytes, not embedded
-            _ => 0,
+            122..=127 => be16(OVERFLOW_TAIL, 2 * (i - 122) as usize),
+            _ => be16(UNDERFLOW, 2 * (i + 128) as usize),
         }
     }
 

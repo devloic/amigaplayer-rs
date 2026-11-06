@@ -66,7 +66,7 @@ fn module(flag: u8, vols: usize, play_body: Option<&[u16]>) -> Vec<u8> {
     }
     let work = h.len();
     h.extend([0u8; 0x20]);
-    let mut put = |h: &mut Vec<u8>, o: usize, v: u32| h[o..o + 4].copy_from_slice(&v.to_be_bytes());
+    let put = |h: &mut Vec<u8>, o: usize, v: u32| h[o..o + 4].copy_from_slice(&v.to_be_bytes());
     put(&mut h, 0x0C, play as u32);
     put(&mut h, 0x10, irqr as u32);
     put(&mut h, 0x14, init as u32);

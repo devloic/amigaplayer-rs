@@ -1596,6 +1596,7 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "host-68k")]
     use super::*;
 
     #[test]

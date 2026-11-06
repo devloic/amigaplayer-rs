@@ -484,3 +484,41 @@ fn damaged_streams_never_panic() {
         }
     }
 }
+
+// ------------------------------------------------------ the public unpack API
+
+#[test]
+fn public_unpack_reports_packer_and_bytes() {
+    use crate::unpack::{packer, unpack, Packer};
+    let (e, want) = ice_events(&lits(), &[near(2), near(3), near(3)], false, false, true);
+    let ice = ice2_file(b"ICE!", &ice_stream(&e, false), want.len());
+    assert_eq!(packer(&ice), Some(Packer::PackIce));
+    assert_eq!(unpack(&ice).unwrap(), Some((Packer::PackIce, want)));
+
+    let (sq, want) = sqsh_file();
+    assert_eq!(packer(&sq), Some(Packer::XpkSqsh));
+    assert_eq!(unpack(&sq).unwrap(), Some((Packer::XpkSqsh, want)));
+
+    let (s4, want) = s404_file();
+    assert_eq!(packer(&s4), Some(Packer::StoneCracker));
+    assert_eq!(unpack(&s4).unwrap(), Some((Packer::StoneCracker, want)));
+
+    let (mm, want) = mmcmp_file();
+    assert_eq!(packer(&mm), Some(Packer::Mmcmp));
+    assert_eq!(unpack(&mm).unwrap(), Some((Packer::Mmcmp, want)));
+}
+
+#[test]
+fn public_unpack_not_packed_and_corrupt() {
+    use crate::unpack::{packer, unpack};
+    assert_eq!(packer(b"too short"), None);
+    assert!(unpack(&[0u8; 200]).unwrap().is_none());
+    // Header says SQSH but the checksum is damaged: an error, not a panic.
+    let (mut sq, _) = sqsh_file();
+    sq[38] ^= 1;
+    assert!(matches!(unpack(&sq), Err(crate::Error::Invalid(_))));
+    // PowerPacker header with nothing behind it.
+    let mut pp = b"PP20".to_vec();
+    pp.extend_from_slice(&[0u8; 20]);
+    assert!(unpack(&pp).is_err());
+}

@@ -417,6 +417,23 @@ fn first_write_follows_path_name_and_sample_resolution() {
 }
 
 #[test]
+fn first_write_pays_for_the_letters_of_npp_a_name_starts_with() {
+    // differences in cycles between names of the same length, fitted to the reference's first
+    // writes at a 60-character directory with a sample set read as SMP.set
+    let s = song(&[pattern(&[])], &[0], &["e1"]);
+    let t = set(&[Smp { name: "e1", len: 32, fine: 0, vol: 64, rstart: 0, rlen: 32 }], &vec![1; 64]);
+    let y = |f: &str| first_write_cycles(&s, &t, 60, f, false).unwrap() as i64;
+    assert_eq!(y("NPx.q") - y("xxx.q"), 54);
+    assert_eq!(y("NPPx.q") - y("xxxx.q"), 54);
+    assert_eq!(y("nPx.q") - y("xxx.q"), 54 + 21);
+    assert_eq!(y("npx.q") - y("xxx.q"), 54 + 21 + 25);
+    // only the first letter matching: 28, and a cycle more when directory, name and case add up odd
+    assert_eq!(y("Nxx.q") - y("xxx.q"), 29);
+    assert_eq!(y("Nxxx.q") - y("xxxx.q"), 28);
+    assert_eq!(y("nxx.q") - y("xxx.q"), 28 + 21);
+}
+
+#[test]
 fn plays_through_the_engine_with_its_sample_set() {
     use crate::engine::{Backend, Engine, Playing};
     use std::path::Path;

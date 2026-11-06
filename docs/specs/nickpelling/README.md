@@ -47,3 +47,21 @@ player beyond the standard ProTracker period table and the small tables written 
   table is empty, break rows of 64 or more play as row 0.
 - Timing is not exact: with the reference start time supplied about 78% of writes are exact and 99% are
   within 1 cc.
+
+### Later timing refit
+
+A second refit against fresh reference logs (write times 99.98% exact when the reference's own first-write time
+is supplied; 98.4% with one fixed first-write constant of 35412 cc) corrects these points:
+
+- Costs are exact multiples of 0.5 cc and the logged time is the floor of the half-cc clock.
+- EC0 was missing about 12 cc; an E8 divide costs 77.0 when the divide hits and differs when it misses; the
+  tick-0 E8 retrigger costs 14.5; a tick-0 EC with y=0 also pays the hit cost.
+- The raster wait is a 9-poll loop over 454-cycle lines. The first wait reads the line register first, at +2
+  cycles, and starts at 95; the second starts at 60; the first-channel constants are 62, 70.5, 79 and 87.5.
+- The tick starts at the first write plus the first unpack cost plus 71779 (with a half-cc parity rule).
+- A CIA write (0xBFE001) for a normal row effect is at +3.5 cc, not -28; the pattern-delay branch is -57 cc
+  (-32 on channel 3; the channel 2 value was never observed and is assumed -57).
+- The first write of the reference moves with the host's file loading (about 8.5 cc per path character and 10.5
+  per suffix character, plus the sample-set name resolution) and cannot be predicted; modules in one run have
+  first writes of 35412 or 35440.
+- Audio is still SIMILAR on every module even with the exact first-write time; the cause is not found.

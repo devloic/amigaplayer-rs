@@ -31,9 +31,11 @@ pub const OPEN: Open = Open { name: "Nick Pelling Packer", detect, new };
 const TICK: u64 = 70940;
 
 /// The reference's first write (a volume write of the start-up) falls this many colour clocks
-/// after the run's origin; it depends on the host's loading of the files (measured 29866 to
-/// 34937 on the synthetic modules; the value of most of them is used).
-const FIRST_WRITE: u64 = 34913;
+/// after the run's origin; it depends on the host's loading of the files (about 8.5 colour clocks
+/// per character of the directory path and 10.5 per character of the file suffix, plus the
+/// sample set's name resolution), so it is a measured constant: 35412 for the synthetic modules
+/// as the reference runs them on the current host (the spec-era logs were 527 lower).
+const FIRST_WRITE: u64 = 35412;
 
 /// Colour clocks from the song's audio origin (a few after the last start-up write, as the
 /// reference host counts it, found by comparing renders) to the timer's start, on top of a period.
@@ -47,159 +49,161 @@ const ED_EXTRA: f64 = 54.5;
 // The cost table of the spec (colour clocks).
 // ---------------------------------------------------------------------------------------------
 mod k {
-    pub const PROW: f64 = 60.48;
-    pub const PDEL: f64 = 84.12;
-    pub const FX: [f64; 4] = [0.0, 61.14, 62.46, 57.20];
-    pub const RN: [f64; 4] = [0.0, 82.64, 82.23, 82.50];
-    pub const FUNK: f64 = 17.00;
-    pub const C0: f64 = 45.42;
-    pub const ARP_Z: f64 = -25.05;
-    pub const ARP_B: f64 = 13.59;
-    pub const ARP_H: f64 = 39.59;
-    pub const ARP_W: f64 = 17.30;
-    pub const ARP_N: f64 = 17.30;
-    pub const C1: f64 = 34.52;
-    pub const C2: f64 = 34.50;
-    pub const SL_MID: f64 = 36.54;
-    pub const SL_LO: f64 = 34.92;
-    pub const SL_HI: f64 = 40.54;
-    pub const C3: f64 = 45.24;
-    pub const TP_PAR: f64 = 14.01;
-    pub const C5: f64 = 44.65;
-    pub const TP_OFF: f64 = -23.27;
-    pub const TP_U: f64 = 56.57;
-    pub const TP_HIT: f64 = 23.01;
-    pub const TP_D: f64 = 56.58;
-    pub const TP_DHIT: f64 = 18.11;
-    pub const GL_OFF: f64 = -12.38;
-    pub const GL_EQ: f64 = 8.10;
-    pub const GL_UP: f64 = 45.21;
-    pub const GL_KEEP: f64 = 23.01;
-    pub const GL_DN: f64 = 49.22;
-    pub const C4: f64 = 37.55;
-    pub const VP: f64 = 35.11;
-    pub const VP_LO: f64 = 6.10;
-    pub const VP_HI: f64 = 5.79;
-    pub const C6: f64 = 37.03;
-    pub const VIB: f64 = 74.58;
-    pub const VW_SINE: f64 = 23.22;
-    pub const VW_RAMP: f64 = 30.17;
-    pub const VW_RNEG: f64 = 1.95;
-    pub const VW_SQ: f64 = 21.19;
-    pub const VNEG: f64 = 1.96;
-    pub const VC_MID: f64 = 24.04;
-    pub const VC_LO: f64 = 22.56;
-    pub const VC_HI: f64 = 27.97;
-    pub const C7: f64 = 131.76;
-    pub const MP: f64 = 34.77;
-    pub const MP_LO: f64 = 6.10;
-    pub const MP_HI: f64 = 6.14;
-    pub const TW_SINE: f64 = 19.07;
-    pub const TW_RAMP: f64 = 27.93;
-    pub const TW_RNEG: f64 = 1.99;
-    pub const TW_SQ: f64 = 18.88;
-    pub const TNEG: f64 = 1.99;
-    pub const TC_MID: f64 = 20.62;
-    pub const TC_LO: f64 = 22.65;
-    pub const TC_HI: f64 = 22.61;
-    pub const CA: f64 = 2.81;
-    pub const VS_UP: f64 = 43.73;
-    pub const VS_DN: f64 = 40.76;
-    pub const VS_MID: f64 = 26.81;
-    pub const VS_LO: f64 = 28.83;
-    pub const VS_HI: f64 = 28.84;
-    pub const CE: f64 = 35.82;
-    pub const E1: f64 = 13.12;
-    pub const E1_0: f64 = -2.52;
-    pub const E1_8: f64 = 10.30;
-    pub const E8_DIV: f64 = 77.87;
-    pub const E8_GO: f64 = 10.96;
-    pub const E1_C: f64 = 16.03;
-    pub const EC_HIT: f64 = 12.06;
-    pub const E1_D: f64 = 19.55;
-    pub const ED_T: f64 = -3.65;
-    pub const ED_N: f64 = 4.70;
-    pub const ED_GO: f64 = 19.37;
-    pub const RZ: f64 = 10.00;
-    pub const RS: f64 = 52.96;
-    pub const RNN: f64 = -9.51;
-    pub const RN_NOTE: f64 = 76.38;
-    pub const RN35: f64 = 21.67;
-    pub const PS_EQ: f64 = 4.79;
-    pub const PS_GT: f64 = 7.48;
-    pub const PS_LT: f64 = 9.41;
-    pub const RN9: f64 = 18.80;
-    pub const RNE: f64 = 26.10;
-    pub const RNE5: f64 = 76.90;
-    pub const RNX: f64 = 9.81;
-    pub const TG: f64 = 54.71;
-    pub const TG_ED: f64 = 6.61;
-    pub const W_LEN: f64 = 10.00;
-    pub const W_PER: f64 = 10.00;
-    pub const W_VOL: f64 = 8.00;
-    pub const W_DMA: [f64; 4] = [86.22, 102.00, 117.53, 121.46];
-    pub const TG_POST: f64 = 42.14;
-    pub const TG_VK: f64 = -7.96;
-    pub const TG_TK: f64 = -7.95;
-    pub const FR: f64 = 73.09;
-    pub const FR_BASE: f64 = -13.98;
-    pub const FR_NOP: f64 = -23.90;
-    pub const FR_B: f64 = 44.29;
-    pub const FR_C: f64 = 11.03;
-    pub const FR_CC: f64 = 13.00;
-    pub const FR_D: f64 = 17.24;
-    pub const FR_DX: f64 = 19.73;
-    pub const FR_E: f64 = 11.82;
-    pub const FR_F: f64 = 6.30;
-    pub const FR_F0: f64 = -12.44;
-    pub const E0: f64 = 34.52;
-    pub const E0_0: f64 = 2.05;
-    pub const E0_1: f64 = 21.45;
-    pub const E0_2: f64 = 21.53;
-    pub const E0_3: f64 = -1.95;
-    pub const E0_4: f64 = -1.98;
-    pub const E0_5: f64 = 27.12;
-    pub const E0_6: f64 = 14.52;
-    pub const E6_MARK: f64 = -17.23;
-    pub const E6_SET: f64 = 17.83;
-    pub const E6_DEC: f64 = 19.96;
-    pub const E6_DONE: f64 = -6.04;
-    pub const E0_7: f64 = 5.10;
-    pub const E0_8: f64 = -13.71;
-    pub const E0_9: f64 = -27.90;
-    pub const E0_A: f64 = 12.64;
-    pub const EA_MID: f64 = 5.35;
-    pub const EA_HI: f64 = 7.29;
-    pub const E0_B: f64 = 13.96;
-    pub const EB_MID: f64 = 6.02;
-    pub const EB_LO: f64 = 7.94;
-    pub const E0_C: f64 = -9.27;
-    pub const E0_D: f64 = -5.75;
-    pub const E0_E: f64 = -40.86;
-    pub const EE_SET: f64 = 43.55;
-    pub const E0_F: f64 = 17.58;
-    pub const RT: f64 = 30.32;
-    pub const RT_LEN: f64 = 10.00;
-    pub const RT_DMA: f64 = 26.00;
-    pub const ADV: f64 = 58.97;
-    pub const ADV_DN: f64 = 53.00;
-    pub const ADV_DR: f64 = -10.65;
-    pub const ADV_D0: f64 = -20.75;
-    pub const ADV_L: f64 = 32.01;
-    pub const OUT: f64 = 241.26;
-    pub const ADV_NP: f64 = 186.36;
-    pub const JC_NP: f64 = 211.81;
-    pub const NP_END: f64 = 9.05;
-    pub const SONGEND: f64 = 75.48;
-    pub const UP_LS: f64 = 29.50;
-    pub const UP_RS: f64 = 36.00;
-    pub const UP_LB: f64 = 6.00;
+    pub const PROW: f64 = 60.5;
+    pub const PDEL: f64 = 84.0;
+    pub const FX: [f64; 4] = [0.0, 61.0, 62.5, 57.0];
+    pub const RN: [f64; 4] = [0.0, 82.5, 82.5, 82.5];
+    pub const FUNK: f64 = 17.0;
+    pub const C0: f64 = 45.5;
+    pub const ARP_Z: f64 = -25.0;
+    pub const ARP_B: f64 = 13.5;
+    pub const ARP_H: f64 = 39.5;
+    pub const ARP_W: f64 = 17.0;
+    pub const ARP_N: f64 = 17.5;
+    pub const C1: f64 = 34.5;
+    pub const C2: f64 = 34.5;
+    pub const SL_MID: f64 = 36.5;
+    pub const SL_LO: f64 = 35.0;
+    pub const SL_HI: f64 = 40.5;
+    pub const C3: f64 = 45.5;
+    pub const TP_PAR: f64 = 14.0;
+    pub const C5: f64 = 44.5;
+    pub const TP_OFF: f64 = -23.5;
+    pub const TP_U: f64 = 56.5;
+    pub const TP_HIT: f64 = 23.0;
+    pub const TP_D: f64 = 56.5;
+    pub const TP_DHIT: f64 = 18.0;
+    pub const GL_OFF: f64 = -12.5;
+    pub const GL_EQ: f64 = 8.0;
+    pub const GL_UP: f64 = 45.0;
+    pub const GL_KEEP: f64 = 23.0;
+    pub const GL_DN: f64 = 49.0;
+    pub const C4: f64 = 38.0;
+    pub const VP: f64 = 35.0;
+    pub const VP_LO: f64 = 6.0;
+    pub const VP_HI: f64 = 6.0;
+    pub const C6: f64 = 37.0;
+    pub const VIB: f64 = 74.5;
+    pub const VW_SINE: f64 = 23.0;
+    pub const VW_RAMP: f64 = 30.0;
+    pub const VW_RNEG: f64 = 2.0;
+    pub const VW_SQ: f64 = 21.0;
+    pub const VNEG: f64 = 2.0;
+    pub const VC_MID: f64 = 24.0;
+    pub const VC_LO: f64 = 22.5;
+    pub const VC_HI: f64 = 28.0;
+    pub const C7: f64 = 132.0;
+    pub const MP: f64 = 35.0;
+    pub const MP_LO: f64 = 6.0;
+    pub const MP_HI: f64 = 6.0;
+    pub const TW_SINE: f64 = 19.0;
+    pub const TW_RAMP: f64 = 28.0;
+    pub const TW_RNEG: f64 = 2.0;
+    pub const TW_SQ: f64 = 19.0;
+    pub const TNEG: f64 = 2.0;
+    pub const TC_MID: f64 = 20.5;
+    pub const TC_LO: f64 = 22.5;
+    pub const TC_HI: f64 = 22.5;
+    pub const CA: f64 = 2.5;
+    pub const VS_UP: f64 = 44.0;
+    pub const VS_DN: f64 = 41.0;
+    pub const VS_MID: f64 = 27.0;
+    pub const VS_LO: f64 = 29.0;
+    pub const VS_HI: f64 = 29.0;
+    pub const CE: f64 = 36.0;
+    pub const E1: f64 = 13.0;
+    pub const E1_0: f64 = -2.5;
+    pub const E1_8: f64 = 10.0;
+    pub const E8_DIV: f64 = 78.5;
+    pub const E0_8_GO: f64 = 14.5;
+    pub const E8_DIVH: f64 = 77.0;
+    pub const E8_GO: f64 = 11.0;
+    pub const E1_C: f64 = 16.0;
+    pub const EC_HIT: f64 = 12.0;
+    pub const E1_D: f64 = 19.5;
+    pub const ED_T: f64 = -3.5;
+    pub const ED_N: f64 = 5.0;
+    pub const ED_GO: f64 = 19.5;
+    pub const RZ: f64 = 10.0;
+    pub const RS: f64 = 53.0;
+    pub const RNN: f64 = -9.5;
+    pub const RN_NOTE: f64 = 76.5;
+    pub const RN35: f64 = 21.5;
+    pub const PS_EQ: f64 = 5.0;
+    pub const PS_GT: f64 = 7.5;
+    pub const PS_LT: f64 = 9.5;
+    pub const RN9: f64 = 19.0;
+    pub const RNE: f64 = 26.0;
+    pub const RNE5: f64 = 77.0;
+    pub const RNX: f64 = 9.5;
+    pub const TG: f64 = 55.0;
+    pub const TG_ED: f64 = 6.5;
+    pub const W_LEN: f64 = 10.0;
+    pub const W_PER: f64 = 10.0;
+    pub const W_VOL: f64 = 8.0;
+    pub const W_DMA: [f64; 4] = [86.5, 102.0, 117.5, 121.5];
+    pub const TG_POST: f64 = 42.0;
+    pub const TG_VK: f64 = -8.0;
+    pub const TG_TK: f64 = -8.0;
+    pub const FR: f64 = 73.0;
+    pub const FR_BASE: f64 = -14.0;
+    pub const FR_NOP: f64 = -24.0;
+    pub const FR_B: f64 = 44.5;
+    pub const FR_C: f64 = 11.0;
+    pub const FR_CC: f64 = 13.0;
+    pub const FR_D: f64 = 17.5;
+    pub const FR_DX: f64 = 19.5;
+    pub const FR_E: f64 = 12.0;
+    pub const FR_F: f64 = 6.5;
+    pub const FR_F0: f64 = -12.0;
+    pub const E0: f64 = 34.5;
+    pub const E0_0: f64 = 2.0;
+    pub const E0_1: f64 = 21.5;
+    pub const E0_2: f64 = 21.5;
+    pub const E0_3: f64 = -2.0;
+    pub const E0_4: f64 = -2.0;
+    pub const E0_5: f64 = 27.0;
+    pub const E0_6: f64 = 14.5;
+    pub const E6_MARK: f64 = -18.0;
+    pub const E6_SET: f64 = 17.5;
+    pub const E6_DEC: f64 = 20.0;
+    pub const E6_DONE: f64 = -6.0;
+    pub const E0_7: f64 = 5.0;
+    pub const E0_8: f64 = -15.5;
+    pub const E0_9: f64 = -28.0;
+    pub const E0_A: f64 = 12.5;
+    pub const EA_MID: f64 = 5.5;
+    pub const EA_HI: f64 = 7.5;
+    pub const E0_B: f64 = 14.0;
+    pub const EB_MID: f64 = 6.0;
+    pub const EB_LO: f64 = 8.0;
+    pub const E0_C: f64 = -9.5;
+    pub const E0_D: f64 = -6.0;
+    pub const E0_E: f64 = -41.0;
+    pub const EE_SET: f64 = 43.5;
+    pub const E0_F: f64 = 17.5;
+    pub const RT: f64 = 30.5;
+    pub const RT_LEN: f64 = 10.0;
+    pub const RT_DMA: f64 = 26.0;
+    pub const ADV: f64 = 59.0;
+    pub const ADV_DN: f64 = 53.0;
+    pub const ADV_DR: f64 = -10.5;
+    pub const ADV_D0: f64 = -20.5;
+    pub const ADV_L: f64 = 32.0;
+    pub const OUT: f64 = 241.5;
+    pub const ADV_NP: f64 = 186.5;
+    pub const JC_NP: f64 = 212.0;
+    pub const NP_END: f64 = 9.5;
+    pub const SONGEND: f64 = 75.0;
+    pub const UP_LS: f64 = 29.5;
+    pub const UP_RS: f64 = 36.0;
+    pub const UP_LB: f64 = 6.0;
     /// Output phase: offsets of the volume and period writes from the first volume write.
     pub const OUT_VP: [f64; 4] = [14.0, 14.0, 14.0, 14.0];
     /// From a channel's period write to the next channel's volume write.
-    pub const OUT_PV: [f64; 4] = [0.0, 73.0, 72.0, 73.0];
+    pub const OUT_PV: [f64; 4] = [0.0, 72.5, 72.5, 72.5];
     /// First repeat location write after the second raster wait, by first channel in the mask.
-    pub const REP_FIRST: [f64; 4] = [61.0, 70.0, 79.0, 87.5];
+    pub const REP_FIRST: [f64; 4] = [62.0, 70.5, 79.0, 87.5];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -420,7 +424,8 @@ struct Led {
 }
 
 impl Led {
-    fn add(&mut self, _item: &str, c: f64) {
+    fn add(&mut self, item: &str, c: f64) {
+        let _ = item;
         self.t += c;
     }
 }
@@ -453,10 +458,10 @@ pub struct NickPelling {
     start_delay: u64,
 }
 
-/// The colour clock a running clock value is logged as: the reference's clock counts half colour
-/// clocks, the cost table's fit sits a little below them on average.
-fn cut(x: f64) -> u64 {
-    (x + 0.9).floor().max(0.0) as u64
+/// The colour clock a tick's running clock value is logged as: the costs and the tick start are
+/// whole half colour clocks, and the log shows the whole clock the half clock is in.
+fn cutx(x: f64) -> u64 {
+    x.floor().max(0.0) as u64
 }
 
 impl NickPelling {
@@ -560,7 +565,7 @@ impl NickPelling {
 impl NickPelling {
     /// Moves the bus clock to the running clock (never backwards).
     fn at(&mut self, hw: &mut Hw) {
-        hw.bus.clock = hw.bus.clock.max(cut(self.led.t));
+        hw.bus.clock = hw.bus.clock.max(cutx(self.led.t));
     }
 
     fn song_end(&mut self) {
@@ -816,7 +821,7 @@ impl NickPelling {
 
     /// An extended command. `tick0`: the tick-0 rules; `row`: inside a row's effect (against a
     /// pattern-delay row's pass, for the time of the filter writes).
-    fn ext(&mut self, c: usize, tick0: bool, row: bool, hw: &mut Hw) {
+    fn ext(&mut self, c: usize, tick0: bool, pdel: bool, hw: &mut Hw) {
         let par = self.ch[c].cell[3];
         let (x, y) = (par >> 4, par & 15);
         if tick0 {
@@ -824,14 +829,20 @@ impl NickPelling {
             match x {
                 0 => {
                     self.led.add("E0_0", k::E0_0);
-                    let t1 = if row { self.led.t + 3.75 } else { self.led.t - 28.0 };
-                    let save = hw.bus.clock;
-                    hw.bus.clock = hw.bus.clock.max(cut(t1));
+                    // a row effect writes 3.5 clocks after this point; inside a pattern-delay
+                    // row's pass the write comes 57 clocks before it (25 later on channel 3)
+                    let t1 = if !pdel {
+                        self.led.t + 3.5
+                    } else if c == 3 {
+                        self.led.t - 32.0
+                    } else {
+                        self.led.t - 57.0
+                    };
+                    hw.bus.clock = hw.bus.clock.max(cutx(t1));
                     let p = hw.bus.read_byte(0xBFE001) & !2;
                     hw.bus.write_byte(0xBFE001, p);
-                    hw.bus.clock = hw.bus.clock.max(cut(t1 + 6.0));
+                    hw.bus.clock = hw.bus.clock.max(cutx(t1 + 6.0));
                     hw.bus.write_byte(0xBFE001, p | 2 * (y & 1));
-                    let _ = save;
                 }
                 1 | 2 => {
                     if x == 1 {
@@ -891,7 +902,7 @@ impl NickPelling {
                 8 => {
                     self.led.add("E0_8", k::E0_8);
                     if note_of_cell(&self.ch[c].cell) == 0 {
-                        self.led.add("E8_GO", k::E8_GO);
+                        self.led.add("E0_8_GO", k::E0_8_GO);
                         self.retrigger(c, hw);
                     }
                 }
@@ -925,6 +936,7 @@ impl NickPelling {
                 0xC => {
                     self.led.add("E0_C", k::E0_C);
                     if y == 0 {
+                        self.led.add("EC_HIT", k::EC_HIT);
                         let ch = &mut self.ch[c];
                         ch.vol = 0;
                         ch.outvol = 0;
@@ -956,8 +968,13 @@ impl NickPelling {
                 8 => {
                     self.led.add("E1_8", k::E1_8);
                     if y != 0 {
-                        self.led.add("E8_DIV", k::E8_DIV);
-                        if self.counter % y == 0 {
+                        let hit = self.counter % y == 0;
+                        if hit {
+                            self.led.add("E8_DIVH", k::E8_DIVH);
+                        } else {
+                            self.led.add("E8_DIV", k::E8_DIV);
+                        }
+                        if hit {
                             self.led.add("E8_GO", k::E8_GO);
                             self.retrigger(c, hw);
                         }
@@ -1119,7 +1136,7 @@ impl NickPelling {
             }
             0xE => {
                 self.led.add("FR_E", k::FR_E);
-                self.ext(c, true, true, hw);
+                self.ext(c, true, false, hw);
             }
             _ => {
                 if par != 0 {
@@ -1303,11 +1320,12 @@ impl NickPelling {
 
     /// Nine raster-line changes from `x` (CPU cycles since the run's origin); the time of the
     /// ninth, in cycles.
-    fn raster(x0: f64) -> f64 {
+    fn raster(x0: f64, first_read: f64) -> f64 {
         let line = |x: f64| (x / 454.0).floor();
         let mut x = x0;
         for n in 0..9 {
-            let l = line(x);
+            // the first read of the line number happens later than the wait's start by this many cycles
+            let l = line(if n == 0 { x + first_read } else { x });
             x += 18.0;
             while line(x) == l {
                 x += 25.0;
@@ -1335,11 +1353,13 @@ impl NickPelling {
         if self.dma == 0 {
             return;
         }
-        let x = Self::raster((2.0 * self.led.t).floor() + 95.0);
+        let x0 = (2.0 * self.led.t).floor() + 95.0;
+        let x = Self::raster(x0, 2.0);
         self.led.t = x / 2.0 + 37.5;
         self.at(hw);
         hw.dmacon(0x8000 | self.dma);
-        let x = Self::raster((2.0 * self.led.t).floor() + 61.0);
+        let x0 = (2.0 * self.led.t).floor() + 60.0;
+        let x = Self::raster(x0, 0.0);
         let mut first = true;
         let mut prev_end = 0.0;
         let mut last = 0usize;
@@ -1471,16 +1491,19 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     // the start-up writes (spec 5), counted from the run's origin
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
-    let mut t = (origin + FIRST_WRITE) as f64;
+    let fw: u64 = FIRST_WRITE;
     let first_up = r.unpack();
     r.row = 0;
+    // the reference's first write is a whole clock, or half a clock past one; the half clock is
+    // there when the unpack's cost (half a clock per literal run) is a whole number, which puts
+    // the tick start (71 779 clocks after this write plus the unpack) half a clock into a clock
+    let t0 = (origin + fw) as f64 + if first_up.fract() == 0.0 { 0.5 } else { 0.0 };
     {
         let mut hw = Hw { bus: &mut m.bus };
         let put = |hw: &mut Hw, t: f64, f: &mut dyn FnMut(&mut Hw)| {
-            hw.bus.clock = hw.bus.clock.max(cut(t));
+            hw.bus.clock = hw.bus.clock.max(cutx(t));
             f(hw);
         };
-        let t0 = t;
         for c in 0..4 {
             let base = t0 + [0.0, 83.0, 166.0, 249.0][c];
             put(&mut hw, base, &mut |h| h.vol(c, 0));
@@ -1493,7 +1516,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             let p = h.bus.read_byte(0xBFE001);
             h.bus.write_byte(0xBFE001, p | 2);
         });
-        t = t0 + 332.0 + 228.75 + first_up;
+        let t = t0 + 332.0 + 229.0 + first_up;
         put(&mut hw, t, &mut |h| h.dmacon(0x000F));
         let mut tt = t;
         for (c, dt) in [(0usize, 8.0), (1, 6.0), (2, 6.0), (3, 6.0)] {
@@ -1504,13 +1527,11 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         put(&mut hw, tt, &mut |h| h.bus.write_word(0xDFF09A, 0x0780));
         tt += 8.0;
         put(&mut hw, tt, &mut |h| h.bus.write_word(0xDFF09C, 0x0780));
-        t = tt;
     }
-    // the first tick: 71 175.94 colour clocks after the last start-up write; the song's audio
-    // counts from just after that write (START_DELAY before the timer's start)
-    let s0 = t + 71175.94;
-    let s0i = cut(s0);
-    r.frac = s0 - s0i as f64;
+    // the first tick starts 71 779 colour clocks plus the first unpack after the first start-up
+    // write (the reference's tick start is the whole clock below that sum, plus half a clock)
+    let s0i = (t0 + first_up + 71779.0).floor() as u64;
+    r.frac = 0.5;
     r.start_delay = START_DELAY;
     m.bus.clock = (s0i.saturating_sub(TICK + START_DELAY)).max(m.bus.clock);
     Some(Box::new(r))

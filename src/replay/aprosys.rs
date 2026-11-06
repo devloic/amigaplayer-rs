@@ -175,6 +175,12 @@ const LAT_LOC_H: u64 = 1004;
 const LAT_VOL_H: u64 = 1022;
 const LAT_MUTED_H: u64 = 743;
 const LAT_START_H: u64 = 1026;
+/// What a tick whose timer is already due adds to its start, by how the previous call ended: after
+/// a LOC, a VOL, a sample start or key tail, an interrupt handler (half clocks).
+const LATE_LOC_H: u64 = 859;
+const LATE_VOL_H: u64 = 877;
+const LATE_START_H: u64 = 881;
+const LATE_HANDLER_H: u64 = 291;
 /// Handler gaps per channel: LOC to LEN, and LEN to the next write.
 const H_LEN: [u64; 4] = [109, 125, 140, 144];
 const H_DMA: [u64; 4] = [94, 109, 125, 129];
@@ -314,6 +320,10 @@ pub struct Aps {
     sq_seen: bool,
     irq_end: u64,
     lat_h: u64,
+    /// The clock at the end of the last call (a tick or an interrupt handler), and what a tick that
+    /// finds the timer already due adds to start (half clocks).
+    act_end: u64,
+    late_h: u64,
     first_tick: Option<u64>,
 }
 
@@ -1283,6 +1293,8 @@ impl Aps {
             _ => {}
         }
         self.irq_end = hw.bus.clock;
+        self.act_end = hw.bus.clock;
+        self.late_h = LATE_HANDLER_H;
     }
 }
 
@@ -1462,6 +1474,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         half: 0,
         irq_end: 0,
         lat_h: LAT_VOL_H,
+        act_end: u64::MAX / 2,
+        late_h: 0,
         start_origin: 0,
         starting: true,
         sq_acc: 0,
@@ -1513,7 +1527,16 @@ impl Replayer for Aps {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        if hw.bus.clock <= self.act_end + 1 {
+            self.wh(hw, self.late_h);
+        }
         self.tick_voices(hw);
+        self.act_end = hw.bus.clock;
+        self.late_h = match self.lat_h {
+            LAT_LOC_H => LATE_LOC_H,
+            LAT_VOL_H | LAT_MUTED_H => LATE_VOL_H,
+            _ => LATE_START_H,
+        };
     }
 
     fn audio_irq_ch(&mut self, ch: usize, hw: &mut Hw) -> bool {

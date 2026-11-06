@@ -119,6 +119,10 @@ const FIRST_TICK: u64 = 72_000;
 const SETUP_BASE: u64 = 28_000;
 const SETUP_PER_KB: u64 = 44;
 
+/// The first call's first write comes this much after the tick's grid (in the reference runs of all five
+/// modules, whatever the module's size or first events).
+const T_FIRST_CALL: u64 = 148;
+
 /// A frame's start to the end of its check of the note-offs, with no voice in use ...
 const T_FRAME: u64 = 289;
 /// ... to which a voice in use adds one, and a voice with a note-off still to come another.
@@ -160,8 +164,11 @@ const T_CALC_STOLEN: u64 = 903;
 const T_NO_PERIOD: u64 = 158;
 /// The driver's DMA wait after the attack's write (nine raster lines' worth of polling in its code,
 /// which the emulated machine runs shorter), and what follows the sustain's.
-const T_DMA_WAIT: u64 = 575;
+const T_DMA_WAIT: u64 = 565;
 const T_NOTE_END: u64 = 17;
+/// A sample with no sustain part queues no second write: the wait is that much shorter (the
+/// reference's restarts of such samples show it, in 130 of them).
+const T_NO_SUSTAIN: u64 = 194;
 
 const ALOG: [u16; 257] = [
     0, 178, 356, 535, 714, 893, 1073, 1254, 1435, 1617, 1799, 1981, 2164, 2348, 2532, 2716, 2902, 3087, 3273, 3460,
@@ -351,6 +358,8 @@ struct DevChan {
 pub struct MaxTrax {
     /// The absolute time of the first tick, until the engine has taken it.
     resume: Option<u64>,
+    /// The half colour clock the events' times carry over.
+    event_half: u64,
     title: String,
     /// The module (the score and, with samples in it, their data), as the driver reads it.
     d: Vec<u8>,
@@ -493,6 +502,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         left_round: 0,
         songend: false,
         resume: None,
+        event_half: 0,
         cls: String::new(),
         sub: 0,
         intena_set: false,
@@ -974,7 +984,7 @@ impl MaxTrax {
             let r = self.new_req(smp.wave, smp.attack, 1, true, per);
             self.dev_write(hw, vi, r);
         }
-        hw.wait(T_DMA_WAIT);
+        hw.wait(if smp.sustain == 0 { T_DMA_WAIT - T_NO_SUSTAIN } else { T_DMA_WAIT });
         if smp.sustain != 0 {
             let pervol = smp.attack == 0;
             let r = self.new_req(smp.wave.wrapping_add(smp.attack), smp.sustain, 0, pervol, per);
@@ -1467,10 +1477,80 @@ impl MaxTrax {
         c
     }
 
-    /// The time the sequencer takes over one event, besides what its handler does to the hardware.
-    fn event_cost(cmd: u8, _stop: u16) -> u64 {
+    /// The time the sequencer takes over one event besides what its handler does to the hardware, in
+    /// half colour clocks (the reference's instruction times are whole cycles, two to the colour
+    /// clock): by command, and for a control change by its number and sometimes its value. Fitted to
+    /// reference runs of modules of one event kind repeated before a note (the figures are the
+    /// means of four events; a note's time is in its own set-up costs).
+    fn event_cost(&self, cmd: u8, stop: u16) -> u64 {
+        let (ctl, val) = ((stop >> 8) as u8, stop as u8);
         match cmd {
-            COMMAND_BEND => T_EV_BEND,
+            COMMAND_BEND => 2 * T_EV_BEND,
+            COMMAND_PROGRAM => 478,
+            COMMAND_TEMPO => {
+                if (((self.tick_unit >> 8) as u16).wrapping_sub(stop) as i16) < 0 {
+                    367
+                } else {
+                    936
+                }
+            }
+            COMMAND_SPECIAL => {
+                if ctl == SPECIAL_BEGINREP {
+                    420
+                } else {
+                    312
+                }
+            }
+            COMMAND_CONTROL => match ctl {
+                5 => 458,
+                6 => {
+                    if val == 0 {
+                        533
+                    } else {
+                        541
+                    }
+                }
+                7 => {
+                    if val == 0 {
+                        494
+                    } else {
+                        498
+                    }
+                }
+                10 => match val.cmp(&64) {
+                    std::cmp::Ordering::Less => 527,
+                    std::cmp::Ordering::Equal => 562,
+                    std::cmp::Ordering::Greater => 537,
+                },
+                37 => 471,
+                64 => {
+                    if val < 64 {
+                        716
+                    } else {
+                        540
+                    }
+                }
+                65 => {
+                    if val < 64 {
+                        565
+                    } else {
+                        557
+                    }
+                }
+                81 => match val.cmp(&64) {
+                    std::cmp::Ordering::Less => 715,
+                    std::cmp::Ordering::Equal => 718,
+                    std::cmp::Ordering::Greater => 729,
+                },
+                100 => 566,
+                101 => 583,
+                120 => 693,
+                121 => 799,
+                123 => 652,
+                126 => 694,
+                127 => 706,
+                _ => 638,
+            },
             _ => 0,
         }
     }
@@ -1529,7 +1609,9 @@ impl MaxTrax {
                 let cmd = self.rb(a2);
                 let data = self.rb(a2 + 1);
                 let stop = be16(&self.d, a2 + 4);
-                hw.wait(Self::event_cost(cmd, stop));
+                let half = self.event_half + self.event_cost(cmd, stop);
+                self.event_half = half & 1;
+                hw.wait(half >> 1);
                 if (cmd as i8) >= 0 {
                     self.flags &= !MUSIC_ADDED_NOTE;
                     let vol = (data >> 1) & 0x78;
@@ -1745,6 +1827,7 @@ impl Replayer for MaxTrax {
             // the audio.device's interrupt handlers: the four channels' interrupts on
             hw.bus.paula.write_intena(0x8000 | 0xF << 7);
             self.intena_set = true;
+            hw.wait(T_FIRST_CALL);
         }
         self.music_server(hw);
     }

@@ -41,16 +41,21 @@ const PERIODS: [u16; 48] = [
 const INTENA: u32 = 0xDFF09A;
 const CIAA_PRA: u32 = 0xBFE001;
 
-/// The first DMACON write of the start-up, from the run's origin, without and with a filter
-/// command in front (the CIA write is at `START_CIA`).
-/// (the first sequence entry, a speed command, is included; later entries add their costs).
-const START_PLAIN: u64 = 4152;
-const START_CIA: u64 = 2772;
+/// The start-up call's first DMACON write and the CIA write of a filter command (in half colour
+/// clocks from the run's origin), before the sum of the costs of the sequence entries met until
+/// them (the first entry's included).
+const START_PLAIN_H: u64 = 7967;
+const START_CIA_H: u64 = 5207;
 /// Colour clocks from the end of the start-up call (the audio interrupts it requests come after)
 /// to the first tick's call: with a keyed voice (plus the latency of the first interrupt handler
 /// after the last AUDxDAT write, `lat_h`), and without.
-const START_TO_TICK_KEYED: u64 = 70814;
-const START_TO_TICK: u64 = 71326;
+const START_TO_TICK_KEYED_H: u64 = 141849;
+const START_TO_TICK_H: u64 = 142650;
+/// Half colour clocks from the last AUDxDAT write of channel 0 to the end of the start-up call
+/// (70 less per channel), and from the audio interrupt being taken (at an output sample) to the
+/// handler's first write.
+const START_TAIL_H: u64 = 672;
+const START_IRQ_H: u64 = 113;
 /// PER to VOL, per voice.
 const PER_VOL: [u64; 4] = [444, 471, 498, 497];
 /// The work before a voice's PER write, in half colour clocks (fitted jointly on the reference
@@ -65,9 +70,9 @@ const PRE_FEAT_H: [u64; 6] = [81, 73, 69, 435, 222, 549];
 /// and reached) or already there; an arpeggio voice adds a little.
 const PRE_PM_H: [u64; 7] = [0, 0, 123, 120, 123, 174, 56];
 const PRE_ARP_H: u64 = 9;
-/// A silent voice's VOL write after the previous voice's last write: by what that was (a sample
-/// start, a plain VOL, a silent voice's VOL), per voice.
-const MUTED_AFTER: [[u64; 4]; 3] = [[300, 303, 331, 341], [300, 348, 359, 354], [300, 219, 215, 215]];
+/// A silent voice's VOL write after the previous voice's last write (half clocks): by what that was
+/// (a sample start, a plain VOL, a silent voice's VOL), per voice.
+const MUTED_AFTER: [[u64; 4]; 3] = [[673, 606, 662, 682], [673, 696, 718, 708], [673, 438, 430, 430]];
 /// The gap before a row's work (DMACON 0x8200).
 const ROW_PRE: u64 = 580;
 /// ... after a plain volume write, and after a silent voice's.
@@ -76,29 +81,34 @@ const ROW_PRE_MUTED: u64 = 451;
 /// Sequence entry costs (measured with probe modules; a loop's first-met-and-final and
 /// taken/not-first costs are split evenly), and the advance's block-end, block-start and
 /// move-to-the-next-entry costs.
-const SQ_NOP: u64 = 153;
-const SQ_SPEED: u64 = 169;
-const SQ_TRANSPOSE: u64 = 183;
-const SQ_FILTER_OFF: u64 = 194;
-const SQ_FILTER_ON: u64 = 199;
-const SQ_JUMP: u64 = 146;
-const SQ_LOOP_TAKEN: u64 = 163;
-const SQ_LOOP_DONE: u64 = 171;
-const ADV_END_BLOCK: u64 = 600;
-const ADV_START_BLOCK: u64 = 599;
-const ADV_NEXT_ENTRY: u64 = 392;
+const SQ_NOP: u64 = 305;
+const SQ_SPEED: u64 = 338;
+const SQ_TRANSPOSE: u64 = 367;
+const SQ_FILTER_OFF: u64 = 388;
+const SQ_FILTER_ON: u64 = 398;
+const SQ_JUMP: u64 = 293;
+/// A loop entry: met for the first time and not repeated, repeated (taken), finished after repeats.
+const SQ_LOOP_ONCE: u64 = 341;
+const SQ_LOOP_TAKEN: u64 = 324;
+const SQ_LOOP_DONE: u64 = 342;
+/// (half colour clocks) The block-end and block-start costs only matter as their sum.
+const ADV_END_BLOCK: u64 = 1199;
+const ADV_START_BLOCK: u64 = 1198;
+const ADV_NEXT_ENTRY: u64 = 784;
 /// The work of voices after the last write of a row, when no write follows (a late tick or a
 /// handler comes next), in half colour clocks, from the leftovers of the reference logs: an idle
 /// voice, a note without a write, a release (plus the instrument change, less a skipped division),
 /// the arpeggio bit, and the channel-volume update class (set, up, up and clamped, down, down and
 /// clamped, same).
-const LF_IDLE: i64 = 434;
+const LF_IDLE: i64 = 433;
 const LF_NOTE: i64 = 1454;
 const LF_REL: i64 = 1342;
 const LF_REL_ID: i64 = 544;
 const LF_REL_CNT0: i64 = 244;
 const LF_ARP: i64 = 68;
-const LF_CV: [i64; 6] = [0, 144, 0, 144, 0, 27];
+const LF_CV: [i64; 6] = [0, 119, 0, 144, 0, 54];
+/// A voice the block mutes while its row has a note (half clocks, more than an idle voice).
+const LF_BLOCK_MUTE: i64 = 39;
 /// The cost of a row's work between two writes, in half colour clocks (fitted jointly on the
 /// reference logs): a constant by the previous write (row start, key-off, other), the work of each
 /// voice processed since (by voice, and by what the voice does), and a constant by the write that
@@ -107,8 +117,6 @@ struct RowCost {
     a: [i64; 3],
     tl_len: [[i64; 4]; 3],
     tl_key: [[i64; 4]; 4],
-    tl_int: i64,
-    fk: i64,
     note: [i64; 4],
     idle: [i64; 4],
     rel: [i64; 4],
@@ -131,8 +139,6 @@ const RC_MAIN: RowCost = RowCost {
     a: [1641, 86, 86],
     tl_len: [[-95, -95, -95, 1413], [-77, -76, -76, 1432], [-49, -49, -49, 1459]],
     tl_key: [[0, 0, 0, 1508], [0, 0, 0, 1508], [-1, 0, 0, 1508], [0, 0, 0, 1508]],
-    tl_int: 0,
-    fk: 0,
     note: [0, 1573, 1621, 0],
     idle: [-1023, 549, 550, 0],
     rel: [-1628, -57, -56, 0],
@@ -155,8 +161,6 @@ const RC_INT: RowCost = RowCost {
     a: [0, -328, -328],
     tl_len: [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
     tl_key: [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
-    tl_int: 0,
-    fk: 69,
     note: [0, 0, 1574, 1974],
     idle: [0, 0, 552, 1009],
     rel: [0, 0, -516, 0],
@@ -175,9 +179,10 @@ const RC_INT: RowCost = RowCost {
     rel_div: 1917,
     idle_then_note: 0,
 };
-/// Per voice: LEN to LOC and LOC to INTENA of a synth voice's row start, and of a moving sample's.
-const ROW_SYN: [(u64, u64); 4] = [(125, 162), (140, 178), (156, 193), (159, 198)];
-const ROW_SMP: [(u64, u64); 4] = [(133, 100), (149, 116), (164, 132), (168, 135)];
+/// Per voice: LEN to LOC and LOC to INTENA of a synth voice's row start, and of a moving sample's
+/// (half colour clocks).
+const ROW_SYN_H: [(u64, u64); 4] = [(249, 325), (280, 356), (311, 387), (319, 395)];
+const ROW_SMP_H: [(u64, u64); 4] = [(267, 201), (298, 232), (329, 263), (337, 271)];
 /// Colour clocks from the last write of a tick to the first interrupt handler write, and from the
 /// end of one handler to the next one's start.
 /// (the first handler's start follows the tick's last write: by what that was, in half clocks:
@@ -329,7 +334,10 @@ pub struct Aps {
     start_origin: u64,
     starting: bool,
     sq_acc: u64,
-    sq_seen: bool,
+    first_block_seen: bool,
+    first_irq: bool,
+    first_half: u64,
+    last_key: usize,
     irq_end: u64,
     lat_h: u64,
     /// The clock at the end of the last call (a tick or an interrupt handler), and what a tick that
@@ -419,7 +427,9 @@ impl Aps {
             let n = c & 0x1F;
             let cost = match c & 0xE0 {
                 0x40 => {
-                    if self.loopc == 0xFF && n == 1 || self.loopc == 1 {
+                    if self.loopc == 0xFF && n == 1 {
+                        SQ_LOOP_ONCE
+                    } else if self.loopc == 1 {
                         SQ_LOOP_DONE
                     } else {
                         SQ_LOOP_TAKEN
@@ -469,7 +479,9 @@ impl Aps {
                 0xC0 => {
                     self.filter_cmd = true;
                     if self.starting {
-                        hw.bus.clock = self.start_origin + START_CIA + self.sq_acc - cost;
+                        let h = 2 * self.start_origin + START_CIA_H + self.sq_acc - cost;
+                        hw.bus.clock = h / 2;
+                        self.half = h % 2;
                     }
                     let x = hw.bus.read_byte(CIAA_PRA);
                     hw.bus.write_byte(CIAA_PRA, if p != 0 { x & !2 } else { x | 2 });
@@ -481,16 +493,22 @@ impl Aps {
         Err(End)
     }
 
-    /// Charges a sequence entry: in the start-up call the sum is kept (the first entry is part of
-    /// the base time), later the time passes.
+    /// Charges a sequence entry (half colour clocks): in the start-up call the sum is kept, later
+    /// the time passes.
     fn sq_cost(&mut self, hw: &mut Hw, cost: u64) {
         if self.starting {
-            if self.sq_seen {
-                self.sq_acc += cost;
-            }
-            self.sq_seen = true;
+            self.sq_acc += cost;
         } else {
-            self.wc(hw, cost);
+            self.wh(hw, cost);
+        }
+    }
+
+    /// Charges an advance cost: in the start-up call it adds to the start-up time, later it passes.
+    fn adv_cost(&mut self, hw: &mut Hw, cost: u64) {
+        if self.starting {
+            self.sq_acc += cost;
+        } else {
+            self.wh(hw, cost);
         }
     }
 
@@ -523,9 +541,7 @@ impl Aps {
                     self.timer = self.tpr;
                     return Ok(self.tpr != 0);
                 }
-                if !self.starting {
-                    self.wc(hw, ADV_END_BLOCK);
-                }
+                self.adv_cost(hw, ADV_END_BLOCK);
                 self.blk = self.blk.wrapping_add(26);
                 self.rep = self.rep.wrapping_add(1);
             } else {
@@ -533,15 +549,16 @@ impl Aps {
                 skip = false;
             }
             if self.rep < self.entry(hw).0 & 0x1F {
-                if !self.starting {
-                    self.wc(hw, ADV_START_BLOCK);
+                // the first block start of the song is part of the base start-up time
+                if !self.first_block_seen {
+                    self.first_block_seen = true;
+                } else {
+                    self.adv_cost(hw, ADV_START_BLOCK);
                 }
                 self.start_block(hw);
                 continue;
             }
-            if !self.starting {
-                self.wc(hw, ADV_NEXT_ENTRY);
-            }
+            self.adv_cost(hw, ADV_NEXT_ENTRY);
             self.seq = self.seq.wrapping_add(1);
             self.sequencer(hw)?;
             skip = true;
@@ -644,6 +661,7 @@ impl Aps {
                 idle_before = !active;
                 pending = true;
                 lf += LF_CV[cvc] + LF_ARP * arp
+                    + if r0 & 63 != 63 { LF_BLOCK_MUTE } else { 0 }
                     + if active { LF_REL + LF_REL_ID * instdiff - if cnt0 { LF_REL_CNT0 } else { 0 } } else { LF_IDLE };
                 continue;
             }
@@ -721,9 +739,9 @@ impl Aps {
             match ty {
                 4 | 5 => {
                     hw.len(v, w & 0xFF);
-                    self.wc(hw, ROW_SMP[v].0);
+                    self.wh(hw, ROW_SMP_H[v].0);
                     hw.loc(v, self.sample_addr(e, 0));
-                    self.wc(hw, ROW_SMP[v].1);
+                    self.wh(hw, ROW_SMP_H[v].1);
                     self.intena(hw, 0x0080 << v);
                     self.wc(hw, 25);
                     hw.dmacon(0x8000 | 1 << v);
@@ -731,9 +749,9 @@ impl Aps {
                 }
                 3 => {
                     hw.len(v, (e & 0xFF) as u16);
-                    self.wc(hw, ROW_SYN[v].0);
+                    self.wh(hw, ROW_SYN_H[v].0);
                     hw.loc(v, self.v[v].front);
-                    self.wc(hw, ROW_SYN[v].1);
+                    self.wh(hw, ROW_SYN_H[v].1);
                     self.intena(hw, 0x0080 << v);
                     self.wc(hw, 25);
                     hw.dmacon(0x8000 | 1 << v);
@@ -758,12 +776,11 @@ impl Aps {
             }
             {
                 if first && pending {
-                    let h = RC_INT.a[prev] + acc[1] + RC_INT.tl_int + RC_INT.fk * v as i64;
-                    acc = [0; 2];
+                    let h = 193 + 70 * v as i64 + lf;
                     lf = 0;
                     self.wh(hw, h.max(0) as u64);
                 } else if first {
-                    self.wc(hw, 97 + 35 * v as u64);
+                    self.wh(hw, 193 + 70 * v as u64);
                 } else {
                     self.wc(hw, 67);
                 }
@@ -772,6 +789,7 @@ impl Aps {
                 self.wc(hw, 31);
                 wr16(hw, 0xDFF0AA + 16 * v as u32, 0);
                 self.lat_h = LAT_DAT_H[v];
+                self.last_key = v;
             }
         }
         // the work of the last voices, when no write follows
@@ -898,7 +916,7 @@ impl Aps {
         self.pm = 0;
         let inst = self.v[v].inst;
         if self.v[v].chvol == 0 {
-            self.wc(hw, MUTED_AFTER[self.last_kind as usize][v]);
+            self.wh(hw, MUTED_AFTER[self.last_kind as usize][v]);
             hw.vol(v, 0);
             self.lat_h = LAT_MUTED_H;
             self.last_kind = 2;
@@ -1271,7 +1289,17 @@ impl Aps {
         if hw.bus.paula.intreq & bit == 0 {
             return;
         }
-        let lat = if hw.bus.clock <= self.irq_end + 2 { 2 * IRQ_NEXT } else { self.lat_h };
+        let lat = if self.first_irq {
+            // the host takes the audio interrupts of the start-up at the next output sample
+            self.first_irq = false;
+            self.half = 0;
+            START_IRQ_H
+        } else if hw.bus.clock <= self.irq_end + 2 {
+            self.half = 0;
+            2 * IRQ_NEXT
+        } else {
+            self.lat_h
+        };
         self.wh(hw, lat);
         self.intena(hw, bit);
         let ev = self.v[ch].ev;
@@ -1499,7 +1527,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         start_origin: 0,
         starting: true,
         sq_acc: 0,
-        sq_seen: false,
+        first_block_seen: false,
+        first_irq: false,
+        first_half: 0,
+        last_key: 0,
         first_tick: None,
     };
     for v in 0..4 {
@@ -1509,11 +1540,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
     let mut hw = Hw { bus: &mut m.bus };
     r.start_origin = origin;
-    hw.bus.clock = origin + START_CIA;
     r.last_kind = 0;
     let started = r.sequencer(&mut hw);
+    // the rest of the start-up call (blocks of no rows, further entries) passes in time
+    r.starting = false;
     if started.is_ok() {
-        hw.bus.clock = origin + START_PLAIN + r.sq_acc - ROW_PRE;
+        let h = 2 * origin + START_PLAIN_H + r.sq_acc - 2 * ROW_PRE;
+        hw.bus.clock = h / 2;
+        r.half = h % 2;
         // the first row is processed without moving the pointer
         if r.step2(&mut hw, true).is_err() {
             r.ended = true;
@@ -1521,11 +1555,19 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     } else {
         r.ended = true;
     }
-    r.starting = false;
     r.last_kind = 1;
     // the timer starts after the start-up call, not after its interrupts
     let keyed = r.start_keyed;
-    r.first_tick = Some(hw.bus.clock + if keyed { START_TO_TICK_KEYED + r.lat_h / 2 } else { START_TO_TICK });
+    if keyed {
+        // the start-up routine returns a little after its last AUDxDAT write (less for a later
+        // channel: the loop over the voices has fewer turns left)
+        r.wh(&mut hw, START_TAIL_H - 70 * r.last_key as u64);
+        r.first_irq = true;
+    }
+    // the first tick follows the end of the call to the half clock
+    let ft = 2 * hw.bus.clock + r.half + if keyed { START_TO_TICK_KEYED_H } else { START_TO_TICK_H };
+    r.first_tick = Some(ft / 2);
+    r.first_half = ft % 2;
     Some(Box::new(r))
 }
 
@@ -1547,6 +1589,7 @@ impl Replayer for Aps {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.half = std::mem::take(&mut self.first_half);
         if hw.bus.clock <= self.act_end + 1 {
             self.wh(hw, self.late_h);
         }

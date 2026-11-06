@@ -932,6 +932,10 @@ impl Aps {
 
     // ---------------------------------------------------------------- the audio interrupt
 
+    /// The original's handler never clears the channel's INTREQ bit (SPEC section 10 lists only the
+    /// INTENA disable), so the bit stays set: a later INTENA enable takes the interrupt again at
+    /// once, and the AUDxDAT write of a row, finding the request already set, raises nothing. The
+    /// reference runs only match with this (clearing the bit moved the interrupts of nine modules).
     fn handler(&mut self, ch: usize, hw: &mut Hw) {
         hw.bus.paula.sync(hw.bus.clock, &hw.bus.ram);
         let bit = 0x80u16 << ch;
@@ -939,7 +943,6 @@ impl Aps {
             return;
         }
         hw.wait(if hw.bus.clock <= self.irq_end + 2 { IRQ_NEXT } else { IRQ_LAT[ch] });
-        hw.bus.paula.write_intreq(bit);
         self.intena(hw, bit);
         let ev = self.v[ch].ev;
         let (e, w) = self.evrec(hw, ev);

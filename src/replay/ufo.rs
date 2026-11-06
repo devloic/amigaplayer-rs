@@ -239,8 +239,13 @@ mod cost {
     /// Colour clocks from a volume write to the next voice's (voices 0-1, 1-2, 2-3).
     pub const VOL_GAP_CC: [u64; 3] = [266, 286, 314];
     pub const VOL_GAP_STOPPED_CC: u64 = 104;
-    pub const TIMER_DELAY_CC: u64 = 10916;
-    pub const START_PER_CHUNK_CC: [u64; 4] = [263, 116, 227, 54];
+    /// The original's start-up (file loading and parsing, about 11 000 to 16 000 colour clocks
+    /// before its first write) is not part of the audio timeline of the reference renders: with
+    /// the delay modelled the port's sound came 150 to 220 sample frames late; with none it is
+    /// within 3 frames. So the port starts its timer at once (the write logs, compared per tick,
+    /// are unchanged).
+    pub const TIMER_DELAY_CC: u64 = 0;
+    pub const START_PER_CHUNK_CC: [u64; 4] = [0, 0, 0, 0];
 }
 
 const NF: usize = 24;

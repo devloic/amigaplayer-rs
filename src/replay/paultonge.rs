@@ -35,7 +35,20 @@ pub const OPEN: Open = Open { name: "Paul Tonge", detect, new };
 static VOLUMES: &[u8; 34] = include_bytes!("paultonge_volumes.bin");
 static PERIODS: &[u8; 256] = include_bytes!("paultonge_periods.bin");
 
+/// The delay of the engine's first tick that puts the first call of the play routine at colour
+/// clock 98306 (the reference's value for a file name of nine characters in a directory path of
+/// 25 characters, with its sample bank found under the name `SMP.<suffix>`).
 const FIRST_TICK_DELAY: u64 = 27266;
+/// Colour clock of the first call in the reference run for a nine-character file name whose
+/// directory path (with its final slash) has 60 characters, without a bank of the song's own
+/// name (the bank `SMP.set` is read after a failed open) and with it.
+const FIRST_CALL_FALLBACK: i64 = 99198;
+const FIRST_CALL_OWN_BANK: i64 = 98495;
+/// The reference host's first call moves with the length of the path: 25.5 colour clocks per
+/// character of the directory when the bank has to be looked for twice, 17 when it is found at
+/// once, and 10.5 per character of the file name.
+const DIR_REF_LEN: i64 = 60;
+const NAME_REF_LEN: i64 = 9;
 /// Colour clocks from a handler call to its read of the interrupt flags (any value from 40 to 100
 /// fits the reference logs; the prologue before the first channel is 94).
 const S_READ: u64 = 94;
@@ -169,6 +182,7 @@ pub struct PaulTonge {
     marks: [bool; 4],
     songend: bool,
     t0: u64,
+    first_delay: u64,
     cy: u64,
 }
 
@@ -927,13 +941,10 @@ impl Replayer for PaulTonge {
         String::new()
     }
 
-    /// The reference host's first tick falls 98306 colour clocks after the start in six of the
-    /// nine songs of the set (the others, 98269, 98346 and 97900, depend on the host's loading
-    /// in a way the files do not predict): 27266 clocks later than the engine's standard first
-    /// tick. The audio interrupt race of 5.11 depends on the phase within the raster line and
-    /// the frame.
+    /// The reference host's first tick depends on its file loading (`first_tick_delay`); the
+    /// audio interrupt race of 5.11 depends on the phase within the raster line and the frame.
     fn timer_delay(&self) -> u64 {
-        FIRST_TICK_DELAY
+        self.first_delay
     }
 
     fn tick(&mut self, hw: &mut Hw) {
@@ -955,7 +966,9 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     let file = m.bus.read_cstr(m.deli.file_buf);
+    let dir_len = m.bus.read_cstr(m.deli.dir_buf).len();
     let mut bank = crate::deli::read_companion(m, &bank_name(&file)).1;
+    let own_bank = bank.is_ok();
     if bank.is_err() {
         bank = crate::deli::read_companion(m, "SMP.set").1;
     }
@@ -1001,7 +1014,36 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         t0: 0,
         cy: 0,
+        first_delay: first_tick_delay(d, dir_len, file.len(), own_bank),
     }))
+}
+
+/// The first call of the play routine in the reference, which the host's file loading moves (by
+/// the path and file name lengths, by whether the song's own bank was found, and by what its
+/// loader does with the three later position lists of the file): as colour clocks after the
+/// engine's standard first tick.
+fn first_tick_delay(d: &[u8], dir_len: usize, name_len: usize, own_bank: bool) -> u64 {
+    let (dl, nl) = (dir_len as i64 - DIR_REF_LEN, name_len as i64 - NAME_REF_LEN);
+    // twice the colour clocks, so that the half clocks round up as the reference's do
+    let half = if own_bank { 2 * FIRST_CALL_OWN_BANK + 34 * dl } else { 2 * FIRST_CALL_FALLBACK + 51 * dl } + 21 * nl;
+    let mut cc = (half + 1).div_euclid(2);
+    // a list offset of 0 in the header (bits: lists 1, 2, 3) skips that list's check
+    let off = |i: usize| if d.len() >= 8 { be16(d, 2 * i) as usize } else { 0 };
+    let mask = (1..4).fold(0usize, |m, i| m | usize::from(off(i) == 0) << (i - 1));
+    cc += [0, -37, -45, -72, -45, -81, -89, -111][mask];
+    // every list that is there and whose first pattern follows the stop byte 0x8F (not 0x80)
+    // costs 27 cycles more
+    let stops = (1..4)
+        .filter(|&i| {
+            let o = off(i);
+            o != 0 && o + 2 <= d.len() && {
+                let e = be16(d, o) as usize;
+                e >= 1 && e < d.len() && d[e - 1] == 0x8F
+            }
+        })
+        .count() as i64;
+    cc += 27 * stops / 2;
+    (FIRST_TICK_DELAY as i64 + cc - 98306).max(0) as u64
 }
 
 #[cfg(test)]

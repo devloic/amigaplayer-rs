@@ -173,7 +173,8 @@ fn period_table_and_state_words() {
     assert_eq!(z.ptab(45 + 20), 33);
     assert_eq!(z.ptab(45 + 20 + 2), 400);
     assert_eq!(z.ptab(45 + 20 + 3), 2);
-    assert_eq!(z.ptab(125), 0);
+    assert_eq!(z.ptab(125), 0xF400);
+    assert_eq!(z.ptab(126), 0);
     assert_eq!(z.ptab(255), 0);
 }
 

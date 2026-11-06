@@ -1,9 +1,9 @@
 //! ZoundMonitor (`sng.*`; AJ of Activas, 1988; the replayer of the demo "The Musical FruitBasket").
 //!
 //! Clean-room, written from a behavioural specification and black-box runs of the 68k player's
-//! register writes; no original code, nothing embedded (the 37-value period table is the
-//! specification's). A song file holds the song, the position table, the single-voice patterns
-//! and up to 15 sample descriptions; the sample data are separate files in a `Samples` directory
+//! register writes; no original code, only three bytes of player state constants embedded (see
+//! `STATE_CONSTANTS`; the 37-value period table is the specification's). A song file holds the
+//! song, the position table, the single-voice patterns and up to 15 sample descriptions; the sample data are separate files in a `Samples` directory
 //! beside the song. Four voices, 50 Hz, a row every `speed` ticks: note starts, instrument loads,
 //! arpeggio, slide and portamento; the sample started on a row tick is switched on by the next
 //! tick. Every register write is placed at the cycle of the specification's cost model (the tick's
@@ -18,6 +18,12 @@ use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "ZoundMonitor", detect, new };
+
+/// Three bytes of the original player's state that a note index past the period table reads:
+/// byte 0 is the high byte of the word at index 37 (its low byte is the song speed), bytes 1 and 2
+/// are the whole word at index 125. Taken from the original player on the project owner's
+/// decision (a small player table, embedded like the other such tables).
+const STATE_CONSTANTS: &[u8; 3] = include_bytes!("zoundmonitor_state_constants.bin");
 
 /// Period table, indices 0 to 36.
 const PERIODS: [u16; 37] = [
@@ -204,7 +210,11 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     for (v, x) in z.v.iter_mut().enumerate() {
         x.bit = 1 << v;
     }
-    // the host's own work before the first tick (measured: the first entry's colour clock)
+    // The host's own work before the first tick. It depends on the host (directory and file names,
+    // sample count), not on the module; the first entry's clock is taken from the reference logs
+    // (92 830 for three samples, 94 344 to 94 391 with four; 94 360 is a mid value). It only shifts
+    // the raster-line phase of the effect-tick wait, so a different value moves those writes by a
+    // few colour clocks and changes no value or order.
     let samples = (0..15).filter(|&i| d.get(slot(i) + 4).copied().unwrap_or(0) != 0).count() as u64;
     let first = if samples <= 3 { 92830 } else { 94360 };
     Hw { bus: &mut m.bus }.wait(first - 100 - 70940);
@@ -246,7 +256,7 @@ impl Zm {
         let i = i as usize;
         match i {
             0..=36 => PERIODS[i],
-            37 => 0x0200 | self.speed as u16,
+            37 => (STATE_CONSTANTS[0] as u16) << 8 | self.speed as u16,
             38 => 15,
             39 => self.p_max as u16,
             40 => (self.t_max as u16) << 8 | self.tick as u16,
@@ -254,6 +264,7 @@ impl Zm {
             42 | 43 => (self.start as u16) << 8 | self.end as u16,
             44 => self.mask,
             45..=124 => self.v[(i - 45) / 20].image((i - 45) % 20),
+            125 => u16::from_be_bytes([STATE_CONSTANTS[1], STATE_CONSTANTS[2]]),
             _ => 0,
         }
     }

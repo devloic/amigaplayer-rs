@@ -120,7 +120,7 @@ const SERVER_ORDER: [usize; 4] = [1, 3, 0, 2];
 /// The gaps between a handler's writes.
 const T_IRQ_GAP: u64 = 8;
 /// An INTENA write enabling a pending request to the processor taking it.
-const T_IRQ_RECOGNISE: u64 = 12;
+const T_IRQ_RECOGNISE: u64 = 24;
 
 const LINE: u64 = crate::paula::LINE;
 
@@ -1044,9 +1044,9 @@ impl Replayer for Silmarils {
             for ch in 0..4 {
                 hw.vol(ch, 0);
             }
-            for v in [0x8080, 0x8100, 0x8200, 0x8400] {
-                hw.bus.write_word(0xDFF09A, v);
-            }
+            // the four audio interrupts are enabled when the player starts, but the reference
+            // shows no write that does it (its host did, before the log begins)
+            hw.bus.paula.intena |= 0x0780;
         }
         if self.silent {
             return;
@@ -1222,18 +1222,8 @@ mod tests {
         // the start-up writes, in order
         let start = log.iter().position(|w| *w == (0xDFF096, 0x000F)).unwrap();
         assert_eq!(
-            log[start..start + 9],
-            [
-                (0xDFF096, 0x000F),
-                (0xDFF0A8, 0),
-                (0xDFF0B8, 0),
-                (0xDFF0C8, 0),
-                (0xDFF0D8, 0),
-                (0xDFF09A, 0x8080),
-                (0xDFF09A, 0x8100),
-                (0xDFF09A, 0x8200),
-                (0xDFF09A, 0x8400)
-            ]
+            log[start..start + 5],
+            [(0xDFF096, 0x000F), (0xDFF0A8, 0), (0xDFF0B8, 0), (0xDFF0C8, 0), (0xDFF0D8, 0)]
         );
         // the note: the one-shot sample whole, the period of note 0x24, the velocity
         assert_eq!(reg(&log, 0xDFF0A4)[0], 16);

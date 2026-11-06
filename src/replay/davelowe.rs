@@ -1206,7 +1206,12 @@ impl DaveLowe {
         self.tw(hw, self.tt);
         let bit = 1u16 << self.v[vi].ch;
         // (the original's DMA start also sets the master enable bit)
-        let master = if self.cfg.kind == Kind::Dl && self.dmaon_master[self.v[vi].ch & 3] { 0x0200 } else { 0 };
+        let master = match self.cfg.kind {
+            Kind::Dl if self.dmaon_master[self.v[vi].ch & 3] => 0x0200,
+            // Dave Lowe New: the DMA start of voice 3 carries it (0x8208), the others do not
+            Kind::DlnA | Kind::DlnB if self.v[vi].ch & 3 == 3 => 0x0200,
+            _ => 0,
+        };
         hw.dmacon(if on { 0x8000 | master | bit } else { bit });
         if self.cfg.kind == Kind::DlnB {
             // the enable follows 10 colour clocks later and delays all that comes after

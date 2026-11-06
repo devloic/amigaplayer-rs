@@ -731,6 +731,17 @@ impl Scumm {
 /// Colour clocks the original's start-up takes before its timer starts: the song's sound counts
 /// from here (what a render keeps of Paula's output), and the first tick follows later.
 const INIT_CLOCKS: u64 = 190;
+/// `INIT_CLOCKS` per family, relative to the song's start (where the engine aligns Paula's
+/// output and line grids): the original's song starts this much before the first tick's
+/// fitted time (the sweeps and the siren, the plain sequencers and Zak's, Maniac Mansion's:
+/// 18, 35 and 23 colour clocks before).
+fn init_clocks(fam: &Family) -> u64 {
+    match fam {
+        Family::Sweep(_) | Family::Siren(_) => INIT_CLOCKS - 18,
+        Family::Seq(Seq { four: true, dma_off_first: true, .. }) => INIT_CLOCKS - 23,
+        Family::Seq(_) => INIT_CLOCKS - 35,
+    }
+}
 /// From the start of the timer to the first tick: the first call's entry, in a line, from the
 /// write logs (the sweeps' first call, with all four channels on at once, enters later).
 const FIRST_DELAY: u64 = 201;
@@ -767,7 +778,7 @@ impl Replayer for Scumm {
                 Family::Siren(_) => SIREN_FIRST_DELAY,
                 _ => FIRST_DELAY,
             };
-            return super::DT_TICK + first - INIT_CLOCKS;
+            return super::DT_TICK + first - init_clocks(&self.fam);
         }
         if self.first {
             super::DT_TICK
@@ -805,7 +816,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     m.bus.write_cstr(m.deli.path_buf, &full);
     // the original's start-up runs this long before the timer starts: the sound of the song
     // counts from its end (the timer's delay below is that much shorter)
-    m.bus.clock += INIT_CLOCKS;
+    m.bus.clock += init_clocks(&fam);
     let p = Scumm { fam, img: d.to_vec(), base, title, a0: [0; SCRATCH], first: true, armed: std::cell::Cell::new(false), songend: false, cold: 0, in_first: false, nstart: 0 };
     Some(Box::new(p))
 }

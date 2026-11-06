@@ -138,6 +138,14 @@ impl Paula {
         self.out.restart();
     }
 
+    /// The song starts at colour clock `t` (the channels have been run to it): the
+    /// output sample grid and the DMA line grid restart there, so that what is heard
+    /// depends only on the time since the start and not on how long loading took.
+    pub fn align_to_start(&mut self, t: u64) {
+        self.out.restart();
+        self.next_line = t.max(self.last) + LINE;
+    }
+
     /// Plays volume 64 as 63 and periods below 16 as 16, as UADE does.
     pub fn set_uade_quirks(&mut self, on: bool) {
         self.quirks = if on { Quirks::Uade } else { Quirks::Hardware };

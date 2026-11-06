@@ -34,14 +34,25 @@ const MIN_SIZE: usize = 1024;
 /// Colour clocks from the host's start phase to the first location write in the reference
 /// runs (the 68k host's own start burst; measured).
 const START_EXTRA: u64 = 7315;
+/// Colour clocks the reference's check takes longer when it does not exit early (the start of the
+/// run moves, the distances inside it do not; the same for every length of the leading run).
+const NOT_ALL_A_EXTRA: u64 = 19;
 /// Colour clocks of the start-up: the first location write to the DMA enable.
 const INIT_LEAD: u64 = 211;
+/// The reference's song start (where Paula's output and line grids restart) is this many colour
+/// clocks after the DMA enable.
+const SONG_START_LAG: u64 = 8;
 /// Handler cost from its first write to the first pointer write.
 const D_FULL: u64 = 6641;
 const D_LAST_FULL: u64 = 6639;
 const D_PARTIAL: u64 = 6641 + 120;
 const D_PARTIAL_LONG: u64 = 15;
 const D_CLEAR: u64 = 224 + 15 * 256;
+
+/// The first 24 words are all the first key word (the check's early exit).
+fn all_a(d: &[u8]) -> bool {
+    (0..24).all(|j| be32(d, 4 * j) == W_A)
+}
 
 /// The player's own content rule on the first 25 words.
 fn detect(d: &[u8]) -> bool {
@@ -178,7 +189,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     p.fill(&mut m.bus.ram, buf, BUF);
     p.rem -= BUF;
     // the start-up writes, at the distances measured in the reference runs
-    let t0 = m.bus.clock + START_EXTRA;
+    let t0 = m.bus.clock + START_EXTRA + if all_a(&d) { 0 } else { NOT_ALL_A_EXTRA };
     let e = t0 + INIT_LEAD;
     let mut hw = Hw { bus: &mut m.bus };
     for ch in 0..4 {
@@ -201,6 +212,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     m68k::AddressBus::write_word(hw.bus, 0xDFF09A, 0x8080);
     hw.bus.clock = e;
     hw.dmacon(0x800F);
+    hw.bus.clock = e + SONG_START_LAG;
     Some(Box::new(p))
 }
 

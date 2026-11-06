@@ -65,8 +65,9 @@ fn run(d: Vec<u8>, ticks: usize) -> Option<(Vec<(u32, u16, u64)>, bool)> {
     }
     let mut out = vec![0f32; 2 * 960];
     let mut end = false;
-    // the first tick falls one tick period after the start
-    for _ in 0..=ticks {
+    // the first tick falls inside the first frame after the start (the output and DMA line grids
+    // start with the song, so the reference's first tick is no longer a full period away)
+    for _ in 0..ticks {
         e.render(&mut out);
         end |= e.songend();
     }

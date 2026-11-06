@@ -227,6 +227,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     m68k::AddressBus::write_word(hw.bus, 0xDFF09A, 0x8080);
     at(&mut hw, INIT_LEAD);
     hw.dmacon(0x800F);
+    // the song starts (Paula's grids restart) 8 colour clocks after the DMA enable in the reference
+    hw.bus.clock += 8;
     Some(Box::new(p))
 }
 

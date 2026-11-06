@@ -385,9 +385,12 @@ fn first_tick_clock_follows_the_directory_path() {
         e.render(&mut out);
         e.m.bus.write_log.take().unwrap()[0].2
     };
+    // The song start (where Paula's grids restart) lies a fixed time before the first tick, so
+    // the path length moves the clock of the first write only by its raster-line phase: 272 cc
+    // for 32 characters longer, modulo a raster line of 227 (the beam the ticks' waits see).
     let a = first("/aaaa");
     let b = first("/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); // 32 characters longer: 272 cc
-    assert_eq!(b - a, 272);
+    assert_eq!((b as i64 - a as i64).rem_euclid(227), 272 % 227);
 }
 
 // ---------------------------------------------------------------------------------

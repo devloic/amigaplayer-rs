@@ -29,6 +29,12 @@ pub const OPEN: Open = Open { name: "TFMX ST", detect, new };
 
 /// Colour clocks between two ticks.
 const TICK: u64 = 70940;
+
+/// The song starts (Paula's output and DMA line grids restart there: `Paula::align_to_start`) one
+/// colour clock after the clock the tick schedule is fitted to: in the reference the first write
+/// falls 73 304 (module `mdst.h2`; 73 209 to 74 903 over the set-up costs) clocks after the song
+/// start where the absolute-clock fit had it at 73 305.
+const ORIGIN_SHIFT: u64 = 1;
 /// CPU cycles from the run's origin to the first tick of a module with one track step of one
 /// started track, seven stopped, a seven-step macro range (one step above $3F) and no sample.
 const E0H_BASE: i64 = 460391;
@@ -277,6 +283,8 @@ pub struct TfmxSt {
     trap_cy: i64,
     /// Ticks run so far (the first two are timed off the regular spacing).
     ticks_run: u32,
+    /// The colour clock the last tick started at.
+    tick_t0: u64,
     /// Half colour clock of the tick phase (the start clock is a whole number of cycles).
     half: u64,
     noise: u32,
@@ -1518,7 +1526,9 @@ impl TfmxSt {
         t += 12;
         c.at(hw, t);
         hw.dmacon(0x8000 | m);
-        let first = 302;
+        // the original polls the flag every 29 cycles from 12 cycles after DMACON, and goes on
+        // 29 cycles after the look that finds it set (Paula sets it at its next line start)
+        let first = 12;
         let mut p = t + first;
         for _ in 0..2000 {
             hw.bus.paula.sync(c.cc(p), &hw.bus.ram);
@@ -1528,7 +1538,7 @@ impl TfmxSt {
             p += 29;
         }
         self.conv.running[ch] = true;
-        let t = c.beam_wait(p + (331 - first) - 21) + 21;
+        let t = c.beam_wait(p + 29 - 21) + 21;
         c.at(hw, t);
         hw.loc(ch, lp.0);
         let t = t + 12;
@@ -1635,7 +1645,16 @@ impl Replayer for TfmxSt {
     }
 
     fn tick_clocks(&self) -> u64 {
-        TICK
+        // the first period starts `ORIGIN_SHIFT` later (see there): the first tick keeps its time
+        if self.ticks_run == 0 {
+            TICK - ORIGIN_SHIFT
+        } else {
+            TICK
+        }
+    }
+
+    fn next_tick_at(&self) -> Option<u64> {
+        Some(self.tick_t0 + TICK)
     }
 
     fn songend(&self) -> bool {
@@ -1658,6 +1677,7 @@ impl Replayer for TfmxSt {
 
     fn tick(&mut self, hw: &mut Hw) {
         let t0 = hw.bus.clock;
+        self.tick_t0 = t0;
         self.run();
         // the first two ticks come off the regular spacing (measured; see FIRST_TICKS)
         let adj = FIRST_TICKS.get(self.ticks_run as usize).copied().unwrap_or(0);
@@ -1754,6 +1774,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         cy: 0,
         trap_cy: 0,
         ticks_run: 0,
+        tick_t0: 0,
         half: 0,
         noise: blk,
         pulse,
@@ -1785,7 +1806,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // write time is exact for it on every module, and a cycle off for the even sums).
     let e0 = (setup.max(1) as u64 - 1) / 2;
     p.half = 1;
-    m.bus.clock = (origin + e0).saturating_sub(TICK).max(m.bus.clock);
+    m.bus.clock = (origin + e0).saturating_sub(TICK).max(m.bus.clock) + ORIGIN_SHIFT;
     Some(Box::new(p))
 }
 

@@ -57,8 +57,11 @@ const LEVELS: [u8; 18] = [0x80, 0x93, 0xA7, 0xBF, 0xCF, 0xDF, 0xEF, 0xFF, 0x0F, 
 /// Paula channel and DMA mask of the four sound sources A, B, C and the digital voice.
 const CHAN: [(usize, u16); 4] = [(0, 1), (3, 8), (2, 4), (1, 2)];
 
-/// The play code's cost before the first write of a tick (the measured baseline).
-const FIRST_GAP: u64 = 1790;
+/// The play code's cost before the first write of a tick, and what the first tick adds to it
+/// (fitted to the reference's logs relative to the song start, over eight modules: the cost varies
+/// with the module by a few hundred colour clocks, the first tick's set-up by about 1000 more).
+const FIRST_GAP: u64 = 2040;
+const FIRST_TICK_EXTRA: u64 = 1200;
 
 /// Colour clocks from the last write of a note start's first half (the length) to the interrupt
 /// request, by source.
@@ -555,6 +558,7 @@ pub struct JochenHippelSt {
     /// The level byte the digital voice plays in SID mode.
     level: u8,
     songend: bool,
+    first_tick_pending: bool,
 }
 
 impl JochenHippelSt {
@@ -1181,7 +1185,8 @@ impl Replayer for JochenHippelSt {
 
     fn tick(&mut self, hw: &mut Hw) {
         self.play();
-        hw.wait(FIRST_GAP);
+        hw.wait(FIRST_GAP + if self.first_tick_pending { FIRST_TICK_EXTRA } else { 0 });
+        self.first_tick_pending = false;
         self.paula(hw);
     }
 }
@@ -1286,6 +1291,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         a_vol: 0,
         level: 0,
         songend: false,
+        first_tick_pending: true,
     };
     p.init_sound(1);
     Some(Box::new(p))

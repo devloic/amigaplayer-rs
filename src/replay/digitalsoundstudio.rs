@@ -68,6 +68,11 @@ const PERIODS: [u16; 48] = [
 ];
 /// Words of 113 after the table, up to the sample addresses.
 const PAD: usize = 30;
+/// Colour clocks from the end of the start's fitted time to the original's song start (the
+/// engine's, from which Paula's output and line grids run): the module's first tick comes
+/// that much before the end of its first period, in the write logs of every module (the
+/// fit of the start puts it within a colour clock).
+const START_SHIFT: u64 = 16;
 /// The mirror of the hunk from the period table on: the periods, the padding,
 /// the 31 sample addresses and the module pointer.
 const SAMPLES_OFF: u32 = 2 * (PERIODS.len() + PAD) as u32;
@@ -109,6 +114,8 @@ pub struct DigitalSoundStudio {
     /// The start's code paths (`start`) and the colour clocks they took.
     init: [(Cost, u32); 5],
     init_wait: u64,
+    /// The first tick is still to come (its period is shortened by `START_SHIFT`).
+    first: std::cell::Cell<bool>,
     /// The newer Digital Sound Studio's player, for a module with a tempo.
     np: Option<np::Np>,
 }
@@ -161,6 +168,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         counts: Vec::new(),
         init: start(d),
         init_wait: 0,
+        first: std::cell::Cell::new(true),
         np: None,
     };
     // DeliTracker's timer starts after the Eagleplayer's check, EP_Get_ModuleInfo
@@ -174,6 +182,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     r.init_wait = c.max(0.0).round() as u64;
     m.bus.clock += r.init_wait;
     r.init_sound(d, &mut m.bus, true);
+    // the song starts (the engine aligns Paula's output and line grids there) when the
+    // original's does: START_SHIFT after what the fit took for the start, while the first
+    // tick keeps its time (its period is shorter by as much, see `tick_clocks`)
+    m.bus.clock += START_SHIFT;
     Some(Box::new(r))
 }
 
@@ -224,6 +236,9 @@ impl Replayer for DigitalSoundStudio {
     }
 
     fn tick_clocks(&self) -> u64 {
+        if self.np.is_none() && self.first.replace(false) {
+            return super::DT_TICK - START_SHIFT;
+        }
         self.np.as_ref().map_or(super::DT_TICK, |n| n.tick_clocks())
     }
 

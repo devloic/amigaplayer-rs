@@ -117,6 +117,10 @@ const TICK_CLOCKS: u64 = 71_051;
 /// Colour clocks from the start of the reference run to its first tick: a constant of the
 /// reference's run for nearly every module (module size and start-up time do not move it).
 const FIRST_TICK_ABS: u64 = 71_150;
+const SETUP_BASE: u64 = 26_538;
+const SETUP_PER_SCORE: u64 = 322;
+const SETUP_PER_SAMPLE: u64 = 417;
+const SETUP_PER_OCTAVE: u64 = 334;
 /// The wait for the frame's set-up before the voices' turns, in 68000 cycles.
 const T_FRAME: u64 = 583;
 /// A pitch bend event (the other events take no time worth the name), in colour clocks.
@@ -483,6 +487,11 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let mut hw = Hw { bus: &mut m.bus };
     mx.init_sound(&mut hw, 0);
     mx.resume = Some(FIRST_TICK_ABS);
+    // The reference's song start (where Paula's grids restart) is the end of the driver's set-up, which
+    // takes longer with more scores, samples and octaves (a least-squares fit on 57 real modules, rms
+    // 130 colour clocks; the first tick is at an absolute clock whatever the set-up took).
+    let est = SETUP_BASE + SETUP_PER_SCORE * nscores as u64 + SETUP_PER_SAMPLE * be16(&mx.sd, so2) as u64 + SETUP_PER_OCTAVE * mx.samples.len() as u64;
+    m.bus.clock = m.bus.clock.max(est.min(FIRST_TICK_ABS - 2_000));
     Some(Box::new(mx))
 }
 

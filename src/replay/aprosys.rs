@@ -44,6 +44,10 @@ const CIAA_PRA: u32 = 0xBFE001;
 /// The start-up call's first DMACON write and the CIA write of a filter command (in half colour
 /// clocks from the run's origin), before the sum of the costs of the sequence entries met until
 /// them (the first entry's included).
+/// Colour clocks the song start (the engine's clock when the start-up call returns) lies from the end
+/// of the start-up call, for a keyed and a plain start.
+const SONG_START_KEYED: i64 = -73;
+const SONG_START_PLAIN: i64 = 327;
 const START_PLAIN_H: u64 = 7967;
 const START_CIA_H: u64 = 5207;
 /// Colour clocks from the end of the start-up call (the audio interrupts it requests come after)
@@ -211,6 +215,10 @@ const IRQ_NEXT: u64 = 218;
 /// Instructions budget guards.
 const SEQ_GUARD: usize = 4096;
 const ADV_GUARD: usize = 100_000;
+/// Colour clocks from the end of the last voice's turn to the song-end INTENA write, and from it to the
+/// DMACON write.
+const END_TO_INTENA: u64 = 670;
+const END_TO_DMACON: u64 = 10;
 const STOP: u32 = u32::MAX;
 
 /// The chunks' file offsets, when the nine of them lie inside the file.
@@ -877,11 +885,16 @@ impl Aps {
         if self.timer != 0 {
             return;
         }
+        let (t_adv, h_adv) = (hw.bus.clock, self.half);
         if self.advance(hw).is_err() {
             self.ended = true;
-            self.wc(hw, 100);
+            // the song-end stop falls a fixed time after the last voice's turn, whatever the
+            // advance cost the port charged on the way to the end entry (measured: INTENA 670, DMACON 10 later)
+            hw.bus.clock = t_adv;
+            self.half = h_adv;
+            self.wc(hw, END_TO_INTENA);
             self.intena(hw, 0x0780);
-            self.wc(hw, 40);
+            self.wc(hw, END_TO_DMACON);
             hw.dmacon(0x000F);
         }
     }
@@ -1637,6 +1650,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the first tick follows the end of the call to the half clock
     let ft = 2 * hw.bus.clock + r.half + if keyed { START_TO_TICK_KEYED_H } else { START_TO_TICK_H };
     r.first_tick = Some(ft.div_ceil(2));
+    // the song start (where Paula's output and line grids restart) is this far from the end of the
+    // start-up call in the reference (measured on the first write of each module)
+    hw.bus.clock = (hw.bus.clock as i64 + if keyed { SONG_START_KEYED } else { SONG_START_PLAIN } + r.half as i64) as u64;
     Some(Box::new(r))
 }
 

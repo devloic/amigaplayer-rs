@@ -239,6 +239,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     q.visited[0] = true;
     // the init routine sets the LED bit of CIA-A's port: the filter is off
     m.bus.ciaa.pra |= 2;
+    // The original's init (everything before the tick timer starts) takes a fixed 14672 CPU
+    // cycles plus 191 per sample entry and 114 per pattern entry of the EMIC chunk (traced:
+    // DELI_TRACE, 16 modules, exact), less the two colour clocks the engine's per-call rounding
+    // drops. Nothing in it waits for the beam or a timer, so this alone sets the phase of the
+    // ticks against the raster. The song starts (the engine aligns Paula's output and line grids
+    // there) at the timer's start, after the init, and the timer then runs a plain period.
+    let (ns, np) = q.init_counts;
+    m.bus.clock += (14672 + 191 * ns + 114 * np) / 2 - 2;
     Some(Box::new(q))
 }
 
@@ -257,16 +265,6 @@ impl Replayer for QuadraComposer {
 
     fn tick_clocks(&self) -> u64 {
         (self.timer as u64 + 1) * 5
-    }
-
-    /// The original's init (everything before the tick timer starts) takes a fixed 14672 CPU
-    /// cycles plus 191 per sample entry and 114 per pattern entry of the EMIC chunk (traced:
-    /// DELI_TRACE, 16 modules, exact), less the two colour clocks the engine's per-call rounding
-    /// drops. Nothing in it waits for the beam or a timer, so this alone sets the phase of the
-    /// ticks against the raster.
-    fn timer_delay(&self) -> u64 {
-        let (ns, np) = self.init_counts;
-        (14672 + 191 * ns + 114 * np) / 2 - 2
     }
 
     fn tick(&mut self, hw: &mut Hw) {

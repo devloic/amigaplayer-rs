@@ -137,6 +137,7 @@ pub mod fashiontracker;
 pub mod seanconnolly;
 pub mod seanconran;
 pub mod soundplayer;
+pub mod custommade;
 pub mod ronklaren;
 pub mod scumm;
 pub mod silmarils;
@@ -299,6 +300,9 @@ pub const REPLAYERS: &[Open] = &[
     dynamicsynthesizer::OPEN,
     artofnoise::OPEN4,
     artofnoise::OPEN8,
+    // raw Ron Klaren dumps (entry-word rules, a 12-byte marker and the driver's table markers); the
+    // hunk modules of the next replayer fail the entry-word rule, so no order dependence
+    custommade::OPEN,
     ronklaren::OPEN,
     digitalsoundstudio::OPEN,
     musicassembler::OPEN,

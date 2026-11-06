@@ -21,6 +21,7 @@
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
+use m68k::AddressBus;
 
 pub const OPEN: Open = Open { name: "Sound Master", detect, new };
 
@@ -792,7 +793,6 @@ impl Sm {
             self.patlen = self.r8(g + 0xDE + c);
             self.loopstep = self.r8(g + 0xDF + c);
             self.endstep = self.r8(g + 0xE0 + c);
-            hw.dmacon(0x000F);
             self.step = self.loopstep;
             self.load_step();
         }
@@ -905,6 +905,11 @@ impl Replayer for Sm {
         self.songend
     }
 
+    /// The first tick's first write follows its timer call by this much (the interrupt's entry).
+    fn timer_delay(&self) -> u64 {
+        ENTRY
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
         if !self.started {
             self.started = true;
@@ -917,6 +922,11 @@ impl Replayer for Sm {
     }
 }
 
+/// From the host's first write to the song start, and from a timer call to the first write of its
+/// tick, in the reference's runs.
+const START: u64 = 2006;
+const ENTRY: u64 = 156;
+
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let lay = scan(d)?;
     let n = if lay.build == Build::B { 64 } else { 46 };
@@ -924,6 +934,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let title = m.bus.read_cstr(m.deli.file_buf);
     // the init routine sets the LED bit of CIA-A's port: the filter is off
     m.bus.ciaa.pra |= 2;
+    // the host's start (DMA off, the audio modulation off) comes before the song start
+    let t0 = m.bus.clock;
+    m.bus.write_word(0xDFF096, 0x000F);
+    m.bus.clock = t0 + 8;
+    m.bus.write_word(0xDFF09E, 0x00FF);
+    m.bus.clock = t0 + START;
     Some(Box::new(Sm {
         img: d.to_vec(),
         base,

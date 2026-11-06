@@ -64,6 +64,10 @@ const MASTER: i16 = 64;
 /// after a voice's step, and before the loop registers (about 8 raster lines).
 const T_VOICE: u64 = 360;
 const T_WRITE: u64 = 40;
+/// From the host's first write (the interrupts off) to the song start, and from a timer call to
+/// the first write of its tick, in the reference's runs.
+const START: u64 = 990;
+const ENTRY: u64 = 163;
 const T_LOOP: u64 = 1900;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -256,7 +260,6 @@ struct PaulShields {
     v: [Voice; 4],
     dacc: u16,
     iacc: u16,
-    started: bool,
     songend: bool,
 }
 
@@ -290,7 +293,9 @@ impl PaulShields {
 
     fn init(&mut self, hw: &mut Hw) {
         hw.bus.write_word(0xDFF09A, 0x0780);
+        hw.wait(8);
         hw.dmacon(0x000F);
+        hw.wait(8);
         hw.bus.write_word(0xDFF09E, 0x00FF);
         if !self.lay.engine_a() {
             self.filter(hw, true);
@@ -778,12 +783,12 @@ impl Replayer for PaulShields {
         self.songend
     }
 
+    /// The first tick's first write follows its timer call by this much (the interrupt's entry).
+    fn timer_delay(&self) -> u64 {
+        ENTRY
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
-        if !self.started {
-            self.started = true;
-            self.songend = false;
-            self.init(hw);
-        }
         let itmp = self.iacc;
         hw.dmacon(self.dacc);
         hw.wait(T_WRITE);
@@ -833,7 +838,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             a += n;
         }
     }
-    Some(Box::new(PaulShields {
+    let mut s = PaulShields {
         d: d.to_vec(),
         lay,
         base,
@@ -844,9 +849,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         v: Default::default(),
         dacc: 0,
         iacc: 0,
-        started: false,
         songend: false,
-    }))
+    };
+    // the host's start (interrupts and DMA off, the audio modulation off) comes before the song
+    // start, not with the first tick
+    let t0 = m.bus.clock;
+    s.init(&mut Hw { bus: &mut m.bus });
+    m.bus.clock = t0 + START;
+    Some(Box::new(s))
 }
 
 #[cfg(test)]

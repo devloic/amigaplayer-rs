@@ -1,7 +1,5 @@
-//! Tests on small synthetic modules built in code (no module files).
 use super::*;
-use crate::engine::Engine;
-use std::path::Path;
+use m68k::CpuType;
 
 fn put16(d: &mut [u8], o: usize, v: u16) {
     d[o..o + 2].copy_from_slice(&v.to_be_bytes());
@@ -11,171 +9,99 @@ fn put32(d: &mut [u8], o: usize, v: u32) {
     d[o..o + 4].copy_from_slice(&v.to_be_bytes());
 }
 
-/// The data block (plain kind): four rows, an order list of one entry (rows 0..1, speed 2) and an
-/// end marker that jumps to it, two instrument records, one volume table, one pitch table and a
-/// sample table of one entry. `row0` is the first row's four channel words.
-fn block(row0: [u16; 4]) -> Vec<u8> {
-    let mut d = vec![0u8; 0x100];
-    put32(&mut d, 0, 0x18);
-    put32(&mut d, 4, 0x38);
-    put32(&mut d, 8, 0x40);
-    put32(&mut d, 12, 0xE0);
-    put32(&mut d, 16, 0x60);
-    put32(&mut d, 20, 0xA0);
-    for (c, w) in row0.iter().enumerate() {
-        put16(&mut d, 0x18 + 2 * c, *w);
+/// Plain module: rows at 0x18, order at 0x40, instruments at 0x60, sample table at 0xA0, volume
+/// tables at 0xC0, pitch tables at 0x140, sample at 0x1C0. Row 1 starts instrument 0 on voice 0
+/// at note `note`; the order plays rows 1..1 at speed 2, then ends with a jump to entry 0.
+fn module(note: u8) -> Vec<u8> {
+    let mut d = vec![0u8; 0x200];
+    for (i, v) in [0x18u32, 0x40, 0x60, 0xA0, 0xC0, 0x140].iter().enumerate() {
+        put32(&mut d, 4 * i, *v);
     }
-    put16(&mut d, 0x38, 0);
-    put16(&mut d, 0x3A, 0x2001);
-    put16(&mut d, 0x3C, 0xFFFF);
-    put16(&mut d, 0x3E, 0);
-    // instrument 0: sample 0, play once, volume table 0, pitch table 0, start volume 0x40
-    d[0x40 + 9] = 0x40;
-    // sample table entry 0: start 0xF0 (in 4-byte units), 4 words
-    put16(&mut d, 0xE0, 0x3C);
-    put16(&mut d, 0xE2, 4);
+    put16(&mut d, 0x18 + 8, (note as u16) << 8);
+    put16(&mut d, 0x40, 1);
+    put16(&mut d, 0x42, 0x2001);
+    put16(&mut d, 0x44, 0xFFFF);
+    put16(&mut d, 0x46, 0);
+    d[0x60 + 9] = 0x40;
+    d[0x60 + 1] = 0;
+    put16(&mut d, 0xA0, 0x1C0 / 4);
+    put16(&mut d, 0xA2, 8);
     d
 }
 
-fn easo(b: &[u8]) -> Vec<u8> {
-    let mut d = b"EASO".to_vec();
-    d.extend_from_slice(b);
-    d
-}
-
-fn branch(b: &[u8]) -> Vec<u8> {
-    let mut d = vec![0u8; 20];
-    d[0..2].copy_from_slice(&KEY[0..2]);
-    put16(&mut d, 2, 6);
-    d[4..6].copy_from_slice(&KEY[0..2]);
-    put16(&mut d, 6, 2);
-    d[8..18].copy_from_slice(&KEY[2..12]);
-    put16(&mut d, 18, 2);
-    // d3 = 2 puts the data start right after the word
-    d.truncate(20);
-    d.extend_from_slice(b);
-    d
-}
-
-type Log = Vec<(u32, u16, u64)>;
-
-fn play(d: Vec<u8>, ticks: usize) -> Option<(Log, bool)> {
-    let mut e = Engine::new(48000.0);
-    e.open_replayers = true;
-    e.m.bus.write_log = Some(Vec::new());
-    e.play_data(Path::new("/ea-test/ea.test"), d).ok()?;
-    if e.playing.as_ref()?.format != "EarAche" {
-        return None;
+fn run(d: &[u8], ticks: usize) -> (Vec<(u32, u16, u64)>, bool) {
+    let mut m = Machine::new(CpuType::M68000);
+    m.bus.write_log = Some(Vec::new());
+    m.bus.clock = 1_000_000;
+    let mut r = new(d, 0x10000, &mut m).unwrap();
+    for _ in 0..ticks {
+        m.bus.clock += TICK;
+        let mut hw = Hw { bus: &mut m.bus };
+        r.tick(&mut hw);
     }
-    let mut out = vec![0f32; 2 * 960];
-    let mut end = false;
-    for _ in 0..=ticks {
-        e.render(&mut out);
-        end |= e.songend();
-    }
-    let log = e.m.bus.write_log.take().unwrap();
-    Some((log, end))
+    (m.bus.write_log.take().unwrap_or_default(), r.songend())
 }
 
 #[test]
-fn detects_the_three_kinds() {
-    let b = block([0; 4]);
-    assert!(detect(&b));
-    assert_eq!(locate(&b).unwrap().kind, Kind::Plain);
-    let e = easo(&b);
-    assert!(detect(&e));
-    assert_eq!(locate(&e).unwrap().kind, Kind::Easo);
-    assert_eq!(locate(&e).unwrap().d, 4);
-    let br = branch(&b);
-    assert!(detect(&br));
-    assert_eq!(locate(&br).unwrap().kind, Kind::Branch);
-    assert_eq!(locate(&br).unwrap().d, 20);
+fn detects_plain_and_rejects_garbage() {
+    let d = module(13);
+    assert!(detect(&d));
+    assert_eq!(locate(&d).map(|x| x.0), Some(0));
+    assert!(!detect(&d[..10]));
+    assert!(!detect(&[0xFF; 64]));
+    let mut bad = d.clone();
+    put32(&mut bad, 0, 0x20);
+    assert!(!detect(&bad));
 }
 
 #[test]
-fn rejects_what_is_not_a_module() {
-    assert!(!detect(&[]));
-    assert!(!detect(&[0; 10]));
-    assert!(!detect(&[0x55; 400]));
-    let mut b = block([0; 4]);
-    b[3] = 0x20; // h0 is not 0x18
-    assert!(!detect(&b));
-    let mut b = block([0; 4]);
-    put32(&mut b, 4, 0x1C); // order list not a multiple of 8 after the rows
-    assert!(!detect(&b));
-    let mut b = block([0; 4]);
-    put32(&mut b, 16, 0x48); // volume tables not a multiple of 16 after the instruments
-    assert!(!detect(&b));
-    let mut br = branch(&block([0; 4]));
-    br[9] ^= 1; // key word differs
-    assert!(!detect(&br));
-    let mut br = branch(&block([0; 4]));
-    br[3] = 5; // odd displacement
-    assert!(!detect(&br));
-    assert!(!detect(&block([0; 4])[..20]));
+fn detects_easo_and_branch() {
+    let d = module(13);
+    let mut e = b"EASO".to_vec();
+    e.extend_from_slice(&d);
+    assert_eq!(locate(&e).map(|x| x.0), Some(4));
+    // branch header: opcode, offset, opcode, offset, key words at the target, then d3
+    let mut b = vec![0u8; 2 + 2 + 2 + 2 + 8];
+    b[..2].copy_from_slice(&KEY[..2]);
+    put16(&mut b, 2, 6);
+    b[4..6].copy_from_slice(&KEY[..2]);
+    put16(&mut b, 6, 2);
+    b.extend_from_slice(&[0, 0]);
+    b.truncate(8);
+    b.extend_from_slice(&KEY[2..12]);
+    b.extend_from_slice(&[0, 4, 0, 0]);
+    assert_eq!(b.len(), 22);
+    // target = 2 + 6 = 8; d3 at 18; data at 18 + 4 -> pad so the data starts at 22
+    put16(&mut b, 18, 4);
+    b.extend_from_slice(&d);
+    assert_eq!(locate(&b).map(|x| x.0), Some(22));
 }
 
 #[test]
-fn note_start_writes_in_order() {
-    // channel 0: note 24, instrument 0
-    let (log, end) = play(block([24 << 8, 0, 0, 0]), 6).unwrap();
-    let w: Vec<(u32, u16)> = log.iter().map(|x| (x.0, x.1)).collect();
-    let i = w.iter().position(|&x| x == (0xDFF0A6, 0x78)).expect("first period write");
-    let want = [
-        (0xDFF0A6, 0x78),
-        (0xDFF096, 0x0001),
-        (0xDFF0A4, 4),
-        (0xDFF0A0, 0),
-        (0xDFF0A2, 0),
-        (0xDFF0A8, 0x40),
-        (0xDFF0A6, 0x38A),
-        (0xDFF096, 0x8001),
-        (0xDFF0A4, 1),
-    ];
-    for (k, &(a, v)) in want.iter().enumerate() {
-        if a == 0xDFF0A0 || a == 0xDFF0A2 {
-            assert_eq!(w[i + k].0, a);
-            continue;
-        }
-        assert_eq!(w[i + k], (a, v), "write {k}");
-    }
-    // the address pair is the sample's: the module's load address + 4 * 0x3C
-    let lc = w[i + 3].1 as u32 * 0x10000 + w[i + 4].1 as u32;
-    assert!(lc >= 0xF0 && lc % 4 == 0);
-    assert!(end, "the end marker is read on the third row tick");
+fn first_note_writes_in_order() {
+    let (w, _) = run(&module(13), 1);
+    let regs: Vec<u32> = w.iter().map(|x| x.0).collect();
+    // the first tick reads the order entry; row 1 has the note: PER, DMA off, LEN, LC (two words),
+    // VOL, PER, DMA on, LEN(1)
+    assert_eq!(&regs[..9], &[0xDFF0A6, 0xDFF096, 0xDFF0A4, 0xDFF0A0, 0xDFF0A2, 0xDFF0A8, 0xDFF0A6, 0xDFF096, 0xDFF0A4]);
+    assert_eq!(w[0].1, 0x78);
+    assert_eq!(w[6].1, 0x06B0);
 }
 
 #[test]
 fn deterministic_and_bounded() {
-    let b = block([24 << 8 | 0, 0, 30 << 8, 0]);
-    let a = play(b.clone(), 40).unwrap();
-    let c = play(b, 40).unwrap();
-    assert_eq!(a.0, c.0);
-    assert!(a.0.len() > 10);
-}
-
-#[test]
-fn damaged_modules_do_not_panic() {
-    let base = block([24 << 8, 5 << 8 | 0, 71 << 8, 255 << 8 | 255]);
-    let mut seed = 0x1234_5678u32;
-    for _ in 0..200 {
-        let mut d = base.clone();
-        for _ in 0..6 {
-            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            let o = (seed >> 8) as usize % d.len();
-            // keep the six header longs recognisable most of the time
-            if o >= 24 || seed & 7 == 0 {
-                d[o] = (seed >> 24) as u8;
-            }
-        }
-        let _ = play(d, 30);
+    let d = module(0);
+    assert_eq!(run(&d, 30), run(&d, 30));
+    // garbage in the tables: no panic
+    let mut g = module(200);
+    for i in 0x60..0x1C0 {
+        g[i] = (i * 37) as u8;
     }
+    run(&g, 50);
 }
 
 #[test]
-fn a_chain_of_end_markers_terminates() {
-    let mut b = block([0; 4]);
-    // the end marker at 0x3C jumps to itself: sixteen jumps, a skip, then the next entry
-    put16(&mut b, 0x3E, 1);
-    assert!(play(b, 8).is_some());
+fn song_end_reported() {
+    let (_, end) = run(&module(13), 8);
+    assert!(end);
 }

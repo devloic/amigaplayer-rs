@@ -119,7 +119,7 @@ struct St26 {
     pt: ProTracker,
 }
 
-fn new(d: &[u8], base: u32, m: &mut Machine, k: Kind) -> Option<Box<dyn Replayer>> {
+fn new(d: &[u8], base: u32, _m: &mut Machine, k: Kind) -> Option<Box<dyn Replayer>> {
     if kind(d) != Some(k) {
         return None;
     }
@@ -127,7 +127,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine, k: Kind) -> Option<Box<dyn Replayer
     let mut pt = ProTracker::new_at(&layout(d), base, Some(samples))?;
     // the 68k Soundtracker 2.6 replay never touches the LED: it stays as the host starts it (off)
     pt.filter = false;
-    pt.clear_loop_words(&mut m.bus.ram);
+    // a sample without a loop leaves AUDxLEN at 0 after its start (64K words from the
+    // sample's own start, as the reference writes it), not at ProTracker's 1 and its cleared
+    // first word
+    pt.set_unlooped_replen(0);
+    if let Ok(f) = std::env::var("TMPFILL") { let r = std::fs::read(f).unwrap(); _m.bus.ram[0x8290..0x9000].copy_from_slice(&r[0x8290..0x9000]); } // TEMP
     let name = if k == Kind::St26 { OPEN_ST26.name } else { OPEN_ICE.name };
     Some(Box::new(St26 { name, pt }))
 }

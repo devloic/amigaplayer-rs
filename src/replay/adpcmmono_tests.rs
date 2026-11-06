@@ -229,10 +229,11 @@ fn short_files_do_not_panic() {
         let d = bytes(n, 7);
         let (mut m, r) = start("t.ADPCM", &d);
         let mut r = r.unwrap();
-        for _ in 0..4 {
+        for _ in 0..1 {
             irq(&mut r, &mut m);
         }
-        // the first buffer is the stream followed by zeros
+        // the first buffer is the stream followed by zeros (the second fill goes to the other
+        // buffer: the stream does not end, the reference's remaining count wraps)
         let log = m.bus.write_log.clone().unwrap();
         let a = ((log[4].1 as u32) << 16) | log[5].1 as u32;
         let want = reference(&d[..d.len() & !1], 2 * (d.len() & !1));

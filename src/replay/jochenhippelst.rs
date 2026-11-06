@@ -1199,7 +1199,9 @@ fn build_sounds(m: &mut Machine) -> Option<(u32, u32, u32, u32)> {
         m.bus.write_bytes(base + k, &[(x >> 16) as u8]);
     }
     let pulse = base + 1024;
-    m.bus.write_bytes(pulse, &[0x7F, 0x7F, 0x80, 0x80]);
+    // the pulse is a square wave of two samples per half period; its amplitude (about 0.61 of full
+    // scale) is fitted to the reference renders: a full-scale pulse is 4.5 dB too loud
+    m.bus.write_bytes(pulse, &[0x4E, 0x4E, 0xB2, 0xB2]);
     Some((base, pulse, pulse + 5, pulse + 6))
 }
 

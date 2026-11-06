@@ -567,7 +567,9 @@ impl Engine {
             return self.start_pcm(Box::new(x), path);
         }
         let data = crate::decrunch::decrunch(data);
-        let data = if self.only_player.is_some() { data } else { crate::prowizard::convert(data, path) };
+        // (a TimeTracker song is the open replayer's own under --open-replayers, not the ProWizard conversion's)
+        let own = self.open_replayers && crate::replay::timetracker::is_timetracker(&data);
+        let data = if self.only_player.is_some() || own { data } else { crate::prowizard::convert(data, path) };
         if data.is_empty() {
             bail!("empty file");
         }

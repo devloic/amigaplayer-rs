@@ -20,7 +20,7 @@ pub fn detect(data: &[u8]) -> Option<String> {
         return Some("AIFF".to_string());
     }
     let data = crate::decrunch::decrunch(data.to_vec());
-    let data = crate::prowizard::convert(data, Path::new(""));
+    let data = if crate::replay::timetracker::is_timetracker(&data) { data } else { crate::prowizard::convert(data, Path::new("")) };
     if let Some(f) = crate::protracker::ProTracker::detect(&data).filter(|f| *f != "SoundTracker") {
         return Some(f.to_string());
     }

@@ -509,8 +509,9 @@ impl Engine {
         self.m.os.int_servers = Default::default();
         self.m.os.icr_vectors = [[0; 5]; 2];
         self.m.bus.ciab = Default::default();
-        // the LED (CIA-A PRA bit 1) as at reset, not as the last module left it
-        self.m.bus.ciaa.pra = crate::cia::Cia::default().pra;
+        // the LED (CIA-A PRA bit 1) as UADE leaves it for a player that never touches it: off
+        // (the filter is bypassed), not as the last module left it
+        self.m.bus.ciaa.pra = crate::cia::Cia::default().pra | 2;
     }
 
     /// Loads and starts playing a module file.

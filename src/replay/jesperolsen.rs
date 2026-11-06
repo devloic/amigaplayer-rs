@@ -958,6 +958,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect(d) {
         return None;
     }
+    // the original player leaves the LED (and with it the audio filter) on from its start: the spec
+    // does not mention it, the reference does (measured with the host as the reference)
+    m.bus.ciaa.pra &= !2;
     let title = m.bus.read_cstr(m.deli.file_buf);
     if rw(d, 0) == 0x6000 {
         let lay = scan_c(d)?;

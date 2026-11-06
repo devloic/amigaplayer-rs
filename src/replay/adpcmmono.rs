@@ -18,10 +18,9 @@
 //! `set_name` around their detection; without it `detect` is false. Any content is accepted
 //! but what another format takes. `new` checks the name again from the guest's file name.
 //!
-//! Choices where the specification leaves the behaviour open: a file of fewer than 512 bytes
-//! is one zero-padded buffer, after which it plays on over zero bytes (the reference's
-//! remaining-length count wraps; it decodes the memory past the module). A longer stream
-//! announces the song end as the reference does, and then restarts.
+//! A file of fewer than 512 bytes is decoded as the reference does: the stream goes on with the
+//! zero bytes past the file and the song never ends. The song end of a longer file is announced
+//! as the reference does, and the stream then restarts.
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -187,12 +186,14 @@ impl Adpcm {
             cost = SILENT_COST;
         } else {
             let mut c = self.decode(&mut out);
-            let n = self.left.clamp(0, BUF as i64) as usize;
+            let mut n = self.left.clamp(0, BUF as i64) as usize;
             self.left -= BUF as i64;
             if init && self.left < 0 {
-                // a stream shorter than a buffer: the reference's 32-bit remaining count wraps
-                // to a huge value, so it keeps playing over zero bytes
-                self.left += 1 << 32;
+                // a stream shorter than a buffer: the init decode does not check the length, so
+                // its buffer holds the decoded memory past the file (zero bytes) as well, and
+                // the count of samples left wraps round: the song never ends
+                n = BUF;
+                self.left = i64::from(u32::MAX) - BUF as i64;
             }
             if n < BUF {
                 out[n..].fill(0);

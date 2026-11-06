@@ -87,6 +87,18 @@ const SQ_LOOP_DONE: u64 = 171;
 const ADV_END_BLOCK: u64 = 600;
 const ADV_START_BLOCK: u64 = 599;
 const ADV_NEXT_ENTRY: u64 = 392;
+/// The work of voices after the last write of a row, when no write follows (a late tick or a
+/// handler comes next), in half colour clocks, from the leftovers of the reference logs: an idle
+/// voice, a note without a write, a release (plus the instrument change, less a skipped division),
+/// the arpeggio bit, and the channel-volume update class (set, up, up and clamped, down, down and
+/// clamped, same).
+const LF_IDLE: i64 = 434;
+const LF_NOTE: i64 = 1454;
+const LF_REL: i64 = 1342;
+const LF_REL_ID: i64 = 544;
+const LF_REL_CNT0: i64 = 244;
+const LF_ARP: i64 = 68;
+const LF_CV: [i64; 6] = [0, 144, 0, 144, 0, 27];
 /// The cost of a row's work between two writes, in half colour clocks (fitted jointly on the
 /// reference logs): a constant by the previous write (row start, key-off, other), the work of each
 /// voice processed since (by voice, and by what the voice does), and a constant by the write that
@@ -564,6 +576,8 @@ impl Aps {
         // the work charged since the last write (with the row's cost tables, and the tail's)
         let mut prev = 0usize;
         let mut acc = [0i64; 2];
+        // the work of the voices since the last write, as it takes when no write follows (half clocks)
+        let mut lf = 0i64;
         let mut idle_before = false;
         let mut pending = false;
         for v in 0..4usize {
@@ -629,6 +643,8 @@ impl Aps {
                 }
                 idle_before = !active;
                 pending = true;
+                lf += LF_CV[cvc] + LF_ARP * arp
+                    + if active { LF_REL + LF_REL_ID * instdiff - if cnt0 { LF_REL_CNT0 } else { 0 } } else { LF_IDLE };
                 continue;
             }
             for (t, rc) in [&RC_MAIN, &RC_INT].into_iter().enumerate() {
@@ -652,6 +668,7 @@ impl Aps {
             }
             idle_before = false;
             pending = true;
+            lf += LF_NOTE + LF_CV[cvc] + LF_ARP * arp + 10 * (r2 >> 7) as i64 + 14 * ((r2 >> 6) & 1) as i64;
             self.v[v].active = true;
             self.v[v].note = (r0 & 63).wrapping_add(b0 & 63);
             let (inst, ev);
@@ -679,6 +696,7 @@ impl Aps {
                 3 | 4 | 5 => {
                     let h = RC_MAIN.a[prev] + acc[0] + RC_MAIN.tl_len[(ty - 3) as usize][v];
                     acc = [0; 2];
+                    lf = 0;
                     pending = false;
                     self.wh(hw, h.max(0) as u64);
                     prev = 2;
@@ -693,6 +711,7 @@ impl Aps {
                         };
                         let h = RC_MAIN.a[prev] + acc[0] + RC_MAIN.tl_key[k][v];
                         acc = [0; 2];
+                    lf = 0;
                         pending = false;
                         self.wh(hw, h.max(0) as u64);
                         prev = 1;
@@ -741,6 +760,7 @@ impl Aps {
                 if first && pending {
                     let h = RC_INT.a[prev] + acc[1] + RC_INT.tl_int + RC_INT.fk * v as i64;
                     acc = [0; 2];
+                    lf = 0;
                     self.wh(hw, h.max(0) as u64);
                 } else if first {
                     self.wc(hw, 97 + 35 * v as u64);
@@ -755,8 +775,8 @@ impl Aps {
             }
         }
         // the work of the last voices, when no write follows
-        if acc[0] > 0 {
-            self.wh(hw, acc[0] as u64);
+        if lf > 0 {
+            self.wh(hw, lf as u64);
         }
     }
 

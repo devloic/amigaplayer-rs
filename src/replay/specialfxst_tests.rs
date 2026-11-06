@@ -236,6 +236,12 @@ fn the_period_table_is_the_drivers() {
 }
 
 #[test]
+fn the_embedded_out_of_range_period_words_have_their_sizes() {
+    // 128 words before the table (index -1 is the last), 6 words after the addressed part
+    assert_eq!((UNDERFLOW.len(), OVERFLOW_TAIL.len()), (256, 12));
+}
+
+#[test]
 fn the_noise_block_is_a_generator() {
     let a = noise_bytes();
     assert_eq!(a.len(), 1024);
@@ -379,7 +385,7 @@ fn a_voice_that_stops_ends_the_song() {
 }
 
 #[test]
-fn notes_outside_the_period_table_read_zero_or_the_table_addresses() {
+fn notes_outside_the_period_table_read_the_embedded_words_or_the_table_addresses() {
     let d = one_voice(&NOTE);
     let t = locate(&d, 0x4000).unwrap();
     let s = SpecialFxSt {
@@ -406,7 +412,9 @@ fn notes_outside_the_period_table_read_zero_or_the_table_addresses() {
     let a = t.arp as u32;
     assert_eq!(s.period(102), (a >> 16) as u16);
     assert_eq!(s.period(103), a as u16);
-    // the specified gap: not embedded, so zero
-    assert_eq!(s.period(-1), 0);
-    assert_eq!(s.period(125), 0);
+    // the embedded words of the player's memory around the table
+    assert_eq!(s.period(-1), be16(UNDERFLOW, 254));
+    assert_eq!(s.period(-128), be16(UNDERFLOW, 0));
+    assert_eq!(s.period(122), be16(OVERFLOW_TAIL, 0));
+    assert_eq!(s.period(127), be16(OVERFLOW_TAIL, 10));
 }

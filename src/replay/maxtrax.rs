@@ -149,7 +149,12 @@ const T_TICK_END: u64 = 647;
 /// that takes a voice over, the time before the voice's DMA stop and the one from there to the new
 /// write; with no period calculated (the note is out of range), the time is shorter.
 const T_CALC: u64 = 1518;
-const T_OCTAVE: u64 = 60;
+const T_OCTAVE: u64 = 53;
+/// A walk down the octaves that stops at the end of the sample chain with the period still too
+/// high, the velocity flag's choice of the note volume (before the new write); the channel
+/// volume's multiplication costs T_MUL there too.
+const T_OCTAVE_END: u64 = 10;
+const T_VELOCITY: u64 = 10;
 const T_STEAL_PRE: u64 = 838;
 const T_CALC_STOLEN: u64 = 903;
 const T_NO_PERIOD: u64 = 158;
@@ -309,6 +314,8 @@ struct Voice {
     status: u8,
     flags: u8,
     last_volume: u8,
+    /// The last `calc_note` ended its walk down the octaves at the end of the sample chain.
+    octave_end: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -792,8 +799,12 @@ impl MaxTrax {
         let mut a3 = patch.sample;
         if v.flags & VOICE_RECALC == 0 {
             self.voices[vi].period_offset = 0;
+            self.voices[vi].octave_end = false;
             while d2 > PREF_PERIOD {
-                let Some(next) = a3.and_then(|s| self.samples[s].next) else { break };
+                let Some(next) = a3.and_then(|s| self.samples[s].next) else {
+                    self.voices[vi].octave_end = true;
+                    break;
+                };
                 a3 = Some(next);
                 self.voices[vi].period_offset = self.voices[vi].period_offset.wrapping_add(0x10000);
                 d2 = d2.wrapping_sub(0x10000);
@@ -955,6 +966,9 @@ impl MaxTrax {
         let stolen = self.voices[vi].flags & VOICE_STOLEN != 0;
         let calc = if stolen { T_CALC_STOLEN } else { T_CALC };
         let calc = calc + (self.voices[vi].period_offset >> 16) as u64 * T_OCTAVE;
+        let calc = calc + if self.voices[vi].octave_end { T_OCTAVE_END } else { 0 };
+        let calc = calc + if self.flags & MUSIC_VELOCITY != 0 { T_VELOCITY } else { 0 };
+        let calc = calc + if self.chans[c].volume < 128 { T_MUL } else { 0 };
         hw.wait(if self.voices[vi].last_period == 0 { calc - T_NO_PERIOD } else { calc });
         if smp.attack != 0 {
             let r = self.new_req(smp.wave, smp.attack, 1, true, per);

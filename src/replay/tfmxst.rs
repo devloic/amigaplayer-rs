@@ -271,7 +271,7 @@ fn song_list(d: &[u8]) -> Vec<u8> {
 }
 
 /// The subsong list and the CPU cycles its building takes beyond skipping an unused entry (spec 4).
-/// The costs are measured: taking a song 44; a song equal to the next one 141 the first time,
+/// The costs are measured: taking a song 44; a song equal to the next one 142 the first time,
 /// 106 after; the skips by an unused first step or a zero last step cost nothing extra.
 fn song_list_cost(d: &[u8]) -> (Vec<u8>, i64) {
     let f = |k: usize| be16(d, 256 + 2 * k);
@@ -290,7 +290,7 @@ fn song_list_cost(d: &[u8]) -> (Vec<u8>, i64) {
             continue;
         }
         if f(k) == f(k + 1) && l(k) == l(k + 1) {
-            cost += if flag { 106 } else { 141 };
+            cost += if flag { 106 } else { 142 };
             if !flag {
                 flag = true;
                 if l(k) == l(k - 1) {
@@ -1660,13 +1660,15 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             for b in &mut smp {
                 *b = NIB[(*b & 15) as usize];
             }
-            load_cost += 55 + 49 * smp.len() as i64;
+            load_cost += 54 + 49 * smp.len() as i64;
         }
         if !smp.is_empty() {
             let dir = m.deli.module_dir.to_string_lossy();
             let dir_len = dir.len() + usize::from(!dir.ends_with('/'));
             let name_len = file.rsplit('/').next().unwrap_or(&file).len();
-            load_cost += SAMPLE_LOAD + 17 * dir_len as i64 + 21 * name_len as i64;
+            // one cycle more when the path (directory with its last "/" plus file name) has an even length
+            // (measured on 80 modules in four directories; the cost per sample step is 91)
+            load_cost += SAMPLE_LOAD + 17 * dir_len as i64 + 21 * name_len as i64 + i64::from((dir_len + name_len) % 2 == 0);
         }
     }
     let sa = m.alloc((smp.len() as u32).max(4) + 4);
@@ -1716,7 +1718,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let setup = E0H_BASE
         + 65 * n_lo as i64
         + 83 * n_hi as i64
-        + 913 * samples as i64 / 10
+        + 91 * samples as i64
         + load_cost
         + song_cost
         + p.cy

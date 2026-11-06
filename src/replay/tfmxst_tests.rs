@@ -162,13 +162,13 @@ fn the_subsong_list_costs_follow_the_measured_rules() {
         put16(&mut d, 320 + 2 * k, l);
     }
     assert_eq!(song_list_cost(&d), (vec![0, 1, 2], 88));
-    // a run of empty songs (first and last step 0): 141 for the first, none for the rest, as the
+    // a run of empty songs (first and last step 0): 142 for the first, none for the rest, as the
     // module with 32 subsongs measured (230 with its two songs)
     for k in 3..32 {
         put16(&mut d, 256 + 2 * k, 0);
         put16(&mut d, 320 + 2 * k, 0);
     }
-    assert_eq!(song_list_cost(&d), (vec![0, 1, 2], 88 + 141));
+    assert_eq!(song_list_cost(&d), (vec![0, 1, 2], 88 + 142));
 }
 
 #[test]

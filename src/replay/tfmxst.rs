@@ -273,6 +273,8 @@ pub struct TfmxSt {
     songend: bool,
     /// CPU cycles spent so far in this tick.
     cy: i64,
+    /// `cy` at the last call to the host in this tick (0 at the tick's start).
+    trap_cy: i64,
     /// Ticks run so far (the first two are timed off the regular spacing).
     ticks_run: u32,
     /// Half colour clock of the tick phase (the start clock is a whole number of cycles).
@@ -361,9 +363,16 @@ impl TfmxSt {
         self.rl(self.mac_t + 4 * i as i64) as i64
     }
 
-    fn signal_end(&mut self) {
+    /// The song-end signal is a call to the host, which takes the elapsed cycles down to a whole
+    /// colour clock: a cycle is lost when the count at the call is odd. `odd` is the parity of
+    /// the cycles between the call and the cost counted so far (measured per call site).
+    fn signal_end(&mut self, odd: i64) {
         self.songend = true;
+        if (self.cy - self.trap_cy + odd) & 1 != 0 {
+            self.cy -= 1;
+        }
         self.cy += 164;
+        self.trap_cy = self.cy;
     }
 
     // ------------------------------------------------------------------ YM image
@@ -458,7 +467,7 @@ impl TfmxSt {
                 match c {
                     0 => {
                         self.playing = false;
-                        self.signal_end();
+                        self.signal_end(0);
                         self.cy += 564;
                         return;
                     }
@@ -471,8 +480,8 @@ impl TfmxSt {
                         } else if l < 0 {
                             let n = self.rw(a + 6) as i16;
                             if n <= 0 {
-                                self.signal_end();
-                                self.cy -= 15;
+                                self.signal_end(1);
+                                self.cy -= 14;
                             }
                             self.loopc = n.wrapping_sub(1);
                             self.cur = self.rw(a + 4);
@@ -527,7 +536,7 @@ impl TfmxSt {
         }
         // an endless run of command steps: stop the song
         self.playing = false;
-        self.signal_end();
+        self.signal_end(0);
     }
 
     // ------------------------------------------------------------------ sequencer
@@ -549,6 +558,10 @@ impl TfmxSt {
                     self.cy += 113;
                 }
                 if self.track(t) {
+                    // the restart from the last track costs two cycles more (measured)
+                    if t == 7 {
+                        self.cy += 2;
+                    }
                     again = true;
                     break;
                 }
@@ -632,7 +645,7 @@ impl TfmxSt {
                     self.cy += 3;
                     if self.cur == self.last {
                         self.cur = self.first;
-                        self.signal_end();
+                        self.signal_end(0);
                     } else {
                         self.cur = self.cur.wrapping_add(1);
                     }
@@ -1382,6 +1395,7 @@ impl TfmxSt {
     /// Everything of a tick up to the conversion; leaves the CPU cycles it took in `cy`.
     fn run(&mut self) {
         self.cy = 1972;
+        self.trap_cy = 0;
         if !self.playing {
             // a stopped song: the tick does only the conversion (measured, h3 after its end command)
             self.cy = 404;
@@ -1391,7 +1405,7 @@ impl TfmxSt {
             Some(k) => self.cy += 33 * k as i64,
             None => {
                 self.cy += 131;
-                self.signal_end();
+                self.signal_end(1);
             }
         }
         if self.playing {
@@ -1738,6 +1752,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         dig: Digital::default(),
         songend: false,
         cy: 0,
+        trap_cy: 0,
         ticks_run: 0,
         half: 0,
         noise: blk,

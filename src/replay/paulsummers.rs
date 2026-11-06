@@ -28,8 +28,14 @@ pub const OPEN: Open = Open { name: "Paul Summers", detect, new };
 /// host's differs per module. `u64::MAX` selects the default. A test and measurement knob.
 pub static PHASE: AtomicU64 = AtomicU64::new(u64::MAX);
 
-const DEFAULT_PHASE: u64 = 169;
+/// The raster phase of the first tick call in the reference is the absolute clock of its song start
+/// plus one period, modulo a line; the song start's absolute clock (the host's loading) differs per
+/// module and is not derivable (phases 169, 87, 209, 212, 27 on five modules). A fit that makes
+/// three of the seven corpus modules identical.
+const DEFAULT_PHASE: u64 = 209;
 const LINE: u64 = 227;
+/// Colour clocks from the last start write to the song start.
+const START_TAIL: u64 = 320;
 const DEFAULT_TIMER: u64 = 14187;
 
 // ---------------------------------------------------------------------------------
@@ -201,8 +207,8 @@ pub struct PaulSummers {
     call: u64,
     t: u64,
     next_at: Option<u64>,
-    /// Colour clocks added to the first period to reach the wanted raster phase.
-    first_due: u64,
+    /// Colour clocks added to the clock the raster waits see (the beam phase of the first tick call).
+    beam_adj: u64,
 }
 
 const F_PITCH: u8 = 1;
@@ -250,7 +256,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         call: 0,
         t: 0,
         next_at: None,
-        first_due: 0,
+        beam_adj: 0,
     };
     let mut hw = Hw { bus: &mut m.bus };
     s.init(0);
@@ -287,10 +293,15 @@ impl PaulSummers {
         }
         hw.bus.clock = ts + 6240;
         hw.dmacon(0x000F);
-        // the first tick: one period after this write, plus what puts it on the wanted raster phase
-        // (the engine starts the timer at the clock after `new`)
+        // the song starts a little after the last of these writes (the host's tail of the start, 316 to
+        // 322 colour clocks in the reference's runs) and the first tick follows one period later,
+        // with no phase adjustment: the reference's first tick is at the period (plus the cost of
+        // reaching its first write) after the song start whatever the raster phase there
+        hw.bus.clock += START_TAIL;
+        // what the raster waits see is shifted instead, so that the first tick call sits on the wanted
+        // raster phase of the beam
         let due = hw.bus.clock + self.period_clocks();
-        self.first_due = (phase() + LINE - due % LINE) % LINE;
+        self.beam_adj = (phase() + LINE - due % LINE) % LINE;
     }
 
     /// Clears the state and loads song table entry `sub + 1` (spec 3.1, without the host writes).
@@ -319,7 +330,7 @@ impl PaulSummers {
     }
 
     fn line(&self) -> u64 {
-        ((self.call + self.t / 2) / LINE) & 0xFF
+        ((self.call + self.t / 2 + self.beam_adj) / LINE) & 0xFF
     }
 
     /// The raster wait of a note start: twice nine changes of the line number (spec 5.5).
@@ -865,11 +876,6 @@ impl Replayer for PaulSummers {
         self.period_clocks()
     }
 
-    fn timer_delay(&self) -> u64 {
-        // the engine counts one period from the clock after `new`; the first call falls on `first_due`
-        self.first_due
-    }
-
     fn songend(&self) -> bool {
         self.songend
     }
@@ -881,6 +887,7 @@ impl Replayer for PaulSummers {
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
         let n = (n as usize).min(self.lay.subsongs - 1);
         self.init(n);
+        self.beam_adj = 0;
         let due = hw.bus.clock + self.period_clocks();
         self.next_at = Some(due + (phase() + LINE - due % LINE) % LINE);
     }

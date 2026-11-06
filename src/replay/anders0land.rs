@@ -34,7 +34,7 @@ const TICK: u64 = 70940;
 /// From the start block's last write to the first tick, beyond one period.
 /// The engine zeroes the audio at the clock `new` leaves; the reference's audio starts this much
 /// after its start block's last write (fitted to its WAV renders, whole output frames).
-const ORIGIN: u64 = 3325;
+const ORIGIN: u64 = 3327;
 const FIRST_EXTRA: u64 = 74267 - TICK - ORIGIN;
 
 const PERIODS: [u16; 70] = [
@@ -829,6 +829,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     hw.bus.ciaa.pra |= 2;
     s.cia_t = tc;
     let end = s.start_block(&mut hw, tc);
+    s.first_at = end + 74267;
     hw.bus.clock = end + ORIGIN;
     Some(Box::new(s))
 }

@@ -75,6 +75,7 @@ before publication so that it describes behaviour only; what was removed or rewo
 | `markii/` | Mark II Sound-System (`mk2.*`): hosted-driver behaviour spec | `src/replay/markii.rs` |
 | `pokeynoise/` | Pokeynoise (Atari SAP types B/M/C, `pn.*`): 6502 + POKEY-to-Paula behaviour spec | `src/replay/pokeynoise.rs` |
 | `quartetpsg/` | Quartet PSG (Atari YM driver images, `sqt.*`): hosted-driver behaviour spec | `src/replay/quartetpsg.rs` |
+| `multimediasound/` | MultiMedia Sound (`mms.*`, `sfx20.*`): SoundFX-layout replayer with its own engine | `src/replay/multimediasound.rs` |
 
 Each directory holds `SPEC.md` (the spec), `LOGS.md` (how the evidence was produced) and `README.md` (what is solved and what
 stays unknown). Files and scripts they call `logs/...`, `scripts/...` or "traces" are not shipped: the reference logs are

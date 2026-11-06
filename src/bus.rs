@@ -50,10 +50,13 @@ pub struct Bus {
 
 impl Bus {
     pub fn new() -> Self {
+        let mut ciaa = Cia::default();
+        // the LED (PRA bit 1) starts off, as under UADE: a player that never touches it plays unfiltered
+        ciaa.pra |= 2;
         Bus {
             ram: vec![0; RAM_SIZE],
             paula: Paula::new(),
-            ciaa: Cia::default(),
+            ciaa,
             ciab: Cia::default(),
             clock: 0,
             e_ticks: 0,

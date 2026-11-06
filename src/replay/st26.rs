@@ -124,7 +124,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine, k: Kind) -> Option<Box<dyn Replayer
         return None;
     }
     let samples = base + (HEADER + d[951] as usize * 256) as u32;
-    let pt = ProTracker::new_at(&layout(d), base, Some(samples))?;
+    let mut pt = ProTracker::new_at(&layout(d), base, Some(samples))?;
+    // the 68k Soundtracker 2.6 replay never touches the LED: it stays as the host starts it (off)
+    pt.filter = false;
     pt.clear_loop_words(&mut m.bus.ram);
     let name = if k == Kind::St26 { OPEN_ST26.name } else { OPEN_ICE.name };
     Some(Box::new(St26 { name, pt }))

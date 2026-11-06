@@ -8,8 +8,12 @@ repository = "https://fg.lolo.asia/adminlolo/amigaplayer-rs.git"
 readme = "README.md"
 keywords = ["amiga", "tracker", "mod", "chiptune", "audio"]
 categories = ["multimedia::audio", "emulators"]
-exclude = ["tools/", "crates/players-native/gen/"]
+exclude = ["tools/", "crates/", "docs/", "target-recomp/", "run.sh", "q.py", "two_rows.json", "*.whl", "LICENSE-*.orig"]
 
+# Publishing: three crates, in this order (each `cargo publish` needs the one before on
+# crates.io): crates/m68k-rc, crates/players-native (its generated gen/ is gitignored and never
+# ships: the registry is empty), then this one. Users of the library want
+# `default-features = false` (no SDL3, no 68k player hosting, no generated players).
 [workspace]
 # The C API shares the root's lock file and target directory; m68k-rc and players-native
 # are path dependencies and so members too. The WebAssembly crate keeps a lock file and
@@ -23,8 +27,8 @@ env_logger = "0.11.11"
 log = "0.4.34"
 m68k = "0.14.7"
 # The recompiled players and the 68000 runtime they were generated against.
-m68k_rc = { package = "m68k-rc", path = "crates/m68k-rc" }
-players-native = { path = "crates/players-native" }
+m68k_rc = { package = "m68k-rc", path = "crates/m68k-rc", version = "0.1.0" }
+players-native = { path = "crates/players-native", version = "0.1.0" }
 sdl3 = { version = "0.20", optional = true }
 
 [features]

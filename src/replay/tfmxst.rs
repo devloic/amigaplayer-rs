@@ -32,11 +32,12 @@ const TICK: u64 = 70940;
 /// CPU cycles from the run's origin to the first tick of a module with one track step of one
 /// started track, seven stopped, a seven-step macro range (one step above $3F) and no sample.
 const E0H_BASE: i64 = 460391;
-/// Entry corrections (CPU cycles) of the first two ticks, which fall off the regular spacing of
-/// the others: the first early, the second late. Each is the middle of the range over which the
-/// reference's writes stay equal (the line wait makes the first writes insensitive to a shift
-/// within it), found on 19 modules; the first tick's range is wide, [-416, -206].
-const FIRST_TICKS: [i64; 2] = [-311, 25];
+/// Entry corrections (CPU cycles) of the first two ticks: the first comes early (it is entered
+/// by the set-up routine, not by the timer); the second needs none. The first is the one value
+/// at which the writes of all 50 modules whose set-up cost the model has right stay equal (the
+/// line wait makes the first writes insensitive to a shift within a range, and the ranges of the
+/// modules only meet at this value; found by scanning the shift in single cycles).
+const FIRST_TICKS: [i64; 2] = [-248, 0];
 /// The cycles the explicit-offset table layout takes less than the fixed one.
 const EXPLICIT_LAYOUT: i64 = 8235;
 /// The companion sample file's load, before the path and the file name (cycles).
@@ -597,7 +598,7 @@ impl TfmxSt {
             match b0 & 15 {
                 0 => {
                     self.tracks[t].pat = 0xFF;
-                    self.cy += 200;
+                    self.cy += 3;
                     if self.cur == self.last {
                         self.cur = self.first;
                         self.signal_end();
@@ -661,7 +662,7 @@ impl TfmxSt {
                     k.pat = b1;
                     k.addr = ad;
                     k.pos = w;
-                    self.cy += 250;
+                    self.cy += 306;
                 }
                 9 => {
                     // the original restores track 0's saved place into track 0 whichever track
@@ -672,7 +673,7 @@ impl TfmxSt {
                             self.tracks[0].pos = ps;
                             let k = &mut self.tracks[t];
                             k.pos = k.pos.wrapping_add(1);
-                            self.cy += 250;
+                            self.cy += 219;
                         }
                         None => {
                             // no call: the original reads low memory; end the track instead
@@ -1414,8 +1415,10 @@ const LEN_TO_BEAM: [u64; 4] = [129, 160, 191, 199];
 
 /// Restart entry offsets from the previous write (the conversion entry for voice A, the previous
 /// voice's period write after), in CPU cycles: by voice A, B, C and the kind of the new state
-/// (silent, noise, tone).
-const RESTART_AT: [[u64; 3]; 3] = [[332, 356, 356], [434, 458, 462], [504, 528, 532]];
+/// (silent, noise, tone). Each is the offset of the first beam-register read (21 cycles after the
+/// entry of the wait routine), taken from a trace of the reference's reads; the writes after the
+/// wait are only sensitive to it at a line boundary.
+const RESTART_AT: [[u64; 3]; 3] = [[353, 398, 381], [434, 479, 462], [504, 549, 532]];
 /// The digital voice's restart entry after voice C's period write: silent, sample.
 const DIGITAL_AT: [u64; 2] = [309, 360];
 /// The volume write when no restart is needed: by voice and kind (noise, tone).

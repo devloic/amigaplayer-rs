@@ -139,6 +139,7 @@ const T_HALT: u64 = 300;
 const T_VOICE: u64 = 467;
 const T_MUL: u64 = 37;
 const T_EARLY: u64 = 288;
+const T_LOW_VOL: u64 = 131;
 const T_CALC_NOTE: u64 = 556;
 /// From the last voice of a frame to the end of the server, where the audio interrupts are taken.
 const T_TICK_END: u64 = 647;
@@ -1375,7 +1376,7 @@ impl MaxTrax {
         let nv = self.voices[vi].note_volume;
         let bv = self.voices[vi].base_volume >> 8;
         let cost = Self::voice_cost(&self.cls, nv, bv);
-        hw.wait(self.voice_adjust(cost));
+        hw.wait(self.voice_adjust(cost, nv, bv));
         let lp = self.voices[vi].last_period;
         if lp != 0 {
             Self::dev_pervol(hw, vi, lp, vol);
@@ -1387,9 +1388,15 @@ impl MaxTrax {
     /// The start of an envelope whose first segment `calc_incrvol` returns early for (the segment is
     /// shorter than the change of volume asks for) takes `T_EARLY` more than the path's time in the
     /// reference's runs.
-    fn voice_adjust(&self, cost: u64) -> u64 {
+    ///
+    /// A decay step at a note volume of 128 or more (one multiplication skipped) whose envelope level
+    /// is 4 or 5 (the volume comes to 2) takes `T_LOW_VOL` less: the reference's runs show it in
+    /// every such step of one module (Contraption Zack's march) and in none of another volume.
+    fn voice_adjust(&self, cost: u64, note_volume: u16, env_top: u16) -> u64 {
         if self.cls.starts_with("start~e") {
             cost + T_EARLY
+        } else if self.cls == "dec/prog" && note_volume >= 128 && (env_top == 4 || env_top == 5) {
+            cost.saturating_sub(T_LOW_VOL)
         } else {
             cost
         }

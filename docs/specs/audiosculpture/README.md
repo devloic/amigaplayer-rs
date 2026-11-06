@@ -38,3 +38,11 @@
 - Detection collides with StarTrekker modules tagged `FLT4` that have an empty sample header with a
   non-zero volume (SPEC 1.2); the companion requirement keeps them apart in practice.
 - The spec author's working notes and scripts are kept in a private working folder, which implementers do not open.
+
+## Errata found by the implementation
+
+- The raster wait adds its 9 cycles on every loop iteration, including the exiting one.
+- All four row cells are fetched from the position at the start of the row.
+- The gap between a subsong stop and the init is 35 colour clocks.
+- With the open replayers, an FLT4 module that has an AudioSculpture companion beside it is taken by this
+  replayer, not by the built-in StarTrekker handling.

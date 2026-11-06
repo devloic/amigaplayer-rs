@@ -32,3 +32,13 @@
 - The 'Riff Raff_v2' loader files that came with the modules were not used.
 - The spec author's private working notes are kept in a separate folder that implementers do not
   use.
+
+## Errata found by the implementation
+
+- SPEC 6.2 (line wait) is wrong as written. The structure that reproduces the logs: P cycles, then nine
+  times {add 16, take the line as reference, loop {add 21, read the line, add 4} until the line differs},
+  then add 15, then Q.
+- Not exercised: master volume, balance and muting (fixed at defaults), subsong changes after the first tick.
+- Safe choices: no period-table marker means the region runs to the end of the hunk; a header pointer
+  outside the hunk is not recognised; a sample table longer than the hunk is cut; more than 5M instructions
+  in one call ends the song.

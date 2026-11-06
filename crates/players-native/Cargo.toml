@@ -7,7 +7,7 @@ license = "GPL-2.0-or-later"
 build = "build.rs"
 
 [dependencies]
-m68k = { package = "m68k-rc", path = "../m68k-rc" }
+m68k = { package = "m68k-rc", path = "../m68k-rc", version = "0.1.0" }
 
 [features]
 # Compile gen/ when it exists. Off, the registry is empty.

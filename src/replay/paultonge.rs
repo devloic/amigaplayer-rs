@@ -36,6 +36,9 @@ static VOLUMES: &[u8; 34] = include_bytes!("paultonge_volumes.bin");
 static PERIODS: &[u8; 256] = include_bytes!("paultonge_periods.bin");
 
 const FIRST_TICK_DELAY: u64 = 27266;
+/// Colour clocks from a handler call to its read of the interrupt flags (any value from 40 to 100
+/// fits the reference logs; the prologue before the first channel is 94).
+const S_READ: u64 = 94;
 const INTENA_SET: [u16; 4] = [0x8080, 0x8100, 0x8200, 0x8400];
 const DMA_SET: [u16; 4] = [0x8201, 0x8202, 0x8204, 0x8208];
 /// Paula channel 0..3's cycles from the end of the previous step to the first volume write.
@@ -883,6 +886,10 @@ impl PaulTonge {
 
     /// The audio interrupt handler (5.11, 6.5).
     fn handler(&mut self, ch: usize, hw: &mut Hw) {
+        // the handler reads the request flags after its prologue, not at the call: a request that
+        // Paula raises in between is served in this call (the reference's TUNE1 and TUNE6 show it)
+        let c = hw.bus.clock + S_READ;
+        hw.bus.paula.sync(c, &hw.bus.ram);
         let s = hw.bus.paula.intreq & hw.bus.paula.intena & 0x0780;
         if s & (0x80 << ch) == 0 {
             return;

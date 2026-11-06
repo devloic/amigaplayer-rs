@@ -38,8 +38,16 @@ const E0H_BASE: i64 = 460391;
 /// line wait makes the first writes insensitive to a shift within a range, and the ranges of the
 /// modules only meet at this value; found by scanning the shift in single cycles).
 const FIRST_TICKS: [i64; 2] = [-248, 0];
-/// The cycles the explicit-offset table layout takes less than the fixed one.
-const EXPLICIT_LAYOUT: i64 = 8235;
+/// The cycles the explicit-offset table layout takes less than the fixed one, before the two
+/// per-entry terms below.
+const EXPLICIT_LAYOUT: i64 = 8303;
+/// The explicit layout's set-up walks the macro table from its second entry up to the first one
+/// that equals the last entry, this many cycles per entry.
+const MACRO_WALK: i64 = 68;
+/// The explicit layout's extra cycles per 4-byte step between the end of the last macro and the
+/// pattern table (the step is also scanned by its class), two cycles fewer when their number is odd
+/// (measured for one to four steps: 29, 62, 91, 124).
+const GAP_STEP: i64 = 31;
 /// The companion sample file's load, before the path and the file name (cycles).
 const SAMPLE_LOAD: i64 = 689;
 
@@ -129,6 +137,23 @@ fn scan_stats(d: &[u8]) -> Option<(usize, usize, usize)> {
     // an ST command is a macro command byte above 63 ($48 is one too)
     let big = (first..end).step_by(4).any(|a| d[a] > 63);
     big.then_some((lo, hi, samples))
+}
+
+/// The explicit layout's macro table walk: the number of entries from the second up to and
+/// including the first that equals the table's last (128th) entry.
+fn explicit_walk(d: &[u8]) -> i64 {
+    let mt = be32(d, 472) as usize;
+    let at = |i: usize| if mt + 4 * i + 4 <= d.len() { be32(d, mt + 4 * i) } else { 0 };
+    let last = at(127);
+    (1..128).find(|&i| at(i) == last).unwrap_or(127) as i64
+}
+
+/// The explicit layout's 4-byte steps between the end of the last macro (the step after the one the
+/// last macro table entry names) and the pattern table.
+fn explicit_gap(d: &[u8]) -> i64 {
+    let mt = be32(d, 472) as usize;
+    let last = if mt + 512 <= d.len() { be32(d, mt + 508) as i64 } else { 0 };
+    ((be32(d, 468) as i64 - (last + 4)) / 4).max(0)
 }
 
 /// The sample count (macro steps of command $48) of a module, if it is one.
@@ -433,6 +458,7 @@ impl TfmxSt {
                     0 => {
                         self.playing = false;
                         self.signal_end();
+                        self.cy += 564;
                         return;
                     }
                     1 => {
@@ -445,6 +471,7 @@ impl TfmxSt {
                             let n = self.rw(a + 6) as i16;
                             if n <= 0 {
                                 self.signal_end();
+                                self.cy -= 15;
                             }
                             self.loopc = n.wrapping_sub(1);
                             self.cur = self.rw(a + 4);
@@ -465,6 +492,9 @@ impl TfmxSt {
                     _ => {
                         self.cur = self.cur.wrapping_add(1);
                         let r = self.fade_start(self.rw(a + 4) as u8, self.rw(a + 6) as u8);
+                        if c == 3 {
+                            self.cy += 112;
+                        }
                         self.cy += match r {
                             FadeStart::Busy => 194,
                             FadeStart::Immediate => 342,
@@ -662,7 +692,7 @@ impl TfmxSt {
                     k.pat = b1;
                     k.addr = ad;
                     k.pos = w;
-                    self.cy += 306;
+                    self.cy += 303;
                 }
                 9 => {
                     // the original restores track 0's saved place into track 0 whichever track
@@ -1184,7 +1214,7 @@ impl TfmxSt {
             g = ((g as u32 * (256 + fl.gtime as u32)) >> 8) as u16;
             if g >= b {
                 ended = true;
-                self.cy += 335;
+                self.cy += if g == b { 326 } else { 335 };
             } else {
                 self.cy += 317;
             }
@@ -1351,6 +1381,11 @@ impl TfmxSt {
     /// Everything of a tick up to the conversion; leaves the CPU cycles it took in `cy`.
     fn run(&mut self) {
         self.cy = 1972;
+        if !self.playing {
+            // a stopped song: the tick does only the conversion (measured, h3 after its end command)
+            self.cy = 404;
+            return;
+        }
         match self.tracks.iter().position(|t| t.pat != 0xFF) {
             Some(k) => self.cy += 33 * k as i64,
             None => {
@@ -1722,7 +1757,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         + load_cost
         + song_cost
         + p.cy
-        - if be32(d, 468) != 0 { EXPLICIT_LAYOUT } else { 0 };
+        - if be32(d, 468) != 0 {
+            EXPLICIT_LAYOUT - MACRO_WALK * (explicit_walk(d) - 1) - GAP_STEP * explicit_gap(d) + 2 * (explicit_gap(d) & 1)
+        } else {
+            0
+        };
     // the run's origin is `START_PHASE` before the engine's aligned start; the engine adds one period
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
     // The tick is entered at a whole colour clock plus one cycle: of the cycles the set-up

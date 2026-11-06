@@ -59,16 +59,17 @@ const START_IRQ_H: u64 = 112;
 /// PER to VOL, per voice.
 const PER_VOL: [u64; 4] = [444, 471, 498, 497];
 /// All the in-tick costs below are counts of 68000 cycles (half colour clocks) from a tick start on a
-/// whole colour clock, fitted so that the floor of the running cycle count reproduces the reference
-/// write times; many of them are odd (the gap between two writes then depends on the parity of the
-/// cycles run since the tick start).
+/// whole colour clock; they were fitted on the reference's EXACT cycle count of each write (a logged
+/// write time is the floor of half the running count), so the parities are the reference's. Many of
+/// them are odd (the gap between two writes then depends on the parity of the cycles run since the
+/// tick start).
 /// The work before a voice's PER write, in half colour clocks (fitted jointly on the reference
 /// logs): by what the previous voice wrote (a sample start or synth LOC per voice, a plain VOL, a
 /// silent voice's VOL), and per arpeggio byte read, arpeggio jump, envelope step, envelope point
 /// loaded (other than envelope 1's), envelope jump and envelope 1's point loaded.
-const PRE_LOC_H: [u64; 4] = [1765, 1676, 1708, 1739];
+const PRE_LOC_H: [u64; 4] = [1765, 1677, 1708, 1739];
 const PRE_VOL_H: u64 = 1765;
-const PRE_MUTED_H: [u64; 4] = [1486, 1485, 1486, 1486];
+const PRE_MUTED_H: [u64; 4] = [1486, 1486, 1486, 1486];
 const PRE_FEAT_H: [u64; 6] = [81, 73, 69, 435, 222, 549];
 /// The portamento step: the period is moved to the target by a step (up, up and reached, down, down
 /// and reached) or already there; an arpeggio voice adds a little.
@@ -76,7 +77,7 @@ const PRE_PM_H: [[u64; 7]; 2] = [[0, 0, 123, 119, 123, 174, 56], [0, 0, 123, 120
 const PRE_ARP_H: u64 = 9;
 /// A silent voice's VOL write after the previous voice's last write (half clocks): by what that was
 /// (a sample start, a plain VOL, a silent voice's VOL), per voice.
-const MUTED_AFTER: [[u64; 4]; 3] = [[673, 607, 660, 681], [674, 695, 718, 708], [673, 438, 431, 430]];
+const MUTED_AFTER: [[u64; 4]; 3] = [[673, 607, 660, 681], [674, 695, 718, 708], [673, 416, 439, 429]];
 /// The gap before a row's work (DMACON 0x8200).
 const ROW_PRE: u64 = 580;
 /// ... after a plain volume write, and after a silent voice's.
@@ -140,12 +141,12 @@ struct RowCost {
     idle_then_note: i64,
 }
 const RC_MAIN: RowCost = RowCost {
-    a: [1641, 86, 86],
+    a: [1639, 86, 86],
     tl_len: [[-95, -95, -95, 1413], [-76, -76, -76, 1432], [-49, -49, -49, 1459]],
-    tl_key: [[0, 0, 0, 1508], [0, 0, 0, 1508], [0, 0, 0, 1508], [0, 0, 0, 1508]],
+    tl_key: [[0, -1, -1, 1507], [1, 0, 0, 1508], [1, 0, 0, 1508], [1, 0, 0, 1508]],
     note: [0, 1573, 1621, 0],
     idle: [-1023, 549, 550, 0],
-    rel: [-1628, -57, -56, 0],
+    rel: [-1629, -57, -56, 0],
     rel_id: [545, 545, 545, 1337],
     rel_id280: [10, 10, 10, 0],
     r280: [10, 10, 10, 10],
@@ -155,8 +156,8 @@ const RC_MAIN: RowCost = RowCost {
     e3: [174, 174, 174, 174],
     n_arp: [68, 68, 68, 68],
     q_arp: [68, 68, 68, 466],
-    n_cv: [[-117, -119, -167, -54], [2, 0, -48, 65], [0, 0, -51, 0], [2, 0, -48, 65], [50, 0, 0, 0], [-62, -65, -113, 0]],
-    q_cv: [[-115, -116, -117, -1074], [4, 3, 2, 0], [0, 0, 0, 0], [4, 3, 2, 0], [0, 0, 0, 0], [-61, 0, -24, 0]],
+    n_cv: [[-116, -119, -167, -54], [3, 0, -48, 65], [0, 0, -51, 0], [3, 0, -48, 65], [51, 0, 0, 0], [-62, -65, -113, 0]],
+    q_cv: [[-114, -116, -117, -1074], [5, 3, 2, 0], [2, 0, -1, 0], [5, 3, 2, 0], [0, 0, 0, 0], [-60, 0, -24, 0]],
     rel_cnt0: 1270,
     rel_div: 1514,
     idle_then_note: 0,
@@ -191,15 +192,15 @@ const ROW_SMP_H: [(u64, u64); 4] = [(267, 201), (298, 232), (329, 263), (337, 27
 /// end of one handler to the next one's start.
 /// (the first handler's start follows the tick's last write: by what that was, in half clocks:
 /// AUDxDAT of channel 0..3, a LOC, a plain VOL, a silent voice's VOL, a sample start's DMACON).
-const LAT_DAT_H: [u64; 4] = [899, 828, 759, 687];
-const LAT_LOC_H: u64 = 1004;
-const LAT_VOL_H: u64 = 1021;
-const LAT_MUTED_H: u64 = 742;
+const LAT_DAT_H: [u64; 4] = [897, 827, 757, 687];
+const LAT_LOC_H: u64 = 1003;
+const LAT_VOL_H: u64 = 1022;
+const LAT_MUTED_H: u64 = 743;
 const LAT_START_H: u64 = 1026;
 /// What a tick whose timer is already due adds to its start, by how the previous call ended: after
 /// a LOC, a VOL, a sample start or key tail, an interrupt handler (half clocks).
 const LATE_LOC_H: u64 = 860;
-const LATE_VOL_H: u64 = 879;
+const LATE_VOL_H: u64 = 878;
 const LATE_START_H: u64 = 882;
 const LATE_HANDLER_H: u64 = 292;
 /// Handler gaps per channel: LOC to LEN, and LEN to the next write.
@@ -327,6 +328,9 @@ pub struct Aps {
     filter_cmd: bool,
     silence: u32,
     last_kind: u8,
+    /// The last LOC was a moving sample's (type 4 or 5): the work after it is two cycles shorter than
+    /// after a synth's.
+    last_mov: bool,
     start_keyed: bool,
     /// Work counters of the voice update in progress, for the cost of the call: arpeggio bytes
     /// read, arpeggio jumps, envelope steps, envelope points loaded, envelope jumps.
@@ -596,9 +600,9 @@ impl Aps {
 
     fn process_row(&mut self, hw: &mut Hw) {
         self.wh(hw, match self.last_kind {
-            2 => 2 * ROW_PRE_MUTED - 1,
-            1 => 2 * ROW_PRE_VOL - 1,
-            _ => 2 * ROW_PRE,
+            2 => 2 * ROW_PRE_MUTED + 1,
+            1 => 2 * ROW_PRE_VOL,
+            _ => 2 * ROW_PRE + 4 - if self.last_mov { 2 } else { 0 },
         });
         hw.dmacon(0x8200);
         let blk = self.blk;
@@ -859,6 +863,7 @@ impl Aps {
     fn tick_voices(&mut self, hw: &mut Hw) {
         self.budget = 255;
         self.last_kind = 1;
+        self.last_mov = false;
         for v in 0..4 {
             match self.voice(hw, v) {
                 Ok(()) | Err(Skip::Voice) => {}
@@ -929,7 +934,11 @@ impl Aps {
         self.pm = 0;
         let inst = self.v[v].inst;
         if self.v[v].chvol == 0 {
-            self.wh(hw, MUTED_AFTER[self.last_kind as usize][v]);
+            let mut h = MUTED_AFTER[self.last_kind as usize][v];
+            if self.last_kind == 0 && v >= 2 {
+                h = h + 1 - if self.last_mov { 2 } else { 0 };
+            }
+            self.wh(hw, h);
             hw.vol(v, 0);
             self.lat_h = LAT_MUTED_H;
             self.last_kind = 2;
@@ -1022,7 +1031,7 @@ impl Aps {
         let vol = (b & 127) as u16;
         let f = self.feat;
         let base = match self.last_kind {
-            0 => PRE_LOC_H[v],
+            0 => PRE_LOC_H[v] - if self.last_mov { 2 } else { 0 },
             1 => PRE_VOL_H,
             _ => PRE_MUTED_H[v],
         };
@@ -1035,9 +1044,6 @@ impl Aps {
             + PRE_FEAT_H[3] * (f[3] - f[5]) as u64
             + PRE_FEAT_H[4] * f[4] as u64
             + PRE_FEAT_H[5] * f[5] as u64;
-        // the first voice's PER comes an odd number of half clocks after the tick starts: a fitted
-        // even total is one half clock short (all ticks of every reference log)
-        let h = if v == 0 { h | 1 } else { h };
         self.wh(hw, h);
         hw.per(v, per);
         self.wc(hw, PER_VOL[v]);
@@ -1045,10 +1051,12 @@ impl Aps {
         self.lat_h = LAT_VOL_H;
         // the event
         let (e, w) = self.evrec(hw, self.v[v].ev);
+        self.last_mov = false;
         match e >> 28 {
             4 | 5 => {
                 let f = self.moving(v, e, w, e >> 28 == 4);
-                self.wh(hw, if e >> 28 == 4 { 983 } else { 764 });
+                self.wh(hw, if e >> 28 == 4 { 984 } else { 765 });
+                self.last_mov = true;
                 hw.loc(v, self.sample_addr(e, f));
                 self.lat_h = LAT_LOC_H;
                 self.last_kind = 0;
@@ -1382,9 +1390,55 @@ struct SynthFeat {
     fresh: bool,
 }
 
+/// Exact corrections (half clocks) to `synth_cost_h`: reference minus the stage model, per
+/// (mode, op, comb, fvar, fill, skip, t1, t2, q22, g1nz, g2nz); nonzero only.
+const SYNTH_FIX: [([u8; 11], i8); 27] = [
+    ([0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1], 1),
+    ([0, 5, 0, 1, 1, 0, 0, 0, 1, 1, 1], 1),
+    ([1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0], 1),
+    ([1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1], -1),
+    ([1, 1, 1, 1, 1, 0, 4, 0, 1, 1, 1], -1),
+    ([1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1], 1),
+    ([1, 3, 0, 0, 1, 0, 4, 0, 0, 0, 0], -1),
+    ([1, 3, 0, 1, 1, 0, 5, 0, 0, 1, 1], -1),
+    ([1, 4, 1, 1, 1, 0, 0, 0, 0, 1, 1], -1),
+    ([1, 4, 1, 1, 1, 0, 4, 0, 1, 1, 1], -1),
+    ([1, 4, 1, 1, 1, 0, 5, 0, 1, 1, 1], -1),
+    ([1, 7, 1, 2, 1, 0, 0, 0, 1, 1, 1], 1),
+    ([2, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0], -1),
+    ([2, 2, 0, 1, 1, 0, 5, 1, 1, 1, 1], 1),
+    ([2, 3, 0, 1, 1, 0, 0, 1, 1, 1, 1], -1),
+    ([2, 3, 0, 2, 1, 0, 5, 1, 1, 1, 1], -1),
+    ([2, 3, 0, 2, 1, 0, 5, 4, 0, 1, 1], -1),
+    ([2, 3, 0, 2, 1, 0, 5, 5, 1, 1, 1], -1),
+    ([2, 4, 1, 0, 1, 0, 0, 4, 0, 0, 0], 1),
+    ([2, 4, 1, 1, 1, 0, 1, 0, 1, 1, 1], 1),
+    ([2, 5, 0, 1, 1, 0, 1, 0, 0, 1, 1], -1),
+    ([2, 5, 1, 0, 1, 0, 5, 0, 0, 0, 0], -1),
+    ([2, 6, 0, 0, 1, 0, 0, 0, 0, 0, 0], -1),
+    ([2, 7, 0, 2, 1, 0, 0, 4, 1, 1, 1], -1),
+    ([2, 9, 0, 0, 1, 0, 0, 0, 0, 0, 0], -1),
+    ([2, 9, 0, 1, 1, 0, 5, 1, 0, 1, 1], -1),
+    ([3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0], -1),
+];
+/// ... and the exceptions by length: (mode, op, n, comb, fvar, fill, skip, t1, t2, q22, g1nz, g2nz) -> correction.
+const SYNTH_FIX_N: [([u8; 12], i8); 1] = [
+    ([0, 1, 8, 1, 1, 1, 0, 0, 0, 0, 1, 1], -1),
+];
+
 /// The half colour clocks the synthesis of one buffer takes, from VOL to LOC: measured on the
 /// reference with probe modules (one stage at a time; the stages add up).
 fn synth_cost_h(f: &SynthFeat) -> u64 {
+    let k = [f.mode as u8, f.op as u8, f.comb as u8, f.fvar, f.fill as u8, f.skip as u8, f.t1 as u8, f.t2 as u8, f.q22 as u8, f.g1nz as u8, f.g2nz as u8];
+    let mut fix = SYNTH_FIX.iter().find(|e| e.0 == k).map_or(0, |e| e.1 as i64);
+    let kn = [k[0], k[1], f.n as u8, k[2], k[3], k[4], k[5], k[6], k[7], k[8], k[9], k[10]];
+    if let Some(e) = SYNTH_FIX_N.iter().find(|e| e.0 == kn) {
+        fix = e.1 as i64;
+    }
+    (synth_cost_base_h(f) as i64 + fix) as u64
+}
+
+fn synth_cost_base_h(f: &SynthFeat) -> u64 {
     let n = f.n;
     let mut c: u64 = match f.mode {
         0 => match f.op {
@@ -1532,6 +1586,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         filter_cmd: false,
         silence: area + 1040,
         last_kind: 1,
+        last_mov: false,
         start_keyed: false,
         feat: [0; 6],
         pm: 0,
@@ -1560,7 +1615,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the rest of the start-up call (blocks of no rows, further entries) passes in time
     r.starting = false;
     if started.is_ok() {
-        let h = 2 * origin + START_PLAIN_H + r.sq_acc - 2 * ROW_PRE;
+        let h = 2 * origin + START_PLAIN_H + r.sq_acc - (2 * ROW_PRE + 4);
         hw.bus.clock = h / 2;
         r.half = h % 2;
         // the first row is processed without moving the pointer
@@ -1581,7 +1636,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     // the first tick follows the end of the call to the half clock
     let ft = 2 * hw.bus.clock + r.half + if keyed { START_TO_TICK_KEYED_H } else { START_TO_TICK_H };
-    r.first_tick = Some(ft / 2);
+    r.first_tick = Some(ft.div_ceil(2));
     Some(Box::new(r))
 }
 

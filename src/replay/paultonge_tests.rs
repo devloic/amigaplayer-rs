@@ -238,3 +238,30 @@ fn damaged_songs_do_not_panic_or_hang() {
     // a bank too short for its entries
     let (_w, _e) = play("PAT.t", one_note(), Some(("SMP.set", vec![0u8; 12])), 1);
 }
+
+#[test]
+fn first_tick_delay_follows_path_name_bank_and_lists() {
+    // header: four list offsets (0, then 3 lists), each list one entry; entry 3's pattern follows 0x8F
+    let mut d = vec![0u8; 64];
+    let put = |d: &mut Vec<u8>, o: usize, v: u16| d[o..o + 2].copy_from_slice(&v.to_be_bytes());
+    put(&mut d, 0, 12);
+    for (i, (off, ent)) in [(18u16, 40u16), (24, 44), (30, 48)].into_iter().enumerate() {
+        put(&mut d, 2 * (i + 1), off);
+        put(&mut d, off as usize, ent);
+    }
+    d[39] = 0x80;
+    d[43] = 0x80;
+    d[47] = 0x8F;
+    let base = super::first_tick_delay(&d, 60, 9, false);
+    assert_eq!(base, 27266 + 892 + 13);
+    // 25.5 per directory character (half clocks round up), 10.5 per file-name character
+    assert_eq!(super::first_tick_delay(&d, 61, 9, false) - base, 26);
+    assert_eq!(super::first_tick_delay(&d, 62, 9, false) - base, 51);
+    assert_eq!(super::first_tick_delay(&d, 60, 10, false) - base, 11);
+    // the song's own bank found at once: 703 clocks earlier here, 17 per directory character
+    assert_eq!(base - super::first_tick_delay(&d, 60, 9, true), 703);
+    assert_eq!(super::first_tick_delay(&d, 61, 9, true) - super::first_tick_delay(&d, 60, 9, true), 17);
+    // a list offset of 0 skips that list's check
+    put(&mut d, 2, 0);
+    assert_eq!(super::first_tick_delay(&d, 60, 9, false), 27266 + 892 + 13 - 37);
+}

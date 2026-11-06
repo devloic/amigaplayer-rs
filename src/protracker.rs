@@ -358,6 +358,17 @@ impl ProTracker {
         }
     }
 
+    /// For a replayer that leaves the repeat length of a sample without a loop at 0
+    /// (64K words in Paula, which replays from the repeat pointer on) instead of
+    /// ProTracker's 1: set it for every sample of the module that has data and no loop.
+    pub fn set_unlooped_replen(&mut self, replen: u16) {
+        for s in &mut self.samples[1..] {
+            if s.length != 0 && s.repeat == 0 && s.replen <= 1 {
+                s.replen = replen;
+            }
+        }
+    }
+
     /// One interrupt of the replayer (mt_music).
     pub fn tick(&mut self, bus: &mut Bus) {
         self.counter = self.counter.wrapping_add(1);

@@ -568,7 +568,7 @@ impl Aps {
                 continue;
             }
             {
-                hw.wait(if first { 97 } else { 36 });
+                hw.wait(if first { 97 } else { 67 });
                 first = false;
                 self.intena(hw, 0x8000 | 0x0080 << v);
                 hw.wait(31);

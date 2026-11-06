@@ -321,7 +321,14 @@ impl Tronic {
     }
 
     fn period_of(idx: u8) -> u16 {
-        PERIODS.get(idx as usize).copied().unwrap_or(0)
+        match PERIODS.get(idx as usize) {
+            Some(&p) => p,
+            // Past the table the original reads whatever follows it. The only index seen to
+            // reach there in the reference runs, 254 (note + transpose wrapping a byte), reads
+            // 0x8000 (the logged period is then 0x8000 + the slide); the rest are unknown (0).
+            None if idx == 254 => 0x8000,
+            None => 0,
+        }
     }
 
     // --- one voice

@@ -227,7 +227,7 @@ enum Iop {
     Imm32 { o: i64, v: u32 },
     NextPos,
     Vol(usize),
-    Adk(u16),
+    Adk,
     Led,
 }
 
@@ -375,7 +375,7 @@ fn init_ops(t: &mut Tm, voice: bool) -> Option<Vec<Iop>> {
             0x4279 if !voice && x(1) == 0x00df && matches!(x(2), 0xf0a8 | 0xf0b8 | 0xf0c8 | 0xf0d8) => {
                 (Iop::Vol(((x(2) - 0xf0a8) / 16) as usize), 3)
             }
-            0x33fc if !voice && x(2) == 0x00df && x(3) == 0xf09e => (Iop::Adk(x(1)), 4),
+            0x33fc if !voice && x(2) == 0x00df && x(3) == 0xf09e => (Iop::Adk, 4),
             0x08f9 if !voice && x(1) == 1 && x(2) == 0x00bf && x(3) == 0xe001 => (Iop::Led, 4),
             _ => {
                 if std::env::var_os("DELI_AVP_DEBUG").is_some() {
@@ -1035,7 +1035,12 @@ impl ActivisionPro {
             Iop::Imm32 { o, v: x } => hw.bus.w32(at(o, 0), x),
             Iop::NextPos => self.nextpos(hw, v),
             Iop::Vol(ch) => self.write(hw, 10, 0xdff0a8 + 16 * ch as u32, 0),
-            Iop::Adk(x) => self.write(hw, 10, 0xdff09e, x),
+            Iop::Adk => {
+                // the reference never shows the module's ADKCON write (0x00ff, clearing the
+                // modulation bits that are clear anyway): only the time it takes is kept
+                hw.wait(self.pend + 10);
+                self.pend = 0;
+            }
             Iop::Led => {
                 hw.wait(self.pend + 12);
                 self.pend = 0;
@@ -1198,7 +1203,7 @@ impl ActivisionPro {
             return;
         }
         // the delay loop, all voices on
-        self.write(hw, C_DELAY, 0xdff096, 0x820f);
+        self.write(hw, C_DELAY, 0xdff096, 0x800f);
         let mut c = C_FINAL;
         let sv = if self.l.sv2 { 0 } else { self.gb(hw, "SVCNT").wrapping_sub(1) };
         if !self.l.sv2 {
@@ -1274,7 +1279,7 @@ impl ActivisionPro {
     /// volume, period, loop (once its stop delay has run out) and its stop
     /// delay.
     fn final_late(&mut self, hw: &mut Hw) {
-        self.write(hw, C_DELAY_LATE, 0xdff096, 0x820f);
+        self.write(hw, C_DELAY_LATE, 0xdff096, 0x800f);
         self.pend += C_FINAL_LATE;
         for v in (0..4).rev() {
             if (self.vb(hw, v, "DIS") as i8) < 0 {
@@ -2024,7 +2029,7 @@ mod tests {
         let log = e.m.bus.write_log.take().unwrap();
         let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
         // each voice's note (3 to 0): its DMA off, then all on after the delay
-        assert_eq!(&reg(0xDFF096)[..5], &[8, 4, 2, 1, 0x820f]);
+        assert_eq!(&reg(0xDFF096)[..5], &[8, 4, 2, 1, 0x800f]);
         // the note: period $7e, the sample (16 words); then the loop, the
         // note's period ($18: 856 - 8 * 24), the volume (64 * 64 / 64)
         assert_eq!(&reg(0xDFF0A6)[..2], &[0x7e, 856 - 8 * 24]);
@@ -2036,7 +2041,7 @@ mod tests {
         assert_eq!(reg(0xDFF096).iter().filter(|&&x| x == 1).count() >= 2, true);
         // the delay loop between the last note and the DMA on
         let at = |v: u16| log.iter().position(|w| w.0 == 0xDFF096 && w.1 == v).unwrap();
-        assert!(log[at(0x820f)].2 - log[at(1)].2 >= C_DELAY);
+        assert!(log[at(0x800f)].2 - log[at(1)].2 >= C_DELAY);
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
     }
 }

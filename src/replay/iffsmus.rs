@@ -343,6 +343,13 @@ const COST: [i64; f::N + w::N] = [
 const INIT: i64 = 8829;
 const INIT_COST: [i64; l::N] = [1549, -174, 390, 2253, 1056902, -1597, 29, 40, 212, 1545];
 
+/// Colour clocks from the original's timer start to the song start (the end of the host's start-up)
+/// in the reference's runs: 11456 to 12063 on 17 modules, the median.
+const START_LATE: u64 = 11665;
+/// The reference's first interval between ticks is this much shorter than a period (the median of
+/// 17 modules, 11142 to 11393 colour clocks).
+const SECOND_SHORT: u64 = 11270;
+
 pub struct IffSmus {
     g: u32,
     timer: u16,
@@ -351,6 +358,11 @@ pub struct IffSmus {
     feat: [i64; f::N],
     /// The part of their time already let pass (`spend`).
     paid: i64,
+    /// The first tick's time, until the engine has taken it.
+    first_at: Option<u64>,
+    /// The second tick's time, once the first has run (the tempo it set).
+    second_at: std::cell::Cell<Option<u64>>,
+    ticked: bool,
 }
 
 /// The original's loader: its allocations (AllocMem with a size long in front,
@@ -962,12 +974,17 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     // DeliTracker sets dtg_Timer to its default before InitSound, over
     // InitPlayer's: the first tick sets the tempo's
-    let mut s = IffSmus { g, timer: crate::deli::DEFAULT_TIMER, songend: false, feat: [0; f::N], paid: 0 };
+    let mut s = IffSmus { g, timer: crate::deli::DEFAULT_TIMER, songend: false, feat: [0; f::N], paid: 0, first_at: None, second_at: Default::default(), ticked: false };
     // the loader's time, then InitSound: the score from its start, for ever
     let init = INIT + l.feat.iter().zip(INIT_COST).map(|(n, c)| n * c).sum::<i64>();
     let mut hw = Hw { bus: &mut l.m.bus };
     hw.wait(init.max(0) as u64);
     s.start(&mut hw, score);
+    // the reference's song start is `START_LATE` after the original's timer started: the first
+    // tick falls one period after the timer's start
+    let timer_start = hw.bus.clock;
+    s.first_at = Some(timer_start + s.tick_clocks());
+    hw.bus.clock = timer_start + START_LATE;
     Some(Box::new(s))
 }
 
@@ -988,7 +1005,20 @@ impl Replayer for IffSmus {
         self.songend
     }
 
+    fn subsong_tick_at(&mut self) -> Option<u64> {
+        self.first_at.take()
+    }
+
+    fn next_tick_at(&self) -> Option<u64> {
+        self.second_at.take()
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
+        if self.first_at.is_none() && !self.ticked {
+            self.ticked = true;
+            // the reference's second tick follows its first by a period less `SECOND_SHORT`
+            self.second_at.set(Some(hw.bus.clock + self.tick_clocks() - SECOND_SHORT));
+        }
         self.feat = [0; f::N];
         self.feat[f::TICK] = 1;
         self.fade(hw);

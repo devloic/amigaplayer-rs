@@ -413,6 +413,8 @@ pub struct Med {
     acc2: i64,
     calls: u32,
     init: f64,
+    /// The first tick's time, until the engine has taken it.
+    first_at: Option<u64>,
     n_after: usize,
     first_out: bool,
     /// Whether the last note of the tick loops.
@@ -521,6 +523,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         acc2: 0,
         calls: 0,
         init,
+        first_at: None,
         n_after: 4,
         first_out: true,
         note_loops: false,
@@ -531,6 +534,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     p.title = p.song_name(&m.bus);
     p.play_module(&mut m.bus, 0);
+    // The song starts 14 colour clocks after the original's timer starts (its start-up is `init`
+    // long; the reference's song start is when its timer is started, not when the clocks of the
+    // first tick are counted), so the first tick falls one period after the timer's start.
+    p.first_at = Some(p.timer_delay() + 100 + p.tick_clocks());
+    let start = (114.0 + p.init - 0.01).ceil() as u64;
+    m.bus.clock = m.bus.clock.max(start);
     Some(Box::new(p))
 }
 
@@ -567,6 +576,10 @@ impl Replayer for Med {
     fn timer_delay(&self) -> u64 {
         let ts = (100.0 + self.init + 0.01) as u64;
         5 * (ts / 5) - 100
+    }
+
+    fn subsong_tick_at(&mut self) -> Option<u64> {
+        self.first_at.take()
     }
 
     fn tick(&mut self, hw: &mut Hw) {

@@ -43,9 +43,9 @@ const CIAA_PRA: u32 = 0xBFE001;
 
 /// The first DMACON write of the start-up, from the run's origin, without and with a filter
 /// command in front (the CIA write is at `START_CIA`).
+/// (the first sequence entry, a speed command, is included; later entries add their costs).
 const START_PLAIN: u64 = 4152;
-const START_FILTER: u64 = 4530;
-const START_CIA: u64 = 2956;
+const START_CIA: u64 = 2772;
 /// Colour clocks from the last write of the start-up call (the audio interrupts it requests come
 /// after) to the first tick's call: when its last write is AUDxDAT of a keyed voice, and when not.
 const START_TO_TICK_KEYED: u64 = 71200;
@@ -62,6 +62,23 @@ const MUTED_AFTER: [[u64; 4]; 3] = [[300, 303, 331, 341], [300, 348, 359, 354], 
 /// The gap from a muted voice's VOL write (volume 0) to the next voice's first write.
 /// The gap before a row's work (DMACON 0x8200), and each voice's first write in a row.
 const ROW_PRE: u64 = 580;
+/// ... after a plain volume write, and after a silent voice's.
+const ROW_PRE_VOL: u64 = 591;
+const ROW_PRE_MUTED: u64 = 451;
+/// Sequence entry costs (measured with probe modules; a loop's first-met-and-final and
+/// taken/not-first costs are split evenly), and the advance's block-end, block-start and
+/// move-to-the-next-entry costs.
+const SQ_NOP: u64 = 153;
+const SQ_SPEED: u64 = 169;
+const SQ_TRANSPOSE: u64 = 183;
+const SQ_FILTER_OFF: u64 = 194;
+const SQ_FILTER_ON: u64 = 199;
+const SQ_JUMP: u64 = 146;
+const SQ_LOOP_TAKEN: u64 = 163;
+const SQ_LOOP_DONE: u64 = 171;
+const ADV_END_BLOCK: u64 = 600;
+const ADV_START_BLOCK: u64 = 599;
+const ADV_NEXT_ENTRY: u64 = 392;
 /// A note voice's work before its first write, per voice, and what a retrigger adds.
 const ROW_BASE: [u64; 4] = [721, 730, 745, 728];
 const ROW_RETRIG: u64 = 485;
@@ -207,6 +224,13 @@ pub struct Aps {
     /// Work counters of the voice update in progress, for the cost of the call: arpeggio bytes
     /// read, arpeggio jumps, envelope steps, envelope points loaded, envelope jumps.
     feat: [u32; 5],
+    /// A carried half colour clock (the synthesis costs are in half clocks).
+    half: u64,
+    /// The start-up call is running: sequencer costs add up in `sq_acc` instead of passing.
+    start_origin: u64,
+    starting: bool,
+    sq_acc: u64,
+    sq_seen: bool,
     irq_end: u64,
     first_tick: Option<u64>,
 }
@@ -261,6 +285,13 @@ impl Aps {
         self.c[7].wrapping_add(2u32.wrapping_mul((e & 0xFF_FFFF).wrapping_add(off as u32)))
     }
 
+    /// Lets `h` half colour clocks pass (a half clock left over is carried to the next).
+    fn wh(&mut self, hw: &mut Hw, h: u64) {
+        let t = self.half + h;
+        hw.wait(t / 2);
+        self.half = t % 2;
+    }
+
     fn intena(&self, hw: &mut Hw, v: u16) {
         wr16(hw, INTENA, v);
     }
@@ -277,6 +308,28 @@ impl Aps {
         for _ in 0..SEQ_GUARD {
             let (c, p) = self.entry(hw);
             let n = c & 0x1F;
+            let cost = match c & 0xE0 {
+                0x40 => {
+                    if self.loopc == 0xFF && n == 1 || self.loopc == 1 {
+                        SQ_LOOP_DONE
+                    } else {
+                        SQ_LOOP_TAKEN
+                    }
+                }
+                0x60 => SQ_JUMP,
+                0x80 => SQ_TRANSPOSE,
+                0xA0 => SQ_SPEED,
+                0xC0 => {
+                    if p != 0 {
+                        SQ_FILTER_ON
+                    } else {
+                        SQ_FILTER_OFF
+                    }
+                }
+                0xE0 => SQ_NOP,
+                _ => 0,
+            };
+            self.sq_cost(hw, cost);
             match c & 0xE0 {
                 0x00 => return Err(End),
                 0x20 => {
@@ -306,6 +359,9 @@ impl Aps {
                 }
                 0xC0 => {
                     self.filter_cmd = true;
+                    if self.starting {
+                        hw.bus.clock = self.start_origin + START_CIA + self.sq_acc - cost;
+                    }
                     let x = hw.bus.read_byte(CIAA_PRA);
                     hw.bus.write_byte(CIAA_PRA, if p != 0 { x & !2 } else { x | 2 });
                     self.seq = self.seq.wrapping_add(1);
@@ -314,6 +370,19 @@ impl Aps {
             }
         }
         Err(End)
+    }
+
+    /// Charges a sequence entry: in the start-up call the sum is kept (the first entry is part of
+    /// the base time), later the time passes.
+    fn sq_cost(&mut self, hw: &mut Hw, cost: u64) {
+        if self.starting {
+            if self.sq_seen {
+                self.sq_acc += cost;
+            }
+            self.sq_seen = true;
+        } else {
+            hw.wait(cost);
+        }
     }
 
     fn jump(&mut self, p: u8) -> Result<(), End> {
@@ -345,6 +414,9 @@ impl Aps {
                     self.timer = self.tpr;
                     return Ok(self.tpr != 0);
                 }
+                if !self.starting {
+                    hw.wait(ADV_END_BLOCK);
+                }
                 self.blk = self.blk.wrapping_add(26);
                 self.rep = self.rep.wrapping_add(1);
             } else {
@@ -352,8 +424,14 @@ impl Aps {
                 skip = false;
             }
             if self.rep < self.entry(hw).0 & 0x1F {
+                if !self.starting {
+                    hw.wait(ADV_START_BLOCK);
+                }
                 self.start_block(hw);
                 continue;
+            }
+            if !self.starting {
+                hw.wait(ADV_NEXT_ENTRY);
             }
             self.seq = self.seq.wrapping_add(1);
             self.sequencer(hw)?;
@@ -378,7 +456,11 @@ impl Aps {
     // ---------------------------------------------------------------- rows
 
     fn process_row(&mut self, hw: &mut Hw) {
-        hw.wait(ROW_PRE);
+        hw.wait(match self.last_kind {
+            2 => ROW_PRE_MUTED,
+            1 => ROW_PRE_VOL,
+            _ => ROW_PRE,
+        });
         hw.dmacon(0x8200);
         let blk = self.blk;
         let mut keys = [false; 4];
@@ -706,7 +788,7 @@ impl Aps {
             }
             3 => {
                 let cost = self.synth(hw, v);
-                hw.wait(cost);
+                self.wh(hw, cost);
                 self.v[v].fresh = false;
                 let vo = &mut self.v[v];
                 std::mem::swap(&mut vo.front, &mut vo.back);
@@ -745,6 +827,9 @@ impl Aps {
         let mut buf: Vec<u8> = (0..=n as u32).map(|i| rd8(hw, front.wrapping_add(i))).collect();
         let (ea, eb) = ((e >> 26) & 3, (e >> 24) & 3);
         let (mut comb_on, mut fvar) = (false, 0u8);
+        let (mut fill, mut skip, mut t1, mut t2) = (true, false, 0u32, 0u32);
+        let (mut q22, mut g1nz, mut g2nz) = (false, false, false);
+        let fresh = self.v[v].fresh;
         let rec = |k: u32| x.wrapping_add(6 * k);
         match mode {
             0 => {
@@ -757,6 +842,8 @@ impl Aps {
                             for (i, b) in buf.iter_mut().enumerate().take(n) {
                                 *b = if i < d as usize { 100 } else { 156 };
                             }
+                        } else {
+                            fill = false;
                         }
                     }
                     1 => {
@@ -790,7 +877,10 @@ impl Aps {
                 }
             }
             1 => {
-                if let Some(s) = self.source(hw, v, rec(1), true) {
+                t1 = self.evrec(hw, rec(1)).0 >> 28;
+                let srcopt = self.source(hw, v, rec(1), true);
+                skip = srcopt.is_none();
+                if let Some(s) = srcopt {
                     let src = |i: usize| rd8(hw, s.wrapping_add(i as u32)) as i8;
                     match op {
                         0 => {
@@ -828,6 +918,8 @@ impl Aps {
                 }
             }
             2 => {
+                t1 = self.evrec(hw, rec(1)).0 >> 28;
+                t2 = self.evrec(hw, rec(2)).0 >> 28;
                 let s1 = self.source(hw, v, rec(1), false).unwrap_or(0);
                 let s2 = self.source(hw, v, rec(2), false).unwrap_or(0);
                 let a = |i: usize| rd8(hw, s1.wrapping_add(i as u32)) as i8 as i32;
@@ -892,6 +984,9 @@ impl Aps {
             }
             let g1 = s16(((self.env_val(v, (q >> 26) & 3) * s8((qw >> 8) as u8)) >> 10) + ((q >> 8) & 0xFF) as i32);
             let g2 = s16(((self.env_val(v, (q >> 24) & 3) * s8(qw as u8)) >> 10) + (q & 0xFF) as i32);
+            q22 = q & 0x40_0000 != 0;
+            g1nz = g1 != 0;
+            g2nz = g2 != 0;
             let vo = &mut self.v[v];
             if q & 0x80_0000 == 0 {
                 if g1 != 0 {
@@ -927,7 +1022,7 @@ impl Aps {
         for (i, b) in buf.iter().enumerate() {
             hw.bus.w8(front.wrapping_add(i as u32), *b);
         }
-        synth_cost(mode, op, n as u64, comb_on, fvar)
+        synth_cost_h(&SynthFeat { mode, op, n: n as u64, comb: comb_on, fvar, fill, skip, t1, t2, q22, g1nz, g2nz, fresh })
     }
 
     // ---------------------------------------------------------------- the audio interrupt
@@ -986,41 +1081,117 @@ impl Aps {
     }
 }
 
-/// The colour clocks the synthesis of one buffer takes (a model fitted to the reference logs:
-/// per mode and operation a constant and a cost per byte, plus the comb and the filter variants).
-fn synth_cost(mode: u32, op: u32, n: u64, comb: bool, filt: u8) -> u64 {
-    let (c, k): (u64, u64) = match (mode, op) {
-        (0, 0) => (494, 6),
-        (0, 1) => (833, 13),
-        (0, 2) => (619, 41),
-        (0, _) => (716, 1),
-        (1, 0) => (0, 33),
-        (1, 1) => (810, 0),
-        (1, 2) => (11, 85),
-        (1, 3) => (991, 11),
-        (1, 4) => (820, 116),
-        (1, _) => (355, 1),
-        (2, 2) => (0, 81),
-        (2, 3) => (942, 21),
-        (2, 4) => (483, 27),
-        (2, 5) => (857, 22),
-        (2, 6) => (1068, 14),
-        (2, 7) => (5, 86),
-        (2, 9) => (875, 35),
-        (2, _) => (777, 30),
-        (3, _) => (0, 20),
-        _ => (700, 30),
+/// What the cost of one synthesis depends on.
+struct SynthFeat {
+    mode: u32,
+    op: u32,
+    n: u64,
+    comb: bool,
+    fvar: u8,
+    /// Mode 0 operation 0: the pulse is written (its width is below the length).
+    fill: bool,
+    /// Mode 1: the one-shot source is not fresh, no generation.
+    skip: bool,
+    t1: u32,
+    t2: u32,
+    /// The filter record's bit 22 (state reset on a fresh note) and which gains are non-zero.
+    q22: bool,
+    g1nz: bool,
+    g2nz: bool,
+    fresh: bool,
+}
+
+/// The half colour clocks the synthesis of one buffer takes, from VOL to LOC: measured on the
+/// reference with probe modules (one stage at a time; the stages add up).
+fn synth_cost_h(f: &SynthFeat) -> u64 {
+    let n = f.n;
+    let mut c: u64 = match f.mode {
+        0 => match f.op {
+            0 => {
+                if f.fill {
+                    1320 + 22 * n
+                } else {
+                    1260
+                }
+            }
+            1 => 1696 + 144 * (n >> 3),
+            2 => 1328 + 76 * n,
+            _ => 1262,
+        },
+        1 => {
+            if f.skip {
+                810
+            } else {
+                let extra: i64 = match f.t1 {
+                    4 => 634,
+                    5 => 414,
+                    1 => -6,
+                    _ => 0,
+                };
+                let b: i64 = match f.op {
+                    0 => 988 + 22 * n as i64,
+                    1 => 1014 + 42 * n as i64,
+                    2 => 1048 + 46 * n as i64,
+                    3 => {
+                        if n >= 3 {
+                            1080 + 46 * n as i64
+                        } else {
+                            1034
+                        }
+                    }
+                    4 => 1444 + 243 * n as i64,
+                    _ => 1046,
+                };
+                (b + extra) as u64
+            }
+        }
+        2 => {
+            let extra: u64 = [f.t1, f.t2].iter().map(|t| match t {
+                4 => 620,
+                5 => 402,
+                _ => 0,
+            }).sum();
+            let (b, k): (u64, u64) = match f.op {
+                1 => (1174, 54),
+                2 => (1200, 116),
+                3 => (1228, 38),
+                4 => (1254, 38),
+                5 => (1282, 38),
+                6 => (1308, 40),
+                7 => (1352, 52),
+                9 => (1390, 70),
+                _ => (3000, 0),
+            };
+            b + k * n + extra
+        }
+        _ => 690,
     };
-    let mut t = c + k * n;
-    if comb {
-        t += 592 + 204 * n;
+    if f.comb {
+        c += 924 + 417 * n;
     }
-    match filt {
-        1 => t += 488 + 198 * n,
-        2 => t += 488 + 189 * n,
-        _ => {}
+    if f.fvar != 0 {
+        if f.q22 {
+            c += 42 + if f.fresh { 52 } else { 0 };
+        }
+        if f.fvar == 1 {
+            c += 956;
+            if f.g1nz {
+                c += 58 + 200 * n;
+            }
+            if f.g2nz {
+                c += 76 + 200 * n;
+            }
+        } else {
+            c += 610;
+            if f.g1nz {
+                c += 328;
+                if f.g2nz {
+                    c += 92 + 368 * n;
+                }
+            }
+        }
     }
-    t
+    c
 }
 
 /// The "halve" transform of mode 1 operation 4.
@@ -1082,7 +1253,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         last_kind: 1,
         start_keyed: false,
         feat: [0; 5],
+        half: 0,
         irq_end: 0,
+        start_origin: 0,
+        starting: true,
+        sq_acc: 0,
+        sq_seen: false,
         first_tick: None,
     };
     for v in 0..4 {
@@ -1091,10 +1267,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
     let mut hw = Hw { bus: &mut m.bus };
+    r.start_origin = origin;
     hw.bus.clock = origin + START_CIA;
+    r.last_kind = 0;
     let started = r.sequencer(&mut hw);
     if started.is_ok() {
-        hw.bus.clock = origin + if r.filter_cmd { START_FILTER } else { START_PLAIN } - ROW_PRE;
+        hw.bus.clock = origin + START_PLAIN + r.sq_acc - ROW_PRE;
         // the first row is processed without moving the pointer
         if r.step2(&mut hw, true).is_err() {
             r.ended = true;
@@ -1102,6 +1280,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     } else {
         r.ended = true;
     }
+    r.starting = false;
+    r.last_kind = 1;
     // the timer starts after the start-up call, not after its interrupts
     let keyed = r.start_keyed;
     r.first_tick = Some(hw.bus.clock + if keyed { START_TO_TICK_KEYED } else { START_TO_TICK });

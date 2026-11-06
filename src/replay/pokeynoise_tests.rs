@@ -440,5 +440,5 @@ fn malformed_input_does_not_panic() {
     let mut r = new(&d, 0x20000, &mut m).expect("recognised");
     let mut hw = Hw { bus: &mut m.bus };
     r.tick(&mut hw);
-    assert!(r.subsongs().1 <= 65535);
+    let _ = r.subsongs();
 }

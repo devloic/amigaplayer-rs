@@ -48,6 +48,57 @@ fn libxmp_depack(data: &[u8]) -> Option<(&'static str, Option<Vec<u8>>)> {
     None
 }
 
+/// The packers this module undoes, for the library's `unpack` module.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Kind {
+    PowerPacker,
+    XpkSqsh,
+    Mmcmp,
+    PackIce,
+    StoneCracker,
+}
+
+/// Which packer made `data`, by its header alone (nothing is unpacked).
+pub(crate) fn identify(data: &[u8]) -> Option<Kind> {
+    if data.len() > 12 && &data[..4] == b"PP20" {
+        return Some(Kind::PowerPacker);
+    }
+    if data.len() < MIN_PACKED {
+        return None;
+    }
+    if sqsh::test(data) {
+        Some(Kind::XpkSqsh)
+    } else if mmcmp::test(data) {
+        Some(Kind::Mmcmp)
+    } else if ice::test1(data) || ice::test2(data) {
+        Some(Kind::PackIce)
+    } else if s404::test(data) {
+        Some(Kind::StoneCracker)
+    } else {
+        None
+    }
+}
+
+/// Unpacks `data` as the packer it identifies as: `None` when it is not packed, `Some(None)`
+/// when it is but the data is corrupt, `Some(Some(bytes))` otherwise.
+pub(crate) fn unpack_identified(data: &[u8]) -> Option<(Kind, Option<Vec<u8>>)> {
+    let kind = identify(data)?;
+    let out = match kind {
+        Kind::PowerPacker => pp20(data),
+        Kind::XpkSqsh => sqsh::depack(data),
+        Kind::Mmcmp => mmcmp::depack(data),
+        Kind::PackIce => {
+            if ice::test1(data) {
+                ice::unpack1(data)
+            } else {
+                ice::unpack2(data)
+            }
+        }
+        Kind::StoneCracker => s404::depack(data),
+    };
+    Some((kind, out.filter(|d| !d.is_empty())))
+}
+
 pub fn decrunch(data: Vec<u8>) -> Vec<u8> {
     if data.len() > 12 && &data[..4] == b"PP20" {
         match pp20(&data) {

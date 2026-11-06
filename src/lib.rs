@@ -33,6 +33,8 @@
 //!   [`songend`](Song::songend), [`duration_hint`](Song::duration_hint),
 //!   [`restart`](Song::restart) / [`seek`](Song::seek), [`title`](Song::title),
 //!   [`format`](Song::format).
+//! * [`unpack`]: recognise and undo the file-level packers (PowerPacker, Pack-Ice, XPK SQSH,
+//!   MMCMP, StoneCracker) without playing anything.
 //! * [`Error`]: a typed, `#[non_exhaustive]` error. Garbage input gives an `Err`, not a panic.
 //!
 //! Rendering is deterministic: the same bytes, rate and subsong give the same samples on every
@@ -81,6 +83,7 @@
 #![warn(missing_docs)]
 
 mod song;
+pub mod unpack;
 
 pub use song::{detect, formats, Error, Result, Song, Subsongs};
 

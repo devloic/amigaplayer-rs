@@ -20,7 +20,6 @@
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
-use m68k::AddressBus as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const OPEN: Open = Open { name: "Paul Summers", detect, new };

@@ -61,7 +61,7 @@ fn module(mask: u16) -> Vec<u8> {
     l(&mut h, 0x0001_0000);
     let tab_end = h.len();
     w(&mut h, 0);
-    let mut put = |h: &mut Vec<u8>, o: usize, v: u32| h[o..o + 4].copy_from_slice(&v.to_be_bytes());
+    let put = |h: &mut Vec<u8>, o: usize, v: u32| h[o..o + 4].copy_from_slice(&v.to_be_bytes());
     put(&mut h, 0x0C, b as u32);
     put(&mut h, 0x10, 0x20 + 0x40);
     put(&mut h, 0x14, 1);

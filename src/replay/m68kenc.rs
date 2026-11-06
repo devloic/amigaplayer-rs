@@ -267,10 +267,6 @@ pub fn move_l_imm_disp(imm: u32, n: u16, disp: i16) -> Vec<u16> {
 pub fn rte() -> Vec<u16> {
     vec![0x4E << 8 | 0x73]
 }
-/// `move.<size> #imm,abs.l` for word and long are `move_w_imm_abs`, `move_l_imm_abs`.
-pub fn size_code(s: u16) -> u16 {
-    mv_size(s)
-}
 
 /// An operand of the general forms below.
 #[derive(Clone, Copy, Debug)]

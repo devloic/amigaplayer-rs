@@ -291,6 +291,7 @@ struct Conv {
     running: [bool; 4],
 }
 
+#[cfg(test)]
 fn song_list(d: &[u8]) -> Vec<u8> {
     song_list_cost(d).0
 }

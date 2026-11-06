@@ -2,8 +2,6 @@ use super::*;
 use crate::engine::Engine;
 use std::path::Path;
 
-const DIR: &str = "/tmk-test/";
-
 /// A one-subsong single-file module: one sample (`SMP` bytes, a ramp, no loop, finetune 0, volume
 /// 64), a position list of `positions` patterns, the first pattern's rows `rows` (row number and
 /// the four voices' entries, as bytes) and silence in every other row.

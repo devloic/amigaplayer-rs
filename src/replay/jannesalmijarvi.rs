@@ -118,7 +118,6 @@ struct Voice {
 
 struct Js {
     d: Vec<u8>,
-    base: u32,
     /// Absolute address of the sample data (and of the empty-loop word).
     data: u32,
     title: String,
@@ -162,7 +161,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     m.bus.w16(base + data as u32, 0);
     let mut r = Js {
         d: d.to_vec(),
-        base,
         data: base + data as u32,
         title,
         song_len: d[950],

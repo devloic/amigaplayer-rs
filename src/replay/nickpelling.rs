@@ -42,9 +42,9 @@ const ED_EXTRA: f64 = 54.5;
 // The cost table of the spec (colour clocks).
 // ---------------------------------------------------------------------------------------------
 mod k {
-    pub const PROW: f64 = 60.5;
-    pub const PDEL: f64 = 84.0;
-    pub const FX: [f64; 4] = [0.0, 61.0, 62.5, 57.0];
+    pub const PROW: f64 = 60.0;
+    pub const PDEL: f64 = 83.0;
+    pub const FX: [f64; 4] = [0.5, 61.5, 61.5, 57.5];
     pub const RN: [f64; 4] = [0.0, 82.5, 82.5, 82.5];
     pub const FUNK: f64 = 17.0;
     pub const C0: f64 = 45.5;
@@ -129,13 +129,13 @@ mod k {
     pub const RNE: f64 = 26.0;
     pub const RNE5: f64 = 77.0;
     pub const RNX: f64 = 9.5;
-    pub const TG: f64 = 55.0;
+    pub const TG: f64 = 55.5;
     pub const TG_ED: f64 = 6.5;
     pub const W_LEN: f64 = 10.0;
     pub const W_PER: f64 = 10.0;
     pub const W_VOL: f64 = 8.0;
     pub const W_DMA: [f64; 4] = [86.5, 102.0, 117.5, 121.5];
-    pub const TG_POST: f64 = 42.0;
+    pub const TG_POST: f64 = 41.5;
     pub const TG_VK: f64 = -8.0;
     pub const TG_TK: f64 = -8.0;
     pub const FR: f64 = 73.0;
@@ -178,12 +178,12 @@ mod k {
     pub const RT: f64 = 30.5;
     pub const RT_LEN: f64 = 10.0;
     pub const RT_DMA: f64 = 26.0;
-    pub const ADV: f64 = 59.0;
+    pub const ADV: f64 = 60.0;
     pub const ADV_DN: f64 = 53.0;
     pub const ADV_DR: f64 = -10.5;
     pub const ADV_D0: f64 = -20.5;
     pub const ADV_L: f64 = 32.0;
-    pub const OUT: f64 = 241.5;
+    pub const OUT: f64 = 241.0;
     pub const ADV_NP: f64 = 186.5;
     pub const JC_NP: f64 = 212.0;
     pub const NP_END: f64 = 9.5;
@@ -448,6 +448,10 @@ pub struct NickPelling {
     /// The fraction of the tick start in the reference (its start is not a whole clock).
     frac: f64,
     songend: bool,
+    /// An EEx was handled earlier in this tick's pass (it moves the filter writes of a pattern-delay row).
+    ee_seen: bool,
+    /// How much earlier than the running clock the writes of the retrigger now being handled land.
+    rt_early: f64,
     start_delay: u64,
 }
 
@@ -502,6 +506,8 @@ impl NickPelling {
             led: Led { t: 0.0 },
             frac: 0.0,
             songend: false,
+            ee_seen: false,
+            rt_early: 0.0,
             start_delay: 0,
         };
         Some((me, samples))
@@ -562,6 +568,10 @@ impl NickPelling {
     }
 
     fn song_end(&mut self) {
+        // the host's report starts on an even cycle: from an odd one it waits a cycle
+        if self.led.t.fract() != 0.0 {
+            self.led.t += 0.5;
+        }
         self.led.add("SONGEND", k::SONGEND);
         self.songend = true;
     }
@@ -784,6 +794,7 @@ impl NickPelling {
     fn retrigger(&mut self, c: usize, hw: &mut Hw) {
         let r = self.rec(c);
         self.led.add("RT", k::RT);
+        self.led.t -= self.rt_early;
         self.at(hw);
         hw.loc(c, r.addr);
         self.led.add("RT_LEN", k::RT_LEN);
@@ -795,6 +806,7 @@ impl NickPelling {
         self.led.add("RT_DMA", k::RT_DMA);
         self.at(hw);
         hw.dmacon(1 << c);
+        self.led.t += self.rt_early;
         self.dma |= 1 << c;
     }
 
@@ -822,14 +834,15 @@ impl NickPelling {
             match x {
                 0 => {
                     self.led.add("E0_0", k::E0_0);
-                    // a row effect writes 3.5 clocks after this point; inside a pattern-delay
-                    // row's pass the write comes 57 clocks before it (25 later on channel 3)
+                    // a row effect writes 4 clocks after this point; inside a pattern-delay
+                    // row's pass the write comes 56.5 clocks before it, 25.5 later when an EEx
+                    // was handled earlier in the pass
                     let t1 = if !pdel {
-                        self.led.t + 3.5
-                    } else if c == 3 {
-                        self.led.t - 32.0
+                        self.led.t + 4.0
+                    } else if self.ee_seen {
+                        self.led.t - 31.0
                     } else {
-                        self.led.t - 57.0
+                        self.led.t - 56.5
                     };
                     hw.bus.clock = hw.bus.clock.max(cutx(t1));
                     let p = hw.bus.read_byte(0xBFE001) & !2;
@@ -896,7 +909,13 @@ impl NickPelling {
                     self.led.add("E0_8", k::E0_8);
                     if note_of_cell(&self.ch[c].cell) == 0 {
                         self.led.add("E0_8_GO", k::E0_8_GO);
+                        // in a pattern-delay row's pass the writes land 61 clocks before the
+                        // running clock, 25.5 later when an EEx was handled earlier in the pass
+                        if pdel {
+                            self.rt_early = if self.ee_seen { 35.0 } else { 61.0 };
+                        }
                         self.retrigger(c, hw);
+                        self.rt_early = 0.0;
                     }
                 }
                 9 => self.led.add("E0_9", k::E0_9),
@@ -941,6 +960,11 @@ impl NickPelling {
                 }
                 0xE => {
                     self.led.add("E0_E", k::E0_E);
+                    if pdel && self.ee_seen {
+                        // a second EEx in the same pattern-delay pass
+                        self.led.t += 25.5;
+                    }
+                    self.ee_seen = true;
                     if self.delay == 0 {
                         self.led.add("EE_SET", k::EE_SET);
                         self.pending = y + 1;
@@ -1380,6 +1404,7 @@ impl NickPelling {
 
     fn run(&mut self, hw: &mut Hw) {
         self.led.t = hw.bus.clock as f64 + self.frac;
+        self.ee_seen = false;
         self.dma = 0;
         self.counter = self.counter.wrapping_add(1);
         if self.counter >= self.speed {
@@ -1502,13 +1527,26 @@ fn first_write_cycles(song: &[u8], set: &[u8], dir_len: usize, file: &str, own_b
         y += 1394 + 17 * (d - 60) + (d & 1);
     }
     let is_npp = lb.len() >= 4 && lb[..4].eq_ignore_ascii_case(b"NPP.");
+    // the player compares the name with `NPP.` from the left: every matching letter of NPP in
+    // lower case costs 21 (first), 25 (second, third); a name that does not match all four
+    // characters never tries its own set (84 cycles less), but pays 28 for a matching first
+    // letter and 26 more for a matching second
+    let matched = lb.iter().zip(b"NPP").take_while(|(a, b)| a.eq_ignore_ascii_case(b)).count();
+    for (i, c) in lb[..matched].iter().enumerate() {
+        if c.is_ascii_lowercase() {
+            y += if i == 0 { 21 } else { 25 };
+        }
+    }
     if !is_npp {
         y -= 84;
-    } else {
-        for (i, c) in lb[..3].iter().enumerate() {
-            if c.is_ascii_lowercase() {
-                y += if i == 0 { 21 } else { 25 };
-            }
+        if matched >= 1 {
+            y += 28;
+        }
+        if matched >= 2 {
+            y += 26;
+        }
+        if matched == 1 && (d + f + lb[0].is_ascii_lowercase() as i64) & 1 == 1 {
+            y += 1;
         }
     }
     let ename = |i: usize| cstr(set.get(ent(i)..ent(i) + 22).unwrap_or(&[]));

@@ -55,24 +55,28 @@ const START_TO_TICK_H: u64 = 142650;
 /// (70 less per channel), and from the audio interrupt being taken (at an output sample) to the
 /// handler's first write.
 const START_TAIL_H: u64 = 672;
-const START_IRQ_H: u64 = 113;
+const START_IRQ_H: u64 = 112;
 /// PER to VOL, per voice.
 const PER_VOL: [u64; 4] = [444, 471, 498, 497];
+/// All the in-tick costs below are counts of 68000 cycles (half colour clocks) from a tick start on a
+/// whole colour clock, fitted so that the floor of the running cycle count reproduces the reference
+/// write times; many of them are odd (the gap between two writes then depends on the parity of the
+/// cycles run since the tick start).
 /// The work before a voice's PER write, in half colour clocks (fitted jointly on the reference
 /// logs): by what the previous voice wrote (a sample start or synth LOC per voice, a plain VOL, a
 /// silent voice's VOL), and per arpeggio byte read, arpeggio jump, envelope step, envelope point
 /// loaded (other than envelope 1's), envelope jump and envelope 1's point loaded.
-const PRE_LOC_H: [u64; 4] = [1765, 1677, 1708, 1739];
+const PRE_LOC_H: [u64; 4] = [1765, 1676, 1708, 1739];
 const PRE_VOL_H: u64 = 1765;
-const PRE_MUTED_H: u64 = 1486;
+const PRE_MUTED_H: [u64; 4] = [1486, 1485, 1486, 1486];
 const PRE_FEAT_H: [u64; 6] = [81, 73, 69, 435, 222, 549];
 /// The portamento step: the period is moved to the target by a step (up, up and reached, down, down
 /// and reached) or already there; an arpeggio voice adds a little.
-const PRE_PM_H: [u64; 7] = [0, 0, 123, 120, 123, 174, 56];
+const PRE_PM_H: [[u64; 7]; 2] = [[0, 0, 123, 119, 123, 174, 56], [0, 0, 123, 120, 123, 173, 56]];
 const PRE_ARP_H: u64 = 9;
 /// A silent voice's VOL write after the previous voice's last write (half clocks): by what that was
 /// (a sample start, a plain VOL, a silent voice's VOL), per voice.
-const MUTED_AFTER: [[u64; 4]; 3] = [[673, 606, 662, 682], [673, 696, 718, 708], [673, 438, 430, 430]];
+const MUTED_AFTER: [[u64; 4]; 3] = [[673, 607, 660, 681], [674, 695, 718, 708], [673, 438, 431, 430]];
 /// The gap before a row's work (DMACON 0x8200).
 const ROW_PRE: u64 = 580;
 /// ... after a plain volume write, and after a silent voice's.
@@ -106,7 +110,7 @@ const LF_REL: i64 = 1342;
 const LF_REL_ID: i64 = 544;
 const LF_REL_CNT0: i64 = 244;
 const LF_ARP: i64 = 68;
-const LF_CV: [i64; 6] = [0, 119, 0, 144, 0, 54];
+const LF_CV: [i64; 6] = [0, 119, 0, 145, 0, 57];
 /// A voice the block mutes while its row has a note (half clocks, more than an idle voice).
 const LF_BLOCK_MUTE: i64 = 39;
 /// The cost of a row's work between two writes, in half colour clocks (fitted jointly on the
@@ -187,17 +191,17 @@ const ROW_SMP_H: [(u64, u64); 4] = [(267, 201), (298, 232), (329, 263), (337, 27
 /// end of one handler to the next one's start.
 /// (the first handler's start follows the tick's last write: by what that was, in half clocks:
 /// AUDxDAT of channel 0..3, a LOC, a plain VOL, a silent voice's VOL, a sample start's DMACON).
-const LAT_DAT_H: [u64; 4] = [897, 827, 757, 687];
+const LAT_DAT_H: [u64; 4] = [899, 828, 759, 687];
 const LAT_LOC_H: u64 = 1004;
-const LAT_VOL_H: u64 = 1022;
-const LAT_MUTED_H: u64 = 743;
+const LAT_VOL_H: u64 = 1021;
+const LAT_MUTED_H: u64 = 742;
 const LAT_START_H: u64 = 1026;
 /// What a tick whose timer is already due adds to its start, by how the previous call ended: after
 /// a LOC, a VOL, a sample start or key tail, an interrupt handler (half clocks).
-const LATE_LOC_H: u64 = 859;
-const LATE_VOL_H: u64 = 877;
-const LATE_START_H: u64 = 881;
-const LATE_HANDLER_H: u64 = 291;
+const LATE_LOC_H: u64 = 860;
+const LATE_VOL_H: u64 = 879;
+const LATE_START_H: u64 = 882;
+const LATE_HANDLER_H: u64 = 292;
 /// Handler gaps per channel: LOC to LEN, and LEN to the next write.
 const H_LEN: [u64; 4] = [109, 125, 140, 144];
 const H_DMA: [u64; 4] = [94, 109, 125, 129];
@@ -336,7 +340,6 @@ pub struct Aps {
     sq_acc: u64,
     first_block_seen: bool,
     first_irq: bool,
-    first_half: u64,
     last_key: usize,
     irq_end: u64,
     lat_h: u64,
@@ -499,7 +502,17 @@ impl Aps {
         if self.starting {
             self.sq_acc += cost;
         } else {
-            self.wh(hw, cost);
+            // (a tick's sequencer pays a little more than the start-up call's)
+            let adj: i64 = if cost == SQ_NOP {
+                3
+            } else if cost == SQ_LOOP_TAKEN {
+                -2
+            } else if cost == SQ_SPEED {
+                2
+            } else {
+                0
+            };
+            self.wh(hw, (cost as i64 + adj) as u64);
         }
     }
 
@@ -508,7 +521,7 @@ impl Aps {
         if self.starting {
             self.sq_acc += cost;
         } else {
-            self.wh(hw, cost);
+            self.wh(hw, if cost == ADV_END_BLOCK { cost - 1 } else { cost });
         }
     }
 
@@ -582,10 +595,10 @@ impl Aps {
     // ---------------------------------------------------------------- rows
 
     fn process_row(&mut self, hw: &mut Hw) {
-        self.wc(hw, match self.last_kind {
-            2 => ROW_PRE_MUTED,
-            1 => ROW_PRE_VOL,
-            _ => ROW_PRE,
+        self.wh(hw, match self.last_kind {
+            2 => 2 * ROW_PRE_MUTED - 1,
+            1 => 2 * ROW_PRE_VOL - 1,
+            _ => 2 * ROW_PRE,
         });
         hw.dmacon(0x8200);
         let blk = self.blk;
@@ -712,7 +725,7 @@ impl Aps {
             let ty = e >> 28;
             match ty {
                 3 | 4 | 5 => {
-                    let h = RC_MAIN.a[prev] + acc[0] + RC_MAIN.tl_len[(ty - 3) as usize][v];
+                    let h = RC_MAIN.a[prev] + acc[0] + RC_MAIN.tl_len[(ty - 3) as usize][v] + (prev == 0) as i64;
                     acc = [0; 2];
                     lf = 0;
                     pending = false;
@@ -727,7 +740,7 @@ impl Aps {
                             13 => 3,
                             _ => 0,
                         };
-                        let h = RC_MAIN.a[prev] + acc[0] + RC_MAIN.tl_key[k][v];
+                        let h = RC_MAIN.a[prev] + acc[0] + RC_MAIN.tl_key[k][v] + (k == 0) as i64;
                         acc = [0; 2];
                     lf = 0;
                         pending = false;
@@ -780,7 +793,7 @@ impl Aps {
                     lf = 0;
                     self.wh(hw, h.max(0) as u64);
                 } else if first {
-                    self.wh(hw, 193 + 70 * v as u64);
+                    self.wh(hw, 193 + 70 * v as u64 + (v == 3) as u64);
                 } else {
                     self.wc(hw, 67);
                 }
@@ -1011,10 +1024,10 @@ impl Aps {
         let base = match self.last_kind {
             0 => PRE_LOC_H[v],
             1 => PRE_VOL_H,
-            _ => PRE_MUTED_H,
+            _ => PRE_MUTED_H[v],
         };
         let h = base
-            + PRE_PM_H[self.pm as usize]
+            + PRE_PM_H[(self.last_kind != 0) as usize][self.pm as usize]
             + if r0 & 0x40 != 0 { PRE_ARP_H } else { 0 }
             + PRE_FEAT_H[0] * f[0] as u64
             + PRE_FEAT_H[1] * f[1] as u64
@@ -1035,7 +1048,7 @@ impl Aps {
         match e >> 28 {
             4 | 5 => {
                 let f = self.moving(v, e, w, e >> 28 == 4);
-                self.wc(hw, if e >> 28 == 4 { 492 } else { 383 });
+                self.wh(hw, if e >> 28 == 4 { 983 } else { 764 });
                 hw.loc(v, self.sample_addr(e, f));
                 self.lat_h = LAT_LOC_H;
                 self.last_kind = 0;
@@ -1316,9 +1329,9 @@ impl Aps {
                 }
                 self.wc(hw, if t == 1 { 253 } else { 234 });
                 hw.loc(ch, self.sample_addr(e, 0));
-                self.wc(hw, H_LEN[ch]);
+                self.wh(hw, 2 * H_LEN[ch] + (ch == 0) as u64);
                 hw.len(ch, w);
-                self.wc(hw, H_DMA[ch]);
+                self.wh(hw, 2 * H_DMA[ch] - (ch == 0) as u64);
                 hw.dmacon(0x8000 | 1 << ch);
                 self.wc(hw, 32);
                 self.intena(hw, 0x8000 | bit);
@@ -1326,7 +1339,7 @@ impl Aps {
             0 => {
                 self.wc(hw, 192);
                 hw.loc(ch, self.sample_addr(e, 0));
-                self.wc(hw, H_LEN[ch]);
+                self.wh(hw, 2 * H_LEN[ch] + (ch == 3) as u64);
                 hw.len(ch, w);
                 self.wc(hw, H_DMA[ch] + 5);
                 self.intena(hw, bit);
@@ -1377,12 +1390,12 @@ fn synth_cost_h(f: &SynthFeat) -> u64 {
         0 => match f.op {
             0 => {
                 if f.fill {
-                    1320 + 22 * n
+                    1319 + 22 * n
                 } else {
-                    1260
+                    1261
                 }
             }
-            1 => 1696 + 144 * (n >> 3),
+            1 => 1695 + 144 * (n >> 3) + ((n >> 3) & 1),
             2 => 1328 + 76 * n,
             _ => 1262,
         },
@@ -1392,14 +1405,14 @@ fn synth_cost_h(f: &SynthFeat) -> u64 {
             } else {
                 let extra: i64 = match f.t1 {
                     4 => 634,
-                    5 => 414,
-                    1 => -6,
+                    5 => 415,
+                    1 => -7,
                     _ => 0,
                 };
                 let b: i64 = match f.op {
-                    0 => 988 + 22 * n as i64,
+                    0 => 987 + 22 * n as i64,
                     1 => 1014 + 42 * n as i64,
-                    2 => 1048 + 46 * n as i64,
+                    2 => 1047 + 46 * n as i64,
                     3 => {
                         if n >= 3 {
                             1080 + 46 * n as i64
@@ -1407,7 +1420,7 @@ fn synth_cost_h(f: &SynthFeat) -> u64 {
                             1034
                         }
                     }
-                    4 => 1444 + 243 * n as i64,
+                    4 => 1445 + 243 * n as i64,
                     _ => 1046,
                 };
                 (b + extra) as u64
@@ -1422,11 +1435,11 @@ fn synth_cost_h(f: &SynthFeat) -> u64 {
             let (b, k): (u64, u64) = match f.op {
                 1 => (1174, 54),
                 2 => (1200, 116),
-                3 => (1228, 38),
+                3 => (1229, 38),
                 4 => (1254, 38),
                 5 => (1282, 38),
-                6 => (1308, 40),
-                7 => (1352, 52),
+                6 => (1309, 40),
+                7 => (1354, 52),
                 9 => (1390, 70),
                 _ => (3000, 0),
             };
@@ -1532,7 +1545,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         sq_acc: 0,
         first_block_seen: false,
         first_irq: false,
-        first_half: 0,
         last_key: 0,
         first_tick: None,
     };
@@ -1570,7 +1582,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the first tick follows the end of the call to the half clock
     let ft = 2 * hw.bus.clock + r.half + if keyed { START_TO_TICK_KEYED_H } else { START_TO_TICK_H };
     r.first_tick = Some(ft / 2);
-    r.first_half = ft % 2;
     Some(Box::new(r))
 }
 
@@ -1592,9 +1603,9 @@ impl Replayer for Aps {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        // the tick period is a whole number of colour clocks: every tick starts at the first
-        // tick's half clock
-        self.half = self.first_half;
+        // a tick is a guest call: it starts on a whole colour clock, whatever the half clock the
+        // previous call ended on (the clock only counts whole colour clocks)
+        self.half = 0;
         if hw.bus.clock <= self.act_end + 1 {
             self.wh(hw, self.late_h);
         }

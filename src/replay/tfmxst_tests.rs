@@ -136,6 +136,56 @@ fn the_subsong_list_follows_the_table_rules() {
 }
 
 #[test]
+fn the_scan_counts_steps_by_class() {
+    // below $40, $40 and above except $48, and $48 (a digital sample)
+    let d = build(&[[0xF0, 0, 0, 0]], &[[0x08, 0, 0, 0], [0x3F, 0, 0, 0], [0x40, 0, 0, 0], [0x48, 0, 0, 0], [0xFF, 0, 0, 0], [0x07, 0, 0, 0]]);
+    let (lo, hi, smp) = scan_stats(&d).unwrap();
+    assert_eq!(lo + hi + smp, (be32(&d, 0x7FC) - be32(&d, 0x600)) as usize / 4);
+    assert_eq!(smp, 1);
+    assert!(hi >= 2 && lo >= 2);
+}
+
+#[test]
+fn the_subsong_list_costs_follow_the_measured_rules() {
+    let mut d = vec![0u8; 0x200];
+    for k in 0..32 {
+        put16(&mut d, 256 + 2 * k, 0x1FF);
+        put16(&mut d, 320 + 2 * k, 0);
+    }
+    put16(&mut d, 256, 0);
+    put16(&mut d, 320, 1);
+    // unused slots cost nothing
+    assert_eq!(song_list_cost(&d), (vec![0], 0));
+    // two distinct songs: 44 cycles each
+    for (k, (f, l)) in [(1usize, (2u16, 3u16)), (2, (4, 5))] {
+        put16(&mut d, 256 + 2 * k, f);
+        put16(&mut d, 320 + 2 * k, l);
+    }
+    assert_eq!(song_list_cost(&d), (vec![0, 1, 2], 88));
+    // a run of empty songs (first and last step 0): 141 for the first, none for the rest, as the
+    // module with 32 subsongs measured (230 with its two songs)
+    for k in 3..32 {
+        put16(&mut d, 256 + 2 * k, 0);
+        put16(&mut d, 320 + 2 * k, 0);
+    }
+    assert_eq!(song_list_cost(&d), (vec![0, 1, 2], 88 + 141));
+}
+
+#[test]
+fn the_first_tick_comes_later_for_a_longer_set_up() {
+    // a module with a longer scan range starts later than the same one with a shorter range
+    let a = build(&[[0xF0, 0, 0, 0]], &[[0x41, 0, 0, 0], [0x07, 0, 0, 0]]);
+    let mut steps = vec![[0x41, 0, 0, 0]];
+    steps.extend(std::iter::repeat([0x08, 0, 0, 0]).take(200));
+    steps.push([0x07, 0, 0, 0]);
+    let b = build(&[[0xF0, 0, 0, 0]], &steps);
+    let first = |d: &[u8]| run(d, 6).and_then(|l| l.first().map(|w| w.2));
+    let (fa, fb) = (first(&a), first(&b));
+    assert!(fa.is_some() && fb.is_some());
+    assert!(fb.unwrap() > fa.unwrap());
+}
+
+#[test]
 fn the_noise_buffer_is_a_fixed_generator() {
     let a = noise_bytes();
     assert_eq!(a.len(), 1024);

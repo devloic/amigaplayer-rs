@@ -48,3 +48,11 @@ Tom" directory holds ProTracker modules by an artist of that name, a different f
 - The player also offers next/previous-position functions to the host (both reset the row offset; next:
   position + 1, at L back to R with the song-end notification as in SPEC 4.5; previous: position - 1,
   from 0 to L - 1). The host never calls them, so they are not logged.
+
+## Errata found by the implementation
+
+- SPEC 5.3 (cycle ledger): the portamento charge of 25 applies only when the direction is 0; the
+  pattern-break "+20 on wrap" is charged inside the voice update, before that voice's period write.
+- A period-table index of 180 reads host memory and depends on the memory layout (the spec said to use 0);
+  the port keeps the value from the spec logs, so a few synthetic runs differ from a live reference in
+  those period values.

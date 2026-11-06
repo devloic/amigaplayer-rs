@@ -32,3 +32,18 @@ player beyond the standard ProTracker period table and the small tables written 
    implement or not).
 8. Detection uses only the song file; the reference fails at load when the sample set is missing. Ports
    should look for `SMP.<rest of name>` and then `SMP.set` in the same directory.
+
+## Errata found by the implementation
+
+- Tone portamento with no target does nothing (the glissando does not run and the period stays); the spec
+  said to run it.
+- Missing timing terms: an EDy with a note costs about 54.5 cc more than the table says; a tick-0 E8x without
+  a note needs about 10.96 cc before the retrigger; the start-up unpack has a constant of about 228.75 cc
+  that the formula omits.
+- The reference's first-write time (29866..34937 cc) depends on the sample names and the path and is not
+  modelled (the port uses 34913; the audio origin delay is 233).
+- Delta decoding must read the evolving sample set, not the original.
+- Safe choices where the spec is silent: sample numbers above 31 give an empty record, a pattern past the
+  table is empty, break rows of 64 or more play as row 0.
+- Timing is not exact: with the reference start time supplied about 78% of writes are exact and 99% are
+  within 1 cc.

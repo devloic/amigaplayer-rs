@@ -165,6 +165,7 @@ pub mod tfmx;
 pub mod tfmxst;
 pub mod timfollin;
 pub mod tcbtracker;
+pub mod timetracker;
 pub mod tme;
 pub mod tronic;
 pub mod ufo;
@@ -391,6 +392,8 @@ pub const REPLAYERS: &[Open] = &[
     legglessmusiceditor::OPEN,
     soundprogramminglanguage::OPEN,
     paulsummers::OPEN,
+    // strict: the block table, every row of the highest pattern in range and the sample entries; taken before the built-in ProTracker (which plays the ProWizard conversion of TMK files)
+    timetracker::OPEN,
     onescapee::OPEN,
     ntspsystem::OPEN,
     speedysystem::OPEN,

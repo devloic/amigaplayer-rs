@@ -372,7 +372,9 @@ fn find_stop(h: &[u8], relocs: &[usize]) -> Option<usize> {
 
 /// Overwrites the glide decision of the note start with no-ops: the store of the status register
 /// right after the bit clear of the note's top bit, and, further on, the restore of the status
-/// register together with the conditional branch that follows it.
+/// register together with the conditional branch that follows it. A restore with no branch of
+/// those forms behind it is still overwritten (alone): left in place, a path that skips the store
+/// pops a word too many and the routine returns to garbage.
 fn patch_glide(h: &[u8], bus: &mut Bus, img: u32) {
     let mut p = 0;
     while p + 6 <= h.len() {
@@ -383,7 +385,7 @@ fn patch_glide(h: &[u8], bus: &mut Bus, img: u32) {
             }
             if q < p + 40 && q + 4 <= h.len() {
                 let bne = be16(h, q + 2);
-                let words = if bne & 0xFF00 == 0x6600 && bne & 0xFF != 0 { 2 } else if bne == 0x6600 { 3 } else { 0 };
+                let words = if bne & 0xFF00 == 0x6600 && bne & 0xFF != 0 { 2 } else if bne == 0x6600 { 3 } else { 1 };
                 if words != 0 {
                     bus.w16(img + p as u32 + 4, 0x4E71);
                     for i in 0..words {

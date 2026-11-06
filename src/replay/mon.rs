@@ -693,7 +693,7 @@ impl Mon {
                 if v.state != 0 {
                     hw.loc(ch, g.wrapping_add(s));
                     hw.len(ch, len);
-                    hw.dmacon(0x8200 | 1 << ch);
+                    hw.dmacon(0x8000 | 1 << ch);
                 } else if lp == 0xFFFF {
                     hw.loc(ch, g.wrapping_add(self.lay.sil as u32));
                     hw.len(ch, 4);
@@ -757,7 +757,7 @@ impl Mon {
                     self.v[ch].wpos = self.v[ch].wpos.wrapping_add(2);
                     if self.v[ch].state == 2 {
                         self.v[ch].state = 0;
-                        hw.dmacon(0x8200 | 1 << ch);
+                        hw.dmacon(0x8000 | 1 << ch);
                     }
                     break;
                 }
@@ -806,7 +806,7 @@ impl Mon {
         hw.len(ch, v.wlen);
         if v.state == 2 {
             v.state = 0;
-            hw.dmacon(0x8200 | 1 << ch);
+            hw.dmacon(0x8000 | 1 << ch);
         }
     }
 
@@ -1064,7 +1064,7 @@ mod tests {
         // envelope 64 * chanvol 64 / 64 * master 64 / 64
         assert_eq!(reg(&log, 0xDFF0A8)[0], 64);
         let dma = reg(&log, 0xDFF096);
-        assert!(dma.contains(&0x0001) && dma.contains(&0x8201));
+        assert!(dma.contains(&0x0001) && dma.contains(&0x8001));
         // the pattern ends, the order list says end of music: DMACON 0 and song end
         assert!(dma.contains(&0x0000));
         assert!(end);

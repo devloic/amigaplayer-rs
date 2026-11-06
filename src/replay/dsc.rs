@@ -441,13 +441,13 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
     };
     p.init(0);
-    // the start-up: volumes 0, then the four handlers installed (their interrupts on)
+    // the start-up: volumes 0, twice (the reference shows no interrupt enables here: each
+    // handler's own writes turn its interrupt on)
     let mut hw = Hw { bus: &mut m.bus };
-    for ch in 0..4 {
-        hw.vol(ch, 0);
-    }
-    for ch in 0..4 {
-        Dsc::intena(&mut hw, 0x8000 | 0x80 << ch);
+    for _ in 0..2 {
+        for ch in 0..4 {
+            hw.vol(ch, 0);
+        }
     }
     m.bus.clock += START_EXTRA;
     Some(Box::new(p))
@@ -554,10 +554,10 @@ mod tests {
     #[test]
     fn trigger_and_interrupt_chain() {
         let (e, log) = play(module(false), 12);
-        // start-up: volumes 0, the four channel interrupts on
+        // start-up: volumes 0, twice
         assert_eq!(
             &log[..8],
-            &[(0xDFF0A8, 0), (0xDFF0B8, 0), (0xDFF0C8, 0), (0xDFF0D8, 0), (0xDFF09A, 0x8080), (0xDFF09A, 0x8100), (0xDFF09A, 0x8200), (0xDFF09A, 0x8400)]
+            &[(0xDFF0A8, 0), (0xDFF0B8, 0), (0xDFF0C8, 0), (0xDFF0D8, 0), (0xDFF0A8, 0), (0xDFF0B8, 0), (0xDFF0C8, 0), (0xDFF0D8, 0)]
         );
         let w = ch0(&log[8..]);
         let lc = |i: usize| (w[i].1 as u32) << 16 | w[i + 1].1 as u32;

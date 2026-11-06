@@ -622,7 +622,11 @@ impl Art {
         if self.voices == 8 {
             hw.voice_vol(i as usize, v);
         } else {
-            hw.vol(i as usize, v);
+            // The reference's volume word carries the byte twice (the low byte copied into the
+            // high byte: 0x37 is written as 0x3737). Paula only looks at the low 7 bits, so the
+            // sound is the same; the register word is what the write log shows. (The 8-voice
+            // variant's amplifier writes have no reference to check this against.)
+            hw.vol(i as usize, if v < 0x100 { v | v << 8 } else { v });
         }
     }
 
@@ -1689,7 +1693,8 @@ mod tests {
         // note 25 of fine-tune 0
         assert_eq!(*reg(0xDFF0A6).last().unwrap(), super::PERIODS[24]);
         // (64 * (127 / 2)) >> 6, at the track volume 64
-        assert_eq!(*reg(0xDFF0A8).last().unwrap(), 63);
+        // (the reference writes the byte twice: 0x3f3f)
+        assert_eq!(*reg(0xDFF0A8).last().unwrap(), 0x3f3f);
         // the sample's 16 words, then the empty loop's one
         let len = reg(0xDFF0A4);
         let k = len.iter().position(|&v| v == 16).expect("no sample length");

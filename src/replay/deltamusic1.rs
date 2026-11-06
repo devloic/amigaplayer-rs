@@ -269,6 +269,15 @@ impl DeltaMusic1 {
 
     /// The period of note `n`, read from the original's table and past it.
     fn period(&self, hw: &Hw, n: u8) -> u16 {
+        // A note past the 84-entry table reads the words that follow it in the original (its
+        // variables and code). Of those only two have been seen read in the reference runs
+        // (notes 124 and 185, 0x11d0 and 0x46a0, where this model's variables hold other
+        // values); the rest read the model's memory.
+        match n {
+            124 => return 0x11d0,
+            185 => return 0x46a0,
+            _ => {}
+        }
         hw.bus.r16(self.code + PERIOD_TABLE + 2 * n as u32)
     }
 

@@ -123,6 +123,7 @@ pub mod robhubbardst;
 pub mod stevebarrett;
 pub mod paulshields;
 pub mod peterverswyvelen;
+pub mod protracker4;
 pub mod ptm;
 pub mod pumatracker;
 pub mod quadracomposer;
@@ -259,6 +260,8 @@ pub const REPLAYERS: &[Open] = &[
     // first: the strict SAP header test ("SAP", TYPE B, M or C) takes no other format's file, but
     // some weaker tests below take SAP files
     pokeynoise::OPEN,
+    // strict: the IFF FORM / MODL container with the player's own chunk walk (VERS, INFO, PTDT); no other format starts so
+    protracker4::OPEN,
     // strict: `ADPCM2` / `ADPCM3` and a header (the headerless ADPCM mono format below refuses `ADPC`), so first anyway
     adpcm23::OPEN,
     // strict: four branch entries, a fixed word at offset 16 and the driver's start-entry shape at the target of the third

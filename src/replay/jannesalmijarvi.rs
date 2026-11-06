@@ -212,6 +212,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         hw.bus.clock += 8;
     }
     hw.dmacon(0x000F);
+    // the song starts (Paula's grids restart) 8 colour clocks after this last write in the
+    // reference; the first interrupt keeps its time (`timer_delay` is 8 shorter for it)
+    hw.bus.clock += 8;
     Some(Box::new(r))
 }
 
@@ -378,7 +381,7 @@ impl Replayer for Js {
     }
 
     fn timer_delay(&self) -> u64 {
-        8
+        0
     }
 
     fn tick(&mut self, hw: &mut Hw) {

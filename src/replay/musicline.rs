@@ -380,6 +380,8 @@ const LOOP_NONE_END: u64 = 260;
 /// Colour clocks from the player's start to the first chunk's header read (the init before
 /// the file's chunks: 24 fixed stretches, the last one with the first chunk's 70 cycles).
 const LOAD_START: u64 = 33_335;
+/// Colour clocks from the DMA-on write that ends the start (4 voices) to the song start.
+const START_LAG: u64 = 172;
 /// Cycles of code before each chunk header read (it runs on from the chunk before).
 const CHUNK_ENTRY: u64 = 70;
 /// From the end-of-file header read to the timer start: the calls that close the loader
@@ -1436,6 +1438,9 @@ impl Musicline {
             let entry = (t0 / ECLOCK + latch + 1) * ECLOCK;
             hw.wait(131);
             hw.dmacon(0x8000 | self.dma_mask);
+            // the song starts (Paula's grids restart) this long after the DMA-on write in the
+            // reference; the first interrupt keeps its time
+            hw.wait(START_LAG);
             self.used.set(entry.saturating_sub(hw.bus.clock).max(1));
             self.grid = None;
             self.tb = TimerB::default();

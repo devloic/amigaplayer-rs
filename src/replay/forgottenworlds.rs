@@ -45,6 +45,8 @@ const FIRST_TICK: u64 = 71249;
 /// reference's own start-up takes this long. This puts the writes on the reference's raster
 /// line phase and on its output sample grid.
 const START_DELAY: u64 = 680;
+/// Colour clocks from the last initialisation write to the song's start (`Paula::align_to_start`).
+const ORIGIN_LAG: u64 = 22;
 /// Events one channel may read in one turn before it is ended (bad data).
 const EVENT_CAP: u32 = 5000;
 /// A wait on the audio interrupt flag of the register setup gives up after this many colour clocks.
@@ -150,6 +152,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let mut hw = Hw { bus: &mut m.bus };
     hw.bus.clock += START_DELAY;
     s.start_song(&mut hw);
+    // the song starts (Paula's grids restart) this long after the last initialisation write in the
+    // reference; the first tick keeps its time (`due` is absolute)
+    hw.bus.clock += ORIGIN_LAG;
     Some(Box::new(s))
 }
 

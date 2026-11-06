@@ -90,6 +90,8 @@ fn s8(x: u32) -> i32 {
 // Costs in colour clocks, measured from the reference's write logs (SPEC.md).
 /// Timer to the row's first voice, and to an effect tick's first voice.
 const ROW_START: u64 = 5600;
+/// From the end of the fitted start-up to the original's song start, in colour clocks.
+const START_SHIFT: u64 = 785;
 const FX_START: u64 = 5530;
 /// An effect tick's voice that writes nothing.
 const FX_IDLE: u64 = 75;
@@ -156,6 +158,10 @@ impl Np {
         // much later than the tick, in the logs of every module
         // (the run starts START_PHASE into a frame)
         let anchor = (hw.bus.clock - run + crate::engine::START_PHASE) as i64 - (t0 as i64 - 3249);
+        // the song starts (the engine aligns Paula's output and line grids there) START_SHIFT
+        // colour clocks after the run's start-up, and the first tick keeps its time
+        hw.bus.clock += START_SHIFT;
+        let anchor = anchor + START_SHIFT as i64;
         Np {
             base,
             mem,

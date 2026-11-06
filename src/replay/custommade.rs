@@ -73,6 +73,9 @@ const STOP_TO_HOST: u64 = 224;
 /// The first tick's DMA write comes this many colour clocks after the tick period past the last
 /// init write.
 const FIRST_TICK_DELAY: u64 = 312;
+/// Colour clocks from the last init write to the song start (where Paula's output and line grids
+/// restart), measured against the reference.
+const SONG_START_LAG: u64 = 117;
 /// Cycles from a tick's call to its first write.
 const FIRST_WRITE: u64 = 166;
 /// A song stays out of subsong numbers of 16 or more.
@@ -492,6 +495,8 @@ impl CustomMade {
         }
         self.playing = true;
         self.first_tick = Some(self.last_init_len + self.period_cc + FIRST_TICK_DELAY - FIRST_WRITE / 2);
+        // the reference's song start lies this much after the end of the init writes
+        hw.bus.clock += SONG_START_LAG;
     }
 }
 

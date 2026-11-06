@@ -34,6 +34,12 @@ const TICK: u64 = 70940;
 /// reference host counts it, found by comparing renders) to the timer's start, on top of a period.
 const START_DELAY: u64 = 233;
 
+/// The song starts (the output and DMA line grids restart: `Paula::align_to_start`) this many
+/// colour clocks after the clock the tick schedule was fitted to. The reference's song start lies
+/// 9939 clocks after its first write, the clock the start-up sequence ends at counted from the
+/// first write; measured relative to the song start, so the tick times need no change.
+const ORIGIN_SHIFT: u64 = 13;
+
 /// What the note-delay path (EDy with a note) takes beyond the table's items (measured from the
 /// reference's logs: the table's fit leaves it out).
 const ED_EXTRA: f64 = 54.5;
@@ -1658,8 +1664,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // write (the reference's tick start is the whole clock below that sum, plus half a clock)
     let s0i = (t0 + first_up + 71779.0).floor() as u64;
     r.frac = 0.5;
-    r.start_delay = START_DELAY;
-    m.bus.clock = (s0i.saturating_sub(TICK + START_DELAY)).max(m.bus.clock);
+    r.start_delay = START_DELAY - ORIGIN_SHIFT;
+    m.bus.clock = (s0i.saturating_sub(TICK + START_DELAY) + ORIGIN_SHIFT).max(m.bus.clock);
     Some(Box::new(r))
 }
 

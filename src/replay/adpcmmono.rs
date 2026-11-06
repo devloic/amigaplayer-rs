@@ -44,8 +44,16 @@ const ADJUST: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
 const BUF: usize = 1024;
 /// Colour clocks from the request of the audio interrupt to its first write.
 const IRQ_LATENCY: u64 = 68;
-/// Where the first volume write falls (colour clocks into the run) in the reference.
-const START_AT: u64 = 618;
+/// Where the first volume write falls (colour clocks into the run) in the reference: the host's
+/// start-up counts the file name. In half colour clocks, `1168 + 17 * (name length - 7)` less
+/// 21 for each lower-case letter of the suffix `.ADPCM` (measured on renamed copies of one module
+/// with the reference; 618 for a five-character name such as `sine.ADPCM`). Where the first write
+/// falls matters because Paula's line grid (the audio DMA starts on a line) is anchored to the
+/// absolute clock until the song starts: it sets the phase of the first interrupt.
+fn start_at(name: &str) -> u64 {
+    let lower = name.bytes().rev().take(5).filter(u8::is_ascii_lowercase).count() as i64;
+    ((1168 + 17 * (name.len() as i64 - 7) - 21 * lower) / 2).max(0) as u64
+}
 /// The fill of a buffer past the end of the stream: nothing to decode, 228 + 256 * 15.
 const SILENT_COST: u64 = 4068;
 
@@ -231,6 +239,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     let len = 2 * (d.len() & !1) as i64;
+    let start_at = start_at(&file);
     let mut r = Adpcm {
         d: d.to_vec(),
         len,
@@ -244,8 +253,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     let mut hw = Hw { bus: &mut m.bus };
     let start = hw.bus.clock;
-    if start < START_AT {
-        hw.wait(START_AT - start);
+    if start < start_at {
+        hw.wait(start_at - start);
     }
     hw.vol(0, 64);
     hw.wait(6);
@@ -275,6 +284,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     hw.bus.write_word(0xDFF09A, 0x8080);
     hw.wait(10);
     hw.dmacon(0x800F);
+    hw.wait(8);
     Some(Box::new(r))
 }
 

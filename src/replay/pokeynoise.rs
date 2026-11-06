@@ -39,7 +39,7 @@ static WAVES: &[u8] = include_bytes!("pokeynoise_waves.bin");
 const LINE: u64 = 227;
 /// Colour clocks from the tick's start to the first write beyond the 6502 run itself (the
 /// conversion of the four channels, estimated).
-const CONV: u64 = 3750;
+const CONV: u64 = 2750;
 
 // ------------------------------------------------------------------ the SAP file
 

@@ -49,7 +49,7 @@ const START_STEP: u64 = 49;
 /// INTENA is written this many colour clocks after the first LEN write.
 const INTENA_AFTER: u64 = 544;
 /// Colour clocks from the end of the start-up call to the first audio interrupt handler call.
-const START_TO_IRQ: u64 = 30;
+const START_TO_IRQ: u64 = 33;
 
 /// Cycles from the end of voice 3 to the tick's return (fitted to the reference's interrupt times).
 const TICK_END: u64 = 217;

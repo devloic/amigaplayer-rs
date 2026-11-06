@@ -173,6 +173,8 @@ pub struct DigitalMugician {
     spent: f64,
     fit: Option<std::io::BufWriter<std::fs::File>>,
     counts: Vec<(u8, u32)>,
+    /// The first tick is still to come (its period is shortened by `START_SHIFT`).
+    first: std::cell::Cell<bool>,
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine, v2: bool) -> Option<Box<dyn Replayer>> {
@@ -220,6 +222,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine, v2: bool) -> Option<Box<dyn Replaye
         spent: 0.0,
         fit,
         counts: Vec::new(),
+        first: std::cell::Cell::new(true),
     };
     // InitPlayer works the pointers out once (and clears the arpeggios of a
     // module without them), then DeliTracker runs InitSound
@@ -227,6 +230,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine, v2: bool) -> Option<Box<dyn Replaye
     let mut hw = Hw { bus: &mut m.bus };
     hw.wait(INIT_START[n as usize] + if v2 { CHECK2 } else { 0 });
     r.init_sound(0, &mut hw);
+    // the song starts (the engine aligns Paula's output and line grids there) START_SHIFT after
+    // InitSound's last write, while the first tick keeps its time (a shorter first period)
+    hw.wait(START_SHIFT);
     Some(Box::new(r))
 }
 
@@ -236,6 +242,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine, v2: bool) -> Option<Box<dyn Replaye
 const INIT_START: [u64; 8] = [10337, 10356, 10380, 10403, 10427, 10450, 10474, 10487];
 /// The check's time for the second mark, after it failed on the first.
 const CHECK2: u64 = 188;
+/// From InitSound's end to the original's song start, in colour clocks.
+const START_SHIFT: u64 = 50;
 /// Colour clocks from the end of InitSound to the next one's first write when
 /// DeliTracker steps the subsong (EndSound, then InitSound again).
 const SUBSONG_START: u64 = 4569;
@@ -255,6 +263,14 @@ impl Replayer for DigitalMugician {
 
     fn songend(&self) -> bool {
         self.songend
+    }
+
+    fn tick_clocks(&self) -> u64 {
+        if self.first.replace(false) {
+            super::DT_TICK - START_SHIFT
+        } else {
+            super::DT_TICK
+        }
     }
 
     fn subsongs(&self) -> (u16, u16, u16) {

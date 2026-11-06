@@ -36,9 +36,12 @@ pub const OPEN: Open = Open { name: "Mark Cooksey Old", detect, new };
 const TICK: u64 = 70_940;
 const LINE: u64 = 227;
 /// The first tick's entry for subsong 0, and what each next-song call adds, in colour clocks
-/// from the run's origin (host constants of the reference run).
-const FIRST_TICK: u64 = 71_761;
+/// from the run's origin (the beam's reference: a whole number of raster lines before the song
+/// start less `ORIGIN_PHASE`). Measured against the reference: a tick is `TICK` after the song start.
+const FIRST_TICK: u64 = TICK + ORIGIN_PHASE;
 const PER_SUBSONG: u64 = 621;
+/// The clock of the reference's song start modulo a raster line (the same for every module).
+const ORIGIN_PHASE: u64 = 140;
 /// The header the data skips.
 const D: usize = 28;
 
@@ -480,7 +483,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     // the reference's clock 0 is START_PHASE colour clocks before the engine's aligned start
-    let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
+    // the reference's song start falls at this raster-line phase (the audio DMA slots and the beam
+    // sit at fixed places in a line): the start moves on to the clock that has it
+    let c = m.bus.clock + (ORIGIN_PHASE + LINE - m.bus.clock % LINE) % LINE;
+    m.bus.clock = c;
+    let origin = c - ORIGIN_PHASE;
     let mut p = MarkCookseyOld {
         d: d.to_vec(),
         base,

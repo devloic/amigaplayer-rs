@@ -243,8 +243,14 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         started: 0,
     };
     p.init(0);
-    let base = m.bus.clock;
-    let at = p.first_tick(base, 0);
+    // The reference's song start lies a fixed distance (TICK) before the first tick,
+    // and the raster waits of the ticks see the beam at the absolute clock, whose line phase there
+    // depends on the module (the fitted first-call formula, which only counts modulo a raster line):
+    // the start moves on to the clock that gives the first tick that phase.
+    let phase = (p.first_raw(0) - TICK) % LINE;
+    let base = m.bus.clock + (phase + LINE - m.bus.clock % LINE) % LINE;
+    m.bus.clock = base;
+    let at = base + TICK;
     p.delay = at - base - TICK;
     Some(Box::new(p))
 }

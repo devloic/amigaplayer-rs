@@ -240,6 +240,9 @@ pub struct TimFollin {
     len: u32,
     sub: u16,
     started: bool,
+    /// The colour clock of the first tick, and how many have run.
+    t_first: u64,
+    n_ticks: u32,
     /// The fade ran out: the original crashes here; the port stops.
     dead: bool,
     songend: bool,
@@ -780,8 +783,12 @@ impl TimFollin {
 }
 
 /// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
-/// in the reference runs).
-const TIMER_DELAY: u64 = 1480;
+/// in the reference runs): the first tick's writes follow 76 623 clocks after the song start in the
+/// reference, whatever the module.
+const TIMER_DELAY: u64 = 3654;
+/// The second tick follows the first by this much less than a period: the reference's first music
+/// tick comes 67 979 clocks after the first (the writes of the second tick of all ten corpus files).
+const FIRST_GAP: u64 = 2961;
 
 impl Replayer for TimFollin {
     fn format(&self) -> &'static str {
@@ -794,6 +801,10 @@ impl Replayer for TimFollin {
 
     fn timer_delay(&self) -> u64 {
         TIMER_DELAY
+    }
+
+    fn next_tick_at(&self) -> Option<u64> {
+        (self.n_ticks == 1).then(|| self.t_first + super::DT_TICK - FIRST_GAP)
     }
 
     fn songend(&self) -> bool {
@@ -812,6 +823,10 @@ impl Replayer for TimFollin {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        if self.n_ticks == 0 {
+            self.t_first = hw.bus.clock;
+        }
+        self.n_ticks = self.n_ticks.saturating_add(1);
         if !self.started {
             // song 0 first, then the requested one, as the original's InitSound
             self.started = true;
@@ -858,6 +873,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         len: d.len() as u32,
         sub: 1,
         started: false,
+        t_first: 0,
+        n_ticks: 0,
         dead: false,
         songend: false,
         work: work_area(),

@@ -532,6 +532,7 @@ impl Engine {
     /// takes seconds on a 68000) passed while it loaded, not while it played.
     fn song_starts(&mut self) {
         self.m.bus.paula.sync(self.m.bus.clock, &self.m.bus.ram);
+        self.m.bus.paula.align_to_start(self.m.bus.clock);
         self.m.bus.paula.samples.clear();
         self.heard = false;
         self.led_log.clear();

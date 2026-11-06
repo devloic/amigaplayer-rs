@@ -34,6 +34,8 @@ pub const OPEN: Open = Open { name: "Digital Sonix & Chrome", detect, new };
 /// Colour clocks from the start-up writes to the point where the original's host begins to
 /// render (measured in the reference runs).
 const START_EXTRA: u64 = 2330;
+/// The first tick's distance from the song start, more than the fitted start-up time gave.
+const START_SHIFT: u64 = 3;
 /// A tick that starts no row.
 const T_IDLE: u64 = 283;
 /// From the tick's start of a row to the first voice.
@@ -367,7 +369,9 @@ impl Replayer for Dsc {
     }
 
     fn timer_delay(&self) -> u64 {
-        self.init_cost
+        // (the first tick falls START_SHIFT colour clocks after the end of the start-up in the
+        // original's, the song start the engine aligns Paula's grids to)
+        self.init_cost + START_SHIFT
     }
 
     fn songend(&self) -> bool {
@@ -404,7 +408,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // check) and the part up to the point where the original's host starts rendering are
     // not rendered audio: they are spent before the player runs.
     let pre = (4070 + 528 * d[2] as u64 + 548 * lay.np as u64 + 9 * terminators + 1) / 2;
-    m.bus.clock += pre;
+    let start_clock = m.bus.clock;
+    // The original's song starts after the Eagleplayer's long precalculation (3.2 s on the
+    // reference's 68000): the clock of its start, from the engine's aligned origin (the clock at
+    // the player's start), is 11372522.5 + the loops' half clocks / 2 (fitted to the starts of 10
+    // modules, within a colour clock). The beam's line phase (the handlers wait for the line to
+    // change and read the horizontal position) depends on it, so the song starts there too.
+    let end = (22_745_045 + 528 * d[2] as u64 + 548 * lay.np as u64 + 9 * terminators) / 2 + start_clock;
+    m.bus.clock = (m.bus.clock + pre).max(end.saturating_sub(START_EXTRA));
     let zero = m.alloc(4);
     let title = m.bus.read_cstr(m.deli.file_buf);
     let mut p = Dsc {

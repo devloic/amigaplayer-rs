@@ -101,6 +101,7 @@ pub mod quartet;
 pub mod tomytracker;
 pub mod midiloriciel;
 pub mod quartetst;
+pub mod quartetpsg;
 pub mod voodoosupremesynthesizer;
 pub mod suntronic;
 pub mod paulrobotham;
@@ -254,6 +255,9 @@ pub const REPLAYERS: &[Open] = &[
     // first: the strict SAP header test ("SAP", TYPE B, M or C) takes no other format's file, but
     // some weaker tests below take SAP files
     pokeynoise::OPEN,
+    // strict: four branch entries, a fixed word at offset 16 and the driver's start-entry shape at the target of the third
+    // entry; the sibling Quartet and Quartet ST replayers (qpa., qts.) have no such header, but first anyway: no order dependence
+    quartetpsg::OPEN,
     pumatracker::OPEN,
     sidmon2::OPEN,
     jamcracker::OPEN,

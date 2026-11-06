@@ -137,8 +137,8 @@ struct RowCost {
 }
 const RC_MAIN: RowCost = RowCost {
     a: [1641, 86, 86],
-    tl_len: [[-95, -95, -95, 1413], [-77, -76, -76, 1432], [-49, -49, -49, 1459]],
-    tl_key: [[0, 0, 0, 1508], [0, 0, 0, 1508], [-1, 0, 0, 1508], [0, 0, 0, 1508]],
+    tl_len: [[-95, -95, -95, 1413], [-76, -76, -76, 1432], [-49, -49, -49, 1459]],
+    tl_key: [[0, 0, 0, 1508], [0, 0, 0, 1508], [0, 0, 0, 1508], [0, 0, 0, 1508]],
     note: [0, 1573, 1621, 0],
     idle: [-1023, 549, 550, 0],
     rel: [-1628, -57, -56, 0],
@@ -1022,6 +1022,9 @@ impl Aps {
             + PRE_FEAT_H[3] * (f[3] - f[5]) as u64
             + PRE_FEAT_H[4] * f[4] as u64
             + PRE_FEAT_H[5] * f[5] as u64;
+        // the first voice's PER comes an odd number of half clocks after the tick starts: a fitted
+        // even total is one half clock short (all ticks of every reference log)
+        let h = if v == 0 { h | 1 } else { h };
         self.wh(hw, h);
         hw.per(v, per);
         self.wc(hw, PER_VOL[v]);
@@ -1589,7 +1592,9 @@ impl Replayer for Aps {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        self.half = std::mem::take(&mut self.first_half);
+        // the tick period is a whole number of colour clocks: every tick starts at the first
+        // tick's half clock
+        self.half = self.first_half;
         if hw.bus.clock <= self.act_end + 1 {
             self.wh(hw, self.late_h);
         }

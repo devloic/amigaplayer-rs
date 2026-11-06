@@ -46,3 +46,21 @@ The driver file itself is not needed by a port and is not included.
 
 - The first-tick phase differs per module in the reference (98306 for six songs; 98269, 98346 and 97900 for others) and cannot be derived from the files.
 - The sample bank lies 0x800, 0x810 or 0xC08 bytes after the song start depending on song size (fitted).
+
+### First-call time (derived later by black-box runs on the reference)
+
+The time of the first call of the play routine is not a constant of the song; it follows from the host's loading
+and from three properties of the song data. All values are colour clocks, measured live at one path:
+
+- 25.5 per character of the directory path (final slash included) and 10.5 per character of the file name.
+- If a sample bank `SMP.<suffix>` of the song's own exists beside it, the first call is 703 earlier at a 60-character
+  directory, and the directory slope is 17 per character instead of 25.5 (the spec's -406 for the title is the same
+  effect at the reference's shorter directory, about 25 characters).
+- A header list offset that is 0 skips that list's check: -37 for list 1, -45 for list 2 and for list 3
+  (-72, -81, -89, -111 for the combinations of two and three lists).
+- A present list whose first entry points at a pattern preceded by the byte 0x8F instead of 0x80 costs 27 cycles more
+  (13, 27, 40 for one, two and three such lists).
+
+Nothing else tried changes it: file size, list entry values, pattern bytes, bank size, inserted list entries.
+Untested: file names that do not start with `PAT.`, and zero offsets combined with first entries preceded by other
+bytes.

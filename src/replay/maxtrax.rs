@@ -138,6 +138,7 @@ const T_HALT: u64 = 300;
 /// the note calculation after a change of the channel's pitch.
 const T_VOICE: u64 = 467;
 const T_MUL: u64 = 37;
+const T_EARLY: u64 = 288;
 const T_CALC_NOTE: u64 = 556;
 /// From the last voice of a frame to the end of the server, where the audio interrupts are taken.
 const T_TICK_END: u64 = 647;
@@ -1165,6 +1166,25 @@ impl MaxTrax {
         ch.flags |= CHAN_ALTERED;
     }
 
+    /// The way `calc_incrvol` goes: no time, the division and then the early return, or the division's
+    /// quotient.
+    fn incr_class(delta: i32, time: u16) -> &'static str {
+        if time == 0 {
+            return "~0";
+        }
+        let d0 = delta.wrapping_abs() as u32;
+        if d0 & 0xFFFF == 0 {
+            return "~z";
+        }
+        let n = (d0 & 0xFFFF) * 1000;
+        let q = n / (time as u32 * FREQUENCY as u32);
+        if (d0 as u16).wrapping_sub(q as u16) & 0x8000 != 0 {
+            "~e"
+        } else {
+            "~n"
+        }
+    }
+
     /// `calc_incrvol`.
     fn calc_incrvol(delta: i32, time: u16) -> i32 {
         if time == 0 {
@@ -1247,6 +1267,7 @@ impl MaxTrax {
                         v.status = ENV_ATTACK;
                         v.last_ticks = d2;
                         v.incr_volume = Self::calc_incrvol(vol as i32, dur);
+                        self.cls.push_str(Self::incr_class(vol as i32, dur));
                     }
                 }
             } else if st == ENV_RELEASE {
@@ -1268,6 +1289,7 @@ impl MaxTrax {
                         v.last_ticks = d2;
                         let d0 = vol as i32 - v.base_volume as i32;
                         v.incr_volume = Self::calc_incrvol(d0, dur);
+                        self.cls.push_str(Self::incr_class(d0, dur));
                     }
                 }
             }
@@ -1302,6 +1324,7 @@ impl MaxTrax {
                         v.ticks_left = (dur as u32) << 8;
                         let d0 = vol as i32 - v.base_volume as i32;
                         v.incr_volume = Self::calc_incrvol(d0, dur);
+                        self.cls.push_str(Self::incr_class(d0, dur));
                         next = Some(Next::Calc);
                     }
                 } else {
@@ -1351,12 +1374,24 @@ impl MaxTrax {
         // .17: ADCMD_PERVOL
         let nv = self.voices[vi].note_volume;
         let bv = self.voices[vi].base_volume >> 8;
-        hw.wait(Self::voice_cost(&self.cls, nv, bv));
+        let cost = Self::voice_cost(&self.cls, nv, bv);
+        hw.wait(self.voice_adjust(cost));
         let lp = self.voices[vi].last_period;
         if lp != 0 {
             Self::dev_pervol(hw, vi, lp, vol);
         } else {
             Self::dev_pervol(hw, vi, 1000, 0);
+        }
+    }
+
+    /// The start of an envelope whose first segment `calc_incrvol` returns early for (the segment is
+    /// shorter than the change of volume asks for) takes `T_EARLY` more than the path's time in the
+    /// reference's runs.
+    fn voice_adjust(&self, cost: u64) -> u64 {
+        if self.cls.starts_with("start~e") {
+            cost + T_EARLY
+        } else {
+            cost
         }
     }
 
@@ -1366,6 +1401,19 @@ impl MaxTrax {
     fn voice_cost(path: &str, note_volume: u16, env_top: u16) -> u64 {
         let alt = path.ends_with("+alt") || path.ends_with("+porta");
         let path = path.trim_end_matches("+alt").trim_end_matches("+porta");
+        let mut plain = String::new();
+        let mut skip = false;
+        for ch in path.chars() {
+            if ch == '~' {
+                skip = true;
+            } else if skip && (ch == '/' || ch == '+') {
+                skip = false;
+            }
+            if !skip {
+                plain.push(ch);
+            }
+        }
+        let path = plain.as_str();
         let (base, muls) = match path {
             "att/prog" | "dec/prog" => (467, true),
             "att/segend/last" => (480, true),

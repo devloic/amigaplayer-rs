@@ -8,6 +8,7 @@
 //! waveforms in memory allocated for them.
 
 pub mod actionamics;
+pub mod adpcm23;
 pub mod adpcmmono;
 pub mod amcomposer;
 pub mod aprosys;
@@ -257,6 +258,8 @@ pub const REPLAYERS: &[Open] = &[
     // first: the strict SAP header test ("SAP", TYPE B, M or C) takes no other format's file, but
     // some weaker tests below take SAP files
     pokeynoise::OPEN,
+    // strict: `ADPCM2` / `ADPCM3` and a header (the headerless ADPCM mono format below refuses `ADPC`), so first anyway
+    adpcm23::OPEN,
     // strict: four branch entries, a fixed word at offset 16 and the driver's start-entry shape at the target of the third
     // entry; the sibling Quartet and Quartet ST replayers (qpa., qts.) have no such header, but first anyway: no order dependence
     quartetpsg::OPEN,

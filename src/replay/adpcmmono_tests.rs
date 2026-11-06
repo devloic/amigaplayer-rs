@@ -229,17 +229,18 @@ fn short_files_do_not_panic() {
         let d = bytes(n, 7);
         let (mut m, r) = start("t.ADPCM", &d);
         let mut r = r.unwrap();
-        for _ in 0..1 {
-            irq(&mut r, &mut m);
-        }
-        // the first buffer is the stream followed by zeros (the second fill goes to the other
-        // buffer: the stream does not end, the reference's remaining count wraps)
+        // the first buffer is the stream followed by the decoded zero bytes past the file
         let log = m.bus.write_log.clone().unwrap();
         let a = ((log[4].1 as u32) << 16) | log[5].1 as u32;
-        let want = reference(&d[..d.len() & !1], 2 * (d.len() & !1));
-        let b = ram(&m, a, 1024);
-        assert_eq!(b[..want.len()], want[..], "{n}");
-        assert!(b[want.len()..].iter().all(|&x| x == 0), "{n}");
+        let mut padded = d.clone();
+        padded.resize(512, 0);
+        let want = reference(&padded, 1024);
+        assert_eq!(ram(&m, a, 1024), want, "{n}");
+        // and the song never ends
+        for _ in 0..4 {
+            irq(&mut r, &mut m);
+        }
+        assert!(!r.songend(), "{n}");
     }
 }
 

@@ -61,7 +61,22 @@ is supplied; 98.4% with one fixed first-write constant of 35412 cc) corrects the
 - The tick starts at the first write plus the first unpack cost plus 71779 (with a half-cc parity rule).
 - A CIA write (0xBFE001) for a normal row effect is at +3.5 cc, not -28; the pattern-delay branch is -57 cc
   (-32 on channel 3; the channel 2 value was never observed and is assumed -57).
-- The first write of the reference moves with the host's file loading (about 8.5 cc per path character and 10.5
-  per suffix character, plus the sample-set name resolution) and cannot be predicted; modules in one run have
-  first writes of 35412 or 35440.
-- Audio is still SIMILAR on every module even with the exact first-write time; the cause is not found.
+- The first write of the reference moves with the host's file loading and the player's resolution of the
+  sample names. Derived later by black-box sweeps of the reference at controlled paths, with synthetic songs
+  and sample sets (CPU cycles, two per colour clock; the logged time is the floor of cycles / 2; exact on 20
+  spec modules and 30 random songs at paths of 45 to 150 characters):
+  - 17 cycles per character of the directory path (final slash included), 21 per character of the file name,
+    17 per character of the song name (plus 1 if its length is odd), 50 per entry of the sample set; the
+    constant is 51196.
+  - Sample set read after the song's own `SMP.<name>` failed (`SMP.set`): +1394, another 17 per path
+    character beyond 60 (plus 1 for an odd path length); a file name not starting with `NPP.` never tries its
+    own set and is 84 cycles cheaper; a lower-case letter in `NPP` costs 21 (first), 25 (second, third).
+  - Per non-empty sample name of L characters: not in the set (K entries) 610 + 49 L + 83 K; found in entry
+    j 874 + 87 L + 83 j; plus 38 per leading character it shares with each entry it was compared with (all
+    entries, or those before the match). An alias entry adds 128 + 50 n (repeat start n) and continues with
+    entry n + 1; the used entry adds 60 w - 10 once for delta decoding (w words, 32768 if 0), -2 for a repeat
+    length below 4, -4 for a volume below 64. Take 1 off when the sum of all name lengths plus all compared
+    entries is odd.
+  - The remaining half-clock rule (tick start) is unchanged. With this the first writes match exactly and
+    the audio of 7 of 8 corpus modules is IDENTICAL (the eighth LAG-ONLY): the SIMILAR classes came from the
+    start time alone.

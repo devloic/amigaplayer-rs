@@ -30,13 +30,6 @@ pub const OPEN: Open = Open { name: "Nick Pelling Packer", detect, new };
 /// Colour clocks between two ticks.
 const TICK: u64 = 70940;
 
-/// The reference's first write (a volume write of the start-up) falls this many colour clocks
-/// after the run's origin; it depends on the host's loading of the files (about 8.5 colour clocks
-/// per character of the directory path and 10.5 per character of the file suffix, plus the
-/// sample set's name resolution), so it is a measured constant: 35412 for the synthetic modules
-/// as the reference runs them on the current host (the spec-era logs were 527 lower).
-const FIRST_WRITE: u64 = 35412;
-
 /// Colour clocks from the song's audio origin (a few after the last start-up write, as the
 /// reference host counts it, found by comparing renders) to the timer's start, on top of a period.
 const START_DELAY: u64 = 233;
@@ -1451,16 +1444,110 @@ impl Replayer for NickPelling {
     }
 }
 
-/// The sample set's name beside the song file `file`: the song's name with its first four
-/// characters replaced, then `SMP.set`.
+/// The sample set's name beside the song file `file`: for a name that starts with `NPP.` (each
+/// letter in either case) the name with those four characters replaced by `SMP.`; then `SMP.set`.
+/// Any other file name only tries `SMP.set` (the reference does not look for its own set).
 fn companions(file: &str) -> Vec<String> {
     let leaf = file.rsplit(['/', ':']).next().unwrap_or(file);
     let mut v = Vec::new();
-    if leaf.len() > 4 && leaf.is_char_boundary(4) {
+    if leaf.len() >= 4 && leaf.is_char_boundary(4) && leaf[..4].eq_ignore_ascii_case("NPP.") {
         v.push(format!("SMP{}", &leaf[3..]));
     }
     v.push("SMP.set".to_string());
     v
+}
+
+/// The number of leading bytes two names share.
+fn prefix_len(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
+/// The time of the reference's first write (the volume write of the start-up), in CPU cycles (two
+/// per colour clock) after the run's origin. It is the host's loading of the song and its sample
+/// set and the player's resolution of the 31 sample names, measured by black-box sweeps of the
+/// reference at controlled paths and with synthetic songs and sets (all exact):
+///
+/// * 17 cycles per character of the directory path (final slash included), 21 per character of
+///   the file name; 17 per character of the song name, plus one when its length is odd; 50 per
+///   entry of the sample set.
+/// * The sample set read after a failed try of the song's own `SMP.<name>`: 1394 cycles more at a
+///   60-character directory, another 17 per directory character and one more when the directory
+///   length is odd; 84 cycles less when the song's file name does not start with `NPP.`.
+/// * A letter of `NPP` in lower case: 21 cycles for the first, 25 for each of the others.
+/// * Per non-empty sample name of L characters: not in the set (K entries): 610 + 49 L + 83 K;
+///   found in entry j: 874 + 87 L + 83 j; in both cases 38 per leading character the name shares
+///   with each entry it was compared with (all of them, or those before the match). An entry
+///   of length 0 (an alias, repeat start n) adds 128 + 50 n and continues with entry n + 1. The
+///   entry that is used adds 60 w - 10 for its delta decoding once (w words, 32768 for a length
+///   of 0), takes 2 off for a repeat length below 4 and 4 off for a volume below 64.
+/// * One cycle off when the sum of all name lengths and of all compared entries is odd.
+///
+/// `None` when an alias points past the set (undefined).
+fn first_write_cycles(song: &[u8], set: &[u8], dir_len: usize, file: &str, own_bank: bool) -> Option<u64> {
+    let leaf = file.rsplit(['/', ':']).next().unwrap_or(file);
+    let lb = leaf.as_bytes();
+    let (d, f) = (dir_len as i64, lb.len() as i64);
+    let k = be16(set, 0) as usize;
+    let ent = |i: usize| 2 + 30 * i;
+    let mut o = be32(song, 4) as usize;
+    let mut next = || -> Vec<u8> {
+        let s = cstr(song.get(o..).unwrap_or(&[])).to_vec();
+        o += s.len() + 1;
+        s
+    };
+    let sn = next().len() as i64;
+    let names: Vec<Vec<u8>> = (0..31).map(|_| next()).collect();
+    let mut y: i64 = 51196 + 17 * d + 21 * f + 17 * sn + (sn & 1) + 50 * k as i64;
+    if !own_bank {
+        y += 1394 + 17 * (d - 60) + (d & 1);
+    }
+    let is_npp = lb.len() >= 4 && lb[..4].eq_ignore_ascii_case(b"NPP.");
+    if !is_npp {
+        y -= 84;
+    } else {
+        for (i, c) in lb[..3].iter().enumerate() {
+            if c.is_ascii_lowercase() {
+                y += if i == 0 { 21 } else { 25 };
+            }
+        }
+    }
+    let ename = |i: usize| cstr(set.get(ent(i)..ent(i) + 22).unwrap_or(&[]));
+    let len_of = |i: usize| be16(set, ent(i) + 22) as i64;
+    let mut delta: Vec<bool> = (0..k).map(|i| set.get(ent(i) + 24).is_some_and(|b| b & 0x80 != 0)).collect();
+    let (mut sl, mut sk) = (0i64, 0i64);
+    for nm in names.iter().filter(|n| !n.is_empty()) {
+        let l = nm.len() as i64;
+        sl += l;
+        let Some(j) = (0..k).find(|&i| ename(i) == &nm[..]) else {
+            sk += k as i64;
+            y += 610 + 49 * l + 83 * k as i64 + (0..k).map(|i| 38 * prefix_len(nm, ename(i)) as i64).sum::<i64>();
+            continue;
+        };
+        sk += j as i64;
+        y += 874 + 87 * l + 83 * j as i64 + (0..j).map(|i| 38 * prefix_len(nm, ename(i)) as i64).sum::<i64>();
+        let mut t = j;
+        if len_of(j) == 0 {
+            let n = be16(set, ent(j) + 26) as usize;
+            y += 128 + 50 * n as i64;
+            t = n + 1;
+            if t >= k {
+                return None;
+            }
+        }
+        if delta[t] {
+            delta[t] = false;
+            let w = len_of(t);
+            y += 60 * if w == 0 { 32768 } else { w } - 10;
+        }
+        if be16(set, ent(t) + 28) < 4 {
+            y -= 2;
+        }
+        if set[ent(t) + 25] < 64 {
+            y -= 4;
+        }
+    }
+    y -= (sl + sk) & 1;
+    u64::try_from(y).ok()
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -1468,16 +1555,17 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     let file = m.bus.read_cstr(m.deli.file_buf);
+    let dir_len = m.bus.read_cstr(m.deli.dir_buf).len();
     let mut found = None;
-    for name in companions(&file) {
-        if let Ok(f) = crate::deli::read_companion(m, &name).1 {
+    for (i, name) in companions(&file).iter().enumerate() {
+        if let Ok(f) = crate::deli::read_companion(m, name).1 {
             if let Some(r) = NickPelling::build(d, &f) {
-                found = Some((r, f));
+                found = Some((r, f, i == 0 && name != "SMP.set"));
                 break;
             }
         }
     }
-    let ((mut r, samples), _) = found?;
+    let ((mut r, samples), set, own_bank) = found?;
     let sbase = m.alloc((samples.data.len() as u32).max(4));
     if sbase == 0 {
         return None;
@@ -1491,13 +1579,13 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     // the start-up writes (spec 5), counted from the run's origin
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
-    let fw: u64 = FIRST_WRITE;
+    let y = first_write_cycles(d, &set, dir_len, &file, own_bank).unwrap_or(2 * 35412);
     let first_up = r.unpack();
     r.row = 0;
     // the reference's first write is a whole clock, or half a clock past one; the half clock is
     // there when the unpack's cost (half a clock per literal run) is a whole number, which puts
     // the tick start (71 779 clocks after this write plus the unpack) half a clock into a clock
-    let t0 = (origin + fw) as f64 + if first_up.fract() == 0.0 { 0.5 } else { 0.0 };
+    let t0 = (origin + y / 2) as f64 + if first_up.fract() == 0.0 { 0.5 } else { 0.0 };
     {
         let mut hw = Hw { bus: &mut m.bus };
         let put = |hw: &mut Hw, t: f64, f: &mut dyn FnMut(&mut Hw)| {

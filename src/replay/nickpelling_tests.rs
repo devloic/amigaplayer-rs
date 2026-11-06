@@ -393,6 +393,27 @@ fn companion_names() {
     assert_eq!(companions("/x/NPP.song"), vec!["SMP.song".to_string(), "SMP.set".to_string()]);
     assert_eq!(companions("npp.a"), vec!["SMP.a".to_string(), "SMP.set".to_string()]);
     assert_eq!(companions("x"), vec!["SMP.set".to_string()]);
+    // a name that does not start with NPP. only tries the shared set
+    assert_eq!(companions("xxx.q"), vec!["SMP.set".to_string()]);
+}
+
+#[test]
+fn first_write_follows_path_name_and_sample_resolution() {
+    // reference values (floor of the half-colour-clock time) measured on the same song layouts
+    // at a 60-character and a 61-character directory with the file name NPP.q
+    let s = song(&[pattern(&[])], &[0], &["e1"]);
+    let e = |len: u16, fine: u8| set(&[Smp { name: "e1", len, fine, vol: 64, rstart: 0, rlen: len }], &vec![1; 2 * len as usize]);
+    let (t, td) = (e(32, 0), e(10, 0x80));
+    let fw = |s: &[u8], t: &[u8], dir: usize, f: &str, own: bool| first_write_cycles(s, t, dir, f, own).unwrap() / 2;
+    assert_eq!(fw(&s, &t, 60, "NPP.q", true), 26743);
+    assert_eq!(fw(&s, &t, 61, "NPP.q", true), 26752);
+    assert_eq!(fw(&s, &t, 60, "NPP.q", false), 27440);
+    assert_eq!(fw(&s, &t, 61, "NPP.q", false), 27458);
+    assert_eq!(fw(&s, &td, 60, "NPP.q", true), 27038);
+    assert_eq!(fw(&s, &t, 60, "npp.q", true), 26779);
+    assert_eq!(fw(&s, &t, 60, "xxx.q", false), 27398);
+    // only the leaf of a path counts as the file name
+    assert_eq!(fw(&s, &t, 60, "/a/b/NPP.q", true), 26743);
 }
 
 #[test]

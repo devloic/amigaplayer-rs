@@ -78,6 +78,8 @@ before publication so that it describes behaviour only; what was removed or rewo
 | `multimediasound/` | MultiMedia Sound (`mms.*`, `sfx20.*`): SoundFX-layout replayer with its own engine | `src/replay/multimediasound.rs` |
 | `timetracker/` | TimeTracker (`tmk.*`, with `smp.*`): ProTracker-like replayer with its own quirks | `src/replay/timetracker.rs` |
 | `adpcm23/` | Amiga ADPCM2/ADPCM3 sound files (ZyXEL-style 2/3-bit ADPCM, direct Paula playback) | `src/replay/adpcm23.rs` |
+| `custommade/` | CustomMade: raw Ron Klaren / Ivo Zoer game-driver dumps (`cm.*`, raw `rk.*`) played by a fixed replayer | `src/replay/custommade.rs` |
+| `protracker4/` | Protracker4 (`mod3.*`): ProTracker 4 IFF FORM/MODL modules on a ProTracker 2.x engine | `src/replay/protracker4.rs` |
 
 Each directory holds `SPEC.md` (the spec), `LOGS.md` (how the evidence was produced) and `README.md` (what is solved and what
 stays unknown). Files and scripts they call `logs/...`, `scripts/...` or "traces" are not shipped: the reference logs are

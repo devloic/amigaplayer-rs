@@ -1018,7 +1018,7 @@ impl BuildB {
 
 /// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
 /// in the reference runs).
-const TIMER_DELAY: u64 = 188;
+const TIMER_DELAY: u64 = 202;
 
 /// Where the writes of a tick of build B fall in the original's run, by the previous write (see
 /// `WriteGaps`): the voices' work between two writes.
@@ -1050,7 +1050,7 @@ static JCBB_GAPS: WriteGaps = WriteGaps::new(
         (20, 15, 221), // DMA_ON -> VOL3 x959
     ],
     &[(0, 55), (1, 70), (2, 86), (3, 90), (5, 283), (6, 298), (7, 314), (8, 288), (9, 332), (10, 305), (11, 323), (12, 196), (13, 422), (14, 441), (15, 470), (16, 332), (20, 111)],
-    &[(4, 512), (12, 643)],
+    &[(4, 274), (12, 409)],
 );
 
 impl Replayer for BuildB {

@@ -25,6 +25,7 @@
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
+use m68k::AddressBus;
 
 pub const OPEN: Open = Open { name: "Special FX", detect, new };
 
@@ -49,6 +50,17 @@ const F_NOTRANS: u16 = 0x40;
 const F_REST: u16 = 0x80;
 const F_MUSIC: u16 = 0x8000;
 const F_EFFECT: u16 = 0x4000;
+
+/// Cycles of a code path by counter (`Sfx::t`), fitted on the original's write times; counters
+/// that cost nothing visible are left out.
+const COST: [(usize, i32); 30] = [
+    (0, 363), (1, 227), (4, 74), (5, 17), (9, 752), (10, 306), (11, 162), (20, 52), (31, 46), (33, 83),
+    (36, 149), (41, 19), (51, 56), (52, 87), (53, 211), (54, 7), (56, 12), (61, 6), (63, 299), (65, 66),
+    (73, 9), (74, 152), (75, 23), (76, 56), (80, 120), (81, 159), (83, 65), (85, 80), (87, 138), (89, 57),
+];
+const NOTE_SHIFT: i64 = -315;
+/// The mean of the original's wait for the audio interrupt requests and three raster lines, in cycles.
+const WAIT_RASTER: i64 = 4417;
 
 /// Order-list and pattern streams that never reach a note give up after this many steps.
 const GUARD: u32 = 20000;
@@ -660,9 +672,14 @@ struct Sfx {
     /// A voice's duration counter is decremented even at zero (the builds with a
     /// four-entry branch table).
     unguarded: bool,
+    tl: [u32; 100],
 }
 
 impl Sfx {
+    fn t(&mut self, id: usize) {
+        self.tl[id] += 1;
+    }
+
     fn rd8(&self, o: i64) -> u8 {
         if o < 0 { 0 } else { self.rt.get(o as usize).copied().unwrap_or(0) }
     }
@@ -804,14 +821,20 @@ impl Sfx {
 
     fn tick_sfx(&mut self, hw: &mut Hw) {
         self.dmamask = 0;
+        self.tl = [0; 100];
         if self.active {
             self.active = false;
             for v in 0..self.lay.nv {
                 if self.v[v].flags != 0 {
+                    self.t(0);
                     self.voice(v);
                     self.active |= self.v[v].flags & (F_MUSIC | F_EFFECT) != 0;
+                } else {
+                    self.t(1);
                 }
             }
+        } else {
+            self.t(9);
         }
         self.hardware(hw);
         // the song ends when every voice of the song has jumped to its loop point
@@ -823,27 +846,37 @@ impl Sfx {
     fn voice(&mut self, v: usize) {
         let mut parse = false;
         if self.unguarded || self.v[v].dur != 0 {
+            self.t(2);
             self.v[v].dur = self.v[v].dur.wrapping_sub(1);
             parse = self.v[v].dur == 0;
+        } else {
+            self.t(3);
         }
         if parse {
+            self.t(4);
             self.parse(v);
             if self.v[v].flags == 0 {
+                self.t(5);
                 return;
             }
         }
         if self.v[v].flags & F_REST != 0 {
+            self.t(6);
             return;
         }
+        self.t(7);
         self.effects(v);
+        self.t(8);
         self.envelope(v);
     }
 
     /// The duration byte of a note or rest, added to the counter.
     fn add_duration(&mut self, v: usize) {
         let d = if self.v[v].flags & F_FIXD != 0 {
+            self.t(40);
             self.v[v].fixed_dur
         } else {
+            self.t(41);
             let b = self.rd8(self.v[v].pat_ptr);
             self.v[v].pat_ptr += 1;
             b
@@ -868,13 +901,17 @@ impl Sfx {
             }
             let b = self.next(v);
             if b < 0x80 {
+                self.t(10);
                 self.note(v, b);
                 return;
             }
+            self.t(11);
             self.v[v].flags &= !F_SLIDE;
             if b >= 0xA0 {
+                self.t(12);
                 continue;
             }
+            self.t(20 + (b - 0x80) as usize);
             match b {
                 0x80 => {
                     if !self.end_of_pattern(v) {
@@ -956,12 +993,14 @@ impl Sfx {
     /// The end of a pattern. Returns false when the voice has ended.
     fn end_of_pattern(&mut self, v: usize) -> bool {
         if self.v[v].pat_loop != NULL {
+            self.t(50);
             self.v[v].pat_ptr = self.v[v].pat_loop;
             return true;
         }
         let mut rd = self.v[v].ol_ptr;
         self.v[v].rep = self.v[v].rep.wrapping_sub(1);
         if self.v[v].rep != 0 {
+            self.t(51);
             let p = self.rd8(rd - 1);
             self.v[v].ol_ptr = rd;
             self.v[v].pat_ptr = self.pattern(p);
@@ -978,11 +1017,14 @@ impl Sfx {
             }
             let b = self.rd8(rd);
             rd += 1;
+            self.t(52);
             if b < 0x80 {
+                self.t(58);
                 self.v[v].ol_ptr = rd;
                 self.v[v].pat_ptr = self.pattern(b);
                 return true;
             }
+            self.t(53 + ((b - 0x80) as usize).min(3));
             match b - 0x80 {
                 0 => {
                     self.v[v].jumped = true;
@@ -1014,17 +1056,21 @@ impl Sfx {
         let fl = self.v[v].flags;
         let base = self.v[v].base as i32;
         let mut t = n;
+        self.t(60);
         if fl & F_NOTRANS == 0 {
+            self.t(61);
             t = t.wrapping_add(self.v[v].transpose);
         }
         self.v[v].raw_note = t;
         if fl & F_DROP != 0 {
+            self.t(62);
             t = t.wrapping_add(self.v[v].drop_add);
             self.v[v].drop_cnt = self.v[v].drop_delay;
         }
         self.v[v].eff_note = t;
         let mut p = self.period(t as i8 as i32 - base);
         if fl & F_VIB != 0 {
+            self.t(63);
             let target = self.period(t.wrapping_add(self.v[v].vib_semis) as i8 as i32 - base);
             let diff = (target.wrapping_sub(p) as i16) >> sh;
             let steps = self.v[v].vib_steps as i8 as i16;
@@ -1034,6 +1080,7 @@ impl Sfx {
             self.v[v].vib_cnt = self.v[v].vib_delay as i16;
         }
         if fl & F_SLIDE != 0 {
+            self.t(64);
             let target = self.period(t.wrapping_add(self.v[v].slide_semis) as i8 as i32 - base);
             let diff = target.wrapping_sub(p) as i16;
             let ticks = self.v[v].slide_ticks as i16;
@@ -1043,6 +1090,7 @@ impl Sfx {
         }
         self.v[v].period = p;
         if fl & F_PTAB != 0 {
+            self.t(65);
             let vo = &mut self.v[v];
             vo.pt_cnt = 1;
             vo.pt_pos = vo.pt_start;
@@ -1062,6 +1110,7 @@ impl Sfx {
         let base = self.v[v].base as i32;
         let mut p = self.v[v].period;
         if fl & F_SLIDE != 0 {
+            self.t(70);
             let vo = &mut self.v[v];
             vo.slide_ticks = vo.slide_ticks.wrapping_sub(1);
             if vo.slide_ticks == 0 {
@@ -1069,8 +1118,13 @@ impl Sfx {
             }
             p = p.wrapping_sub(vo.slide_step as u16);
         } else if fl & F_DROP != 0 {
+            self.t(71);
             let vo = &mut self.v[v];
             let wrapped = vo.drop_cnt == 0;
+            if wrapped {
+                self.tl[72] += 1;
+            }
+            let vo = &mut self.v[v];
             vo.drop_cnt = vo.drop_cnt.wrapping_sub(1);
             if wrapped {
                 vo.drop_cnt = 0xFF;
@@ -1078,8 +1132,10 @@ impl Sfx {
                 p = self.period(self.v[v].raw_note as i8 as i32 - base);
             }
         } else if fl & F_PTAB != 0 {
+            self.t(73);
             self.v[v].pt_cnt = self.v[v].pt_cnt.wrapping_sub(1);
             if self.v[v].pt_cnt == 0 {
+                self.t(74);
                 let o = self.rd8(self.v[v].pt_pos);
                 let vo = &mut self.v[v];
                 vo.pt_pos += 1;
@@ -1093,9 +1149,11 @@ impl Sfx {
                 p = self.period(o.wrapping_add(e) as i8 as i32 - base);
             }
         } else if fl & F_VIB != 0 {
+            self.t(75);
             let vo = &mut self.v[v];
             vo.vib_cnt -= 1;
             if vo.vib_cnt < 0 {
+                self.tl[76] += 1;
                 vo.vib_cnt = 0;
                 vo.vib_half = vo.vib_half.wrapping_sub(1);
                 if vo.vib_half == 0 {
@@ -1110,20 +1168,26 @@ impl Sfx {
 
     fn envelope(&mut self, v: usize) {
         if self.v[v].flags & F_ENV == 0 {
+            self.t(80);
             return;
         }
+        self.t(81);
         self.v[v].env_left = self.v[v].env_left.wrapping_sub(1);
         if self.v[v].env_left == 0 {
+            self.t(82);
             let e = self.rd8(self.v[v].envp);
             self.v[v].envp += 1;
             if e == 0 {
+                self.t(83);
                 let m = self.rd8(self.v[v].envp);
                 if m == 0 {
+                    self.t(84);
                     self.v[v].flags &= !F_ENV;
                     return;
                 }
                 let mag = (m as i8 as i32).abs();
                 let r = mag - self.v[v].dur as i32;
+                self.tl[85] += 1;
                 let vo = &mut self.v[v];
                 if r < 0 {
                     vo.env_left = (-r) as u16;
@@ -1135,6 +1199,7 @@ impl Sfx {
                 }
                 return;
             } else if e >= 0x80 {
+                self.t(86);
                 let mut s = self.rd8(self.v[v].envp) as u16;
                 self.v[v].envp += 1;
                 let vo = &mut self.v[v];
@@ -1147,6 +1212,7 @@ impl Sfx {
                 vo.env_period = s as u8;
                 vo.env_cnt = 1;
             } else {
+                self.t(87);
                 let st = self.rd8(self.v[v].envp) as i8 as i16;
                 let vo = &mut self.v[v];
                 vo.envp += 1;
@@ -1156,44 +1222,95 @@ impl Sfx {
                 vo.env_step = st;
             }
         }
+        self.t(88);
         let vo = &mut self.v[v];
         vo.env_cnt = vo.env_cnt.wrapping_sub(1);
         if vo.env_cnt == 0 {
+            self.tl[89] += 1;
+            let vo = &mut self.v[v];
             vo.env_cnt = vo.env_period;
             vo.volume = vo.volume.wrapping_add(vo.env_step as u16);
         }
     }
 
+    /// The cycles from the tick's start to its first register write: the code paths the tick took,
+    /// `COST` by counter, and the shifts of the builds (a four-entry branch table, three voices,
+    /// absolute pattern addressing, a zero effect mask).
+    fn first_write(&self) -> i64 {
+        let mut c: i64 = COST.iter().map(|&(i, k)| self.tl[i] as i64 * k as i64).sum();
+        if self.dmamask != 0 {
+            c += NOTE_SHIFT;
+        }
+        c += if self.lay.four { -98 } else { 0 };
+        c += if self.lay.nv == 3 { 249 } else { 0 };
+        c += if !self.lay.rel_pat { 35 } else { 0 };
+        c += if self.lay.m2 == 0 { 14 } else { 0 };
+        c.max(0)
+    }
+
     fn hardware(&mut self, hw: &mut Hw) {
         let d = self.dmamask;
+        let t0 = hw.bus.clock;
+        // the time in 68000 cycles since the tick's start; a write falls on the colour clock its cycle is in
+        let mut cy = self.first_write();
+        macro_rules! at {
+            ($c:expr) => {
+                hw.bus.clock = hw.bus.clock.max(t0 + ($c as u64) / 2)
+            };
+        }
         if d != 0 {
-            // stop the voices that start a note and set their output to the idle state;
-            // the original waits for the audio interrupt requests and three raster
-            // lines here (Paula has no AUDxDAT register to write in this model)
+            // stop the voices that start a note, clear their audio interrupt requests and hand each a
+            // zero word at period 1 (the interrupt request returns); the original then waits for the
+            // requests and for three raster lines, which end on a line the phase of which is that of
+            // the original's run: the mean wait is used
+            at!(cy);
             hw.dmacon(d as u16);
+            cy += 36;
+            at!(cy);
+            hw.bus.write_word(0xDFF09C, (d as u16) << 7);
+            let mut next = 0;
             for ch in 0..self.lay.nv {
                 if d & 1 << ch != 0 {
+                    cy += if next == 0 { 39 + 19 * ch as i64 } else { 31 + 19 * (ch - next) as i64 };
+                    at!(cy);
                     hw.per(ch, 1);
+                    cy += 12;
+                    at!(cy);
+                    hw.bus.write_word(0xDFF0AA + 16 * ch as u32, 0);
+                    next = ch + 1;
                 }
             }
-            hw.wait(2000);
+            cy += WAIT_RASTER;
         }
+        let build = if self.lay.nv == 3 { 12 } else if !self.lay.rel_pat { 4 } else { 0 };
         for ch in 0..self.lay.nv {
             let vo = &self.v[ch];
             let mask = if vo.flags & F_EFFECT != 0 { self.lay.m2 } else { self.lay.m1 };
             let x = vo.volume & mask;
             let x = ((x as u32 * 64) as u16) >> 6;
+            let restart = d & 1 << ch != 0;
+            at!(cy);
             hw.vol(ch, x >> self.lay.vs);
+            cy += 20;
+            at!(cy);
             hw.per(ch, vo.period);
-            if d & 1 << ch != 0 {
-                hw.len(ch, vo.len);
-                hw.loc(ch, self.guest(vo.start));
+            cy += if restart { 83 } else { 63 };
+            at!(cy);
+            let (len, loc) = if restart { (vo.len, vo.start) } else { (vo.looplen, vo.lp) };
+            hw.len(ch, len);
+            cy += 28;
+            at!(cy);
+            hw.loc(ch, self.guest(loc));
+            cy += if ch + 1 == self.lay.nv {
+                20 + if self.lay.nv == 3 { 14 } else { 0 }
             } else {
-                hw.len(ch, vo.looplen);
-                hw.loc(ch, self.guest(vo.lp));
+                291 + if ch == 0 { 10 } else { 0 } + build
+            };
+            if restart {
+                cy += 126;
             }
-            hw.wait(100);
         }
+        at!(cy);
         hw.dmacon(0x8000 | d as u16);
     }
 }
@@ -1260,6 +1377,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         active: false,
         dmamask: 0,
         unguarded,
+        tl: [0; 100],
     }))
 }
 
@@ -1462,6 +1580,30 @@ mod tests {
         // the other three voices idle: period 1, volume 0
         assert!(reg(&log, 0xDFF0B6).iter().all(|&p| p == 1));
         assert!(reg(&log, 0xDFF0B8).iter().all(|&p| p == 0));
+    }
+
+    #[test]
+    fn the_writes_of_a_tick_are_spread_over_it() {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new("/jd-test/jd.test"), module(&SIMPLE, false)).unwrap();
+        let mut out = vec![0f32; 2 * 960 * 8];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        // a note tick clears the voice's audio interrupt request and writes its data register
+        // before the voice's registers
+        let n = log.iter().position(|w| w.0 == 0xDFF09C && w.1 == 0x80).unwrap();
+        assert_eq!(log[n - 1].0, 0xDFF096);
+        assert_eq!(log[n + 1].0, 0xDFF0A6);
+        assert_eq!(log[n + 2].0, 0xDFF0AA);
+        assert!(log[n + 2].2 - log[n + 1].2 <= 7);
+        // a tick without a note: volume, period, length and address 10, 31 and 14 colour clocks apart
+        let i = n + 10 + log[n + 10..].iter().position(|w| w.0 == 0xDFF0A8).unwrap();
+        let t: Vec<u64> = (0..4).map(|k| log[i + k].2).collect();
+        assert_eq!(log[i + 1].0, 0xDFF0A6);
+        assert_eq!(log[i + 2].0, 0xDFF0A4);
+        assert_eq!((t[1] - t[0], t[2] - t[1], t[3] - t[2]), (10, 31, 14));
     }
 
     #[test]

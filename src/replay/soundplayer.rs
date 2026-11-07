@@ -267,6 +267,26 @@ impl Sjs {
     }
 }
 
+// The tick's times in 68000 cycles (half colour clocks), measured in the reference's runs.
+/// From the previous voice's length to the next voice's location in the loop pass.
+const LOOP_NEXT: u64 = 163;
+/// From the loop pass to the first start of a sample, to the next start (after the DMA on),
+/// and for each voice in between that starts none.
+const PEND_FIRST: u64 = 178;
+const PEND_NEXT: u64 = 155;
+const PEND_SKIP: u64 = 79;
+/// From the period to the volume, by voice.
+const PEND_VOL: [u64; 4] = [391, 445, 499, 553];
+/// A row tick: from the loop pass to the first stop of DMA (the modal time: it varies in
+/// steps of 37 cycles with the data, as with the voices that fetch no note); from one stop to
+/// the next.
+const ROW_START: u64 = 1650;
+const ROW_NOTE: u64 = 319;
+/// For each voice between two stops of DMA that stops none.
+const ROW_SKIP: u64 = 276;
+/// A row tick's volume commands: from the loop pass to each voice's volume write.
+const ROW_VOL: [u64; 4] = [2422, 2874, 3349, 3847];
+
 impl Replayer for Sjs {
     fn format(&self) -> &'static str {
         "SoundPlayer"
@@ -284,16 +304,27 @@ impl Replayer for Sjs {
         (self.timer as u64 + 1) * 5
     }
 
+    /// The first tick follows the song start by a period and this much.
+    fn timer_delay(&self) -> u64 {
+        267
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
         self.ticks += 1;
+        let mut clk = Clk { base: hw.bus.clock, h: 0 };
+        // the loops of the four voices (the sample or the empty one)
         for ch in 0..4 {
             let v = &mut self.v[ch];
+            let looped = v.loop_len != 0;
             if !v.hold_loop {
-                if v.loop_len != 0 {
+                clk.step(hw, if looped { 6 * 2 } else { 0 } + if ch > 0 { LOOP_NEXT } else { 0 });
+                if looped {
                     hw.loc(ch, v.loop_addr);
+                    clk.step(hw, 20);
                     hw.len(ch, v.loop_len);
                 } else {
                     hw.loc(ch, self.silence);
+                    clk.step(hw, 16);
                     hw.len(ch, 1);
                 }
             }
@@ -317,13 +348,21 @@ impl Replayer for Sjs {
                 }
             }
         }
+        let mut last: Option<usize> = None;
         for ch in 0..4 {
             let v = &mut self.v[ch];
             if v.pend_len != 0 {
+                let skipped = ch - last.map_or(0, |l| l + 1);
+                clk.step(hw, if last.is_none() { PEND_FIRST } else { PEND_NEXT } + PEND_SKIP * skipped as u64);
+                last = Some(ch);
                 hw.loc(ch, v.pend_start);
+                clk.step(hw, 20);
                 hw.len(ch, v.pend_len);
+                clk.step(hw, 20);
                 hw.per(ch, v.per);
+                clk.step(hw, PEND_VOL[ch]);
                 hw.vol(ch, v.vol as u16);
+                clk.step(hw, 90);
                 hw.dmacon(0x8000 | 1 << ch);
                 v.pend_len = 0;
             }
@@ -331,6 +370,7 @@ impl Replayer for Sjs {
         if self.ticks % 6 != 0 {
             return;
         }
+        let row0 = clk.h;
         for ch in 0..4 {
             self.v[ch].fetched = None;
             if self.mask & (1 << ch) == 0 {
@@ -357,9 +397,15 @@ impl Replayer for Sjs {
             let row = v.row;
             self.v[ch].fetched = Some(self.group(row, ch));
         }
+        let mut last: Option<usize> = None;
         for ch in 0..4 {
             let Some([note, ins, _]) = self.v[ch].fetched else { continue };
             if note != 0 {
+                match last {
+                    None => clk.to(hw, row0 + ROW_START),
+                    Some(l) => clk.step(hw, ROW_NOTE + ROW_SKIP * (ch - l - 1) as u64),
+                }
+                last = Some(ch);
                 hw.dmacon(1 << ch);
                 let s = if (1..=38).contains(&ins) { self.slots[ins as usize] } else { Slot::default() };
                 let v = &mut self.v[ch];
@@ -373,9 +419,30 @@ impl Replayer for Sjs {
         }
         for ch in 0..4 {
             if let Some([_, _, c]) = self.v[ch].fetched {
+                if (0x03..=0x42).contains(&c) {
+                    clk.to(hw, row0 + ROW_VOL[ch]);
+                }
                 self.command(ch, c, hw);
             }
         }
+    }
+}
+
+/// The tick's time in half colour clocks (68000 cycles) from its start.
+struct Clk {
+    base: u64,
+    h: u64,
+}
+
+impl Clk {
+    fn to(&mut self, hw: &mut Hw, h: u64) {
+        self.h = self.h.max(h);
+        hw.bus.clock = self.base + self.h / 2;
+    }
+
+    fn step(&mut self, hw: &mut Hw, cycles: u64) {
+        self.h += cycles;
+        hw.bus.clock = self.base + self.h / 2;
     }
 }
 

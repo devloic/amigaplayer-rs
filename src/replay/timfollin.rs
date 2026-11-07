@@ -789,6 +789,7 @@ const TIMER_DELAY: u64 = 3654;
 /// The second tick follows the first by this much less than a period: the reference's first music
 /// tick comes 67 979 clocks after the first (the writes of the second tick of all ten corpus files).
 const FIRST_GAP: u64 = 2961;
+const _: () = assert!(super::DT_TICK > FIRST_GAP);
 
 impl Replayer for TimFollin {
     fn format(&self) -> &'static str {

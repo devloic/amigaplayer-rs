@@ -152,9 +152,18 @@ impl Song {
         }
         let name = clean_name(name);
         // (the format recognised by its file name needs it to be told)
-        crate::replay::adpcmmono::set_name(&name);
-        let known = open::detect(data).is_some();
-        crate::replay::adpcmmono::set_name("");
+        let known = {
+            // restores the caller's name even if detection panics
+            struct Restore(String);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    crate::replay::adpcmmono::set_name(&self.0);
+                }
+            }
+            let _restore = Restore(crate::replay::adpcmmono::current_name());
+            crate::replay::adpcmmono::set_name(&name);
+            open::detect(data).is_some()
+        };
         if !known {
             return Err(Error::NotRecognised);
         }

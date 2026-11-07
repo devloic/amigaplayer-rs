@@ -111,8 +111,13 @@ pub struct Rjp {
     flags: u8,
     flags0: u8,
     songend: bool,
-    /// The next tick is the first of the song (the original's start-up routine runs in it).
+    /// The next tick follows a change of subsong (the original's start-up routine runs in it).
     first: bool,
+    /// When that tick is due (colour clocks, absolute): at once.
+    tick_at: Option<u64>,
+    /// The tick after the start-up tick: when it falls (absolute).
+    next_at: std::cell::Cell<Option<u64>>,
+    due: u64,
 }
 
 /// The name the sample companion has: `smp.NAME` for `rjp.NAME` (the prefix in any
@@ -187,11 +192,14 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         flags0: 0,
         songend: false,
         first: false,
+        tick_at: None,
+        next_at: std::cell::Cell::new(None),
+        due: 0,
     };
     r.title = file;
     let mut hw = Hw { bus: &mut m.bus };
     hw.dmacon(0x000F);
-    r.start(0, &mut hw);
+    r.start(0, &mut hw, false);
     Some(Box::new(r))
 }
 
@@ -221,11 +229,13 @@ impl Rjp {
     }
 
     /// Stop, then the start of subsong `n`.
-    fn start(&mut self, n: u16, hw: &mut Hw) {
+    fn start(&mut self, n: u16, hw: &mut Hw, change: bool) {
         hw.dmacon(0x000F);
         self.sub = n;
         self.songend = false;
-        self.first = true;
+        self.first = change;
+        self.tick_at = change.then_some(hw.bus.clock);
+        self.due = hw.bus.clock;
         // a new start finds the samples as loaded
         self.area.copy_from_slice(&self.pristine);
         hw.bus.write_bytes(self.base, &self.pristine);
@@ -571,9 +581,16 @@ static GAPS: WriteGaps = WriteGaps::new(
 /// The tick's first write falls this far into it (the start gap of a stop of DMA below).
 const START_FIRST: u64 = 576;
 
-/// Colour clocks from the song's start to the host's timer start, beyond the first period: the
-/// original's init takes longer than the port's by this much, over the files at the median.
-const TIMER_DELAY: u64 = 14131;
+/// Colour clocks from the song's start to the host's timer start, beyond the first period (the
+/// song starts without a start-up routine: the reference's first tick follows the song start by
+/// a period and this much; measured over ten modules, the ticks' grid stays on it).
+const TIMER_DELAY: u64 = 376;
+
+/// A change of subsong: the start-up routine's first stop of DMA follows this long after the change.
+const CHANGE_FIRST: u64 = 234;
+
+/// The tick after the start-up one falls this much later than a period after the change.
+const CHANGE_EXTRA: u64 = 380;
 
 impl Replayer for Rjp {
     fn format(&self) -> &'static str {
@@ -597,7 +614,15 @@ impl Replayer for Rjp {
     }
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
-        self.start(n, hw);
+        self.start(n, hw, true);
+    }
+
+    fn subsong_tick_at(&mut self) -> Option<u64> {
+        self.tick_at.take()
+    }
+
+    fn next_tick_at(&self) -> Option<u64> {
+        self.next_at.take()
     }
 
     fn tick(&mut self, hw: &mut Hw) {
@@ -607,12 +632,13 @@ impl Replayer for Rjp {
             return;
         }
         if self.first {
-            // the start-up routine of the first tick: all voices off, the volumes cleared, the
+            // the start-up routine of the tick after a change of subsong: all voices off, the volumes cleared, the
             // DMA stopped again (measured in the reference runs: the first voice's stop comes some
             // 8,000 colour clocks into the tick, which fixes how long the channels stay in the
             // state the data-register write leaves them in)
             self.first = false;
-            hw.wait(START_FIRST);
+            self.next_at.set(Some(self.due + self.tick_clocks() + CHANGE_EXTRA));
+            hw.wait(CHANGE_FIRST);
             hw.dmacon(0x000F);
             for ch in 0..4 {
                 hw.vol(ch, 0);
@@ -721,7 +747,8 @@ mod tests {
         assert!(dma.contains(&0x0001) && dma.contains(&0x8201));
         let lc = reg(&log, 0xDFF0A2);
         assert_eq!(lc[1] - lc[0], 8);
-        // the start-up routine clears the volume first; the envelope is flat at 64
-        assert_eq!(reg(&log, 0xDFF0A8)[..2], [0, 64]);
+        // the start-up routine (volumes cleared first) runs only after a change of subsong, not
+        // at the song's start; the envelope is flat at 64
+        assert_eq!(reg(&log, 0xDFF0A8)[..2], [64, 64]);
     }
 }

@@ -49,17 +49,12 @@ const END_WORDS: [u16; 5] = [0x0094, 0x00FE, 0x00FF, 0x01FE, 0x01FF];
 /// reference waits for 9 raster line changes, and its gaps from the last volume
 /// write to the first DMA-on write and from the last DMA-on write to the first
 /// loop write are 2,094 and 2,018 (medians, Die Hard 2 song 1).
-const WAIT_ON: u64 = 2000;
-const WAIT_LOOP: u64 = 1984;
-/// The reference's time per write (its medians, as above): after DMA off, LC, LEN,
-/// PER and VOL of a voice; after a DMA-on write; after the loop LC and LEN.
-const T_OFF: u64 = 28;
-const T_LC: u64 = 14;
-const T_LEN: u64 = 10;
-const T_PER: u64 = 208;
-const T_VOL: u64 = 96;
-const T_ON: u64 = 34;
-const T_LOOP_LEN: u64 = 54;
+const WAIT_ON: i64 = 4400;
+const WAIT_LOOP: i64 = 4150;
+/// From the period write to the volume write of a voice, in cycles (the mean of the two builds' paths).
+const PER_VOL: [i64; 4] = [481, 504, 527, 517];
+/// The cost in cycles of the sequencer paths (fitted), by path counter.
+const COST: [(usize, i64); 6] = [(0, 172), (1, 232), (2, 324), (3, 167), (19, 403), (21, 15)];
 
 /// The instrument record and the instrument count's step.
 const REC: usize = 0x18;
@@ -364,9 +359,14 @@ pub struct MikeDavies {
     playing: bool,
     song: u16,
     v: [Voice; 4],
+    tl: [u32; 64],
 }
 
 impl MikeDavies {
+    fn t(&mut self, id: usize) {
+        self.tl[id] += 1;
+    }
+
     /// The prepared image's byte at address `a` (VIRT-based); 0 outside it.
     fn b(&self, a: u32) -> u8 {
         let o = a.wrapping_sub(VIRT) as usize;
@@ -444,23 +444,28 @@ impl MikeDavies {
             let a = c.ptr.wrapping_add(c.idx as i16 as i32 as u32);
             let x = self.unit(a, 0);
             let mut c2 = c;
+            self.t(3);
             match x {
                 0..=0x7F => {
+                    self.t(10);
                     let dur = self.unit(a, 1);
                     c2.idx = c.idx.wrapping_add(self.size(4, 2));
                     self.set_ctx(vi, in_pat, c2);
                     return Next::Note(x, dur);
                 }
                 END_PATTERN => {
+                    self.t(11);
                     c2.idx = 0;
                     let v = &mut self.v[vi];
                     v.prep = v.prep.wrapping_sub(1);
                     if v.prep == 0 {
                         c2.ptr = 0;
+                        self.tl[12] += 1;
                     }
                     self.set_ctx(vi, in_pat, c2);
                 }
                 CALL => {
+                    self.t(13);
                     let (count, tr, ptr) = (self.w(a.wrapping_add(2)), self.w(a.wrapping_add(4)), self.l(a.wrapping_add(6)));
                     let sz = self.size(10, 5);
                     let v = &mut self.v[vi];
@@ -470,11 +475,16 @@ impl MikeDavies {
                     v.main.idx = v.main.idx.wrapping_add(sz);
                 }
                 LOOP_END => {
+                    self.t(14);
                     c2.lcnt = c.lcnt.wrapping_sub(1);
+                    if c2.lcnt != 0 {
+                        self.tl[15] += 1;
+                    }
                     c2.idx = if c2.lcnt != 0 { c.lret } else { c.idx.wrapping_add(self.size(2, 1)) };
                     self.set_ctx(vi, in_pat, c2);
                 }
                 LOOP_START => {
+                    self.t(16);
                     let n = self.unit(a, 1);
                     c2.idx = c.idx.wrapping_add(self.size(4, 2));
                     c2.lret = c2.idx;
@@ -482,16 +492,19 @@ impl MikeDavies {
                     self.set_ctx(vi, in_pat, c2);
                 }
                 RESTART => {
+                    self.t(17);
                     self.songend = true;
                     self.start_song(self.song, hw);
                     return Next::Restart;
                 }
                 STOP => {
+                    self.t(18);
                     self.songend = true;
                     self.stop(hw);
                     return Next::Restart;
                 }
                 _ => {
+                    self.t(19);
                     let mut r = self.lay.ins + REC * (x & 0x7F) as usize;
                     if r >= self.lay.ins_end {
                         r = self.lay.ins;
@@ -531,12 +544,15 @@ impl MikeDavies {
         }
         for vi in 0..4 {
             if self.v[vi].main.ptr & 0x8000_0000 != 0 {
+                self.t(0);
                 continue;
             }
             self.v[vi].dur = self.v[vi].dur.wrapping_sub(1);
             if self.v[vi].dur != 0 {
+                self.t(1);
                 continue;
             }
+            self.t(2);
             let (mut x, dur) = match self.next(vi, hw) {
                 Next::Restart => return true,
                 Next::Note(x, d) => (x, d),
@@ -552,6 +568,10 @@ impl MikeDavies {
                     x = x.wrapping_add(tr);
                 }
                 x = x.wrapping_add(v.itr);
+            }
+            self.t(20);
+            if x != 0 {
+                self.t(21);
             }
             let per = self.w((VIRT + self.lay.periods as u32).wrapping_add(x.wrapping_mul(2) as i16 as i32 as u32));
             let v = &mut self.v[vi];
@@ -569,9 +589,24 @@ impl MikeDavies {
 
     /// The output routine (specification, 6.2).
     fn output(&mut self, hw: &mut Hw) {
+        // the time in 68000 cycles since the start of this pass; a write falls on the colour clock its
+        // cycle is in
+        let t0 = hw.bus.clock;
+        let mut cy: i64 = COST.iter().map(|&(i, c)| self.tl[i] as i64 * c).sum();
+        self.tl = [0; 64];
+        macro_rules! at {
+            () => {
+                hw.bus.clock = hw.bus.clock.max(t0 + (cy.max(0) as u64) / 2)
+            };
+        }
         let mut wrote = false;
+        let mut skipped = 0i64;
+        let mut last = 0;
         for ch in 0..4 {
             if !self.v[ch].trig {
+                if wrote {
+                    skipped += 1;
+                }
                 continue;
             }
             if self.v[ch].per < self.lay.thr {
@@ -579,50 +614,75 @@ impl MikeDavies {
                     self.v[ch].per = self.lay.thr;
                 } else {
                     self.v[ch].trig = false;
+                    if wrote {
+                        skipped += 1;
+                    }
                     continue;
                 }
             }
             let v = self.v[ch];
+            if wrote {
+                cy += 239 + 31 * last as i64 + 41 * skipped;
+            }
+            skipped = 0;
+            last = ch;
+            at!();
             hw.dmacon(1 << ch);
-            hw.wait(T_OFF);
+            cy += 76;
+            at!();
             hw.loc(ch, self.guest(v.smp));
-            hw.wait(T_LC);
+            cy += 20;
+            at!();
             hw.len(ch, v.len);
-            hw.wait(T_LEN);
+            cy += 20;
+            at!();
             hw.per(ch, v.per);
-            hw.wait(T_PER);
+            cy += PER_VOL[ch];
+            at!();
             hw.vol(ch, v.vol & 0x7F);
-            hw.wait(T_VOL);
             wrote = true;
         }
         if !wrote {
             return;
         }
-        hw.wait(WAIT_ON);
+        // the original waits for the raster before it starts the voices: the mean wait is used
+        cy += WAIT_ON;
+        let mut first = true;
         for ch in 0..4 {
             let v = &self.v[ch];
             if v.trig && (!self.lay.rest || v.note != 0) {
+                if !first {
+                    cy += 85;
+                }
+                first = false;
+                at!();
                 hw.dmacon(0x8000 | 1 << ch);
-                hw.wait(T_ON);
             }
         }
-        hw.wait(WAIT_LOOP);
+        cy += WAIT_LOOP;
+        let mut gap = 0;
         for ch in 0..4 {
             if !self.v[ch].trig {
+                gap += 1;
                 continue;
             }
             self.v[ch].trig = false;
             let v = self.v[ch];
+            cy += 41 * gap;
+            gap = 0;
+            at!();
             if v.lp != 0 {
                 hw.loc(ch, self.guest(v.smp.wrapping_add(v.lp as i16 as i32 as u32)));
-                hw.wait(T_LC);
+                cy += 18;
+                at!();
                 hw.len(ch, (v.len.wrapping_mul(2).wrapping_sub(v.lp)) >> 1);
             } else {
                 hw.loc(ch, self.guest(v.smp));
-                hw.wait(T_LC);
+                cy += 18;
+                at!();
                 hw.len(ch, 2);
             }
-            hw.wait(T_LOOP_LEN);
+            cy += 136;
         }
     }
 
@@ -680,6 +740,7 @@ impl Replayer for MikeDavies {
             }
             self.start_song(self.sub, hw);
         }
+        self.tl = [0; 64];
         self.play(hw);
     }
 }
@@ -705,6 +766,7 @@ fn new(d: &[u8], base: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
         playing: false,
         song: 0,
         v: Default::default(),
+        tl: [0; 64],
     }))
 }
 

@@ -325,6 +325,10 @@ pub fn depack(data: &[u8]) -> Option<Vec<u8>> {
         table.push(input.le32()?);
     }
 
+    // the work is bounded by the declared size: a table that names one block over and over,
+    // or sub-blocks that overlap, cannot make the copying go on past it
+    let mut budget = filesize as i64;
+    let mut subs_left = 1i64 << 24;
     for &t in &table {
         input.pos = t as usize;
         let mut b = [0u8; 20];
@@ -359,6 +363,10 @@ pub fn depack(data: &[u8]) -> Option<Vec<u8>> {
             }
         }
 
+        subs_left -= sub_blk as i64;
+        if subs_left < 0 {
+            return None;
+        }
         let mut sub = Vec::new();
         for _ in 0..sub_blk {
             let mut s = [0u8; 8];
@@ -369,6 +377,10 @@ pub fn depack(data: &[u8]) -> Option<Vec<u8>> {
             let unpk_size = i32::from_le_bytes([s[4], s[5], s[6], s[7]]);
             // Sanity check
             if unpk_pos < 0 || unpk_size < 0 {
+                return None;
+            }
+            budget -= unpk_size as i64;
+            if budget < 0 {
                 return None;
             }
             sub.push(Sub { unpk_pos, unpk_size });

@@ -35,7 +35,7 @@
 //!   [`format`](Song::format).
 //! * [`unpack`]: recognise and undo the file-level packers (PowerPacker, Pack-Ice, XPK SQSH,
 //!   MMCMP, StoneCracker) without playing anything.
-//! * [`Error`]: a typed, `#[non_exhaustive]` error. Garbage input gives an `Err`, not a panic.
+//! * [`Error`]: a typed, `#[non_exhaustive]` error. Garbage input gives an `Err`, not a panic (a replayer bug that panics is caught and reported as `Error::Internal`, except under `panic = "abort"`).
 //!
 //! Rendering is deterministic: the same bytes, rate and subsong give the same samples on every
 //! run and platform that has IEEE floats.

@@ -7,7 +7,7 @@
 //!
 //! Modified for xmp by Claudio Matsuoka, Jan 2010.
 
-use super::alloc_zeroed;
+use super::{alloc_zeroed, DEPACK_LIMIT};
 
 struct Bits<'a> {
     word: u32,
@@ -207,6 +207,9 @@ pub fn depack(data: &[u8]) -> Option<Vec<u8>> {
     }
     // Best case ratio of the sliding window is about 255:1.
     if p_len < o_len / 255 {
+        return None;
+    }
+    if o_len as usize > DEPACK_LIMIT {
         return None;
     }
     decompress(data, 16, o_len, p_len)

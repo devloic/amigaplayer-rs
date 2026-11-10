@@ -200,7 +200,11 @@ pub unsafe extern "C" fn ap_render_s16(song: *mut ApSong, out: *mut i16, frames:
         set_error(E_ARGUMENT, "null buffer");
         return 0;
     }
-    let buf = unsafe { std::slice::from_raw_parts_mut(out, frames.saturating_mul(2)) };
+    if frames > isize::MAX as usize / 4 {
+        set_error(E_ARGUMENT, "frames too large");
+        return 0;
+    }
+    let buf = unsafe { std::slice::from_raw_parts_mut(out, frames * 2) };
     guard(0, || s.song.render_i16(buf))
 }
 
@@ -212,7 +216,11 @@ pub unsafe extern "C" fn ap_render_f32(song: *mut ApSong, out: *mut f32, frames:
         set_error(E_ARGUMENT, "null buffer");
         return 0;
     }
-    let buf = unsafe { std::slice::from_raw_parts_mut(out, frames.saturating_mul(2)) };
+    if frames > isize::MAX as usize / 8 {
+        set_error(E_ARGUMENT, "frames too large");
+        return 0;
+    }
+    let buf = unsafe { std::slice::from_raw_parts_mut(out, frames * 2) };
     guard(0, || s.song.render_f32(buf))
 }
 
@@ -220,7 +228,7 @@ pub unsafe extern "C" fn ap_render_f32(song: *mut ApSong, out: *mut f32, frames:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_subsongs(song: *mut ApSong, first: *mut u16, last: *mut u16, current: *mut u16) -> c_int {
     let s = song!(song, -1);
-    let r = s.song.subsongs();
+    let Some(r) = guard(None, || Some(s.song.subsongs())) else { return -1 };
     unsafe {
         if !first.is_null() {
             *first = r.first;
@@ -252,21 +260,21 @@ pub unsafe extern "C" fn ap_set_subsong(song: *mut ApSong, n: u16) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_songend(song: *mut ApSong) -> c_int {
     let s = song!(song, 0);
-    s.song.songend() as c_int
+    guard(0, || s.song.songend() as c_int)
 }
 
 /// Seconds rendered since the subsong started.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_elapsed_secs(song: *mut ApSong) -> c_double {
     let s = song!(song, 0.0);
-    s.song.elapsed_secs()
+    guard(0.0, || s.song.elapsed_secs())
 }
 
 /// The length in seconds when the format states it, else a negative number.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_duration_hint(song: *mut ApSong) -> c_double {
     let s = song!(song, -1.0);
-    s.song.duration_hint().unwrap_or(-1.0)
+    guard(-1.0, || s.song.duration_hint().unwrap_or(-1.0))
 }
 
 /// Restarts the current subsong from its beginning. Returns 0 or -1.
@@ -283,7 +291,7 @@ pub unsafe extern "C" fn ap_restart(song: *mut ApSong) -> c_int {
 }
 
 /// Positions the song `secs` seconds into the current subsong (by rendering up to there).
-/// Returns 0 or -1.
+/// `secs` must be finite and not negative (capped at 24 hours). Returns 0 or -1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_seek(song: *mut ApSong, secs: c_double) -> c_int {
     let s = song!(song, -1);

@@ -469,9 +469,9 @@ impl ProTracker {
         ch.note = (l >> 16) as u16;
         ch.cmd = l as u16;
         let ins = ((ch.note >> 8) & 0xF0) as usize | (ch.cmd >> 12) as usize;
-        if ins != 0 {
+        // (instrument numbers above 31 name no sample: ignored)
+        if let (true, Some(&s)) = (ins != 0, self.samples.get(ins)) {
             spend(bus, C_ROW_INSTR);
-            let s = self.samples[ins];
             ch.start = s.start;
             ch.length = s.length;
             ch.finetune = s.finetune;
@@ -926,6 +926,17 @@ mod tests {
             d[o..o + 4].copy_from_slice(&l.to_be_bytes());
         }
         d
+    }
+
+    /// Instrument numbers above 31 name no sample: ignored, no panic.
+    #[test]
+    fn instrument_past_31_is_ignored() {
+        let d = module(4, 0, 1, 0, &[(0, 0, note(0xF0, 428, 0))]);
+        let mut e = crate::engine::Engine::new(48000.0);
+        e.open_replayers = true;
+        let _ = e.play_data(std::path::Path::new("t.mod"), d);
+        let mut out = vec![0f32; 2 * 960];
+        e.render(&mut out);
     }
 
     /// A note long: instrument, period, command and parameter.

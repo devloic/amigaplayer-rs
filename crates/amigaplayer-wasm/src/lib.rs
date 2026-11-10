@@ -60,7 +60,9 @@ pub unsafe extern "C" fn dp_free(p: *mut u8, n: usize) {
 /// `p` points at `n` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dp_detect(p: *const u8, n: usize) -> i32 {
-    amigaplayer_rs::detect(unsafe { bytes(p, n) }).is_some() as i32
+    // (a panic aborts under panic = "abort"; the guard is for builds without it)
+    let d = unsafe { bytes(p, n) };
+    std::panic::catch_unwind(|| amigaplayer_rs::detect(d).is_some() as i32).unwrap_or(0)
 }
 
 /// A companion file for the next `dp_open`, at `path` relative to the module.
@@ -95,13 +97,11 @@ pub unsafe extern "C" fn dp_open(
     s.truncated = false;
     let files = std::mem::take(&mut s.files);
     let data = unsafe { bytes(p, n) };
-    if amigaplayer_rs::detect(data).is_none() {
-        return -2;
-    }
     let name = String::from_utf8_lossy(unsafe { bytes(name, name_len) }).replace(['/', '\\'], "_");
     let companions: Vec<(&str, &[u8])> = files.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
     let mut song = match Song::open_with(&name, data, &companions, rate) {
         Ok(song) => song,
+        Err(Error::NotRecognised) => return -2,
         Err(e) => {
             // the reason, for the page to show (AIFF names the compression it cannot decode)
             s.info = match e {
@@ -115,7 +115,10 @@ pub unsafe extern "C" fn dp_open(
         let r = song.subsongs();
         (r.first, r.last, r.current)
     };
-    let want = if subsong < 0 { first } else { (subsong as u16).clamp(lo, hi) };
+    let want = if subsong < 0 { first } else { {
+        let n = subsong.min(u16::MAX as i32) as u16;
+        if lo <= hi { n.clamp(lo, hi) } else { first }
+    } };
     if song.set_subsong(want).is_err() {
         return -1;
     }

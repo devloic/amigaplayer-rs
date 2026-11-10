@@ -173,6 +173,8 @@ pub struct Engine {
     active_genies: Vec<usize>,
     /// The genies playing or told about the current module.
     running_genies: Vec<usize>,
+    /// The guest heap's live allocations before the replayer was created (see `stop`).
+    replay_mark: Option<Vec<u32>>,
     /// Guest memory for the NoteStruct a NotePlayer genie reads (0: not allocated yet).
     #[cfg_attr(not(feature = "host-68k"), allow(dead_code))]
     genie_mem: u32,
@@ -221,6 +223,7 @@ impl Engine {
             note_genie_auto: false,
             active_genies: Vec::new(),
             running_genies: Vec::new(),
+            replay_mark: None,
             genie_mem: 0,
             intena_seen: 0,
             heard: false,
@@ -505,6 +508,9 @@ impl Engine {
         for (a, _) in std::mem::take(&mut self.m.deli.list) {
             self.m.heap.free(a);
         }
+        if let Some(mark) = self.replay_mark.take() {
+            self.m.heap.free_since(&mark);
+        }
         self.m.os.int_vectors = [0; 16];
         self.m.os.int_servers = Default::default();
         self.m.os.icr_vectors = [[0; 5]; 2];
@@ -638,9 +644,13 @@ impl Engine {
                 // players' do after start_deli's reset; it starts at the same phase
                 self.align_start();
                 self.m.bus.paula.reset();
+                // (what the replayer allocates is freed again at stop, or here if it declines)
+                let mark = self.m.heap.mark();
                 if let Some(r) = (o.new)(&data, addr, &mut self.m) {
+                    self.replay_mark = Some(mark);
                     return self.start_replay(r, path);
                 }
+                self.m.heap.free_since(&mark);
             }
             // the PC tracker formats of libxmp's loaders (those the open chain
             // takes: see xmp::LEFT_TO_OTHER_PLAYERS)
@@ -895,7 +905,7 @@ impl Engine {
                 Some(c) => {
                     ranged = true;
                     let first = if first == 0xFFFF { n } else { first };
-                    (first, first, first + c - 1)
+                    (first, first, (first as u32 + c as u32).wrapping_sub(1) as u16)
                 }
                 None => (n, n, n),
             }

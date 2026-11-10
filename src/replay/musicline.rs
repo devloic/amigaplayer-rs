@@ -268,9 +268,35 @@ const FX_PT_VIBRATO: u8 = 0xea;
 // the Eagleplayer's write log) and the CIA's wait.
 const ECLOCK: u64 = 5;
 /// The tick's fixed work before the effects.
-const PLAY_TIME: u64 = 2683;
+const PLAY_TIME: u64 = 2669;
+/// The first tick's (the volume writes instead of the tune's reading).
+const FIRST_PLAY_TIME: u64 = 2683;
 /// EndSound's writes of a 4-voice tune that ends in its first row, before the timer starts.
 const END_BEFORE_START: u64 = 579;
+/// 8 voices (the reference's CPU running eight times as fast as the 68000's: it counts floor(cycles / 16) of
+/// each stretch between two host calls, `Cost::clk8`): the first write of InitSound comes this many
+/// colour clocks after the loading (the fixed init stretches), on 120 of 129 tunes; nine others (12, 75, 125, 234,
+/// 237, 263, 274, 289, 9 of the corpus) 8 later, for a reason not found.
+const EIGHT_FIRST_WRITE: u64 = 27_617;
+/// 8 voices: the time from InitSound's last write to the first tick's acknowledge is, in colour
+/// clocks, a fit on 129 tunes (standard deviation 37, at most 200) of the pre-roll row's price:
+/// the price (in 68000 colour clocks) over 8, as the reference's CPU is 8 times as fast, and a constant.
+const EIGHT_ROW_DIV: f64 = 8.0;
+const EIGHT_ROW_BASE: f64 = 130.2;
+/// 8 voices (the reference's CPU running eight times as fast): InitSound's writes of a channel
+/// (location, length, period) come 0, 1 and 2 colour clocks after the first, the next channel's 4
+/// after; the first tick's acknowledge is `EIGHT_ROW_BASE` + the row's price / 8 after the last, the interrupt
+/// enable, DMA-on and the four volumes 1 colour clock apart after it, and the song starts 22
+/// after the last volume write (the writes before it are the engine's time before the start).
+const EIGHT_ACK_TO_START: u64 = 22;
+/// 8 voices: a tick's four location writes come these colour clocks after its acknowledge
+/// (each channel's location and length words in one move) and the four volumes of the first
+/// tick after the last location.
+const EIGHT_LOC_AT: [u64; 4] = [9, 11, 12, 14];
+const EIGHT_FIRST_VOL_AT: [u64; 4] = [19, 20, 22, 23];
+/// 4 voices: the first tick's four volume writes (0) come these colour clocks after its acknowledge;
+/// they come out of the tick's fixed work (`FIRST_PLAY_TIME`).
+const FIRST_VOL_AT: [u64; 4] = [60, 72, 84, 96];
 
 // Prices, in colour clocks, of what the original's code does (see PLAY_TIME).
 // A row:
@@ -283,13 +309,21 @@ const PART_FX: f64 = 32.0;
 const ARP_START: f64 = 365.9;
 const PLAY_INSTRUMENT: f64 = 122.3;
 const INST_PLAY: f64 = 756.2;
+/// A tick in which instruments start takes less than the prices say: per instrument started, and once
+/// for the tick (a fit on the 623 such ticks of 15 modules; the same terms leave 81 colour clocks of
+/// error on the 15 modules in turn held out, against 118).
+const INST_START_VOICE: f64 = -124.3;
+const INST_START_TICK: f64 = 105.1;
 const INST_ENVELOPE: f64 = 104.1;
 const INST_FILTER: f64 = 199.9;
 const INST_MIX: f64 = 80.5;
 const INST_PHASE: f64 = 116.7;
 const INST_RESONANCE: f64 = 164.0;
 // Each tick and voice:
-const VOICE_PLAY: f64 = 450.9;
+/// (An idle tick takes 4411.25 + 7.5 per voice that plays an instrument to the first period write: 4418, 4426,
+/// 4433 with one, two, three; 15 cycles of the 68000 for each; 814 idle ticks of 3 modules.)
+const VOICE_PLAY: f64 = 453.8125;
+const VOICE_PLAYING: f64 = 7.5;
 const SLIDE_NOTE: f64 = 51.8;
 const ARP_WAIT: f64 = 25.6;
 const ARP_STEP: f64 = 313.1;
@@ -719,6 +753,8 @@ pub struct Musicline {
     title: String,
     /// The prices of the work done since the last `pay` (colour clocks, with fractions).
     owed: f64,
+    /// An instrument has started on this tick (the tick's share of the start's price is paid).
+    inst_started: bool,
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -818,6 +854,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         voices,
         vol_table,
         owed: 0.0,
+        inst_started: false,
         title: String::new(),
     };
     let mut hw = Hw { bus: &mut m.bus };
@@ -825,8 +862,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // timer starts then (4 voices), or the first write is made (8 voices, at the
     // engine's start phase after it; InitSound's first writes)
     if hw.bus.r8(hw.bus.r32(tab + T_TUNES) + TU_PLAY_MODE) != 0 {
-        let at = cost.clocks();
-        hw.wait((at + crate::engine::START_PHASE).saturating_sub(hw.bus.clock));
+        hw.wait((cost.base + cost.clk8 + EIGHT_FIRST_WRITE).saturating_sub(hw.bus.clock));
         ml.init_sound(&mut hw, 0, false);
     } else {
         ml.init_sound(&mut hw, 0, true);
@@ -956,7 +992,6 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                 if p == 0 {
                     return None;
                 }
-                cost.part_bytes += len as u64;
                 let start = f.pos;
                 if !f.skip(len as usize) || len < 2 {
                     return None;
@@ -972,7 +1007,6 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                     if flag & 0x80 != 0 {
                         break;
                     }
-                    cost.part_lines += 1;
                     part_cost += 241 + 28 * (flag & 0x3f).count_ones() as u64;
                     let mut fl = flag;
                     for j in 0..6 {
@@ -1031,7 +1065,6 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                 let cmd = f.d[f.pos + 4];
                 f.pos += 6;
                 let extra = if orig == 0x100 { 0xf0 } else { 0 };
-                cost.waves += (orig == 0x100) as u64;
                 cost.call(if orig == 0x100 { 164 } else { 148 });
                 cost.call(89);
                 let s = m.alloc((orig + extra).wrapping_add(0x32));
@@ -1122,17 +1155,10 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
 struct Cost {
     /// The clock at which the loader starts.
     base: u64,
-    /// Bytes of crunched samples that are copied as they are.
-    literals: u64,
-    /// 4-bit deltas decrunched.
-    deltas: u64,
-    /// Rows of the PART chunks, and their bytes.
-    part_lines: u64,
-    part_bytes: u64,
-    /// 256-byte waveform samples.
-    waves: u64,
     /// The 4-voice loading time so far, in colour clocks from `base` (the stretches ended by a call).
     clk: u64,
+    /// The same with the reference's CPU running eight times as fast (8 voices): floor(cycles / 16).
+    clk8: u64,
     /// Cycles run since the last call.
     pending: u64,
     /// A chunk header has been read.
@@ -1148,6 +1174,7 @@ impl Cost {
     /// Code runs for `cycles` and a host call ends the stretch.
     fn call(&mut self, cycles: u64) {
         self.clk += (self.pending + cycles) / 2;
+        self.clk8 += (self.pending + cycles) / 16;
         self.pending = 0;
     }
 
@@ -1174,20 +1201,6 @@ impl Cost {
         }
         self.base + self.clk + AFTER_LOAD + row.max(0.0) as u64
     }
-
-    /// Colour clocks from the start to the original's timer start (4 voices) or to
-    /// its first write (8 voices, less 100): its InitPlayer's loading and the rest of
-    /// its init. A least-squares fit on 74 tunes (the 20 of the refcmp corpus and 54
-    /// more; median error 5600 colour clocks, at most 5% of the time).
-    fn clocks(&self) -> u64 {
-        let t = 241_137.0
-            + 33.236 * self.literals as f64
-            + 38.844 * self.deltas as f64
-            + 106.893 * self.part_lines as f64
-            + 11.198 * self.part_bytes as f64
-            + 6_981.3 * self.waves as f64;
-        t.max(0.0) as u64
-    }
 }
 
 /// The delta decruncher: a byte, or the command, a start byte and a 16-bit
@@ -1205,7 +1218,6 @@ fn decrunch(c: &[u8], cmd: u8, m: &mut Machine, mut to: u32, cost: &mut Cost) {
     let mut cyc = 237u64;
     while let Some(b) = next() {
         if b != cmd {
-            cost.literals += 1;
             cyc += 64;
             m.bus.w8(to, b);
             to += 1;
@@ -1214,7 +1226,6 @@ fn decrunch(c: &[u8], cmd: u8, m: &mut Machine, mut to: u32, cost: &mut Cost) {
         cyc += 164;
         let (Some(mut s), Some(hi), Some(lo)) = (next(), next(), next()) else { break };
         let mut n = (hi as u16) << 8 | lo as u16;
-        cost.deltas += n as u64;
         // an even, non-empty run costs 10 more
         if n != 0 && n % 2 == 0 {
             cyc += 10;
@@ -1395,8 +1406,11 @@ impl Musicline {
             let len = self.mix_length >> 1;
             for ch in 0..4 {
                 hw.loc(ch, self.mix[1] + 0x1400 * ch as u32);
+                hw.wait(1);
                 hw.len(ch, len);
+                hw.wait(1);
                 hw.per(ch, 0x7e);
+                hw.wait(2);
             }
         }
         // the pre-roll: one row
@@ -1446,12 +1460,19 @@ impl Musicline {
             self.tb = TimerB::default();
             self.isr_step = 1;
         } else {
+            // the pre-roll row's work, from the last period write (2 colour clocks ago)
+            let row = std::mem::take(&mut self.owed);
+            hw.wait(((EIGHT_ROW_BASE + row / EIGHT_ROW_DIV) as u64).saturating_sub(2));
             hw.bus.write_word(0xdff09c, 0x0080);
+            hw.wait(1);
             hw.bus.write_word(0xdff09a, 0x8080);
+            hw.wait(1);
             hw.dmacon(0x800f);
             for ch in 0..4 {
+                hw.wait(1);
                 hw.vol(ch, 0x40);
             }
+            hw.wait(EIGHT_ACK_TO_START);
         }
     }
 
@@ -1470,21 +1491,38 @@ impl Musicline {
         hw.bus.write_word(0xdff09c, 0x0080);
         if self.eight {
             self.half ^= 0xa00;
+            let mut at = 0;
             for ch in 0..4 {
+                hw.wait(EIGHT_LOC_AT[ch] - at);
+                at = EIGHT_LOC_AT[ch];
                 hw.loc(ch, self.mix[1] + self.half as u32 + 0x1400 * ch as u32);
             }
+            if self.first {
+                for ch in 0..4 {
+                    hw.wait(EIGHT_FIRST_VOL_AT[ch] - at);
+                    at = EIGHT_FIRST_VOL_AT[ch];
+                    hw.vol(ch, 0x40);
+                }
+            }
         }
+        let mut spent = 0;
+        self.inst_started = false;
+        let first = self.first;
         if self.first {
             self.first = false;
-            let v = if self.eight { 0x40 } else { 0 };
-            for ch in 0..4 {
-                hw.vol(ch, v);
+            if !self.eight {
+                // the first tick writes the four volumes, a move apart, instead of reading the tune
+                for ch in 0..4 {
+                    hw.wait(FIRST_VOL_AT[ch] - spent);
+                    spent = FIRST_VOL_AT[ch];
+                    hw.vol(ch, 0);
+                }
             }
         } else {
             self.play_tune(hw);
             self.pay(hw);
         }
-        hw.wait(PLAY_TIME);
+        hw.wait(if first { FIRST_PLAY_TIME } else { PLAY_TIME } - spent);
         for v in 0..self.voice_count() {
             self.play_effects(hw, v);
             self.pay(hw);
@@ -2134,7 +2172,10 @@ impl Musicline {
 
     fn inst_play(&mut self, hw: &mut Hw, v: usize) {
         let inst = self.voices[v].instrument;
-        self.owed += INST_PLAY;
+        self.owed += INST_PLAY + INST_START_VOICE;
+        if !std::mem::replace(&mut self.inst_started, true) {
+            self.owed += INST_START_TICK;
+        }
         let x = &mut self.voices[v];
         if x.pitch_slide != FX_PORTAMENTO && !x.arp_wait {
             for (flag, price) in [(E2_PHASE, INST_PHASE), (E2_RESONANCE, INST_RESONANCE), (E2_FILTER, INST_FILTER), (E2_MIX, INST_MIX)] {
@@ -2768,6 +2809,9 @@ impl Musicline {
         }
         if self.voices[v].play & P_RETRIGGER == 0 {
             self.owed += VOICE_PLAY;
+            if self.voices[v].instrument != 0 {
+                self.owed += VOICE_PLAYING;
+            }
             self.slide_volume(v);
             self.slide_channel_volume(v);
             self.slide_master_volume(v);

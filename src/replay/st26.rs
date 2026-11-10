@@ -119,7 +119,21 @@ struct St26 {
     pt: ProTracker,
 }
 
-fn new(d: &[u8], base: u32, _m: &mut Machine, k: Kind) -> Option<Box<dyn Replayer>> {
+/// What the 68k reference has in guest memory past the module: its host has opened two stub
+/// libraries (mpega.library, asyncio.library: 200 vectors of `A0xx RTS NOP`, a library base
+/// and the name) from the first free address after the module. A sample that runs past the
+/// end of the file is played from those bytes, so they are laid out the same way (the
+/// vectors carry the reference host's trap numbers 0x61 and 0x62).
+fn stub_libraries(m: &mut Machine) {
+    for (name, trap) in [("mpega.library", 0xA061), ("asyncio.library", 0xA062)] {
+        let base = crate::os::make_library(m, name, crate::os::LibKind::Stub, 200, 0x100, 40);
+        for i in 1..=200 {
+            m.bus.w16(base - i * 6, trap);
+        }
+    }
+}
+
+fn new(d: &[u8], base: u32, m: &mut Machine, k: Kind) -> Option<Box<dyn Replayer>> {
     if kind(d) != Some(k) {
         return None;
     }
@@ -131,7 +145,7 @@ fn new(d: &[u8], base: u32, _m: &mut Machine, k: Kind) -> Option<Box<dyn Replaye
     // sample's own start, as the reference writes it), not at ProTracker's 1 and its cleared
     // first word
     pt.set_unlooped_replen(0);
-    if let Ok(f) = std::env::var("TMPFILL") { let r = std::fs::read(f).unwrap(); _m.bus.ram[0x8290..0x9000].copy_from_slice(&r[0x8290..0x9000]); } // TEMP
+    stub_libraries(m);
     let name = if k == Kind::St26 { OPEN_ST26.name } else { OPEN_ICE.name };
     Some(Box::new(St26 { name, pt }))
 }

@@ -28,7 +28,8 @@ pub enum Error {
         /// The last subsong.
         last: u16,
     },
-    /// A replayer panicked on this input (a bug, caught so that it cannot take the host down).
+    /// A replayer panicked on this input (a bug, caught so that it cannot take the host down; with `panic = "abort"`, as in the
+    /// WebAssembly build, nothing is caught and the panic aborts instead).
     /// The [`Song`] that raised it is unusable and renders silence.
     Internal(String),
 }
@@ -85,8 +86,12 @@ const MAX_RATE: u32 = 768_000;
 /// assert_eq!(amigaplayer_rs::detect(b"not a module"), None);
 /// ```
 pub fn detect(data: &[u8]) -> Option<String> {
-    open::detect(data)
+    // a replayer's detector that panics (a bug) claims nothing
+    catch_unwind(AssertUnwindSafe(|| open::detect(data))).ok().flatten()
 }
+
+/// The furthest [`Song::seek`] goes, in seconds.
+pub const MAX_SEEK_SECS: f64 = 86_400.0;
 
 /// The names of the formats the library can play: every open replayer, the built-in
 /// ProTracker, the AIFF decoder and the PC tracker loaders of the libxmp port. Several
@@ -162,8 +167,9 @@ impl Song {
             }
             let _restore = Restore(crate::replay::adpcmmono::current_name());
             crate::replay::adpcmmono::set_name(&name);
-            open::detect(data).is_some()
+            catch_unwind(AssertUnwindSafe(|| open::detect(data).is_some()))
         };
+        let known = known.map_err(|p| Error::Internal(panic_text(p)))?;
         if !known {
             return Err(Error::NotRecognised);
         }
@@ -297,9 +303,15 @@ impl Song {
     /// Positions the song `secs` seconds into the current subsong by restarting and rendering
     /// (and discarding) up to there: the cost is that of playing it, tens to hundreds of times
     /// faster than real time. Stops early at [`Song::songend`].
+    ///
+    /// `secs` must be finite and not negative; it is capped at [`MAX_SEEK_SECS`] (24 hours) so
+    /// that a huge value cannot play a looping song for ever. Otherwise `Error::Invalid`.
     pub fn seek(&mut self, secs: f64) -> Result<()> {
+        if !secs.is_finite() || secs < 0.0 {
+            return Err(Error::Invalid(format!("cannot seek to {secs} seconds")));
+        }
         self.restart()?;
-        let target = (secs.max(0.0) * self.rate as f64) as u64;
+        let target = (secs.min(MAX_SEEK_SECS) * self.rate as f64) as u64;
         let mut buf = [0f32; 4096];
         let mut done = 0u64;
         while done < target && !self.songend() && !self.poisoned {
@@ -321,6 +333,16 @@ mod tests {
     fn song_is_send() {
         assert_send::<Song>();
         assert_send::<Error>();
+    }
+
+    #[test]
+    fn seek_rejects_bad_times() {
+        let m = crate::testdata::minimal_mod();
+        let mut s = Song::open("a.mod", &m, 8000).unwrap();
+        for t in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(matches!(s.seek(t), Err(Error::Invalid(_))), "{t}");
+        }
+        assert!(s.seek(0.5).is_ok());
     }
 
     #[test]

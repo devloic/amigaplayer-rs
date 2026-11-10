@@ -1669,7 +1669,7 @@ impl Wavegen {
             let sl = g(WI_SAM_LEN) as usize;
             if flags & 4 != 0 {
                 let l = (sl + 1) << 7;
-                let n = l * 7 / 8;
+                let n = (l * 7 / 8).min(buf.len().saturating_sub(start + l));
                 for j in 0..n {
                     buf[start + l + j] = buf[start + 2 * j];
                 }
@@ -2268,6 +2268,21 @@ mod tests {
         w[0x1e] = 0xff; // sustain: no volume envelope
         d.extend(w);
         d
+    }
+
+    /// The sample-length byte of a looping wave (flags bit 2) far past the sample buffer
+    /// must not index past it.
+    #[test]
+    fn oversized_sample_length_stays_in_the_buffer() {
+        let mut d = module();
+        let n = d.len();
+        d[n - 42 + 0x14] = 4; // flags
+        d[n - 42 + 0x19] = 0xff; // sample length
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        let _ = e.play_data(Path::new("test.prt"), d);
+        let mut out = vec![0f32; 2 * 960];
+        e.render(&mut out);
     }
 
     #[test]

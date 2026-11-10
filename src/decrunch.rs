@@ -219,7 +219,7 @@ fn pp20(src: &[u8]) -> Option<Vec<u8>> {
             b.bits(eff[x] as u32)? as usize
         };
         for _ in 0..n {
-            if dst == 0 || dst + offset >= out_len {
+            if dst == 0 || dst.checked_add(offset).is_none_or(|s| s >= out_len) {
                 return None;
             }
             out[dst - 1] = out[dst + offset];

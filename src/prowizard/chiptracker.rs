@@ -150,8 +150,9 @@ impl Format for ChipTracker {
                             0
                         } else {
                             let n = (c[0].wrapping_add((transpose * 2) as u8).wrapping_sub(0x18) / 2) as usize;
-                            b1 |= (CHIP_PERIODS[n] >> 8) as u8;
-                            CHIP_PERIODS[n] as u8
+                            let p = *CHIP_PERIODS.get(n)?;
+                            b1 |= (p >> 8) as u8;
+                            p as u8
                         };
                         pat[k * 16 + j * 4..k * 16 + j * 4 + 4].copy_from_slice(&[b1, b2, b3, c[3]]);
                     }
@@ -218,5 +219,14 @@ mod tests {
         let mut want = song.module(0x7f);
         want[..20].copy_from_slice(b"Song\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
         assert_eq!(m, want);
+    }
+
+    /// A note past the period table is a refusal, not a panic.
+    #[test]
+    fn note_past_the_period_table() {
+        let song = Song::new(3);
+        let mut d = pack(&song);
+        d[0x7c0] = 0xfe; // (0xfe - 0x18) / 2 = 127 > 84 periods
+        let _ = convert_any(&d);
     }
 }

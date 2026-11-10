@@ -371,7 +371,7 @@ impl Replayer for Dsc {
     fn timer_delay(&self) -> u64 {
         // (the first tick falls START_SHIFT colour clocks after the end of the start-up in the
         // original's, the song start the engine aligns Paula's grids to)
-        self.init_cost + START_SHIFT
+        self.init_cost.wrapping_add(START_SHIFT)
     }
 
     fn songend(&self) -> bool {
@@ -424,7 +424,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         base,
         zero,
         title,
-        init_cost: init_cost - pre - START_EXTRA,
+        // (may be "negative": kept as a wrapped offset, added back with wrapping_add)
+        init_cost: init_cost.wrapping_sub(pre).wrapping_sub(START_EXTRA),
         frac: 0,
         starts,
         sub: 0,

@@ -309,11 +309,15 @@ const PART_FX: f64 = 32.0;
 const ARP_START: f64 = 365.9;
 const PLAY_INSTRUMENT: f64 = 122.3;
 const INST_PLAY: f64 = 756.2;
-/// A tick in which instruments start takes less than the prices say: per instrument started, and once
-/// for the tick (a fit on the 623 such ticks of 15 modules; the same terms leave 81 colour clocks of
-/// error on the 15 modules in turn held out, against 118).
+/// A tick in which instruments start takes less than the prices say. 8 voices: per instrument started,
+/// and once for the tick (a fit on the 623 such ticks of 15 modules).
 const INST_START_VOICE: f64 = -124.3;
 const INST_START_TICK: f64 = 105.1;
+/// 4 voices: the error of the prices on a start tick (the DMA-on write of 563 ticks of 18 modules) is
+/// better described by a term per started voice, growing with the voice's index (a start of voice 0 or 1
+/// is priced right, one of voice 3 takes 190 colour clocks less), than by terms per instrument and tick:
+/// about half of those ticks come within 37 colour clocks, against 40% with no term and fewer with those.
+const INST_START_BY_VOICE: [f64; 4] = [-15.0, 0.0, -65.0, -190.0];
 const INST_ENVELOPE: f64 = 104.1;
 const INST_FILTER: f64 = 199.9;
 const INST_MIX: f64 = 80.5;
@@ -2172,9 +2176,14 @@ impl Musicline {
 
     fn inst_play(&mut self, hw: &mut Hw, v: usize) {
         let inst = self.voices[v].instrument;
-        self.owed += INST_PLAY + INST_START_VOICE;
-        if !std::mem::replace(&mut self.inst_started, true) {
-            self.owed += INST_START_TICK;
+        self.owed += INST_PLAY;
+        if self.eight {
+            self.owed += INST_START_VOICE;
+            if !std::mem::replace(&mut self.inst_started, true) {
+                self.owed += INST_START_TICK;
+            }
+        } else {
+            self.owed += INST_START_BY_VOICE[v & 3];
         }
         let x = &mut self.voices[v];
         if x.pitch_slide != FX_PORTAMENTO && !x.arp_wait {

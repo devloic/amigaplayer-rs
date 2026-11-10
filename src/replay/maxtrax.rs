@@ -117,10 +117,26 @@ const TICK_CLOCKS: u64 = 71_051;
 /// Colour clocks from the start of the reference run to its first tick: a constant of the
 /// reference's run for nearly every module (module size and start-up time do not move it).
 const FIRST_TICK_ABS: u64 = 71_150;
-const SETUP_BASE: u64 = 26_538;
-const SETUP_PER_SCORE: u64 = 322;
-const SETUP_PER_SAMPLE: u64 = 417;
-const SETUP_PER_OCTAVE: u64 = 334;
+
+// The reference's song start is the end of the player's start-up. What the reference's trace shows
+// of it, in colour clocks: the run starts at 100, the check takes 63, the init call that follows
+// it (`InitPlayer`) takes the module-dependent time below, and the four guest calls after that
+// take 20, 32, 2554 and 7817 for every module (`SETUP_FIXED` is the sum of all but the init call).
+// The init call costs, in 68000 cycles (the reference's cycle table, a whole number per
+// instruction; every host call drops an odd half colour clock, which the division by two takes care
+// of), a sum of loop passes: the score loop over the scores that
+// fit (the driver keeps `MAX_SCORES`; the rest are skipped by a host call each), the sample loop
+// over the sample headers, the octave loop over every octave's waveform, the search for the first
+// patch with a sample (a pass per patch up to it) and one test of the velocity flag.
+const SETUP_FIXED: u64 = 10_586;
+const MAX_SCORES: usize = 24;
+const SETUP_CYCLES: u64 = 31_828;
+const SETUP_PER_SCORE: u64 = 700;
+const SETUP_PER_SKIPPED_SCORE: u64 = 506;
+const SETUP_PER_SAMPLE: u64 = 772;
+const SETUP_PER_OCTAVE: u64 = 686;
+const SETUP_PER_PATCH_SEARCH: u64 = 39;
+const SETUP_VELOCITY: u64 = 48;
 /// The wait for the frame's set-up before the voices' turns, in 68000 cycles.
 const T_FRAME: u64 = 583;
 /// A pitch bend event (the other events take no time worth the name), in colour clocks.
@@ -487,10 +503,20 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let mut hw = Hw { bus: &mut m.bus };
     mx.init_sound(&mut hw, 0);
     mx.resume = Some(FIRST_TICK_ABS);
-    // The reference's song start (where Paula's grids restart) is the end of the driver's set-up, which
-    // takes longer with more scores, samples and octaves (a least-squares fit on 57 real modules, rms
-    // 130 colour clocks; the first tick is at an absolute clock whatever the set-up took).
-    let est = SETUP_BASE + SETUP_PER_SCORE * nscores as u64 + SETUP_PER_SAMPLE * be16(&mx.sd, so2) as u64 + SETUP_PER_OCTAVE * mx.samples.len() as u64;
+    // The reference's song start (where Paula's grids restart) is the end of the driver's set-up (the
+    // first tick is at an absolute clock whatever the set-up took).
+    let first_patch = mx.patches.iter().position(|p| p.sample.is_some()).unwrap_or(NUM_PATCHES - 1);
+    let (fit, skipped) = (nscores.min(MAX_SCORES) as u64, nscores.saturating_sub(MAX_SCORES) as u64);
+    let cycles = SETUP_CYCLES
+        + SETUP_PER_SCORE * fit
+        + SETUP_PER_SKIPPED_SCORE * skipped
+        + SETUP_PER_SAMPLE * be16(&mx.sd, so2) as u64
+        + SETUP_PER_OCTAVE * mx.samples.len() as u64
+        + SETUP_PER_PATCH_SEARCH * (first_patch as u64 + 1)
+        + if mx.flags & MUSIC_VELOCITY != 0 { SETUP_VELOCITY } else { 0 }
+        // (the 2 cycles the skipping of scores drops in the two modules that have any)
+        - if skipped > 0 { 2 } else { 0 };
+    let est = SETUP_FIXED + cycles / 2;
     m.bus.clock = m.bus.clock.max(est.min(FIRST_TICK_ABS - 2_000));
     Some(Box::new(mx))
 }
@@ -1470,6 +1496,11 @@ impl MaxTrax {
         }
         if lp0 {
             c -= 2;
+            // (a voice's note change with no period takes 324 less, as the first voice of a tick that
+            // starts four notes shows in the reference: Contraption Zack's BlueJam)
+            if alt {
+                c -= 324;
+            }
         }
         c
     }
@@ -1610,7 +1641,7 @@ impl MaxTrax {
                 100 => 566,
                 101 => 583,
                 120 => 693,
-                121 => 799,
+                121 => 804,
                 123 => 652,
                 126 => 694,
                 127 => 706,
@@ -1891,7 +1922,9 @@ impl Replayer for MaxTrax {
             // the audio.device's interrupt handlers: the four channels' interrupts on
             hw.bus.paula.write_intena(0x8000 | 0xF << 7);
             self.intena_set = true;
-            self.wh(hw, 298);
+            // (the first tick's write comes 15 colour clocks before the 298 half clocks the fit of
+            // the later ticks gives: all five reference modules show it)
+            self.wh(hw, 268);
         }
         self.music_server(hw);
     }

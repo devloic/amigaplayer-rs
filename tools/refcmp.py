@@ -396,6 +396,32 @@ def _fallback_stage(path, cache):
     return mod
 
 
+ALIAS_ROOT = '/dev/shm/refcmp'   # 16 characters
+ALIAS_LEN = 76                   # characters of a cache alias path
+
+
+def cache_alias(cache):
+    """A symlink of fixed path length to the cache directory. The guest sees the module's
+    directory and the host's loading cost depends on the LENGTH of that path (directory and
+    file name characters enter the first-write time of the original and of the ports modelled on
+    it), so every path handed to a render goes through this alias and a result no longer
+    depends on how long the --cache path is."""
+    real = os.path.abspath(cache)
+    os.makedirs(real, exist_ok=True)
+    name = hashlib.sha1(real.encode()).hexdigest()
+    name += '_' * (ALIAS_LEN - len(ALIAS_ROOT) - 1 - len(name))
+    link = os.path.join(ALIAS_ROOT, name)
+    os.makedirs(ALIAS_ROOT, exist_ok=True)
+    try:
+        os.symlink(real, link)
+    except FileExistsError:
+        if os.path.realpath(link) != os.path.realpath(real):
+            os.unlink(link)
+            os.symlink(real, link)
+    assert len(link) == ALIAS_LEN
+    return link
+
+
 class Ctx:
     def __init__(self, a):
         self.bin = os.path.abspath(a.bin)
@@ -403,8 +429,7 @@ class Ctx:
         self.binkey = f'{int(st.st_mtime)}-{st.st_size}'
         self.secs = a.seconds
         self.flags = a.flags
-        self.cache = a.cache
-        os.makedirs(self.cache, exist_ok=True)
+        self.cache = cache_alias(a.cache)
         self.empty = os.path.join(self.cache, 'empty')
         os.makedirs(self.empty, exist_ok=True)
         self.stage = None

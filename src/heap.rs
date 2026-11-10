@@ -70,6 +70,19 @@ impl Heap {
         }
     }
 
+    /// The start of every allocation now live, ascending (a mark for `free_since`).
+    pub fn mark(&self) -> Vec<u32> {
+        self.used.keys().copied().collect()
+    }
+
+    /// Frees every allocation made since `mark` was taken.
+    pub fn free_since(&mut self, mark: &[u32]) {
+        let new: Vec<u32> = self.used.keys().copied().filter(|a| mark.binary_search(a).is_err()).collect();
+        for a in new {
+            self.free(a);
+        }
+    }
+
     pub fn available(&self) -> u32 {
         self.free.values().sum()
     }

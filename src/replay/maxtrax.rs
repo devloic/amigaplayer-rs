@@ -2080,4 +2080,30 @@ mod tests {
         e.play_data(Path::new("/mxtx-test2/mxtx.test"), d).unwrap();
         assert_eq!(e.playing.as_ref().unwrap().format, "MaxTrax");
     }
+
+    /// Playing over and over on one Engine must not use up the guest heap: a module whose
+    /// samples cannot be installed (what the replayer allocated before giving up), and one that
+    /// plays (what it allocated, until stop), each 30 times.
+    #[test]
+    fn repeated_plays_free_the_guest_heap() {
+        let mut huge = module(false);
+        let at = huge.len() - 64;
+        huge[at..at + 4].copy_from_slice(&1_000_000u32.to_be_bytes());
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.os.mem_files.insert(Path::new("/mxtx-test2/SMPL.set").to_path_buf(), module(false));
+        let free = e.m.heap.available();
+        let first = e.play_data(Path::new("/mxtx-test2/mxtx.test"), huge.clone()).is_ok();
+        e.stop();
+        for _ in 0..30 {
+            let ok = e.play_data(Path::new("/mxtx-test2/mxtx.test"), huge.clone()).is_ok();
+            assert_eq!(ok, first, "play result changed: the heap leaks");
+            e.stop();
+        }
+        for _ in 0..30 {
+            e.play_data(Path::new("/mxtx-test2/mxtx.test"), module(false)).expect("play");
+            e.stop();
+        }
+        assert_eq!(e.m.heap.available(), free);
+    }
 }

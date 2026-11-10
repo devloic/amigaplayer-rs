@@ -144,6 +144,10 @@ impl Format for Titanics {
                     if row >= 64 || c1 & 0x80 != 0 {
                         break;
                     }
+                    // (the C# loops forever at the end of the data)
+                    if s.eof {
+                        return None;
+                    }
                 }
                 push!(out, pat, s);
             }
@@ -250,5 +254,27 @@ mod tests {
         let (f, m) = convert_any(&pack(&song)).expect("Titanics");
         assert_eq!(f, "Titanics Player");
         assert_eq!(m, module15(&song));
+    }
+
+    /// A pattern offset pointing at the end of the data must not loop for ever.
+    #[test]
+    fn titanics_truncated_pattern_terminates() {
+        for off in [180u16, 184, 65534] {
+            let mut d = vec![0u8; 180];
+            for i in 0..15 {
+                let o = i * 12;
+                if i == 0 {
+                    d[o + 4..o + 6].copy_from_slice(&2u16.to_be_bytes());
+                }
+                d[o + 10..o + 12].copy_from_slice(&1u16.to_be_bytes());
+            }
+            d.extend(off.to_be_bytes());
+            d.extend([0xff, 0xff]);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(convert_any(&d).is_none());
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(10)).expect("convert_any hangs");
+        }
     }
 }

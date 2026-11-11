@@ -1,4 +1,5 @@
-//! Jochen Hippel ST (Eagleplayer "Jochen Hippel ST", module prefixes `hst.` and `sdc.`).
+//! Jochen Hippel ST (Eagleplayer "Jochen Hippel ST", module prefixes `hst.` and `sdc.`; also
+//! a plain COSO file with the ST layout, see `OPEN_COSO`).
 //!
 //! Clean-room, written from a behaviour specification drawn up from the Paula register writes of
 //! the 68k reference player and black-box runs; no original code. The module container is the
@@ -21,8 +22,12 @@
 //! paths a tick takes (`COST`), and the beam position at the song start comes from the length of
 //! the original's start-up, which depends on the module (`reference_start`). All of it is from
 //! counts of executed addresses and their cycles, related to the module's data and the port's
-//! own state: all 1,842,570 writes of 330 modules (30 s each) are at the reference's colour
-//! clock, counted from the song start.
+//! own state: all 3,192,691 writes of the 606 modules compared (30 s each; every file of the
+//! comparison set that the reference plays, but two Amiga modules under ST names) are at the
+//! reference's colour clock, counted from the song start, as are the 2,529,889 writes of 849
+//! files built from them for the cases they do not hold (a companion sample file, a table word
+//! of $100 in a raw module, sample ends before their starts, the Amiga shape of a pitch
+//! program, the old command set with the MMME code and samples).
 //!
 //! Embedded data: `jochenhippelst_data.bin` (52 bytes) is the volume table together with the bytes
 //! that follow it in the original player, which a volume index above 17 reads. It is taken from the
@@ -40,13 +45,17 @@
 //! * a digital sample number past the sample table reads the bytes that follow it in the module
 //!   (zero past the module's end), and the sample command plays what the bytes at the table's
 //!   place say when no table is there, as the original does;
-//! * a pitch or volume program is run for a bounded number of steps per tick (4096);
+//! * a pitch or volume program is run for a bounded number of steps per tick (4096); one that
+//!   reaches the bound runs in a circle without a wait, where the original never comes back
+//!   from the tick: the port writes nothing more and reports the song's end;
 //! * a command of the pitch program's set in the volume program ends the voice's update for the
 //!   tick as the original's does (see `volume_program`); a byte from $E9 on, which the original
 //!   crashes on, stops the program; a table entry that points outside the image reads zeros
-//!   (the memory around the original's image);
-//! * the two-file (companion sample) module path follows the description but is not verified
-//!   against the reference.
+//!   (the memory around the original's image).
+//!
+//! The two-file module (a raw module with `LSMP` in its header and the samples in a companion
+//! file) is compared with the reference on built files only: no real module of the kind was at
+//! hand.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -148,9 +157,14 @@ impl Dig {
     fn mark(&self, n: usize) -> u16 {
         be16(&self.data, 8 * n + 2)
     }
-    /// The number of entries (up to the first with a zero start).
+    /// The number of entries: the first, and those after it up to one with a zero start (the
+    /// original does not look at the first one's: a companion file whose table starts with a
+    /// zero word counts as the others).
     fn count(&self) -> usize {
-        (0..self.data.len() / 8).take_while(|&n| self.start(n) != 0).count()
+        if self.data.len() < 8 {
+            return 0;
+        }
+        1 + (1..self.data.len() / 8).take_while(|&n| self.start(n) != 0).count()
     }
 }
 
@@ -198,6 +212,8 @@ struct Module {
     raw_dig: Option<usize>,
     /// The sample table is in a companion file.
     lsmp: bool,
+    /// Offset in the file of a raw module's sample table place.
+    raw_place: usize,
     prefix: Prefix,
     /// The 68000 cycles of the original's check of this module and of its conversion of a raw
     /// module (see `reference_start`).
@@ -323,6 +339,9 @@ fn parse(d: &[u8]) -> Option<Module> {
         let per = if coso == 0 { 85 } else if m.short { 124 } else { 118 };
         m.check_cycles += 152 + per * n as u64 + 21 * e2 + 10 * amiga - 96 * coso;
     }
+    if m.lsmp {
+        m.check_cycles += 4;
+    }
     Some(m)
 }
 
@@ -366,6 +385,7 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         dig_file: Some(tag + dpos),
         raw_dig: None,
         lsmp: false,
+        raw_place: 0,
         prefix,
         check_cycles: 0,
         conv_cycles: 0,
@@ -540,6 +560,7 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         dig_file: (!lsmp).then_some(tag + o_dig),
         raw_dig: matches!(be16(h, o_dig), 0x80 | 0x100).then_some(tag + o_dig),
         lsmp,
+        raw_place: tag + o_dig,
         prefix,
         check_cycles: 0,
         conv_cycles: cycles,
@@ -717,17 +738,16 @@ enum F {
 /// build of the original (old or new command set, without or with the MMME pitch code), one cost
 /// per path of `F`, then a constant (and an unused column). The reference's cycles per tick were
 /// measured from the addresses it executes and solved for whole-cycle costs of these paths:
-/// they give the reference's count on every tick measured (117,126 ticks of 575 modules). A cost
-/// is the sum over the addresses a path adds, so it can be negative (a path that skips more than
-/// it runs). Not measured, and taken as the other build's step: the old set's `$E7` and sample
-/// command in a COSO file with 16-bit tables and the MMME code (`FsE7Old`, `FsDigOld`:
-/// measured without the MMME code only).
+/// they give the reference's count on every tick measured (126,120 ticks of 581 modules; the
+/// old command set with 16-bit tables, the MMME code and samples on five built ones, the Ghost
+/// Battle tunes with the tag changed). A cost is the sum over the addresses a path adds, so it
+/// can be negative (a path that skips more than it runs).
 #[rustfmt::skip]
 const COST: [[i32; F::N as usize + 2]; 4] = [
     [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 18, 0, 0, 0, 0, 0, 8, 0, 0, 67, 19, 0, 0, 0, 0, 5108, 0],
     [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 18, 0, 0, 0, 0, 0, 0, 0, 0, 67, 19, 0, 0, 0, 0, 5279, 0],
     [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 0, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 0, 0, 0, 0, 8, -14, 48, 0, 19, -19, 0, -60, 27, 5528, 0],
-    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 153, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 4, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 87, -19, 0, 0, 0, -14, 67, 0, 0, -19, 0, -60, 27, 5699, 0],
+    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 153, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 4, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 87, -19, 0, 0, 0, -14, 48, 0, 19, -19, 0, -60, 27, 5699, 0],
 ];
 
 pub struct JochenHippelSt {
@@ -1060,10 +1080,11 @@ impl JochenHippelSt {
         if self.note_args {
             self.f[if note_arg & 0x80 != 0 { F::FsDigNoteHi } else { F::FsDigNote } as usize] += 1;
         }
+        // (the length is a word: an end before the start gives a length below $8000 words)
         let (len1, lp, len2) = match mark {
-            0 => (((dig.start(n + 1) as u32).wrapping_sub(start) / 2) as u16, self.silent, 1),
+            0 => (dig.start(n + 1).wrapping_sub(start as u16) / 2, self.silent, 1),
             0x10 => (8, addr, 8),
-            end => (((end as u32).wrapping_sub(start) / 2) as u16, self.silent, 1),
+            end => (end.wrapping_sub(start as u16) / 2, self.silent, 1),
         };
         let mut per = self.period;
         if self.note_args {
@@ -1787,38 +1808,88 @@ impl Replayer for JochenHippelSt {
 /// The initialisation calls the host three times (four for a raw module, which asks for the
 /// image's memory), and each stretch between ends on a whole clock as well: the first is 145479
 /// clocks, the last 8, and a raw module's sample table is looked at before the memory request.
-/// Not observed, so guessed from the nearest case: a table word of $100 in a raw module (taken
-/// as $80), a companion sample file (as no table).
-fn reference_start(m: &Module, table: Option<u16>, samples: usize, converted: Option<(usize, usize)>) -> u64 {
+/// A table word of $100 costs 21 cycles more than $80 (in a raw module before the memory
+/// request). A companion sample file is loaded by one more call of the host, after the memory
+/// request; its table is then looked at as a raw module's own, with 67 cycles more, and the
+/// check takes 4 more (`companion`: the file has a table). The module's own table place is
+/// looked at all the same when it is inside the file (`table`, `own` entries). The call between
+/// the check and the initialisation is `load` clocks long: 20, or the companion file's loading
+/// (`companion_clocks`).
+fn reference_start(m: &Module, table: Option<u16>, own: usize, companion: bool, load: u64, samples: usize, converted: Option<(usize, usize)>) -> u64 {
     let coso = m.in_file.is_some();
-    let valid = matches!(table, Some(0x80 | 0x100));
+    let in_file = matches!(table, Some(0x80 | 0x100));
+    let valid = in_file || companion;
     let mut init = 292_051 + 12 * m.mmme as u64 + 4 * (coso && m.short) as u64 + m.prefix.scan + m.conv_cycles;
     // a raw module's stretch before its memory request
     let mut before = 0;
     match table {
         Some(w) if coso => {
-            init += 29 + if w != 0x80 { 21 } else { 0 } + if valid { 47 + 33 * samples as u64 } else { 17 };
+            init += 29 + if w != 0x80 { 21 } else { 0 } + if in_file { 47 + 33 * own as u64 } else { 17 };
         }
-        Some(_) => {
-            init += 33 + if valid { 57 + 33 * samples as u64 } else { 38 };
-            before = 738 + if valid { 56 + 33 * samples as u64 } else { 71 };
+        Some(w) => {
+            let long = if w == 0x100 { 21 } else { 0 };
+            init += 33 + long + if in_file { 57 + 33 * own as u64 } else { 38 };
+            before = 738 + long + if in_file { 56 + 33 * own as u64 } else { 71 };
         }
         None if !coso => before = 738,
         None => {}
     }
+    if companion {
+        init += 33 + 57 + 33 * samples as u64 + 67;
+    }
+    // what follows the companion file's loading (the host's call ends a stretch there)
+    let mut tail = 199 + 33 * samples as u64;
     if m.prefix.kind != 0 {
         init += 17;
+        tail += 17;
     }
     if m.prefix.kind == 2 {
-        init += 25 + if valid { 77 } else { 0 };
+        let k = 25 + if valid { 77 } else { 0 };
+        init += k;
+        tail += k;
     }
     if let Some((bytes, high)) = converted {
-        init += 42 + 58 * bytes as u64 + 23 * high as u64;
+        let k = 42 + 58 * bytes as u64 + 23 * high as u64;
+        init += k;
+        tail += k;
     }
-    let init_clocks = 145_479 + before / 2 + (init - 290_975 - before) / 2 + 8;
+    let rest = init - 290_975 - before;
+    let init_clocks = 145_479 + before / 2 + if companion { (rest - tail) / 2 + tail / 2 } else { rest / 2 } + 8;
     let setup = setup_cycles(m, 1);
     // the host's start, the check, four short calls and the two timer set-ups between
-    100 + m.check_cycles / 2 + 20 + init_clocks + 12 + 18 + 118 + 118 + setup / 2
+    100 + m.check_cycles / 2 + load + init_clocks + 12 + 18 + 118 + 118 + setup / 2
+}
+
+/// The colour clocks of the original's call that loads the companion file. It builds the
+/// companion's name from the host's directory and file strings: 523 cycles, 17 per character
+/// of the directory (its last separator included) and 21 per character of the file name
+/// (measured with directories of 83 to 90 characters and names of 3 to 25), with the host's
+/// two calls 42 clocks in and 22 before the end. The look at the name's first four characters
+/// (`hst.` in either case) takes less with capitals (measured for the eight ways to write the
+/// three letters) and when it ends early on another name (measured per place of the first
+/// other character, with small letters before it, and once with a capital). When the file of
+/// that name is missing (`fallback`) the path is built again for `SMP.set`: 299 cycles and 17
+/// per character of the directory, between two stretches of 44 and 16 clocks.
+fn companion_clocks(dir: usize, name: &str, fallback: bool) -> u64 {
+    let mut same = 0;
+    let mut capitals = 0;
+    for (i, (&c, &w)) in name.as_bytes().iter().zip(b"hst.").enumerate() {
+        if c.to_ascii_lowercase() != w {
+            break;
+        }
+        same += 1;
+        capitals |= (c.is_ascii_uppercase() as usize) << i;
+    }
+    // (21 for a capital H, 25 each for S and T; the two first figures of the early ends may be
+    // one more: the clocks seen allow both)
+    let less = [0, 21, 25, 46, 25, 46, 50, 71][capitals] + [155, 105, 55, 30, 0][same];
+    let (dir, name) = (dir as u64, name.len() as u64);
+    let first = 42 + (523 + 17 * dir + 21 * name - less - 130) / 2;
+    if fallback {
+        first + 44 + (299 + 17 * dir) / 2 + 16
+    } else {
+        first + 22
+    }
 }
 
 /// The 68000 cycles of the original's set-up of subsong `n`, from the subsong table as it is
@@ -1870,16 +1941,19 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         }
         m.bus.write_bytes(a, &md.b);
     }
-    let dig = if md.lsmp {
+    let mut load = 20;
+    let mut dig = if md.lsmp {
         let file = m.bus.read_cstr(m.deli.file_buf);
         let names = companion(&file);
-        let smp = names.iter().find_map(|n| crate::deli::read_companion(m, n).1.ok())?;
+        let (at, smp) = names.iter().enumerate().find_map(|(i, n)| Some((i, crate::deli::read_companion(m, n).1.ok()?)))?;
+        let dir = m.bus.read_cstr(m.deli.dir_buf);
+        load = companion_clocks(dir.len(), &file, at + 1 == names.len());
         let a = m.alloc(smp.len() as u32 + 4);
         if a == 0 {
             return None;
         }
         m.bus.write_bytes(a, &smp);
-        matches!(be16(&smp, 0), 0x80 | 0x100).then(|| Dig { data: smp, base: a, valid: true })
+        Some(Dig { data: smp, base: a, valid: true })
     } else {
         // the table's place: in the module, or (a raw module without one) where its image ends
         md.dig_file.map(|o| {
@@ -1904,27 +1978,36 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     let has_dig = dig.as_ref().is_some_and(|d| d.valid);
     let note_args = md.prefix.kind != 0 && has_dig;
+    // (the entries are counted before the conversion, which may change the table)
+    let samples = dig.as_ref().filter(|d| d.valid).map_or(0, |d| d.count());
     let mut converted = None;
     if md.prefix.kind == 2 && has_dig {
-        if let Some(dg) = &dig {
+        if let Some(dg) = &mut dig {
             // the nibble-coded sample area becomes signed bytes in place, when its first long has
             // no bit set in any high nibble (only with the first of the two prefix patterns alone)
             let end = (0..dg.count()).map(|n| dg.start(n) as usize).last().unwrap_or(0);
             let first = dg.start(0) as usize;
-            if end > first && end <= dg.data.len() && be32(&dg.data, first) & 0xF0F0_F0F0 == 0 {
+            // (an empty area: the original's loop still converts one byte)
+            let end = end.max(first + 1);
+            if end <= dg.data.len() && be32(&dg.data, first) & 0xF0F0_F0F0 == 0 {
                 let conv: Vec<u8> = dg.data[first..end]
                     .iter()
                     .map(|&b| if b & 0x80 == 0 { LEVELS[(b & 15) as usize] } else if b == 0x88 { LEVELS[17] } else { LEVELS[16] })
                     .collect();
                 m.bus.write_bytes(dg.base + first as u32, &conv);
                 converted = Some((end - first, dg.data[first..end].iter().filter(|&&b| b & 0x80 != 0).count()));
+                // (the table is read from the memory: an area that starts inside it changes it)
+                dg.data[first..end].copy_from_slice(&conv);
             }
         }
     }
     m.bus.write_bytes(level_cell - 1, &[LEVELS[0], LEVELS[0]]);
     // the word at the sample table's place, when that is inside the file
-    let table = md.dig_file.filter(|&o| o < d.len() && !md.lsmp).map(|o| be16(d, o));
-    let ref_start = reference_start(&md, table, dig.as_ref().filter(|d| d.valid).map_or(0, |d| d.count()), converted);
+    let place = if md.lsmp { Some(md.raw_place) } else { md.dig_file };
+    let table = place.filter(|&o| o < d.len()).map(|o| be16(d, o));
+    let own = place.map_or(0, |o| (0..).take_while(|&n| be16(d, o + 8 * n) != 0).count());
+    let companion = md.lsmp && has_dig;
+    let ref_start = reference_start(&md, table, own, companion, load, samples, converted);
     let mut p = JochenHippelSt {
         image_at,
         m: md,
@@ -1963,14 +2046,15 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     Some(Box::new(p))
 }
 
-/// The companion sample file's names: the module's name with the leading `hst.` or `sdc.` replaced
-/// by `smp.`, then `smp.set` in the same directory.
+/// The companion sample file's names: the module's name with the leading `hst.` (in either
+/// case) replaced by `SMP.`, then `SMP.set` in the same directory.
 fn companion(file: &str) -> Vec<String> {
     let name = file.rsplit(['/', ':']).next().unwrap_or(file);
     let mut v = Vec::new();
     if name.len() > 4 && name.is_char_boundary(4) {
         let head = &name[..4];
-        if head.eq_ignore_ascii_case("hst.") || head.eq_ignore_ascii_case("sdc.") {
+        // (only this prefix: the original does not find `SMP.x` for `sdc.x`)
+        if head.eq_ignore_ascii_case("hst.") {
             v.push(format!("SMP.{}", &name[4..]));
         }
     }

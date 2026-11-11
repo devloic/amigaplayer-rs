@@ -13,6 +13,31 @@
 //! the V1.5 replay's: a triggered voice's DMA off with the new sample at volume 0
 //! and period $71, three raster lines, all DMA on, three more lines, then each
 //! voice's loop, period and volume. The player runs on the vertical blank.
+//!
+//! A wave whose note is so high that the phase step passes the oscillator's
+//! period (octave 9: `prt.m065`'s wave 2, base note $75) reads the oscillator
+//! with an index that runs away, up to 64K past the 12 notes' buffers: the
+//! reference then reads its own memory, and so does this (`Wavegen::memory`).
+//! Measured on the reference with the player loaded alone (the address of every
+//! read of the oscillator, 139 modules; only `prt.m065` leaves the buffers, 295
+//! of its 236710 reads): behind the buffers come the rest of the player's BSS
+//! hunk (zeros), the 8 bytes in front of a loaded hunk, the player's first hunk
+//! (its header, code and tables, $4D54 bytes), and zeros (the unused bottom of
+//! the machine's stack; in a full Eagleplayer directory another player's hunk
+//! lies there, which no port can hold: tools/refcmp.py runs the original alone).
+//!
+//! Embedded data: `pretracker_player.bin` (246 bytes: 82 records of an offset
+//! in the hunk, a big-endian word, and the byte there) is taken from the first
+//! hunk of UADE's PreTracker player file ("PreTracker for UADE 0.1-1" by Arnaud
+//! Neny & Pink/Abyss, $LICENSE: GNU LGPL), on the project owner's decision:
+//! only the 82 bytes that the reads above fetch from the part of the hunk that
+//! is as in the file. They are single bytes, no two of them closer than 12
+//! bytes: 78 between $E8 and $43A4, where the player's code lies (one of them
+//! in its version string), and 4 in its tables behind that. The rest of that
+//! part is 0 here, so a wave that reads other bytes of it differs from the
+//! reference. What the player computes in the hunk is not taken but built: the
+//! two relocated pointers of its tag list that are read (2 bytes), the fine
+//! period table and the table of the multiples of 3 behind it (7 bytes read).
 
 use super::pretracker_tables as t;
 use super::{Hw, Open, Replayer};
@@ -1580,9 +1605,25 @@ struct Wavegen;
 /// note's after the other.
 const OWB_SIZE: usize = 385;
 
+// The reference's memory behind the oscillator buffers (see the file header): its BSS
+// hunk ($2800 bytes) holds them at $1268, and its first hunk ($4D54 bytes) is loaded
+// behind that. In the first hunk the fine periods lie at $46D0 (the first one is in
+// the file, the others are computed at init: the port's 576 and the last period once
+// more), then a zero word and 255 multiples of 3.
+const OSC_END: usize = 12 * OWB_SIZE;
+const BSS_SIZE: usize = 0x2800;
+const BSS_OSC: usize = 0x1268;
+const PLAYER_SIZE: usize = 0x4d54;
+const PLAYER_PERIODS: usize = 0x46d0;
+/// Bytes of the reference player's first hunk: (offset, byte) records. See the file header.
+static PLAYER_BYTES: &[u8; 246] = include_bytes!("pretracker_player.bin");
+/// The relocated pointers of the player's tag list that are read: where they lie in the
+/// hunk and what they point to in it (the player's name and its creator's).
+const PLAYER_POINTERS: [(usize, u32); 2] = [(0x6c, 0xac), (0x74, 0xb7)];
+
 impl Wavegen {
     fn osc_buffers() -> Vec<u8> {
-        let mut b = vec![0u8; 12 * OWB_SIZE + 2 * OWB_SIZE];
+        let mut b = vec![0u8; OSC_END];
         for (n, &p) in t::LOG12.iter().enumerate() {
             let base = n * OWB_SIZE;
             let (saw, sqr, tri) = (base, base + 128, base + 256);
@@ -1616,8 +1657,45 @@ impl Wavegen {
         b
     }
 
+    /// The oscillator buffers and what lies behind them in the reference's memory, as far
+    /// as it is not zeros (see the file header): what an index that runs away reads.
+    fn memory(p: &PreTracker) -> Vec<u8> {
+        let mut b = Self::osc_buffers();
+        // the rest of the BSS hunk
+        b.resize(BSS_SIZE - BSS_OSC, 0);
+        // The player's hunks, loaded alone: each is allocated from the top of the heap
+        // with 8 bytes in front of it (its size with them, the next hunk's BPTR), the
+        // first hunk first, the BSS hunk below it.
+        let block = |top: u32, size: usize| top - ((size as u32 + 8 + 7) & !7);
+        let code = block(crate::machine::NATIVE_HI, PLAYER_SIZE);
+        let bss = block(code, BSS_SIZE);
+        b.extend_from_slice(&(PLAYER_SIZE as u32 + 8).to_be_bytes());
+        b.extend_from_slice(&((bss + 4) >> 2).to_be_bytes());
+        let h = b.len();
+        b.resize(h + PLAYER_SIZE, 0);
+        for r in PLAYER_BYTES.chunks_exact(3) {
+            b[h + u16::from_be_bytes([r[0], r[1]]) as usize] = r[2];
+        }
+        for (at, to) in PLAYER_POINTERS {
+            b[h + at..h + at + 4].copy_from_slice(&(code + 8 + to).to_be_bytes());
+        }
+        let mut a = h + PLAYER_PERIODS;
+        for w in p.period_table {
+            b[a..a + 2].copy_from_slice(&w.to_be_bytes());
+            a += 2;
+        }
+        // (the last period once more and a zero word between the two tables)
+        b[a..a + 2].copy_from_slice(&t::PERIODS[36].to_be_bytes());
+        a += 4;
+        for k in 0..255u16 {
+            b[a..a + 2].copy_from_slice(&(3 * k).to_be_bytes());
+            a += 2;
+        }
+        b
+    }
+
     fn run(p: &PreTracker, bus: &mut Bus, total: u32) {
-        let osc = Self::osc_buffers();
+        let osc = Self::memory(p);
         let base = p.sample_buffer;
         // the sample buffer, as bytes (index 0: the empty sample)
         let mut buf = vec![0u8; total as usize];
@@ -1791,8 +1869,10 @@ impl Wavegen {
             if d4 < 0 {
                 d4 = 0;
             }
-            let idx = (d4 >> 15) as i16 as isize;
-            let smp = osc.get((w as isize + idx) as usize).copied().unwrap_or(0) as i8 as i16;
+            // the whole index, not its low word (measured: the addresses the reference
+            // reads); past the player's memory there are zeros
+            let idx = (d4 >> 15) as usize;
+            let smp = osc.get(w + idx).copied().unwrap_or(0) as i8 as i16;
             let d3 = ((gain as i16 as i32 * smp as i32) as i16) >> 7;
             let v = ((*o as i8 as i16) + d3).clamp(-128, 127);
             *o = v as u8;

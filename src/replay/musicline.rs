@@ -118,17 +118,18 @@
 //! on a raster line of the grid that runs before the song start, and when that line's end comes before
 //! the start (the write in its last 26 colour clocks) the first buffer starts a line earlier.
 //!
-//! The time before the first tick (4 voices) is exact except for the first row. The original's
-//! loader runs on the engine's 68000 clock, which counts floor(cycles / 2) of each stretch of
-//! code between two host-library calls, so the loading time is the sum of the stretches of each
-//! chunk kind (per channel of a tune, per line and voice bit of a part, per instrument, and per
-//! sample: the wave's, the decrunch's records, literals and deltas): it equals the original's
-//! call times on 183 of 184 four-voice modules (`Cost`). The timer starts a fixed time after
-//! the last call plus the first row's work, which is calibrated (`INIT_ROW`), and its first
-//! tick comes 65536 E-clocks after, from the E-clock edge the start fell in (`start_int`); the
-//! timer's later ticks follow its latch. A tune whose first row sets the tempo (effect $42) has
-//! the timer's latch loaded before the player starts, so the first tick comes after that
-//! period (`preload`) rather than the default one.
+//! The time before the first tick (4 voices). The original's loader runs on the engine's 68000
+//! clock, which counts floor(cycles / 2) of each stretch of code between two host-library calls, so
+//! the loading time is the sum of the stretches of each chunk kind (per channel of a tune, per line
+//! and voice bit of a part, per instrument, and per sample: the wave's, the decrunch's records,
+//! literals and deltas; a last chunk of an unknown kind makes the closing stretch longer): it equals
+//! the original's call times on the 192 four-voice modules (`Cost`). The timer starts a fixed time
+//! after the last call plus one stretch of the init that holds the first row's work, counted in
+//! cycles as a tick's row is, the voices' set-up (longer with a groove) and EndSound when the tune
+//! ends in that row (`four_clocks`); its first tick comes 65536 E-clocks after, from the E-clock
+//! edge the start fell in (`start_int`), and the later ones follow its latch. A tune whose first row
+//! sets the tempo (effect $42) has the timer's latch loaded before the player starts, so the first
+//! tick comes after that period (`preload`) rather than the default one.
 //!
 //! The tables (`musicline_tables.rs`) come from NostalgicPlayer's Tables.cs; the
 //! 68k player was used only to check them, none of its code or data is copied.
@@ -299,6 +300,16 @@ const FIRST_PLAY_TIME: u64 = 2683;
 const FIRST_TICK_PROCESS: u64 = 226;
 /// EndSound's writes of a 4-voice tune that ends in its first row, before the timer starts.
 const END_BEFORE_START: u64 = 579;
+/// 4 voices, the init's stretch that holds the pre-roll row, in 68000 cycles: a tune with a groove takes
+/// 16 more for each voice's set-up (all 5 such modules of the corpus), and EndSound, run when the tune
+/// ends in that row, 518 (one module; the 8-voice row has the same two numbers).
+const GROOVE_INIT: u64 = 64;
+const END_SOUND_INIT: u64 = 518;
+/// The loader's last stretch is this much longer (colour clocks) when the chunks end with one of an
+/// unknown kind and not with the file: 202 cycles (one module of the corpus, and modules with such a
+/// chunk appended), which make 13 colour clocks of the 8-voice reference's.
+const UNKNOWN_CHUNK: u64 = 101;
+const UNKNOWN_CHUNK8: u64 = 13;
 /// 8 voices (the reference's CPU running eight times as fast as the 68000's: it counts floor(cycles / 16) of
 /// each stretch between two host calls, `Cost::clk8`): the first write of InitSound comes this many
 /// colour clocks after the loading (the fixed init stretches: 373,919 cycles from the last host call),
@@ -858,13 +869,21 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         ml.init_sound(&mut hw, 0, false);
     } else {
         ml.init_sound(&mut hw, 0, true);
-        // the pre-roll's row is counted in `cyc`
-        let at = cost.four_clocks(ml.cyc);
-        if ml.voices[0].ended {
-            // a tune that ends in its first row: the init makes EndSound's writes 579 colour
-            // clocks before it starts the timer
+        // the pre-roll's row is counted in `cyc`; the same stretch of the init sets up the four
+        // voices (longer with a groove) and, when the tune ends in that row, runs EndSound
+        let ended = ml.voices[0].ended;
+        let mut init = ml.cyc;
+        if ml.tune_groove != 0 {
+            init += GROOVE_INIT;
+        }
+        if ended {
+            init += END_SOUND_INIT;
+        }
+        let at = cost.four_clocks(init);
+        if ended {
+            // EndSound's writes come 579 colour clocks before the timer starts, 10 apart
             hw.wait(at.saturating_sub(END_BEFORE_START + hw.bus.clock));
-            ml.end_sound(&mut hw);
+            ml.end_sound(&mut hw, 10);
         }
         hw.wait(at.saturating_sub(hw.bus.clock));
     }
@@ -1126,7 +1145,11 @@ fn load(f: &mut File, m: &mut Machine, tab: u32, cost: &mut Cost) -> Option<u16>
                     break;
                 }
             }
-            _ => break,
+            _ => {
+                cost.clk += UNKNOWN_CHUNK;
+                cost.clk8 += UNKNOWN_CHUNK8;
+                break;
+            }
         }
     }
     Some(tunes)
@@ -1180,8 +1203,9 @@ impl Cost {
     }
 
     /// Colour clocks from the start to the original's timer start with 4 voices: the
-    /// loading (`clk`), the calls that close it and the init's fixed stretch, and the
-    /// first row's work (`row`: the 68000 cycles the tune's routine runs for it, as in a tick).
+    /// loading (`clk`), the calls that close it and the init's stretch, which is its fixed part
+    /// and `row`: the 68000 cycles the tune's routine runs for the first row, as in a tick, and
+    /// what the init adds for a groove and for a tune that ends there.
     fn four_clocks(&self, row: u64) -> u64 {
         self.base + self.clk + AFTER_LOAD + (row + 37) / 2
     }
@@ -1338,7 +1362,7 @@ impl Replayer for Musicline {
     }
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
-        self.end_sound(hw);
+        self.end_sound(hw, 0);
         self.init_sound(hw, n, false);
         self.start_int(hw);
     }
@@ -1418,7 +1442,7 @@ impl Musicline {
         if self.eight {
             self.eight_end_sound(hw);
         } else if self.voices[0].ended && !defer_end {
-            self.end_sound(hw);
+            self.end_sound(hw, 0);
         }
     }
 
@@ -1480,9 +1504,12 @@ impl Musicline {
     }
 
     /// DTP_EndSound.
-    fn end_sound(&mut self, hw: &mut Hw) {
+    /// Its three writes come `gap` colour clocks apart.
+    fn end_sound(&mut self, hw: &mut Hw, gap: u64) {
         hw.dmacon(0x000f);
+        hw.wait(gap);
         hw.bus.write_word(0xdff09a, 0x0080);
+        hw.wait(gap);
         hw.bus.write_word(0xdff09c, 0x0080);
         for v in self.voices.iter_mut() {
             v.wave_number_old = 0;
@@ -1860,7 +1887,7 @@ impl Musicline {
             if x.part_note == 61 {
                 self.cyc += 131;
                 if pos == 0 {
-                    self.end_sound(hw);
+                    self.end_sound(hw, 0);
                     return true;
                 }
                 let x = &mut self.voices[v];

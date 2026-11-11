@@ -18,7 +18,11 @@
 //! Embedded data: `jochenhippelst_data.bin` (52 bytes) is the volume table together with the bytes
 //! that follow it in the original player, which a volume index above 17 reads. It is taken from the
 //! original player on the project owner's decision; the 18 table entries are written out in the
-//! specification and the rest are the bytes real modules reach.
+//! specification and the rest are the bytes real modules reach. `jochenhippelst_noise.bin` (1024
+//! bytes) is the noise buffer and `PULSE` the 4-byte pulse, both read from the original player's
+//! memory while it plays (it fills them at its start-up, the same bytes in every run, and does not
+//! change them afterwards), also on the project owner's decision: with them a tone or the noise is
+//! the reference's sample data byte for byte.
 //!
 //! Choices where the specification is silent (all safe, none can panic or hang):
 //! * the prefix's pointer to the module is found as the first PC-relative address load in the first
@@ -41,6 +45,11 @@ pub const OPEN: Open = Open { name: "Jochen Hippel ST", detect, new };
 const TICK: u64 = 70940;
 /// The volume table (18 values) and the 34 bytes after it.
 static VOL_TABLE: &[u8] = include_bytes!("jochenhippelst_data.bin");
+/// The noise buffer (1024 bytes) as the original player holds it while it plays: the same bytes in
+/// every run and for every module, never changed after the player's start-up.
+static NOISE: &[u8] = include_bytes!("jochenhippelst_noise.bin");
+/// The pulse: a square wave of two samples per half period, as the original's.
+const PULSE: [u8; 4] = [0xB2, 0xB2, 0x4D, 0x4D];
 
 /// The YM period for each note (96 notes, then zeros up to 127).
 const YM_PERIODS: [u16; 96] = [
@@ -1193,20 +1202,14 @@ impl Replayer for JochenHippelSt {
 
 fn build_sounds(m: &mut Machine) -> Option<(u32, u32, u32, u32)> {
     // the noise buffer, the pulse, one word that carries the level byte of the SID trick, and
-    // the silent word, in the order the original keeps them
+    // the silent word, in the order the original keeps them (one block of 1032 bytes)
     let base = m.alloc(1024 + 16);
     if base == 0 {
         return None;
     }
-    let mut x: u32 = 0x1234_5678;
-    for k in 0..1024 {
-        x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
-        m.bus.write_bytes(base + k, &[(x >> 16) as u8]);
-    }
+    m.bus.write_bytes(base, NOISE);
     let pulse = base + 1024;
-    // the pulse is a square wave of two samples per half period; its amplitude (about 0.61 of full
-    // scale) is fitted to the reference renders: a full-scale pulse is 4.5 dB too loud
-    m.bus.write_bytes(pulse, &[0x4E, 0x4E, 0xB2, 0xB2]);
+    m.bus.write_bytes(pulse, &PULSE);
     Some((base, pulse, pulse + 5, pulse + 6))
 }
 
@@ -1266,7 +1269,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             }
         }
     }
-    m.bus.write_bytes(level_cell - 1, &[LEVELS[0]]);
+    m.bus.write_bytes(level_cell - 1, &[LEVELS[0], LEVELS[0]]);
     let mut p = JochenHippelSt {
         m: md,
         dig,

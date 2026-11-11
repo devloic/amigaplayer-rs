@@ -155,8 +155,12 @@ struct Module {
     in_file: Option<usize>,
     short: bool,
     mmme: bool,
+    /// Which row of `COST` the module's ticks take: the table width for a COSO file, the
+    /// prefix code's word for a raw module.
     new_type: bool,
-    /// The prefix code's own word on the type (a file without prefix: 16-bit tables).
+    /// The command set of the pitch and volume programs (new or old): the prefix code's own word
+    /// on the type (a file without prefix: 16-bit tables). A COSO file behind a prefix without
+    /// the jump has 16-bit tables and the old set: its `$EA` is the sample command.
     ext_new: bool,
     n_fs: usize,
     n_inst: usize,
@@ -652,7 +656,7 @@ enum F {
     // what the module is (the same in every tick): a COSO file; one with digital samples; one
     // with note arguments in the sample command; the type the prefix code gives
     GCoso, GDig, GArgs, GKind1, GKind2, GKind3,
-    VsE1Store, VsE0Mask, FsE1Store, FsE0Mask, SidPlay5, SidRangeHi, TrNoteLong, TrFfLong, FsStepCoso, PmEndAny, PmEnd8, PmEnd4, PmEnd1, PmDeltaNeg, FsE2Ext, FsStepOld, FsStepLtEb, FsStepLtEbNoDig, FsStepGeF0, SidRange10,
+    VsE1Store, VsE0Mask, FsE1Store, FsE0Mask, SidPlay5, SidRangeHi, TrNoteLong, TrFfLong, FsStepCoso, PmEndAny, PmEnd8, PmEnd4, PmEnd1, PmDeltaNeg, FsE2Ext, FsStepOld, FsStepLtEb, FsStepLtEbNoDig, FsStepGeF0, SidRange10, FsE7Old, FsDigOld,
     N,
 }
 
@@ -661,17 +665,18 @@ enum F {
 /// build of the original (old or new command set, without or with the MMME pitch code), one cost
 /// per path of `F`, then a constant (and an unused column). The reference's cycles per tick were
 /// measured from the addresses it executes and solved for whole-cycle costs of these paths:
-/// they give the reference's count on every tick measured (60,720 ticks of 330 modules). A cost
+/// they give the reference's count on every tick measured (66,716 ticks of 330 modules). A cost
 /// is the sum over the addresses a path adds, so it can be negative (a path that skips more than
-/// it runs). One cost is not measured: the SID section's leave on a period above $EEE in the
-/// build without the MMME code, taken as the other build's step (17 cycles after the leave on
-/// a period of $10 or less).
+/// it runs). Not measured, and taken as the other build's step: the SID section's leave on a
+/// period above $EEE in the build without the MMME code (17 cycles after the leave on a period
+/// of $10 or less), and the old set's `$E7` and sample command in a COSO file with 16-bit
+/// tables and the MMME code (`FsE7Old`, `FsDigOld`: measured without the MMME code only).
 #[rustfmt::skip]
 const COST: [[i32; F::N as usize + 2]; 4] = [
-    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 67, 19, 0, 0, 5108, 0],
-    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 18, 0, 0, 0, 0, 0, 0, 0, 0, 67, 19, 0, 0, 5279, 0],
-    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 0, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 0, 0, 0, 0, 8, -14, 48, 0, 19, -19, 0, 5528, 0],
-    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 153, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 4, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 87, -19, 0, 0, 0, -14, 67, 0, 0, -19, 0, 5699, 0],
+    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 67, 19, 0, 0, 0, 0, 5108, 0],
+    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 18, 0, 0, 0, 0, 0, 0, 0, 0, 67, 19, 0, 0, 0, 0, 5279, 0],
+    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 0, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 0, 0, 0, 0, 8, -14, 48, 0, 19, -19, 0, -60, 27, 5528, 0],
+    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 153, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 4, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 87, -19, 0, 0, 0, -14, 67, 0, 0, -19, 0, -60, 27, 5699, 0],
 ];
 
 pub struct JochenHippelSt {
@@ -818,7 +823,7 @@ impl JochenHippelSt {
             self.f[F::FsWait as usize] += 1;
             return;
         }
-        let new = self.m.new_type;
+        let new = self.m.ext_new;
         let has_dig = self.dig.as_ref().is_some_and(|d| d.valid);
         for _ in 0..4096 {
             let v = self.v[i];
@@ -876,6 +881,12 @@ impl JochenHippelSt {
                 0xEE => F::FsEe,
                 _ => F::FsEf,
             } as usize] += 1;
+            if !new && c == 0xE7 {
+                self.f[F::FsE7Old as usize] += 1;
+            }
+            if !new && c == 0xEA {
+                self.f[F::FsDigOld as usize] += 1;
+            }
             let v = &mut self.v[i];
             match c {
                 0xE0 => v.fs_idx = if new { arg as i32 } else { (arg & 0x3F) as i32 },

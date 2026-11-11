@@ -140,3 +140,31 @@ fn a_tag_far_into_the_data_is_not_found() {
     d[3000..3004].copy_from_slice(b"TFMX");
     assert!(!detect(&d));
 }
+
+#[test]
+fn a_plain_coso_file_with_the_st_layout_is_taken_before_the_amiga_replayer() {
+    // the table behind the subsongs has 6 bytes per entry and the sample table follows it
+    assert!(detect_coso(&small()));
+    let mut e = Engine::new(48000.0);
+    e.open_replayers = true;
+    e.play_data(Path::new("test.hst"), small()).unwrap();
+    assert!(e.output_report().contains("player=Jochen_Hippel_ST"), "{}", e.output_report());
+    // the Amiga layout: 10 bytes per sample between the two offsets
+    let mut d = small();
+    let x = be32(&d, 0x18);
+    put32(&mut d, 0x1C, x + 10);
+    assert!(!detect_coso(&d));
+    // the MMME tag is the main entry's
+    let mut d = small();
+    d[0x20..0x24].copy_from_slice(b"MMME");
+    assert!(!detect_coso(&d));
+}
+
+#[test]
+fn the_amiga_shape_of_pitch_programs_refuses_the_tfmx_tag_only() {
+    // a pitch program starting with E2 and a positive byte (the Amiga's sample command)
+    let d = build(b"TFMX", &[0xE2, 0x01, 0x10, 0xE1], &[1, 0, 0, 0, 0, 0x10, 0xE1], &[0x10, 0x00, 0xFF], 3);
+    assert!(!detect(&d));
+    let d = build(b"MMME", &[0xE2, 0x01, 0x10, 0xE1], &[1, 0, 0, 0, 0, 0x10, 0xE1], &[0x10, 0x00, 0xFF], 3);
+    assert!(detect(&d));
+}

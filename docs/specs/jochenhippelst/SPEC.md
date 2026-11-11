@@ -585,3 +585,29 @@ data; 330 modules):
 * 7: the tracker counter is a word. A position flag `$E0` sets the speed to zero; the counter is
   then reloaded with zero and the next sequencer step comes 65536 ticks later (one module, compared
   over 69,997 ticks: equal with a word counter, different from tick 696 on with a byte one).
+
+## 14. Errata from the acceptance round (608 modules the reference plays)
+
+* 2.2 (detection): the count of pitch programs of the Amiga shape (`$E2` and a positive byte)
+  against the others is made for a COSO image with the `TFMX` tag as for a raw module (8 files
+  with more of the Amiga shape are refused), and not at all with the `MMME` tag (6 such files
+  are played).
+* 2.1 (a COSO file with the `TFMX` tag and no prefix): such a file is also what the Amiga
+  "Hippel-COSO" player's check accepts (`COSO`, and `TFMX` 32 bytes on), and that player comes
+  first when nothing names the player. The two layouts differ behind the subsong table: the ST's
+  table there has 6 bytes per entry (count at +$32, less one) and the sample table's offset
+  (+$1C) is right behind it; the Amiga's is the sample list, 10 bytes per sample, with the
+  sample data behind. The port takes a plain `COSO`/`TFMX` file as an ST module when
+  (+$1C) - (+$18) = 6 * (word at +$32, plus one), and leaves the others to the Amiga replayer.
+  253 built files are of the first kind; the 14 Amiga files compared all have the 10-byte
+  relation.
+* Timing (start-up): the check finds a COSO image's pitch programs through its table: 124
+  cycles per program with 16-bit entries, 118 with 32-bit ones (a raw module: 85); a program
+  that starts with `$E2` adds 21, and 10 more when the next byte is positive.
+* Timing (a tick's end): the tick's code ends 188 cycles after the digital voice's volume write,
+  or 433 cycles after channel C's period write when the digital voice writes nothing. A note
+  start waits for the channel's interrupt request, which a long sample at a long period (the
+  noise buffer, 1024 bytes) can delay past the next tick's time: that tick then starts when
+  this one ends, not on its 70940 clock grid (the ticks after it are on the grid again).
+* Timing (6.6): the SID section's leave on a period above `$EEE` costs the same 17 cycles more
+  in the build without the MMME pitch code (measured; it was taken from the other build).

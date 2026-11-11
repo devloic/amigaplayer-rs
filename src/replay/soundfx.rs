@@ -29,13 +29,20 @@
 //!   good, and set their sample (bit 12 of `$FFFx` is the sample's bit 4); no
 //!   effect 9 (NostalgicPlayer's auto slide, from Flod)
 //!
-//! The writes are spaced as the originals' (`Timing`). Where the start of a tick
-//! lies against the host's interrupt is not followed: the reference's ticks start
-//! some 6500 to 8000 colour clocks later than the port's, by the time the host
-//! took to run the 68k player's init, which differs from module to module. So the
-//! DMA wait after DMA on ends on another line, and where a DMA off to on gap is
-//! shorter than a word at the voice's period, whether the voice restarts can come
-//! out otherwise than in the reference.
+//! The writes are spaced as the originals'. 1.3's come on the Eagleplayer's colour
+//! clock: the song starts after the time its start-up takes (`START13` and the
+//! module's part, see `new`), and each write after the 68000 cycles of the code
+//! paths before it (`F`). Not followed there: a note that is not in the period
+//! table (other than 0) under an arpeggio, which the original searches for through
+//! all the memory after its table, for many ticks' time.
+//!
+//! 2.0's writes keep measured gaps (`Timing`), but where the start of its tick lies
+//! against the host's interrupt is not followed: the reference's ticks start some
+//! 6500 to 8000 colour clocks later than the port's, by the time the host took to
+//! run the 68k player's init, which differs from module to module. So the DMA wait
+//! after DMA on ends on another line, and where a DMA off to on gap is shorter than
+//! a word at the voice's period, whether the voice restarts can come out otherwise
+//! than in the reference.
 
 use super::{Hw, Open, Replayer};
 use crate::bus::Bus;
@@ -62,18 +69,18 @@ const L20: Layout = Layout { samples: 31, info: 0x90, song_len: 0x432, orders: 0
 
 /// The period tables as they lie in the players' data: 1.3's 856 to 113, after
 /// its song length, play flag and delay words and 12 more 856s (which a step up
-/// from the first note reads), followed by the last word of its hunk; 2.0's is
-/// NostalgicPlayer's. `*_START` is the word where the search for a note starts.
+/// from the first note reads), followed by the last word of its hunk and the two
+/// words after it; 2.0's is NostalgicPlayer's. `*_START` is the word where the search for a note starts.
 const T13_START: u32 = 15;
 const T20_START: u32 = 20;
 /// Room past 1.3's table for its arpeggio search, which stops only at the note
 /// (on the original, in whatever follows its hunk); the port gives up there.
 const T13_SEARCH: u32 = 0x1000;
 
-/// The time the original's code takes between its writes, in colour clocks
-/// (measured on its write logs). Paula stops a playing voice only at the end of
-/// its word and restarts it only once stopped, so the time between a voice's DMA
-/// off and the DMA on decides whether its note is heard.
+/// The time 2.0's code takes between its writes, in colour clocks (measured on its
+/// write logs; 1.3's times are `F`'s). Paula stops a playing voice only at the end
+/// of its word and restarts it only once stopped, so the time between a voice's
+/// DMA off and the DMA on decides whether its note is heard.
 struct Timing {
     /// A row: before the first voice (not measured, see above); a voice up to its
     /// sample (with one, up to its volume write); with no note, the rest of the
@@ -108,29 +115,6 @@ struct Timing {
     step_entry: u64,
 }
 
-const T13: Timing = Timing {
-    row_pre: 200,
-    smp: 335,
-    no_smp: 80,
-    no_note: 73,
-    note_dma: 151,
-    dma_loc: 119,
-    stp_vol: 0,
-    loc_len: 105,
-    len_per: 93,
-    note_post: 60,
-    dma_on: 89,
-    loops: 109,
-    loop_mid: 105,
-    loop_next: 118,
-    fx_pre: 200,
-    fx_none: 114,
-    fx_per: 129,
-    fx_post: 100,
-    arp_entry: 24,
-    step_entry: 27,
-};
-
 const T20: Timing = Timing {
     row_pre: 200,
     smp: 364,
@@ -153,6 +137,11 @@ const T20: Timing = Timing {
     arp_entry: 32,
     step_entry: 27,
 };
+
+/// 1.3: colour clocks from the open replayer's start to the song's (where the timer and
+/// the output begin) but for the module's part: the Eagleplayer's check, its start-up
+/// calls and InitSound (their lengths on the 147 modules of the corpus; see `new`).
+const START13: u64 = 32 + 4543 + 733 + 11;
 
 /// One voice: the fields of the original's voice structure.
 #[derive(Default)]
@@ -187,6 +176,8 @@ pub struct SoundFx {
     dma: u16,
     brk: bool,
     songend: bool,
+    /// 1.3: the 68000 cycles of the paths taken since the last host call (`F`).
+    cy: i64,
 }
 
 fn detect13(d: &[u8]) -> bool {
@@ -228,6 +219,9 @@ fn new(_d: &[u8], base: u32, m: &mut Machine, v20: bool) -> Option<Box<dyn Repla
         t.extend(&NOTE_TABLE[24..60]);
         t.extend([113; 12]);
         t.extend([0xffff, 0xc400]);
+        // what the reference has after the hunk: the arpeggio of a voice without a note
+        // yet finds its 0 there, and its first step up is the word after
+        t.extend([0, 0x110]);
         for (i, &p) in t.iter().enumerate() {
             b.w16(table + 2 * i as u32, p);
         }
@@ -249,6 +243,22 @@ fn new(_d: &[u8], base: u32, m: &mut Machine, v20: bool) -> Option<Box<dyn Repla
     for &s in &samples[..l.samples] {
         b.w32(s, 0);
     }
+    if !v20 {
+        // the original's start-up before the timer runs: a loop over the samples with a
+        // length and InitSound's scan of the orders (a pass for each, and more for one not
+        // below the highest so far)
+        let sized = (0..15).filter(|&i| b.r32(base + 4 * i) != 0).count() as u64;
+        let (mut top, mut tops) = (0, 0u64);
+        let orders = if song_len == 0 { 0x10000 } else { song_len as u64 };
+        for i in 0..orders as u32 {
+            let o = b.r8(base + l.orders + i);
+            if o >= top {
+                top = o;
+                tops += 1;
+            }
+        }
+        b.clock += START13 + 6 * sized + (2348 + 31 * orders + 4 * tops) / 2;
+    }
 
     Some(Box::new(SoundFx {
         v20,
@@ -264,6 +274,7 @@ fn new(_d: &[u8], base: u32, m: &mut Machine, v20: bool) -> Option<Box<dyn Repla
         dma: 0,
         brk: false,
         songend: false,
+        cy: 0,
     }))
 }
 
@@ -287,12 +298,14 @@ impl Replayer for SoundFx {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.cy = 0;
         self.timer += 1;
         if self.timer == 6 {
             self.timer = 0;
             self.row(hw);
         } else {
-            hw.wait(self.timing().fx_pre);
+            self.wait20(hw, T20.fx_pre);
+            self.c(F::Fx);
             for i in 0..4 {
                 self.effects(i, hw);
             }
@@ -300,36 +313,133 @@ impl Replayer for SoundFx {
     }
 }
 
-impl SoundFx {
-    fn timing(&self) -> &'static Timing {
-        if self.v20 { &T20 } else { &T13 }
-    }
+macro_rules! paths {
+    ($($name:ident = $c:expr,)*) => {
+        /// 1.3's code paths between its calls to the host (one for every register write),
+        /// each with the 68000 cycles it takes as the emulator counts them. A write comes
+        /// half the cycles of the paths since the last host call later (an odd cycle is
+        /// lost there, as the emulator's clock follows the CPU in whole colour clocks).
+        /// The figures are a whole-number solution of the Eagleplayer's gaps between host
+        /// calls (half-cycle write logs of 147 modules and of 60 made-up ones that take
+        /// the rarer paths); only sums along a tick's way mean something.
+        #[derive(Clone, Copy)]
+        enum F { $($name,)* }
+        const COST: &[i64] = &[$($c,)*];
+    };
+}
 
+paths! {
+    // a row: its start; a voice's start; its sample up to the volume write (more with a
+    // loop offset, the volume effects 5 and 6 and their limits) and on from there; a
+    // voice without a sample (but for PIC and STP, which take none) and a STP
+    Row = 255,
+    Voice = 244,
+    Smp = 547,
+    SmpLoop = 10,
+    Vol5 = 24,
+    Vol5Limit = 8,
+    Vol6 = 35,
+    Vol6Limit = 14,
+    AfterVol = 27,
+    NoSmp = 63,
+    Stp = 2,
+    // a note: to its DMA off, location, length and period
+    Note = 276,
+    NoteLoc = 239,
+    NoteLen = 210,
+    NotePer = 186,
+    // the DMA on, and after the host's DMA wait the loops
+    RowDma = 298,
+    Loops = 230,
+    LoopLen = 210,
+    LoopNext = 236,
+    // the effects: a tick's start, a voice's start, a running step that reached its end
+    // (up, down), a voice without a step
+    Fx = 71,
+    FxVoice = 203,
+    StepUpEnd = 4,
+    StepDownEnd = 14,
+    NoStep = 14,
+    // the arpeggio (more on ticks 1 and 5, 2 and 4, and for each word its search passes),
+    // the pitch bend
+    Arp = 55,
+    ArpHigh = 97,
+    ArpLow = 91,
+    ArpEntry = 49,
+    Bend = 50,
+    BendUp = 13,
+    BendDown = 52,
+    // a step's start (effect 7 up, 8 down): a word its search passes, the note found
+    SetUp = 143,
+    UpEntry = 56,
+    UpFound = 52,
+    SetDown = 175,
+    DownEntry = 56,
+    DownFound = 48,
+    // the period write; the way on from a voice but after a step's write
+    FxPer = 166,
+    FxOn = 12,
+}
+
+fn cost(f: F, n: u64) -> i64 {
+    COST[f as usize] * n as i64
+}
+
+impl SoundFx {
     fn layout(&self) -> &'static Layout {
         if self.v20 { &L20 } else { &L13 }
     }
 
+    /// 2.0's time between two writes (`Timing`).
+    fn wait20(&self, hw: &mut Hw, clocks: u64) {
+        if self.v20 {
+            hw.wait(clocks);
+        }
+    }
+
+    /// 1.3 takes path `f`.
+    fn c(&mut self, f: F) {
+        self.cy += cost(f, 1);
+    }
+
+    /// 1.3 calls the host for a write: the paths' time since the last call passes.
+    fn call(&mut self, hw: &mut Hw) {
+        if !self.v20 {
+            hw.wait(self.cy as u64 / 2);
+        }
+        self.cy = 0;
+    }
+
     fn row(&mut self, hw: &mut Hw) {
-        let (t, l) = (self.timing(), self.layout());
+        let (t, l) = (&T20, self.layout());
         let order = hw.bus.r8(self.module.wrapping_add(l.orders).wrapping_add(self.track_pos));
         let row = self.module.wrapping_add(l.patterns + ((order as u32) << 10) + self.pos);
         self.dma = 0;
-        hw.wait(t.row_pre);
+        self.wait20(hw, t.row_pre);
+        self.c(F::Row);
         for i in 0..4 {
             self.play_note(i, row + 4 * i as u32, hw);
         }
-        hw.wait(t.dma_on);
+        self.wait20(hw, t.dma_on);
+        self.c(F::RowDma);
+        self.call(hw);
         hw.dmacon(0x8000 | self.dma);
         // the host's ENPP_DMAMask waits for the DMA as dtg_WaitAudioDMA does: to
         // 10 lines past the current one
         let now = hw.bus.clock;
-        hw.wait((now / LINE + 10) * LINE - now + t.loops);
+        hw.wait((now / LINE + 10) * LINE - now);
+        self.wait20(hw, t.loops);
+        self.c(F::Loops);
         for i in (0..4).rev() {
-            let v = &self.voices[i];
-            hw.loc(i, v.loop_addr);
-            hw.wait(t.loop_mid);
-            hw.len(i, v.loop_len);
-            hw.wait(t.loop_next);
+            let (a, n) = (self.voices[i].loop_addr, self.voices[i].loop_len);
+            self.call(hw);
+            hw.loc(i, a);
+            self.wait20(hw, t.loop_mid);
+            self.c(F::LoopLen);
+            self.call(hw);
+            hw.len(i, n);
+            self.wait20(hw, t.loop_next);
+            self.c(F::LoopNext);
         }
 
         if self.brk {
@@ -349,62 +459,84 @@ impl SoundFx {
 
     /// Voice `i`'s part of the row at `a`.
     fn play_note(&mut self, i: usize, a: u32, hw: &mut Hw) {
-        let (t, l, v20) = (self.timing(), self.layout(), self.v20);
+        let (t, l, v20) = (&T20, self.layout(), self.v20);
         let bit = 1u16 << i;
-        let b: &Bus = hw.bus;
-        let v = &mut self.voices[i];
-        v.pattern = b.r32(a);
-        let w = (v.pattern >> 16) as u16;
-        let mut n = (v.pattern >> 12) as u8 & 0xf;
+        self.c(F::Voice);
+        let pattern = hw.bus.r32(a);
+        self.voices[i].pattern = pattern;
+        let w = (pattern >> 16) as u16;
+        let mut n = (pattern >> 12) as u8 & 0xf;
         if v20 && w & 0x1000 != 0 {
             n += 16;
         }
-        // 1.3 takes no sample for a STP
-        let has_sample = n != 0 && w != 0xfffd && (v20 || w != 0xfffe);
+        // 1.3's STP only clears the effect
+        let quiet = w == 0xfffd || (!v20 && w == 0xfffe);
+        // and takes no sample
+        let has_sample = n != 0 && !quiet;
         if has_sample {
             let n = n as u32 - 1;
             let e = self.module + l.info + 30 * n + 22;
+            let b: &Bus = hw.bus;
+            let v = &mut self.voices[i];
             v.sample = self.samples[n as usize];
             v.len = b.r16(e);
             v.volume = b.r16(e + 2);
-            v.loop_addr = v.sample.wrapping_add(b.r16(e + 4) as u32);
+            let loop_start = b.r16(e + 4);
+            v.loop_addr = v.sample.wrapping_add(loop_start as u32);
             v.loop_len = b.r16(e + 6);
-            let param = v.pattern as u8 as u16;
+            let param = pattern as u8 as u16;
             let mut vol = v.volume;
-            match (v.pattern >> 8) & 0xf {
+            self.c(F::Smp);
+            if loop_start != 0 {
+                self.c(F::SmpLoop);
+            }
+            match (pattern >> 8) & 0xf {
                 5 => {
+                    self.c(F::Vol5);
                     vol = vol.wrapping_add(param);
                     if vol as i16 > 0x40 {
+                        self.c(F::Vol5Limit);
                         vol = 0x40;
                     }
                 }
                 6 => {
+                    self.c(F::Vol6);
                     vol = vol.wrapping_sub(param);
                     if (vol as i16) < 0 {
+                        self.c(F::Vol6Limit);
                         vol = 0;
                     }
                 }
                 _ => {}
             }
-            hw.wait(t.smp);
+            self.wait20(hw, t.smp);
+            self.call(hw);
             hw.vol(i, vol);
+            self.c(F::AfterVol);
         } else {
-            hw.wait(t.no_smp);
+            self.wait20(hw, t.no_smp);
+            if !quiet {
+                self.c(F::NoSmp);
+            }
         }
 
-        let v = &mut self.voices[i];
-        if w == 0xfffd || (!v20 && w == 0xfffe) {
-            v.pattern &= 0xffff0000;
-            hw.wait(t.no_note);
+        if quiet {
+            self.voices[i].pattern &= 0xffff0000;
+            self.wait20(hw, t.no_note);
+            if w == 0xfffe {
+                self.c(F::Stp);
+            }
             return;
         }
         if w == 0 {
-            hw.wait(t.no_note);
+            self.wait20(hw, t.no_note);
             return;
         }
-        v.step = 0;
-        v.note = if v20 { w & 0xefff } else { w };
-        hw.wait(t.note_dma);
+        self.voices[i].step = 0;
+        self.voices[i].note = if v20 { w & 0xefff } else { w };
+        self.wait20(hw, t.note_dma);
+        self.c(F::Note);
+        self.call(hw);
         hw.dmacon(bit);
         if v20 {
             match w {
@@ -421,33 +553,46 @@ impl SoundFx {
                     if w == 0xfffc {
                         self.brk = true;
                     }
-                    v.pattern &= 0xefffffff;
+                    self.voices[i].pattern &= 0xefffffff;
                     hw.wait(t.note_post);
                     return;
                 }
                 _ => {}
             }
         }
-        hw.wait(t.dma_loc);
-        hw.loc(i, v.sample);
-        hw.wait(t.loc_len);
-        hw.len(i, v.len);
-        hw.wait(t.len_per);
-        hw.per(i, v.note);
-        hw.wait(t.note_post);
+        let (sample, len, note) = (self.voices[i].sample, self.voices[i].len, self.voices[i].note);
+        self.wait20(hw, t.dma_loc);
+        self.c(F::NoteLoc);
+        self.call(hw);
+        hw.loc(i, sample);
+        self.wait20(hw, t.loc_len);
+        self.c(F::NoteLen);
+        self.call(hw);
+        hw.len(i, len);
+        self.wait20(hw, t.len_per);
+        self.c(F::NotePer);
+        self.call(hw);
+        hw.per(i, note);
+        self.wait20(hw, t.note_post);
         self.dma |= bit;
     }
 
     /// Voice `i`'s effects, between rows.
     fn effects(&mut self, i: usize, hw: &mut Hw) {
-        let (t, v20, timer, table) = (self.timing(), self.v20, self.timer, self.table);
+        let (t, v20, timer, table) = (&T20, self.v20, self.timer, self.table);
         let v = &mut self.voices[i];
-        // the time the searches in the period table take
+        // 2.0: the time the searches in the period table take; 1.3: the voice's paths (`F`)
         let mut searched = 0;
-        let per = if v.step != 0 {
+        let mut cy = cost(F::FxVoice, 1);
+        let stepping = v.step != 0;
+        let per = if stepping {
             v.step_note = v.step_note.wrapping_add(v.step);
             let (s, end) = (v.step_note, v.step_end);
-            let reached = if (v.step as i16) < 0 { end as i16 >= s as i16 } else { end <= s };
+            let down = (v.step as i16) < 0;
+            let reached = if down { end as i16 >= s as i16 } else { end <= s };
+            if reached {
+                cy += cost(if down { F::StepDownEnd } else { F::StepUpEnd }, 1);
+            }
             if v20 {
                 // 2.0 stops at the end note; 1.3 keeps stepping and writes it
                 v.note = s;
@@ -461,12 +606,20 @@ impl SoundFx {
         } else {
             let param = v.pattern as u8;
             let b: &Bus = hw.bus;
+            cy += cost(F::NoStep, 1);
             match (v.pattern >> 8) & 0xf {
                 // arpeggio
                 1 => {
+                    cy += cost(F::Arp, 1);
                     let idx = match timer {
-                        1 | 5 => (param >> 4) as u32,
-                        2 | 4 => (param & 0xf) as u32,
+                        1 | 5 => {
+                            cy += cost(F::ArpHigh, 1);
+                            (param >> 4) as u32
+                        }
+                        2 | 4 => {
+                            cy += cost(F::ArpLow, 1);
+                            (param & 0xf) as u32
+                        }
                         _ => 0x100,
                     };
                     if idx == 0x100 {
@@ -474,17 +627,21 @@ impl SoundFx {
                     } else {
                         let (at, n) = find(b, table, v.note, v20);
                         searched = n * t.arp_entry;
+                        cy += cost(F::ArpEntry, n);
                         at.map(|a| b.r16(a + 2 * idx))
                     }
                 }
                 // pitch bend: the row's period word changes
                 2 => {
+                    cy += cost(F::Bend, 1);
                     let w = (v.pattern >> 16) as u16;
                     let keep = if v20 { w & 0x1000 } else { 0 };
                     let (up, down) = ((param >> 4) as u16, (param & 0xf) as u16);
                     let p = if up != 0 {
+                        cy += cost(F::BendUp, 1);
                         Some((w & !keep).wrapping_add(up))
                     } else if down != 0 {
+                        cy += cost(F::BendDown, 1);
                         Some((w & !keep).wrapping_sub(down))
                     } else {
                         None
@@ -510,6 +667,7 @@ impl SoundFx {
                     let s = (param & 0xf) as u16;
                     v.step = if down { s.wrapping_neg() } else { s };
                     v.step_note = from;
+                    cy += cost(if down { F::SetDown } else { F::SetUp }, 1);
                     // 1.3 and 2.0 both check the end mark here
                     let mut a = table;
                     v.step_end = loop {
@@ -518,24 +676,31 @@ impl SoundFx {
                             break from;
                         }
                         if p == from {
+                            cy += cost(if down { F::DownFound } else { F::UpFound }, 1);
                             let off = 2 * (param >> 4) as i32;
                             break b.r16(a.wrapping_add(if down { off } else { -off } as u32));
                         }
                         a += 2;
                         searched += t.step_entry;
+                        cy += cost(if down { F::DownEntry } else { F::UpEntry }, 1);
                     };
                     None
                 }
                 _ => None,
             }
         };
-        match per {
-            Some(p) => {
-                hw.wait(t.fx_per + searched);
-                hw.per(i, p);
-                hw.wait(t.fx_post);
-            }
-            None => hw.wait(t.fx_none + searched),
+        self.cy += cy;
+        if let Some(p) = per {
+            self.wait20(hw, t.fx_per + searched);
+            self.c(F::FxPer);
+            self.call(hw);
+            hw.per(i, p);
+            self.wait20(hw, t.fx_post);
+        } else {
+            self.wait20(hw, t.fx_none + searched);
+        }
+        if !stepping {
+            self.c(F::FxOn);
         }
     }
 }

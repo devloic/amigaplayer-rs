@@ -21,7 +21,7 @@
 //! paths a tick takes (`COST`), and the beam position at the song start comes from the length of
 //! the original's start-up, which depends on the module (`reference_start`). All of it is from
 //! counts of executed addresses and their cycles, related to the module's data and the port's
-//! own state: 958,299 of 962,425 writes of 330 modules (5 s each) are at the reference's colour
+//! own state: 962,035 of 962,425 writes of 330 modules (5 s each) are at the reference's colour
 //! clock, counted from the song start.
 //!
 //! Embedded data: `jochenhippelst_data.bin` (52 bytes) is the volume table together with the bytes
@@ -96,6 +96,9 @@ const LINE: u64 = 227;
 /// From the end of the music code to channel A's first event, by its case (tone held, noise
 /// held, tone started, noise started, silent), with the tick's entry code.
 const HEAD_A: [u64; 5] = [866, 937, 662, 679, 978];
+/// From the original's call of the host at the song's end to the end of the music code, less
+/// the paths counted after the call (measured on 193 song ends: one value in every build).
+const END_CALL: i64 = 2214;
 
 fn vol_table(i: usize) -> u16 {
     VOL_TABLE.get(i).copied().unwrap_or(0) as u16
@@ -671,6 +674,8 @@ const COST: [[i32; F::N as usize + 2]; 4] = [
 
 pub struct JochenHippelSt {
     f: [u32; F::N as usize],
+    /// The paths counted up to the song's end, in the tick that has it (see `END_CALL`).
+    f_end: Option<[u32; F::N as usize]>,
     /// The reference's clock at the song start (see `reference_start`).
     ref_start: u64,
     /// The clock at the tick's start and the 68000 cycles since.
@@ -1284,6 +1289,7 @@ impl JochenHippelSt {
                         self.songpos -= 1;
                         if self.songpos < 0 {
                             self.f[F::TrEnd as usize] += 1;
+                            self.f_end = Some(self.f);
                             self.songend = true;
                             self.reset_ym();
                             self.v[0].sid_src = 0xFF;
@@ -1593,6 +1599,7 @@ impl Replayer for JochenHippelSt {
 
     fn tick(&mut self, hw: &mut Hw) {
         self.f = [0; F::N as usize];
+        self.f_end = None;
         self.play();
         let k = [F::PaTone, F::PaNoise, F::PaToneNew, F::PaNoiseNew, F::PaSilent][self.channel_case(0)];
         self.f[k as usize] += 1;
@@ -1613,6 +1620,15 @@ impl Replayer for JochenHippelSt {
         }
         for (n, c) in self.f.iter().zip(cost) {
             cy += *n as i64 * *c as i64;
+        }
+        if let Some(f) = self.f_end {
+            // the original tells the host of the song's end from inside the tick, and the host
+            // goes on at a whole colour clock: a call at an odd cycle loses that cycle
+            let mut at = cost[F::N as usize] as i64 - END_CALL;
+            for (n, c) in f.iter().zip(cost) {
+                at += *n as i64 * *c as i64;
+            }
+            cy -= at & 1;
         }
         self.cy = cy.clamp(0, TICK as i64) as u64;
         self.paula(hw);
@@ -1793,6 +1809,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         first_tick_pending: true,
         f: [0; F::N as usize],
+        f_end: None,
         ref_start,
         t0: 0,
         cy: 0,

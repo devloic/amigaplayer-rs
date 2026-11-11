@@ -29,7 +29,7 @@ const E_SUBSONG: c_int = 4;
 const E_INTERNAL: c_int = 5;
 const E_ARGUMENT: c_int = 6;
 const E_GUEST: c_int = 7;
-#[cfg_attr(feature = "host-68k", allow(dead_code))]
+#[cfg_attr(all(feature = "host-68k", feature = "songdb"), allow(dead_code))]
 const E_UNSUPPORTED: c_int = 8;
 
 /// `ap_open_opts` flag: custom modules may play (their own 68k code is run).
@@ -408,10 +408,276 @@ pub unsafe extern "C" fn ap_format(song: *mut ApSong) -> *const c_char {
     s.format.as_ptr()
 }
 
+// ------------------------------------------------------------------ song database ---
+
+/// One subsong of an `ap_songdb_info`.
+#[repr(C)]
+pub struct ApSongDbSubsong {
+    pub subsong: u8,
+    pub is_duplicate: u8,
+    /// `AP_SONGEND_*`
+    pub status: i8,
+    pub length_ms: u32,
+}
+
+/// What `ap_songdb_lookup` fills in. The pointers belong to the database handle.
+#[repr(C)]
+pub struct ApSongDbInfo {
+    pub key: *const c_char,
+    pub format: *const c_char,
+    pub author: *const c_char,
+    pub album: *const c_char,
+    pub publisher: *const c_char,
+    pub year: u16,
+    pub channels: u8,
+    pub subsong_count: usize,
+    pub subsongs: *const ApSongDbSubsong,
+}
+
+/// An open song database, and the strings of its last lookup.
+pub struct ApSongDb {
+    #[cfg(feature = "songdb")]
+    db: amigaplayer_rs::songdb::SongDb,
+    #[cfg_attr(not(feature = "songdb"), allow(dead_code))]
+    strings: [CString; 5],
+    #[cfg_attr(not(feature = "songdb"), allow(dead_code))]
+    subsongs: Vec<ApSongDbSubsong>,
+}
+
+/// Opens the song database in directory `dir` (audacious-uade's `conf/songdb`). Null on
+/// failure: `AP_ERR_INVALID` if it cannot be read, `AP_ERR_UNSUPPORTED` in a library built
+/// without the `songdb` feature.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_songdb_open(dir: *const c_char) -> *mut ApSongDb {
+    let Some(dir) = (unsafe { str_arg(dir) }) else {
+        set_error(E_ARGUMENT, "null or invalid directory");
+        return std::ptr::null_mut();
+    };
+    #[cfg(feature = "songdb")]
+    return guard(std::ptr::null_mut(), || match amigaplayer_rs::songdb::SongDb::open(dir) {
+        Ok(db) => Box::into_raw(Box::new(ApSongDb { db, strings: Default::default(), subsongs: Vec::new() })),
+        Err(e) => {
+            set_error(E_INVALID, &e.to_string());
+            std::ptr::null_mut()
+        }
+    });
+    #[cfg(not(feature = "songdb"))]
+    {
+        let _ = dir;
+        set_error(E_UNSUPPORTED, "this build has no song database support (built without the songdb feature)");
+        std::ptr::null_mut()
+    }
+}
+
+/// Closes a song database. Null is allowed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_songdb_free(db: *mut ApSongDb) {
+    if !db.is_null() {
+        let b = unsafe { Box::from_raw(db) };
+        let _ = catch_unwind(AssertUnwindSafe(move || drop(b)));
+    }
+}
+
+/// The number of files the database knows, 0 for a null handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_songdb_count(db: *mut ApSongDb) -> usize {
+    let Some(d) = (unsafe { db.as_mut() }) else {
+        set_error(E_ARGUMENT, "null database");
+        return 0;
+    };
+    #[cfg(feature = "songdb")]
+    return d.db.len();
+    #[cfg(not(feature = "songdb"))]
+    {
+        let _ = d;
+        0
+    }
+}
+
+/// The database key of `data` (12 hex digits and a NUL) into `out`, which holds 13 bytes.
+/// Returns 0, or -1: a null argument, or (`AP_ERR_UNSUPPORTED`) a build without the `songdb`
+/// feature. Needs no database.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_songdb_key(data: *const u8, len: usize, out: *mut c_char) -> c_int {
+    let (Some(d), false) = (unsafe { bytes(data, len) }, out.is_null()) else {
+        set_error(E_ARGUMENT, "null data or buffer");
+        return -1;
+    };
+    #[cfg(feature = "songdb")]
+    return guard(-1, || {
+        let k = amigaplayer_rs::songdb::key(d);
+        unsafe {
+            std::ptr::copy_nonoverlapping(k.as_ptr(), out as *mut u8, 12);
+            *out.add(12) = 0;
+        }
+        0
+    });
+    #[cfg(not(feature = "songdb"))]
+    {
+        let _ = d;
+        set_error(E_UNSUPPORTED, "this build has no song database support (built without the songdb feature)");
+        -1
+    }
+}
+
+#[cfg(feature = "songdb")]
+fn songdb_fill(d: &mut ApSongDb, found: Option<amigaplayer_rs::songdb::Info>, out: *mut ApSongDbInfo) -> c_int {
+    let Some(i) = found else { return 0 };
+    d.strings = [cstring(&i.key), cstring(&i.format), cstring(&i.author), cstring(&i.album), cstring(&i.publisher)];
+    d.subsongs = i
+        .subsongs
+        .iter()
+        .map(|s| ApSongDbSubsong { subsong: s.subsong, is_duplicate: s.is_duplicate as u8, status: s.status.as_i8(), length_ms: s.length_ms })
+        .collect();
+    let s = &d.strings;
+    let info = ApSongDbInfo {
+        key: s[0].as_ptr(),
+        format: s[1].as_ptr(),
+        author: s[2].as_ptr(),
+        album: s[3].as_ptr(),
+        publisher: s[4].as_ptr(),
+        year: i.year,
+        channels: i.channels,
+        subsong_count: d.subsongs.len(),
+        subsongs: d.subsongs.as_ptr(),
+    };
+    unsafe { out.write(info) };
+    1
+}
+
+/// Looks the file `data` up. Returns 1 and fills `out` if the database knows it, 0 if it
+/// does not (`out` is left alone), -1 on a null argument. The strings and the subsong array
+/// of `out` belong to `db`: valid until the next lookup on it, or `ap_songdb_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_songdb_lookup(db: *mut ApSongDb, data: *const u8, len: usize, out: *mut ApSongDbInfo) -> c_int {
+    let (Some(d), Some(bytes), false) = (unsafe { db.as_mut() }, unsafe { bytes(data, len) }, out.is_null()) else {
+        set_error(E_ARGUMENT, "null database, data or result");
+        return -1;
+    };
+    #[cfg(feature = "songdb")]
+    return guard(-1, || {
+        let found = d.db.lookup(bytes);
+        songdb_fill(d, found, out)
+    });
+    #[cfg(not(feature = "songdb"))]
+    {
+        let _ = (d, bytes);
+        0
+    }
+}
+
+/// As `ap_songdb_lookup`, by key (12 hex digits; anything else is not found).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_songdb_lookup_key(db: *mut ApSongDb, key: *const c_char, out: *mut ApSongDbInfo) -> c_int {
+    let (Some(d), false, false) = (unsafe { db.as_mut() }, key.is_null(), out.is_null()) else {
+        set_error(E_ARGUMENT, "null database, key or result");
+        return -1;
+    };
+    // (a key that is not UTF-8 is not a key)
+    let Some(key) = (unsafe { str_arg(key) }) else { return 0 };
+    #[cfg(feature = "songdb")]
+    return guard(-1, || {
+        let found = d.db.lookup_key(key);
+        songdb_fill(d, found, out)
+    });
+    #[cfg(not(feature = "songdb"))]
+    {
+        let _ = (d, key);
+        0
+    }
+}
+
+/// The database tools' name of an `AP_SONGEND_*` status ("player", "loop+silence", ...), or
+/// "unknown". A static string.
+#[unsafe(no_mangle)]
+pub extern "C" fn ap_songdb_status_name(status: c_int) -> *const c_char {
+    let names: [&CStr; 13] = [
+        c"error", c"none", c"player", c"timeout", c"silence", c"loop", c"volume", c"repeat", c"player+silence",
+        c"player+volume", c"loop+silence", c"loop+volume", c"nosound",
+    ];
+    let at = status.checked_add(1).and_then(|v| usize::try_from(v).ok());
+    at.and_then(|i| names.get(i)).unwrap_or(&c"unknown").as_ptr()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use amigaplayer_rs::testdata::{minimal_custom, minimal_mod};
+
+    #[test]
+    fn status_names() {
+        let name = |s| unsafe { CStr::from_ptr(ap_songdb_status_name(s)) }.to_str().unwrap();
+        assert_eq!((name(-1), name(0), name(1), name(8), name(11)), ("error", "none", "player", "player+volume", "nosound"));
+        assert_eq!((name(12), name(-2), name(c_int::MAX), name(c_int::MIN)), ("unknown", "unknown", "unknown", "unknown"));
+        #[cfg(feature = "songdb")]
+        for v in -1..=11i8 {
+            let s = amigaplayer_rs::songdb::SongEndStatus::from_i8(v).unwrap();
+            assert_eq!(name(v as c_int), s.as_str());
+        }
+    }
+
+    #[cfg(not(feature = "songdb"))]
+    #[test]
+    fn the_song_database_is_refused_without_the_feature() {
+        unsafe {
+            assert!(ap_songdb_open(c"/".as_ptr()).is_null());
+            assert_eq!(last_error().0, E_UNSUPPORTED);
+            let mut key = [0 as c_char; 13];
+            assert_eq!(ap_songdb_key(b"x".as_ptr(), 1, key.as_mut_ptr()), -1);
+            ap_songdb_free(std::ptr::null_mut());
+            assert_eq!(ap_songdb_count(std::ptr::null_mut()), 0);
+        }
+    }
+
+    #[cfg(feature = "songdb")]
+    #[test]
+    fn the_song_database_through_c() {
+        // (next to the test binary: in the build's own directory)
+        let dir = std::env::current_exe().unwrap().parent().unwrap().join(format!("capi-songdb-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (minimal_mod(), minimal_custom());
+        amigaplayer_rs::testdata::write_songdb(&dir, &[&a, &b]).unwrap();
+        let cdir = CString::new(dir.to_str().unwrap()).unwrap();
+        unsafe {
+            assert!(ap_songdb_open(c"/nonexistent/songdb".as_ptr()).is_null());
+            assert_eq!(last_error().0, E_INVALID);
+            assert!(ap_songdb_open(std::ptr::null()).is_null());
+            assert_eq!(last_error().0, E_ARGUMENT);
+
+            let db = ap_songdb_open(cdir.as_ptr());
+            assert!(!db.is_null(), "{:?}", last_error());
+            assert!(ap_songdb_count(db) >= 2);
+            let mut info = std::mem::MaybeUninit::<ApSongDbInfo>::uninit();
+            assert_eq!(ap_songdb_lookup(db, b.as_ptr(), b.len(), info.as_mut_ptr()), 1);
+            let i = info.assume_init_read();
+            let text = |p| CStr::from_ptr(p).to_str().unwrap().to_string();
+            assert_eq!(text(i.key), amigaplayer_rs::songdb::key(&b));
+            assert_eq!((text(i.format), text(i.author), text(i.album), text(i.publisher)), ("Synthetic 1".into(), "Author 1".into(), "Album 1".into(), "Publisher 1".into()));
+            assert_eq!((i.year, i.channels, i.subsong_count), (1991, 4, 2));
+            let subs = std::slice::from_raw_parts(i.subsongs, i.subsong_count);
+            assert_eq!((subs[0].subsong, subs[0].length_ms, subs[0].status, subs[0].is_duplicate), (0, 3000, 1, 0));
+            assert_eq!((subs[1].subsong, subs[1].length_ms, subs[1].status), (1, 500, 3));
+
+            // by key: the same; the key function gives it
+            let mut key = [0 as c_char; 13];
+            assert_eq!(ap_songdb_key(a.as_ptr(), a.len(), key.as_mut_ptr()), 0);
+            assert_eq!(text(key.as_ptr()), amigaplayer_rs::songdb::key(&a));
+            assert_eq!(ap_songdb_lookup_key(db, key.as_ptr(), info.as_mut_ptr()), 1);
+            let i = info.assume_init_read();
+            assert_eq!((text(i.author), i.year), ("Author 0".to_string(), 1990));
+
+            // not found, and bad arguments
+            assert_eq!(ap_songdb_lookup(db, b"nothing".as_ptr(), 7, info.as_mut_ptr()), 0);
+            assert_eq!(ap_songdb_lookup_key(db, c"xyz".as_ptr(), info.as_mut_ptr()), 0);
+            assert_eq!(ap_songdb_lookup(std::ptr::null_mut(), a.as_ptr(), a.len(), info.as_mut_ptr()), -1);
+            assert_eq!(ap_songdb_lookup(db, a.as_ptr(), a.len(), std::ptr::null_mut()), -1);
+            assert_eq!(ap_songdb_lookup_key(db, std::ptr::null(), info.as_mut_ptr()), -1);
+            assert_eq!(ap_songdb_key(std::ptr::null(), 3, key.as_mut_ptr()), -1);
+            ap_songdb_free(db);
+            ap_songdb_free(std::ptr::null_mut());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn last_error() -> (c_int, String) {
         (ap_last_error_code(), unsafe { CStr::from_ptr(ap_last_error()) }.to_string_lossy().into_owned())

@@ -15,6 +15,11 @@ default = ["host-68k"]
 # The emulated 68000 hosting a custom module's own code (`ap_open_opts` with AP_OPEN_CUSTOM,
 # `ap_detect_custom`). No external player is ever loaded. Without it the flag is refused.
 host-68k = ["amigaplayer-rs/host-68k"]
+# The ap_songdb_* functions: song lengths and metadata from audacious-uade's song database
+# (a directory given at run time: the data, CC BY-NC-SA 4.0, is not part of the library).
+# Off by default; without it ap_songdb_open fails with AP_ERR_UNSUPPORTED.
+#   cargo build --release -p amigaplayer-capi --features songdb
+songdb = ["amigaplayer-rs/songdb"]
 
 [dependencies]
 # The open-replayer library: no SDL, no original players.

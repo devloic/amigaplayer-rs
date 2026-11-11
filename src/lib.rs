@@ -38,6 +38,9 @@
 //!   [`format`](Song::format).
 //! * [`unpack`]: recognise and undo the file-level packers (PowerPacker, Pack-Ice, XPK SQSH,
 //!   MMCMP, StoneCracker) without playing anything.
+//! * `songdb` (feature `songdb`): song lengths, authors, albums and years from the song
+//!   database of audacious-uade, looked up by a key of the file's bytes. The database is not
+//!   included (it is CC BY-NC-SA 4.0): its directory is given at run time.
 //! * [`Error`]: a typed, `#[non_exhaustive]` error. Garbage input gives an `Err`, not a panic (a replayer bug that panics is caught and reported as `Error::Internal`, except under `panic = "abort"`).
 //!
 //! Rendering is deterministic: the same bytes, rate and subsong give the same samples on every
@@ -49,6 +52,7 @@
 //! |------------|---------|--------------|
 //! | `host-68k` | yes     | loading and running the original 68k DeliPlayers, Eagleplayers and DeliGenies (the application's mode of operation); in the library, custom modules through `Song::open_opts` (`Options::allow_custom`), and nothing else |
 //! | `ui`       | yes     | the SDL3 player window and the `amigaplayer-rs` binary (implies `host-68k`) |
+//! | `songdb`   | no      | `amigaplayer_rs::songdb`: lengths and metadata from audacious-uade's song database (code vendored in `crates/songdb`; the data is not included), and `--songdb` of `amigaplayer-render` |
 //! | `native`   | yes     | the players recompiled to Rust, when generated from the user's own player files (implies `host-68k`) |
 //!
 //! A library user wants `default-features = false` (plus `features = ["host-68k"]` to play
@@ -87,6 +91,8 @@
 #![warn(missing_docs)]
 
 mod song;
+#[cfg(feature = "songdb")]
+pub mod songdb;
 pub mod unpack;
 
 pub use song::{detect, formats, Error, Options, Result, Song, Subsongs};

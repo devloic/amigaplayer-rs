@@ -10,15 +10,16 @@ keywords = ["amiga", "tracker", "mod", "chiptune", "audio"]
 categories = ["multimedia::audio", "emulators"]
 exclude = ["tools/", "crates/", "docs/", "target-recomp/", "run.sh", "q.py", "two_rows.json", "*.whl", "LICENSE-*.orig"]
 
-# Publishing: three crates, in this order (each `cargo publish` needs the one before on
+# Publishing: four crates, in this order (each `cargo publish` needs the ones before on
 # crates.io): crates/m68k-rc, crates/players-native (its generated gen/ is gitignored and never
-# ships: the registry is empty), then this one. Users of the library want
-# `default-features = false` (no SDL3, no 68k player hosting, no generated players).
+# ships: the registry is empty), crates/songdb (amigaplayer-songdb: no dependencies, and no
+# data), then this one. Users of the library want `default-features = false` (no SDL3, no
+# 68k player hosting, no generated players).
 [workspace]
-# The C API shares the root's lock file and target directory; m68k-rc and players-native
-# are path dependencies and so members too. The WebAssembly crate keeps a lock file and
+# The C API shares the root's lock file and target directory; m68k-rc, players-native and
+# songdb are path dependencies and so members too. The WebAssembly crate keeps a lock file and
 # release profile of its own (panic = abort, LTO), which a workspace member could not.
-members = [".", "crates/amigaplayer-capi"]
+members = [".", "crates/amigaplayer-capi", "crates/songdb"]
 exclude = ["crates/amigaplayer-wasm"]
 
 [dependencies]
@@ -30,6 +31,10 @@ m68k = "0.14.7"
 m68k_rc = { package = "m68k-rc", path = "crates/m68k-rc", version = "0.1.0" }
 players-native = { path = "crates/players-native", version = "0.1.0" }
 sdl3 = { version = "0.20", optional = true }
+# The reader of audacious-uade's song database (lengths and metadata), vendored in
+# crates/songdb. The database itself (CC BY-NC-SA 4.0) is not part of anything here: it is
+# read from a directory given at run time.
+amigaplayer-songdb = { path = "crates/songdb", version = "0.1.0", optional = true }
 
 [features]
 default = ["ui", "native", "host-68k"]
@@ -37,6 +42,9 @@ default = ["ui", "native", "host-68k"]
 # disk, running their code on the emulated 68000, the `Engine` methods that drive them).
 # The application needs it; the open-replayer library (`default-features = false`) does not.
 host-68k = []
+# `amigaplayer_rs::songdb`: song lengths and metadata from audacious-uade's song database,
+# and `--songdb` / `--stop-at songdb` of amigaplayer-render. Off by default.
+songdb = ["dep:amigaplayer-songdb"]
 # The SDL3 player window. The library (engine only) builds without it.
 ui = ["dep:sdl3", "host-68k"]
 # The players recompiled to Rust (crates/players-native/gen), when generated. They
@@ -54,7 +62,13 @@ required-features = ["ui"]
 
 # Headless renderer (module to WAV / raw PCM on a file or standard output), no SDL:
 #   cargo build --release --no-default-features --features host-68k --bin amigaplayer-render
+# With the song database (`--songdb DIR`, `--stop-at songdb`):
+#   cargo build --release --no-default-features --features "host-68k songdb" --bin amigaplayer-render
 [[bin]]
 name = "amigaplayer-render"
 path = "src/bin/render.rs"
 required-features = ["host-68k"]
+
+[[example]]
+name = "make_demo_songdb"
+required-features = ["songdb"]

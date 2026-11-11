@@ -22,6 +22,7 @@ dependencies = [
 name = "amigaplayer-rs"
 version = "0.1.0"
 dependencies = [
+ "amigaplayer-songdb",
  "anyhow",
  "env_logger",
  "log",
@@ -30,6 +31,10 @@ dependencies = [
  "players-native",
  "sdl3",
 ]
+
+[[package]]
+name = "amigaplayer-songdb"
+version = "0.1.0"
 
 [[package]]
 name = "anstream"

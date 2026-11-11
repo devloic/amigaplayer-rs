@@ -150,3 +150,34 @@ pub fn custom_with(init_prefix: &[u8], interrupt: &[u8]) -> Vec<u8> {
     long(&mut f, 0x3F2);
     f
 }
+
+/// Writes a small synthetic song database into `dir` (which exists), in the file formats of
+/// audacious-uade's `conf/songdb/`, for [`SongDb::open`](crate::songdb::SongDb::open): it
+/// knows each of `modules` (the bytes of a file). Module number `i` (from 0) has the format
+/// "Synthetic `i`", 4 channels, author "Author `i`", album "Album `i`", publisher
+/// "Publisher `i`", the year 1990 + `i`, and two subsongs: 0, of 2000 + 1000 * `i` ms and
+/// ended by the player ("player"), and 1, of 500 ms and ended by silence ("silence").
+/// Nothing in it comes from the real database.
+#[cfg(feature = "songdb")]
+pub fn write_songdb(dir: &std::path::Path, modules: &[&[u8]]) -> std::io::Result<()> {
+    use amigaplayer_songdb::{Info, MetaData, ModInfo, SongEnd, SongEndStatus, SubSongInfo};
+    let entries: Vec<(String, Info)> = modules
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let sub = |subsong, status, ms| SubSongInfo { subsong, songend: SongEnd::new(status, ms), is_duplicate: false };
+            let info = Info {
+                subsongs: vec![sub(0, SongEndStatus::Player, 2000 + 1000 * i as u32), sub(1, SongEndStatus::DetectSilence, 500)],
+                modinfo: Some(ModInfo { format: format!("Synthetic {i}"), channels: 4 }),
+                metadata: Some(MetaData {
+                    author: format!("Author {i}"),
+                    album: format!("Album {i}"),
+                    publisher: format!("Publisher {i}"),
+                    year: 1990 + i as u16,
+                }),
+            };
+            (amigaplayer_songdb::key(m), info)
+        })
+        .collect();
+    amigaplayer_songdb::write::write(dir, &entries)
+}

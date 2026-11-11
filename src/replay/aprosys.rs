@@ -41,24 +41,17 @@ const PERIODS: [u16; 48] = [
 const INTENA: u32 = 0xDFF09A;
 const CIAA_PRA: u32 = 0xBFE001;
 
-/// 68000 cycles (half colour clocks) the song start (the engine's clock when the start-up call
-/// returns) lies from the point the port's start-up reaches, for a keyed and a plain start.
-const SONG_START_KEYED_H: i64 = -146;
-const SONG_START_PLAIN_H: i64 = 655;
+/// 68000 cycles (half colour clocks) the start-up call returns sooner after its row's last write
+/// than a tick's call does (`TAIL_*`): measured on the reference's call ends, the same for a row
+/// that ends with a key tail, with a sample or synth start, or with nothing but its start.
+const START_RETURN_H: u64 = 111;
 /// The start-up call's first DMACON write and the CIA write of a filter command (in half colour
 /// clocks from the run's origin), before the sum of the costs of the sequence entries met until
 /// them (the first entry's included).
 const START_PLAIN_H: u64 = 7967;
 const START_CIA_H: u64 = 5207;
-/// Colour clocks from the end of the start-up call (the audio interrupts it requests come after)
-/// to the first tick's call: with a keyed voice (plus the latency of the first interrupt handler
-/// after the last AUDxDAT write), and without.
-const START_TO_TICK_KEYED_H: u64 = 141849;
-const START_TO_TICK_H: u64 = 142650;
-/// Half colour clocks from the last AUDxDAT write of channel 0 to the end of the start-up call
-/// (70 less per channel), and from the audio interrupt being taken (at an output sample) to the
-/// handler's first write.
-const START_TAIL_H: u64 = 672;
+/// Half colour clocks from the audio interrupt being taken (when the call running returns, or at
+/// an output sample) to the handler's first write.
 const START_IRQ_H: u64 = 260;
 /// PER to VOL, per voice.
 const PER_VOL: [u64; 4] = [444, 471, 498, 497];
@@ -70,11 +63,12 @@ const PER_VOL: [u64; 4] = [444, 471, 498, 497];
 /// The work before a voice's PER write, in half colour clocks (fitted jointly on the reference
 /// logs): by what the previous voice wrote (a sample start or synth LOC per voice, a plain VOL, a
 /// silent voice's VOL), and per arpeggio byte read, arpeggio jump, envelope step, envelope point
-/// loaded (other than envelope 1's), envelope jump and envelope 1's point loaded.
+/// loaded (other than envelope 1's), envelope jump (other than envelope 1's), envelope 1's point
+/// loaded and envelope 1's jump (its duration scale is worked out again for every point tried).
 const PRE_LOC_H: [u64; 4] = [1765, 1677, 1708, 1739];
 const PRE_VOL_H: u64 = 1765;
 const PRE_MUTED_H: [u64; 4] = [1486, 1486, 1486, 1486];
-const PRE_FEAT_H: [u64; 6] = [81, 73, 69, 435, 222, 549];
+const PRE_FEAT_H: [u64; 7] = [81, 73, 69, 435, 222, 549, 208];
 /// The portamento step: the period is moved to the target by a step (up, up and reached, down, down
 /// and reached) or already there; an arpeggio voice adds a little.
 const PRE_PM_H: [u64; 7] = [0, 0, 123, 120, 123, 173, 56];
@@ -155,8 +149,10 @@ const TAIL_END_H: u64 = 232;
 /// The tail of an interrupt handler after its last write, and of one that only disabled its interrupt.
 const TAIL_HANDLER_H: u64 = 176;
 const TAIL_HANDLER_NONE_H: u64 = 418;
-/// A tick that starts when the previous call returns begins its work this long after (half clocks).
-const TICK_DISPATCH_H: u64 = 116;
+/// The tick's code before the work of the voices (half clocks). The tick is called one timer period
+/// after the song start and every period after that (the engine's default), or when the call that
+/// was running then returns, as the reference's (measured on its guest calls).
+const TICK_ENTRY_H: u64 = 116;
 /// Handler gaps per channel in half clocks (the same for both handler shapes): LOC to LEN, and LEN to
 /// DMACON (the loop shape's LEN to INTENA is 10 more).
 const H_LEN_H: [u64; 4] = [219, 250, 281, 289];
@@ -289,10 +285,10 @@ pub struct Aps {
     /// The last LOC was a moving sample's (type 4 or 5): the work after it is two cycles shorter than
     /// after a synth's.
     last_mov: bool,
-    start_keyed: bool,
     /// Work counters of the voice update in progress, for the cost of the call: arpeggio bytes
-    /// read, arpeggio jumps, envelope steps, envelope points loaded, envelope jumps.
-    feat: [u32; 6],
+    /// read, arpeggio jumps, envelope steps, envelope points loaded, envelope jumps, envelope 1's
+    /// points loaded and envelope 1's jumps (counted in the two before as well).
+    feat: [u32; 7],
     pm: u8,
     /// A carried half colour clock (the synthesis costs are in half clocks).
     half: u64,
@@ -301,14 +297,8 @@ pub struct Aps {
     starting: bool,
     sq_acc: u64,
     first_block_seen: bool,
-    first_irq: bool,
-    last_key: usize,
     /// The tail of the tick's call after the last write made (half clocks).
     tail_h: u64,
-    /// The clock at the end of the last call (a tick or an interrupt handler), and what a tick that
-    /// finds the timer already due adds to start (half clocks).
-    act_end: u64,
-    first_tick: Option<u64>,
     /// The sequence entry costs a tick's advance has paid (half clocks).
     sq_paid: u64,
     /// The row just processed ended with the key tail of this voice.
@@ -699,7 +689,7 @@ impl Aps {
                 }
             }
         }
-        self.start_keyed = keys.iter().any(|&k| k);
+
         if after == 0 {
             self.tail_h = TAIL_ROW_H;
         }
@@ -726,7 +716,6 @@ impl Aps {
                 self.wc(hw, 31);
                 wr16(hw, 0xDFF0AA + 16 * v as u32, 0);
                 self.tail_h = TAIL_DAT_H[v];
-                self.last_key = v;
                 self.row_key = Some(v);
             }
         }
@@ -791,14 +780,7 @@ impl Aps {
                 Ok(()) => {}
                 Err(skip) => {
                     // the work done before the abort takes its time (no write follows it)
-                    let f = self.feat;
-                    let h = SKIP_BASE_H
-                        + PRE_FEAT_H[0] * f[0] as u64
-                        + PRE_FEAT_H[1] * f[1] as u64
-                        + PRE_FEAT_H[2] * f[2] as u64
-                        + PRE_FEAT_H[3] * (f[3] - f[5]) as u64
-                        + PRE_FEAT_H[4] * f[4] as u64
-                        + PRE_FEAT_H[5] * f[5] as u64;
+                    let h = SKIP_BASE_H + self.feat_cost();
                     self.wh(hw, h);
                     if let Skip::All = skip {
                         break;
@@ -833,6 +815,18 @@ impl Aps {
             hw.dmacon(0x000F);
             self.tail_h = TAIL_END_H;
         }
+    }
+
+    /// The cost of the arpeggio and envelope work counted in `feat` (half clocks).
+    fn feat_cost(&self) -> u64 {
+        let f = self.feat;
+        PRE_FEAT_H[0] * f[0] as u64
+            + PRE_FEAT_H[1] * f[1] as u64
+            + PRE_FEAT_H[2] * f[2] as u64
+            + PRE_FEAT_H[3] * (f[3] - f[5]) as u64
+            + PRE_FEAT_H[4] * (f[4] - f[6]) as u64
+            + PRE_FEAT_H[5] * f[5] as u64
+            + PRE_FEAT_H[6] * f[6] as u64
     }
 
     fn env_step(&mut self, hw: &Hw, v: usize, k: usize, scale: u32, e1: bool) -> Result<(), Skip> {
@@ -872,6 +866,9 @@ impl Aps {
                 return Err(Skip::Voice);
             }
             self.feat[4] += 1;
+            if e1 {
+                self.feat[6] += 1;
+            }
             e.pos = e.pos.wrapping_add((lev * 2) as u32);
             kk = kk.wrapping_add(1);
         }
@@ -879,7 +876,7 @@ impl Aps {
     }
 
     fn voice(&mut self, hw: &mut Hw, v: usize) -> Result<(), Skip> {
-        self.feat = [0; 6];
+        self.feat = [0; 7];
         self.pm = 0;
         let inst = self.v[v].inst;
         if self.v[v].chvol == 0 {
@@ -980,7 +977,6 @@ impl Aps {
         a += 16 * s8(rd8(hw, inst.wrapping_add(21)));
         let b = (s16(a) * self.v[v].nvol as i32) >> 12;
         let vol = (b & 127) as u16;
-        let f = self.feat;
         let base = match self.last_kind {
             0 => PRE_LOC_H[v] - if self.last_mov { 2 } else { 0 },
             1 => PRE_VOL_H,
@@ -989,12 +985,7 @@ impl Aps {
         let h = base
             + PRE_PM_H[self.pm as usize]
             + if r0 & 0x40 != 0 { PRE_ARP_H } else { 0 }
-            + PRE_FEAT_H[0] * f[0] as u64
-            + PRE_FEAT_H[1] * f[1] as u64
-            + PRE_FEAT_H[2] * f[2] as u64
-            + PRE_FEAT_H[3] * (f[3] - f[5]) as u64
-            + PRE_FEAT_H[4] * f[4] as u64
-            + PRE_FEAT_H[5] * f[5] as u64;
+            + self.feat_cost();
         self.wh(hw, h);
         hw.per(v, per);
         self.wc(hw, PER_VOL[v]);
@@ -1266,7 +1257,6 @@ impl Aps {
         }
         // the handler's code starts on a whole colour clock, where the engine takes the interrupt (the
         // end of the previous call, or later when the request comes after it)
-        self.first_irq = false;
         self.half = 0;
         let lat = START_IRQ_H;
         self.wh(hw, lat);
@@ -1313,7 +1303,6 @@ impl Aps {
         // does more first); the call ends on a whole colour clock
         self.wh(hw, if matches!(e >> 28, 0 | 1 | 2 | 13) { TAIL_HANDLER_H } else { TAIL_HANDLER_NONE_H });
         self.half = 0;
-        self.act_end = hw.bus.clock;
     }
 }
 
@@ -1504,19 +1493,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         silence,
         last_kind: 1,
         last_mov: false,
-        start_keyed: false,
-        feat: [0; 6],
+        feat: [0; 7],
         pm: 0,
         half: 0,
         tail_h: TAIL_VOL_H,
-        act_end: 0,
         start_origin: 0,
         starting: true,
         sq_acc: 0,
         first_block_seen: false,
-        first_irq: false,
-        last_key: 0,
-        first_tick: None,
         sq_paid: 0,
         row_key: None,
     };
@@ -1543,23 +1527,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         r.ended = true;
     }
     r.last_kind = 1;
-    // the timer starts after the start-up call, not after its interrupts
-    let keyed = r.start_keyed;
-    if keyed {
-        // the start-up routine returns a little after its last AUDxDAT write (less for a later
-        // channel: the loop over the voices has fewer turns left)
-        r.wh(&mut hw, START_TAIL_H - 70 * r.last_key as u64);
-        r.first_irq = true;
-    }
-    // the first tick follows the end of the call to the half clock
-    let ft = 2 * hw.bus.clock + r.half + if keyed { START_TO_TICK_KEYED_H } else { START_TO_TICK_H };
-    r.first_tick = Some(ft.div_ceil(2));
-    // the song start (where Paula's output and line grids restart) is this far from the end of the
-    // start-up call in the reference (measured on the first write of each module)
-    // (the call returns on a whole colour clock: an odd cycle of its end is dropped, as at the end of
-    // every call; measured on 21 modules, 5 of them with an odd count)
-    let end_h = 2 * hw.bus.clock as i64 + r.half as i64 + if keyed { SONG_START_KEYED_H } else { SONG_START_PLAIN_H };
-    hw.bus.clock = end_h.div_euclid(2) as u64;
+    // the song starts (Paula's output and line grids restart, the timer's first period begins) where
+    // the start-up call returns: after its row as a tick's call after a row, a little sooner, and on
+    // a whole colour clock (an odd cycle is dropped, as at the end of every call)
+    let end_h = 2 * hw.bus.clock + r.half + r.tail_h - START_RETURN_H;
+    hw.bus.clock = end_h / 2;
+    r.half = 0;
     Some(Box::new(r))
 }
 
@@ -1572,28 +1545,19 @@ impl Replayer for Aps {
         String::new()
     }
 
-    fn subsong_tick_at(&mut self) -> Option<u64> {
-        self.first_tick.take()
-    }
-
     fn songend(&self) -> bool {
         self.ended
     }
 
     fn tick(&mut self, hw: &mut Hw) {
         // a tick is a guest call: it starts on a whole colour clock, whatever the half clock the
-        // previous call ended on (the clock only counts whole colour clocks); a timer already due
-        // is served when the previous call returns, the tick's code starting a little after that
+        // previous call ended on (the clock only counts whole colour clocks)
         self.half = 0;
-        let since = 2 * hw.bus.clock.saturating_sub(self.act_end);
-        if since < TICK_DISPATCH_H {
-            self.wh(hw, TICK_DISPATCH_H - since);
-        }
+        self.wh(hw, TICK_ENTRY_H);
         self.tick_voices(hw);
         // the call returns a while after its last write
         self.wh(hw, self.tail_h);
         self.half = 0;
-        self.act_end = hw.bus.clock;
     }
 
     fn audio_irq_ch(&mut self, ch: usize, hw: &mut Hw) -> bool {

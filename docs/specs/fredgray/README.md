@@ -18,3 +18,35 @@
   absent from the modules. The lead decides on any embedding.
 - Private analysis notes, scripts and the disassembly exist in a separate
   folder that the implementer must not open.
+
+## Errata found by the implementation
+
+Measured afterwards against reference logs that carry the half colour clock (68000 cycle), relative
+to the song start; with them every write of the 20 subsongs (60 s each) falls on the reference's
+cycle. They replace the "12 to 25 cc of jitter" of SPEC 11 / 12.3 and LOGS.md:
+
+- There is no jitter. The wrapper takes a fixed number of 68000 cycles at each store of the play
+  routine to an audio register, on top of the module's own instructions. Builds that store
+  through `a5` (Black Lamp, Star Goose, Victory Road): 12 after the period stores of channels 0
+  and 1, 116 after channel 2's, 104 after the volume stores of channels 0 and 1, 128 after channel
+  2's, 20 after the low word of a pointer, 183 after a length (an odd number: the stores behind it
+  fall on the other half of the colour clock). The build with absolute stores (Eco): 68 before
+  channel 0's period store, then 44, 60 and 148 after the three period stores, 104 after the volume
+  stores of channels 0 and 1; its pointer and length stores cost nothing.
+- The timer interrupt comes exactly 70940 cc after the return of the last init and every 70940 cc
+  after that; the play routine is entered 140 cc (first builds) or 120 cc (Eco) after the
+  interrupt (SPEC 12.2 gives 126 +/- 5 after the final DMACON write, which is 8 cc before the
+  return). An interrupt that falls due while the host changes the subsong is served when the new
+  init returns, with the same 140 / 120 cc before the play routine; the following ones keep the
+  old phase.
+- Every tick on which section 0 is current takes 116 cycles more than a plain return before the
+  rest of the tick (the song-end call into the host).
+- The glide patch does not look at what follows the status register restore (0x46DF): the restore
+  and the word behind it are overwritten with no-ops, and one word more when that word's low byte
+  is zero (the same rule as the patched area of SPEC 12.1). In a test copy with another instruction
+  behind the restore, the reference's note starts are shorter by that instruction's cycles less a
+  no-op's.
+- Eco rewrites its wave buffer in the play routine before the first register store of a tick. What
+  the audio DMA reads on the lines between the interrupt and that store is the buffer as it is at
+  the store (the engine fetches lazily), so a port must take its tick event at the interrupt, not
+  at the play routine's entry, to play the same words.

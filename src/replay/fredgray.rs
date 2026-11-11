@@ -32,12 +32,12 @@ pub const OPEN: Open = Open { name: "Fred Gray", detect, new };
 /// reference's first write of a tick).
 const TICK_WRAP: u64 = 0;
 
-/// The first tick comes this long after the last init's final DMA-enable store (the 50 Hz timer
-/// period) plus the interrupt wrapper's set-up; `TICK_K` is the engine-side calibration of the
-/// timer start (colour clocks, on top of the specification's 126).
 /// Colour clocks from the start of the init routine to its first Paula store, in the builds that
 /// store soonest after a start at the run's first phase (the clock of a start is 100 into a frame).
 const FIRST_STORE: u64 = 33;
+/// The timer starts when the last init returns and its interrupts come one 50 Hz period apart;
+/// the interrupt wrapper's set-up puts the play routine's entry this long after the init's final
+/// DMA-enable store plus a whole number of periods, with the build's `tick_k` on top (colour clocks).
 const WRAP_CC: u64 = 126;
 
 /// The wrapper's scan of the module's code before the first init (specification section 12.1):
@@ -136,36 +136,46 @@ fn detect(d: &[u8]) -> bool {
         && (0x2C..0x38).step_by(4).all(|o| be32(d, o) != 0)
 }
 
-/// Colour clocks the reference's wrapper takes at a store of the play routine to an audio
-/// register, measured against the plain cycle count of the module's own instructions (the
-/// specification's timing section): after the period stores of channels 0, 1 and 2, after the
-/// volume stores, after a pointer store and after a length store, and before the first period
-/// store of a tick (`pre`; `pre_loc` when the store before it was one or two pointer stores, not three).
+/// 68000 cycles (half colour clocks) the reference's wrapper takes at a store of the play routine
+/// to an audio register, on top of the module's own instructions: after the period stores of
+/// channels 0, 1 and 2, after the volume stores, after the low word of a pointer and after a
+/// length store, and before the first channel's period store (`pre`). Measured store by store
+/// against reference logs that carry the half colour clock: every figure is the same on every
+/// tick of every module of the build.
 struct Extra {
     per: [u64; 3],
     vol: [u64; 3],
     loc: u64,
+    /// An odd number of cycles (whatever the cycle of the store): the stores behind a length
+    /// store fall on the other half of the colour clock.
     len: u64,
     pre: u64,
-    pre_loc: u64,
-    /// Timer start calibration: the specification's 122-131 colour clocks of play-entry delay is
-    /// a cycle estimate; the first store of a tick measured against the logs sets this.
+    /// Timer start calibration (colour clocks): the specification's 122-131 colour clocks of
+    /// play-entry delay is a cycle estimate; the first store of a tick measured against the logs
+    /// sets this.
     tick_k: u64,
 }
 
 /// The builds that store through the `a5` base (Black Lamp, Star Goose, Victory Road).
-const EXTRA_A: Extra = Extra { per: [6, 6, 58], vol: [52, 52, 64], loc: 10, len: 92, pre: 0, pre_loc: 0, tick_k: 22 };
-/// The build that stores to absolute addresses (Eco).
-const EXTRA_B: Extra = Extra { per: [22, 30, 74], vol: [52, 52, 64], loc: 10, len: 0, pre: 34, pre_loc: 24, tick_k: 1 };
+const EXTRA_A: Extra = Extra { per: [12, 12, 116], vol: [104, 104, 128], loc: 20, len: 183, pre: 0, tick_k: 22 };
+/// The build that stores to absolute addresses (Eco): its pointer and length stores cost nothing.
+const EXTRA_B: Extra = Extra { per: [44, 60, 148], vol: [104, 104, 128], loc: 0, len: 0, pre: 68, tick_k: 2 };
+
+/// Cycles the reference's song-end routine (the replaced first jump table entry, a call into the
+/// host) takes on top of a plain return, on every tick that reaches it. The engine's time after a
+/// host call is a whole colour clock; every measured case reached it on one, so the dropped odd
+/// cycle is the engine's rule here, not a measurement.
+const SONG_END: u64 = 116;
 
 /// The bus the routine sees: in the play routine its audio stores take the wrapper's time.
 struct HookBus<'a> {
     bus: &'a mut Bus,
     play: bool,
     x: &'static Extra,
+    /// Cycles of the call so far, the running instruction included.
+    cycles: u64,
+    /// Cycles the wrapper takes after this instruction's stores.
     extra: u64,
-    /// Pointer stores in a row so far.
-    run: u32,
     l: Option<u64>,
 }
 
@@ -174,12 +184,10 @@ impl HookBus<'_> {
         let a = a & 0xFF_FFFF;
         if self.play && (0xDF_F0A0..0xDF_F0D0).contains(&a) {
             let ch = ((a - 0xDF_F0A0) >> 4) as usize;
-            if a & 0xF == 6 && ch == 0 {
-                let pre = if (1..3).contains(&self.run) { self.x.pre_loc } else { self.x.pre };
-                self.bus.epoch.0 += pre;
-                self.bus.clock += pre;
+            if a & 0xF == 6 && ch == 0 && self.x.pre != 0 {
+                self.cycles += self.x.pre;
+                m68k_rc::Bus::cycles(self.bus, self.cycles);
             }
-            self.run = if a & 0xF == 2 { self.run + 1 } else { 0 };
             self.extra += match a & 0xF {
                 2 => self.x.loc,
                 4 => self.x.len,
@@ -223,7 +231,6 @@ impl AddressBus for HookBus<'_> {
 struct Cpu68 {
     cpu: CpuCore,
     sp: u32,
-    run: u32,
     x: &'static Extra,
     /// The time of the last DMA-enable store of an init run.
     l: Option<u64>,
@@ -233,11 +240,12 @@ impl Cpu68 {
     fn new(sp: u32, x: &'static Extra) -> Cpu68 {
         let mut cpu = CpuCore::new();
         cpu.set_cpu_type(CpuType::M68000);
-        Cpu68 { cpu, sp, run: 0, x, l: None }
+        Cpu68 { cpu, sp, x, l: None }
     }
 
     /// Runs the routine at `entry` until it returns, from `start`, with `d0` in D0 and A5 at the
-    /// custom chips. Returns the cycles it took (counting `pre`), and whether it reached `stop`.
+    /// custom chips. Returns the cycles it took (counting `pre` and, in the play routine, the
+    /// wrapper's time at the stores and at the song end), and whether it reached `stop`.
     fn call(&mut self, bus: &mut Bus, entry: u32, start: u64, pre: u64, d0: u32, stop: u32, play: bool) -> Result<(u64, bool), String> {
         let ret = self.sp & !3;
         let sp = ret - 4;
@@ -254,7 +262,6 @@ impl Cpu68 {
         let mut cycles = pre;
         let mut executed = 0u64;
         let mut ended = false;
-        self.run = 0;
         loop {
             let pc = self.cpu.pc;
             if pc == ret && self.cpu.dar[15] == ret {
@@ -262,6 +269,9 @@ impl Cpu68 {
             }
             if pc == stop {
                 ended = true;
+                if play {
+                    cycles = (cycles + SONG_END) & !1;
+                }
             }
             executed += 1;
             if executed > 5_000_000 {
@@ -270,16 +280,11 @@ impl Cpu68 {
             let ins = m68k_rc::decode::decode_model(pc, &mut |a| bus.r16(a), m68k_rc::Model::M68000);
             cycles += m68k_rc::cycles::cycles(&ins) as u64;
             m68k_rc::Bus::cycles(bus, cycles);
-            let mut hb = HookBus { bus, play, x: self.x, extra: 0, run: self.run, l: None };
+            let mut hb = HookBus { bus, play, x: self.x, cycles, extra: 0, l: None };
             let r = self.cpu.step(&mut hb);
-            let extra = hb.extra;
-            self.run = hb.run;
+            cycles = hb.cycles + hb.extra;
             if hb.l.is_some() {
                 self.l = hb.l;
-            }
-            if extra != 0 {
-                bus.epoch.0 += extra;
-                bus.clock += extra;
             }
             match r {
                 StepResult::Ok { .. } => {}
@@ -302,8 +307,12 @@ struct FredGray {
     resume: Option<u64>,
     /// Ticks run so far: the reference's timer is not restarted by a change of subsong once it runs.
     ticks: u64,
-    /// Colour clocks from the end of the last init to the timer's start, on top of its period.
-    delay: u64,
+    /// Colour clocks from a timer interrupt to the play routine's entry: the interrupt wrapper's
+    /// set-up. The timer itself starts at the end of the last init. The interrupt is the engine's
+    /// event, not the entry: the audio DMA of the lines in between reads the wave buffer as the
+    /// tick leaves it at its first register store, in the reference too (Eco rewrites its buffer
+    /// before that store).
+    wrap: u64,
 }
 
 /// Adds the load address to every longword the hunk's relocation list names; returns their
@@ -372,9 +381,10 @@ fn find_stop(h: &[u8], relocs: &[usize]) -> Option<usize> {
 
 /// Overwrites the glide decision of the note start with no-ops: the store of the status register
 /// right after the bit clear of the note's top bit, and, further on, the restore of the status
-/// register together with the conditional branch that follows it. A restore with no branch of
-/// those forms behind it is still overwritten (alone): left in place, a path that skips the store
-/// pops a word too many and the routine returns to garbage.
+/// register together with the conditional branch that follows it. The reference does not look at
+/// what follows the restore: it overwrites the restore and the word behind it, and one word more
+/// when that word's low byte is zero (in a module edited to have a shift there, each note start
+/// of the reference is shorter by the shift's cycles less a no-op's).
 fn patch_glide(h: &[u8], bus: &mut Bus, img: u32) {
     let mut p = 0;
     while p + 6 <= h.len() {
@@ -384,15 +394,14 @@ fn patch_glide(h: &[u8], bus: &mut Bus, img: u32) {
                 q += 2;
             }
             if q < p + 40 && q + 4 <= h.len() {
-                let bne = be16(h, q + 2);
-                let words = if bne & 0xFF00 == 0x6600 && bne & 0xFF != 0 { 2 } else if bne == 0x6600 { 3 } else { 1 };
-                if words != 0 {
-                    bus.w16(img + p as u32 + 4, 0x4E71);
-                    for i in 0..words {
-                        bus.w16(img + q as u32 + 2 * i, 0x4E71);
-                    }
-                    p = q;
+                // the word behind the restore is taken for the branch whatever it is: a zero low
+                // byte is the long form (specification 12.1)
+                let words = if be16(h, q + 2) & 0xFF == 0 && q + 6 <= h.len() { 3 } else { 2 };
+                bus.w16(img + p as u32 + 4, 0x4E71);
+                for i in 0..words {
+                    bus.w16(img + q as u32 + 2 * i, 0x4E71);
                 }
+                p = q;
             }
         }
         p += 2;
@@ -445,7 +454,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         resume: None,
         ticks: 0,
-        delay: 0,
+        wrap: 0,
     };
     // the first write of the first init falls at the time the scan gives (the init's own first
     // store comes FIRST_STORE colour clocks after the start's clock, which holds the phase)
@@ -462,7 +471,7 @@ impl FredGray {
         let (cyc, _) = self.cpu.call(bus, entry, start, 0, sub as u32, self.stop, false).map_err(|e| log::error!("{e}")).ok()?;
         bus.clock = start + cyc / 2;
         if let Some(l) = self.cpu.l.take() {
-            self.delay = (l + WRAP_CC + self.cpu.x.tick_k).saturating_sub(bus.clock);
+            self.wrap = (l + WRAP_CC + self.cpu.x.tick_k).saturating_sub(bus.clock);
         }
         Some(())
     }
@@ -479,10 +488,6 @@ impl Replayer for FredGray {
 
     fn songend(&self) -> bool {
         self.songend
-    }
-
-    fn timer_delay(&self) -> u64 {
-        self.delay
     }
 
     fn subsongs(&self) -> (u16, u16, u16) {
@@ -503,7 +508,7 @@ impl Replayer for FredGray {
             }
             hw.bus.clock = t0 + CHANGE_CC;
             if self.init_song(hw.bus, n).is_some() && self.ticks == 0 {
-                self.resume = Some(hw.bus.clock + super::DT_TICK + self.delay);
+                self.resume = Some(hw.bus.clock + super::DT_TICK);
             }
         }
     }
@@ -514,7 +519,9 @@ impl Replayer for FredGray {
 
     fn tick(&mut self, hw: &mut Hw) {
         self.ticks += 1;
-        let start = hw.bus.clock;
+        // an interrupt that fell due while the host changed the subsong is served when the init
+        // returns (the engine calls at once): the wrapper's set-up comes after it as on any tick
+        let start = hw.bus.clock + self.wrap;
         let play = self.img + be32(&self.h, 0x0C);
         match self.cpu.call(hw.bus, play, start, TICK_WRAP, 0, self.stop, true) {
             Ok((c, ended)) => {
@@ -631,6 +638,70 @@ mod tests {
         let out: Vec<u16> = (0..12).map(|i| m.bus.r16(0x1000 + 2 * i)).collect();
         assert_eq!(out[..7], [0x0884, 7, 0x4E71, 0x1D84, 0x6002, 0x4E71, 0x4E71]);
         assert_eq!(out[7..], code[7..]);
+        // the word behind the restore is overwritten whatever it is, and one more when its low byte is zero
+        for (word, n) in [(0xE544u16, 2), (0x6600, 3), (0x7000, 3)] {
+            let mut c = code;
+            c[6] = word;
+            for (i, w) in c.iter().enumerate() {
+                m.bus.w16(0x1000 + 2 * i as u32, *w);
+            }
+            let h: Vec<u8> = c.iter().flat_map(|w| w.to_be_bytes()).collect();
+            patch_glide(&h, &mut m.bus, 0x1000);
+            let out: Vec<u16> = (0..12).map(|i| m.bus.r16(0x1000 + 2 * i)).collect();
+            assert!(out[5..5 + n].iter().all(|&w| w == 0x4E71), "{word:04x}");
+            assert_eq!(out[5 + n..], c[5 + n..], "{word:04x}");
+        }
+    }
+
+    /// The wrapper's time at the stores of the first build, in 68000 cycles on top of the 20 of
+    /// each `move.w #x,abs.l`: 12 after the first two periods, 183 after a length (an odd number:
+    /// the store behind it falls half a colour clock later than a whole count would put it).
+    #[test]
+    fn store_costs_are_counted_in_cycles() {
+        let mut d = module();
+        let play: [u16; 17] = [
+            0x33FC, 0x0123, 0x00DF, 0xF0A6, 0x33FC, 0x0124, 0x00DF, 0xF0B6, 0x33FC, 0x0008, 0x00DF, 0xF0A4, 0x33FC, 0x0001,
+            0x00DF, 0xF0B8, 0x4E75,
+        ];
+        // the play routine goes into new room behind the hunk's 0x80 bytes; no relocation touches it
+        let tail = d.split_off(0x20 + 0x80);
+        d.extend(vec![0u8; 0x40]);
+        d.extend(tail);
+        let code: Vec<u8> = play.iter().flat_map(|w| w.to_be_bytes()).collect();
+        d[0x20 + 0x90..0x20 + 0x90 + code.len()].copy_from_slice(&code);
+        d[0x20 + 0x0C..0x20 + 0x10].copy_from_slice(&0x90u32.to_be_bytes());
+        d[0x14..0x18].copy_from_slice(&0x4000_0030u32.to_be_bytes());
+        d[0x1C..0x20].copy_from_slice(&0x30u32.to_be_bytes());
+        let (mut m, mut r) = start(&d);
+        m.bus.write_log.replace(Vec::new());
+        let t0 = m.bus.clock;
+        r.tick(&mut Hw { bus: &mut m.bus });
+        let log = m.bus.write_log.take().unwrap();
+        let cycles = [20u64, 20 + 12 + 20, 52 + 12 + 20, 84 + 183 + 20];
+        let want: Vec<(u32, u64)> = [0xDFF0A6u32, 0xDFF0B6, 0xDFF0A4, 0xDFF0B8].into_iter().zip(cycles.map(|c| c / 2)).collect();
+        assert_eq!(log.iter().map(|&(a, _, t)| (a, t - t0)).collect::<Vec<_>>(), want);
+        // the volume store's own wrapper time and the return
+        assert_eq!(m.bus.clock - t0, (287 + 104 + 16) / 2);
+    }
+
+    /// A tick that reaches the song end takes the host call's time on top of the return.
+    #[test]
+    fn song_end_costs_the_host_call() {
+        let d = module();
+        let (mut m, mut r) = start(&d);
+        let t0 = m.bus.clock;
+        r.tick(&mut Hw { bus: &mut m.bus });
+        assert!(r.songend());
+        let with_end = m.bus.clock - t0;
+        // the same play routine with the call through the table replaced by a no-op
+        let mut e = d.clone();
+        e[0x20 + 0x3E..0x20 + 0x40].copy_from_slice(&[0x4E, 0x71]);
+        let (mut m, mut r) = start(&e);
+        let t0 = m.bus.clock;
+        r.tick(&mut Hw { bus: &mut m.bus });
+        assert!(!r.songend());
+        // the call (16 cycles) and the return (16) against the no-op (4), and the host call
+        assert_eq!(with_end - (m.bus.clock - t0), (16 + 16 - 4 + SONG_END) / 2);
     }
 
     #[test]

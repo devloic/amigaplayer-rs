@@ -52,8 +52,8 @@
   reference). With another host value AUDxVOL scales by value/64.
 - The ninth chunk is never read; it might hold names in real modules (unknown).
 - The synthesis area is allocated without clearing; it was zero in all reference runs.
-- Real modules might use synth length 0 (`n` = 128 while AUDxLEN is written as 0 at row time)
-  or bits 6-7 of the synth length byte; neither was tested.
+- Real modules might use bits 6-7 of the synth length byte: not tested. (Synth length code 0, `n` = 128,
+  was tested later: it plays as specified and costs 8 cycles more, LOGS.md.)
 - Tick-handler overruns (long synthesis) delay the next tick in the reference; ports that model
   time per write will see the same shift only if their synthesis costs match LOGS.md.
 
@@ -62,3 +62,8 @@
 - Modules t1-t4 listed in LOGS are missing from the spec's module set, and no DMA logs were shipped.
 - Handler and row timings depend on channel index and event type; the port fits them from the logs.
 - Unspecified: running-sum width of mode 2 op 7 (port: 16-bit); portamento fall and wrap (port: volume-style).
+- LOGS.md said the start-up does not depend on the module's path: true of the register writes, not of
+  the sound when a sample start leaves the module (the host keeps the path below the module).
+- The spec does not say in which order the two chip buffers are allocated: the silence buffer comes first.
+- Exact timing (LOGS.md, "Timing, exact"): the earlier per-voice row tables and the call-end
+  constants were fits; the row is one cost per voice, and call starts and ends were measured.

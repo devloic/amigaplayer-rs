@@ -84,3 +84,53 @@ these runs.
   the last AUDxDAT write; LOC +115..235, LEN +31..110, DMACON +95..110, INTENA enable +32.
 - **DMA off to on** of a keyed voice (row-time DMACON off to the handler's DMACON on): 1 067 to
   about 3 100 cc, longer the more voices follow it in the row.
+
+## Timing, exact (68000 cycles)
+
+Measured later on the reference's own cycle counter (one colour clock is two cycles), on the clocks
+at which its guest calls start and return, and on its audio DMA fetches; 615 modules (the 21 above,
+234 probes, 360 random ones). A port that follows these rules writes every register at the reference's
+cycle. Each rule is a count per piece of work; none is per module.
+
+- **Calls.** The start-up, each tick and each audio interrupt handler is one call. A call starts on a
+  whole colour clock and returns on one (an odd cycle of its end is dropped). The song starts where the
+  start-up call returns: the host's output sample grid and DMA line grid restart there. The first tick
+  is called 70 940 cc after that and then every 70 940 cc, or, when a call is still running, when it
+  returns. An audio interrupt requested while a call runs is taken when that call returns (channel 0
+  first); otherwise the host takes it at the end of the output sample in which it was requested (or
+  at once in a host step where a vertical blank was already due). So the time a handler starts depends
+  on where the calls before it started and ended, not only on the writes.
+- **Tick.** 116 cycles from the call to the voices' work. Then per voice, counted from the previous
+  voice's end: a silent voice's VOL after 672 / 695 / 718 / 708 cycles (voices 0-3); a playing voice's
+  PER after 1 765 plus the portamento step (up 123, up and reached 120, down 123, down and reached
+  173, already there 56), an arpeggio row 9, each arpeggio byte 81, arpeggio jump 73, envelope step
+  69, envelope point loaded 435 (envelope 1's 549), envelope jump 222 (envelope 1's 208). These hold
+  after a plain VOL (and at the tick's start); after a voice that ended with a LOC the voice comes 88 /
+  57 / 26 cycles sooner (voices 1-3; 2 more after a moving sample's), after a silent voice 279 sooner.
+  PER to VOL 888 / 942 / 996 / 994. VOL to LOC: type 4 984, type 5 765, synthesis as below.
+- **Abandoned update** (§6.2): an envelope that runs out of jumps ends the voice 500 cycles after the
+  point where the PER count starts (29 more for each envelope after envelope 0), plus the portamento,
+  arpeggio and envelope work done; an arpeggio that runs out ends all the voices 78 cycles after it,
+  plus that work. What follows comes as after a plain VOL.
+- **Synthesis** (VOL to LOC): every stage is a constant plus a count per byte and the stages add up
+  (see `synth_cost_h` in the port for the table: generator or mixer by mode and operation, source
+  record types 4/5/1, comb 924 + 417 n, the two filter variants); a length code of 0 (128 bytes) costs
+  8 more.
+- **Row.** DMACON `0x8200` 1 164 cycles after a LOC (2 less after a moving sample's), 1 182 after a
+  plain VOL, 903 after a silent voice's VOL. Then each voice costs, whatever its number: idle 433, note
+  1 454, release 1 341 (instrument change +545, with the record-relative bit +10, counter zero -244),
+  arpeggio bit +68, row byte 2 bit 7 +10, bit 6 +14, retrigger +905 (first row of a block +115, with
+  the block's envelope-3 bit +174), block mute on a row with a note +39, channel-volume update: set 0,
+  up 119, up and clamped 116, down 119, down and clamped 167, already there 54. A write comes 70 cycles
+  (after the row start) or 86 (after another write of the row) plus the work of the voices since; a
+  LEN write of type 3 / 4 / 5 comes 95 / 76 / 49 sooner.
+- **Call ends.** A tick returns after its last write: AUDxDAT of a key tail 637 / 567 / 497 / 427
+  (channels 0-3), LOC 744 (moving sample 742), plain VOL 762, silent VOL 483, a row's sample or synth
+  start 766 plus the work of the voices after it, a row with no write but its start 750 plus that
+  work, the song end's DMACON 232. The start-up call returns 111 cycles sooner than a tick would
+  after the same row. A handler returns 176 cycles after its last write.
+- **Memory.** The 2-byte silence buffer is allocated first and the 1024-byte synthesis area after it
+  (8 bytes higher in the reference host). A moving sample start that an envelope takes out of the
+  module reads host memory: below the module the reference host keeps, among other things, the
+  module's path, so the sound (not the register writes) of such a module depends on the path it was
+  loaded from.

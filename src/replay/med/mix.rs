@@ -28,20 +28,25 @@
 //!   channels 0 and 3) the level L(w) and side 1 L(32 - w), L(0) = 0, L(32) = V, else
 //!   1 + (V - 1) * w / 32. An 8-bit sample's term is s * L * voladj * 256 / (6400 * channels),
 //!   cut towards zero; L * voladj is a signed 16-bit product (it wraps). Without the stereo
-//!   flag both sides have L = V; with it but without free panning the term is doubled.
-//! - A 16-bit sample is shifted, not multiplied: its level, (V * w + 15) / 32 of 64 for a mono
-//!   one and L for a stereo one, goes down to a power of two, and the volume adjust (down to a
-//!   power of two of 100) over the channels (up to one) never raises it. A stereo sample's
-//!   left channel plays on side 1, its right on side 0.
-//! - The sides' sums are 16-bit words (they wrap), the high byte is played. The stereo
-//!   separation adds the other side's sum, shifted down by 5 - |sep|, negated for a positive
-//!   one. The echo adds what the side (crossed: the other side) put out floor(ms * 24023 /
-//!   1000) samples ago, shifted down by the depth, to the word.
+//!   flag both sides have L = V; with it but without free panning the channels count as half
+//!   as many (rounded down, one at least; rounded up for the 16-bit samples' shift).
+//! - A 16-bit sample is shifted, not multiplied: its level is L taken down to a power of two
+//!   (a mono one's with the pan in the middle is V / 2, rounded down), and the volume adjust
+//!   (down to a power of two of 100) over the channels (up to one) never raises it. A stereo
+//!   sample's left channel plays on side 1, its right on side 0.
+//! - An instrument whose output device byte (expansion data) is not 0 plays a semitone up,
+//!   and command 0FFF (note off) does not stop it.
+//! - A new note starts at the sample's first byte with the fraction of a byte the voice's
+//!   position had.
+//! - The sides' sums are 16-bit words (they wrap), the high byte is played. The echo adds
+//!   what the side (crossed: the other side) had floor(ms * 24023 / 1000) samples ago,
+//!   shifted down by the depth, to the word. Then the stereo separation adds the other
+//!   side's word, shifted down by 5 - |sep|, negated for a positive one (the echo's memory
+//!   is without it).
 //!
-//! Not measured, so guessed: the 16-bit samples without free panning (half the measured cases
-//! differ), an odd volume after the track's and the master volume (halved, rounded down), the
-//! order of separation and echo, and the step of a frequency that is not a table note's (a
-//! slide, a vibrato, an arpeggio).
+//! Not measured, so guessed: an odd volume after the track's and the master volume (halved,
+//! rounded down), and the step of a frequency that is not a table note's (a slide, a vibrato,
+//! an arpeggio).
 //!
 //! The reference's CPU is not a 68000 for these songs (`needs_fast_reference_cpu`): the mixer
 //! takes longer than a buffer with a few tracks on one, and the original then plays halves
@@ -301,6 +306,9 @@ struct Instr {
     decay: u16,
     midi_ch: u32,
     def_freq: u32,
+    /// The expansion data's output device byte: SoundStudio's mixer plays an instrument whose
+    /// byte is not 0 a semitone up (measured with 1 and 2 on seven notes: the next note's step).
+    outdev: u8,
 }
 
 impl Instr {
@@ -592,8 +600,10 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
             sep: 0,
             name: String::new(),
         };
-        // the instruments of the song structure
-        for i in 0..MAX_INSTR - 1 {
+        // the instruments of the song structure: the first song's (a later song's header has
+        // its own copy, without the first's expansion data: its loops are the short fields',
+        // an even number of frames)
+        for i in 0..if subs.is_empty() { MAX_INSTR - 1 } else { 0 } {
             let o = s + 8 * i;
             let ci = &mut instr[i];
             ci.rep = (be16(d, o) as u32) << 1;
@@ -819,7 +829,7 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
             let e = h.exp;
             next = be32(d, e) as usize;
             let (it_off, it_n, it_sz) = (be32(d, e + 4) as usize, be16(d, e + 8) as usize, be16(d, e + 10) as usize);
-            for i in 0..it_n.min(MAX_INSTR) {
+            for i in 0..if subs.is_empty() { it_n.min(MAX_INSTR) } else { 0 } {
                 let o = it_off + i * it_sz;
                 let ci = &mut instr[i];
                 if it_sz >= 2 {
@@ -842,6 +852,9 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
                     has_loop = true;
                 } else if ci.replen > 2 {
                     ci.flags = I_LOOP;
+                }
+                if it_sz >= 9 {
+                    ci.outdev = r8(d, o + 8);
                 }
                 if it_sz >= 18 {
                     ci.rep = be32(d, o + 10);
@@ -881,7 +894,7 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
             }
             let _ = song_tracks;
         }
-        if !has_loop {
+        if !has_loop && subs.is_empty() {
             for ci in instr.iter_mut() {
                 if ci.replen > 2 {
                     ci.flags = I_LOOP;
@@ -1005,7 +1018,9 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
                 }
             }
             if ok {
-                if smp.syn.is_some() {
+                // (SoundStudio's mixer plays a synth or hybrid sound at its instrument's volume:
+                // measured, three sounds of a module at two volumes each)
+                if smp.syn.is_some() && kind != Kind::Oss {
                     instr[i].init_vol = 128;
                 }
                 samp[i] = Some(smp);
@@ -1274,10 +1289,10 @@ const SOFT_HALF: usize = 16384;
 /// Its Paula period: 24023 Hz as the player counts it (3579545 / 149).
 const SOFT_PERIOD: u16 = 149;
 /// The mixed samples a second the player's ticks are counted in, and the same as the 16.16
-/// number a BPM tempo's tick length comes from (24023 * 65536 + 256: the middle of what four
-/// measured tempos allow, 1574371500..1574371668).
+/// number a BPM tempo's tick length comes from (24023 * 65536 + 320: within what eight
+/// measured tempos allow, 1574371620..1574371668).
 const SOFT_RATE: f64 = 24023.0;
-const SOFT_TICK: u64 = 24023 * 65536 + 256;
+const SOFT_TICK: u64 = 24023 * 65536 + 320;
 /// The rate a frequency outside the frequency table is stepped at: f * 65536 / 24063 rounded up
 /// is within a few units of the measured steps of finetune 0 (`STEPS`).
 const SOFT_STEP_RATE: u64 = 24063;
@@ -1456,9 +1471,10 @@ impl Soft {
             let n = (0..7).find(|n| (64 >> n) <= x).unwrap_or(6);
             Some((8 + n - tot) as u32)
         };
-        // a mono 16-bit sample's level is the volume times the pan's weight (of 32), a half
-        // rounded down; a stereo one's is the 8-bit samples' level
-        let m = |w: i64| (v * w.clamp(0, 32) + 15) >> 5;
+        // a mono 16-bit sample's level is the 8-bit samples' too, but half the volume (rounded
+        // down) on both sides with the pan in the middle (measured: 63 gives 31 there, 3 gives
+        // 1, 1 none)
+        let m = |w: i64| if w == 16 { v >> 1 } else { side0(w) };
         let (w0, w1) = if stereo { (16 + pan as i64, 16 - pan as i64) } else { (32, 32) };
         Lev { l, sh: [sh(m(w0)), sh(m(w1))], shc: [sh(l[0]), sh(l[1])] }
     }
@@ -1466,15 +1482,18 @@ impl Soft {
     /// Mixes `n` samples into `out` from `at`: the voices of the first `channels` tracks.
     fn render(&mut self, ram: &[u8], pans: &[i8], channels: usize, out: &mut [Vec<i8>; 2], at: usize, n: usize) {
         let nch = channels.min(self.v.len());
-        let lev: Vec<Lev> = (0..nch).map(|t| self.levels(t, pans[t], channels)).collect();
-        let muted = self.ticks <= 1;
         let (stereo, free) = (self.flags3 & 1 != 0, self.flags3 & 2 != 0);
-        // a level times the volume adjust is the player's 16-bit product (it wraps: 64 * 800)
-        let g = if stereo && !free { 2 } else { 1 };
+        // stereo without free panning: the levels are over half the channels, rounded down
+        // for the 8-bit samples' division and up for the 16-bit ones' shift (measured with 1
+        // to 7 and 25 channels)
+        let (over, over16) = if stereo && !free { ((channels / 2).max(1), channels.div_ceil(2)) } else { (channels.max(1), channels) };
+        let lev: Vec<Lev> = (0..nch).map(|t| self.levels(t, pans[t], over16)).collect();
+        let muted = self.ticks <= 1;
         let va = self.vol_adj as i64;
-        let den = 6400 * channels.max(1) as i64;
-        // an 8-bit sample's term: the player's table entry, 8.8, cut towards zero
-        let k = |s: i64, l: i64| s * g * ((l * va) as u16 as i16 as i64) * 256 / den;
+        let den = 6400 * over as i64;
+        // an 8-bit sample's term: the player's table entry, 8.8, cut towards zero. A level
+        // times the volume adjust is the player's 16-bit product (it wraps: 64 * 800)
+        let k = |s: i64, l: i64| s * ((l * va) as u16 as i16 as i64) * 256 / den;
         for i in at..at + n {
             // the two sides' sums: 16-bit words, 8.8 (the high byte is what Paula plays)
             let mut a = [0i64; 2];
@@ -1553,13 +1572,8 @@ impl Soft {
                     }
                 }
             }
-            let mut o = a;
-            if stereo && self.sep != 0 {
-                let n = 5 - self.sep.unsigned_abs() as u32;
-                let sg = -(self.sep.signum() as i64);
-                o = [o[0] + sg * (o[1] >> n), o[1] + sg * (o[0] >> n)];
-            }
-            let mut o = [o[0] as i16, o[1] as i16];
+            // the echo first (its memory is without the separation), then the separation
+            let mut o = [a[0] as i16, a[1] as i16];
             if let Some((cross, depth, d)) = self.echo {
                 let e = [self.ring[0][self.ring_at], self.ring[1][self.ring_at]];
                 for s in 0..2 {
@@ -1569,6 +1583,11 @@ impl Soft {
                 self.ring[0][self.ring_at] = o[0];
                 self.ring[1][self.ring_at] = o[1];
                 self.ring_at = (self.ring_at + 1) % d;
+            }
+            if stereo && self.sep != 0 {
+                let n = 5 - self.sep.unsigned_abs() as u32;
+                let sg = -(self.sep.signum() as i16);
+                o = [o[0].wrapping_add(sg * (o[1] >> n)), o[1].wrapping_add(sg * (o[0] >> n))];
             }
             out[0][i] = (o[0] >> 8) as i8;
             out[1][i] = (o[1] >> 8) as i8;
@@ -1837,6 +1856,9 @@ impl OctaMed {
                     if let Some(s) = smp {
                         n = (n as i32 + s.note_diff(n.wrapping_sub(1))) as u8;
                     }
+                    if self.soft.is_some() && i.outdev != 0 {
+                        n = n.saturating_add(1);
+                    }
                     return self.note_freq(n.wrapping_sub(1), ft);
                 }
                 0
@@ -2010,6 +2032,15 @@ impl OctaMed {
         let ft = (self.td[t].fine_tune.clamp(-8, 7) + 8) as usize;
         let (fr, st) = (&self.freqs[ft], &STEPS[ft]);
         let f = freq.clamp(0, 65535) as u16;
+        if f < 65535 && fr.binary_search(&f).is_err() {
+            // not a note of this finetune: one of another's (an instrument number without a
+            // note changes the track's finetune and leaves the note's frequency)
+            for (r, row) in self.freqs.iter().enumerate() {
+                if let Ok(n) = row.binary_search(&f) {
+                    return STEPS[r][n] as u64;
+                }
+            }
+        }
         if f >= fr[0] && f < 65535 {
             let n = fr.partition_point(|&x| x <= f) - 1;
             if fr[n] == f {
@@ -2353,8 +2384,8 @@ impl OctaMed {
         while i < SOFT_HALF {
             if self.soft.as_ref().is_some_and(|s| s.left < 1 << 16) {
                 self.callback(hw);
-                // a tick's samples, 16.16: measured at four tempos as ten times the whole
-                // part of 24023.004 * 65536 / (tempo * lines a beat)
+                // a tick's samples, 16.16: measured at eight tempos as ten times the whole
+                // part of 24023.005 * 65536 / (tempo * lines a beat)
                 let t = self.tempo;
                 let len = if t.bpm {
                     10 * (SOFT_TICK / (t.tempo.max(1) as u64 * t.lpb.max(1) as u64))
@@ -2482,6 +2513,8 @@ impl OctaMed {
                     self.delayed_stop = true;
                     self.songend = true;
                 }
+                // SoundStudio's mixer plays on an instrument with an output device (measured)
+                0xff if self.soft.is_some() && song.instr[self.td[t].prev_inum].outdev != 0 => {}
                 0xff => self.mute_track(hw, t),
                 v => {
                     if v <= 240 {

@@ -29,6 +29,14 @@
 //!
 //! The synth effects change the waveforms in the module, in guest memory, at the
 //! moment the original does, and restore them when the voice restarts.
+//!
+//! A voice that has played a one-shot sample goes on playing from the player's
+//! empty word, with length 0: 131072 bytes of the player's own memory. The port
+//! keeps the originals' variables there, in their layout (from memory dumps of the
+//! two Eagleplayers: the voices' structures, the song position and counters, the
+//! saved waveforms, the period table and the samples' addresses), as they are
+//! after each tick: equal to the originals' on 89 2.0 and 61 2.2 modules at four
+//! moments each.
 
 use super::{be16, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -36,7 +44,11 @@ use crate::machine::Machine;
 pub const OPEN: Open = Open { name: "SoundMon", detect, new };
 
 /// Bytes of the player's empty sample: what Paula reads after a one-shot sample,
-/// at length 0 (65536 words). The original's is its own memory, which is not silent.
+/// at length 0 (65536 words). The original's is its own memory, which is not silent:
+/// the empty word is followed by the player's variables (`write_state`), which this
+/// keeps there as the original does. What follows those is whatever the machine has
+/// after the player's hunk (zeros when the Eagleplayer is loaded alone, the next
+/// Eagleplayer's code when a whole directory of them is loaded); here zeros.
 const EMPTY_SIZE: u32 = 0x20000;
 
 #[derive(Default)]
@@ -212,9 +224,9 @@ fn dma_on(hw: &mut Hw, mask: u16) {
 /// off to the first restart, and for a restart up to its DMA on (2.0) or the next
 /// voice's (2.2). Paula stops a playing voice only at the end of its word, so DMA
 /// off and on at one moment would not restart it.
-/// Colour clocks from the song's start to the first tick (the originals' set-up, which writes
-/// the voices' empty sample first), from their write logs.
-const TIMER_DELAY_20: u64 = 112;
+/// Colour clocks from the song's start to the first tick's first write, past the timer's
+/// period (the same on every module: 89 of 2.0, 61 of 2.2), from the originals' write logs.
+const TIMER_DELAY_20: u64 = 331;
 /// 2.0 tick: the first voice's period follows its synth volume write by FIRST_PER_AFTER_VOL_20,
 /// the pointer follows the volume byte by VOL_TO_LOC_20 or the tick's start by TICK_TO_LOC_20
 /// when no period is written.
@@ -228,7 +240,7 @@ const PER_TO_LOC_20: u64 = 294;
 /// 2.2: the originals' set-up takes some 19000 to 30000 colour clocks (it walks the song's steps
 /// and the instruments) before the first tick, but their renders (WAV) do not contain that time,
 /// only their write logs do, so the first tick comes at once.
-const TIMER_DELAY_22: u64 = 0;
+const TIMER_DELAY_22: u64 = 214;
 /// 2.2 tick, from the reference logs: each voice's synth step takes SYNTH_STEP_22 colour clocks,
 /// its volume write comes VOL_PRE_22 into the step and the step goes on VOL_POST_22 after it,
 /// an LFO period write LFO_PRE_22 after that.
@@ -306,6 +318,13 @@ impl Replayer for SoundMon {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.tick_inner(hw);
+        self.write_state(hw.bus);
+    }
+}
+
+impl SoundMon {
+    fn tick_inner(&mut self, hw: &mut Hw) {
         // Paula has played up to now from the waveforms as they were
         let b = &mut *hw.bus;
         b.paula.sync(b.clock, &b.ram);
@@ -386,6 +405,95 @@ impl Replayer for SoundMon {
 }
 
 impl SoundMon {
+    /// The player's variables as the original keeps them after its empty word, where a voice
+    /// that has played a one-shot sample goes on reading them (522 bytes in 2.0, 556 in 2.2).
+    /// 2.0: the word, four voices of 32 bytes, 16 bytes of song state, four saved waveforms
+    /// (address and 32 bytes), the 84 periods, the 15 samples' addresses and a long of zeros.
+    /// 2.2: the word, four voices of 36 bytes, the song state with the vibrato table (and the
+    /// pointer into it), the last DMA word, the waveforms' address, the saved waveforms, the
+    /// periods and the samples' addresses.
+    fn write_state(&self, bus: &mut crate::bus::Bus) {
+        let w16 = |s: &mut [u8], o: usize, v: u16| s[o..o + 2].copy_from_slice(&v.to_be_bytes());
+        let w32 = |s: &mut [u8], o: usize, v: u32| s[o..o + 4].copy_from_slice(&v.to_be_bytes());
+        let mut s = vec![0u8; if self.v22 { 0x22c } else { 0x20a }];
+        // a voice: 32 bytes in 2.0, 36 in 2.2
+        let size = if self.v22 { 36 } else { 32 };
+        for (i, v) in self.voices.iter().enumerate() {
+            let o = 2 + size * i;
+            w16(&mut s, o, v.period);
+            s[o + 2] = v.volume;
+            s[o + 3] = v.instrument;
+            w32(&mut s, o + 4, v.addr);
+            w16(&mut s, o + 8, v.len);
+            s[o + 10] = v.note;
+            s[o + 11] = v.arp_value;
+            s[o + 12] = v.auto_slide;
+            s[o + 13] = v.auto_arp;
+            w16(&mut s, o + 14, v.eg_ptr);
+            w16(&mut s, o + 16, v.lfo_ptr);
+            w16(&mut s, o + 18, v.adsr_ptr);
+            if self.v22 {
+                w16(&mut s, o + 20, v.mod_ptr);
+                s[o + 22] = v.eg_count as u8;
+                s[o + 23] = v.lfo_count as u8;
+                s[o + 24] = v.adsr_count as u8;
+                s[o + 25] = v.mod_count;
+                s[o + 26] = v.fx_count;
+                s[o + 27] = v.synth as u8;
+                s[o + 28] = v.old_eg;
+                s[o + 29] = v.eg_control;
+                s[o + 30] = v.lfo_control;
+                s[o + 31] = v.adsr_control;
+                s[o + 32] = v.mod_control;
+                s[o + 34] = v.vibrato;
+                s[o + 35] = v.fx_control;
+            } else {
+                w16(&mut s, o + 20, v.eg_count);
+                w16(&mut s, o + 22, v.lfo_count);
+                w16(&mut s, o + 24, v.adsr_count);
+                s[o + 26] = v.synth as u8;
+                s[o + 28] = v.old_eg;
+                s[o + 29] = v.eg_control;
+                s[o + 30] = v.lfo_control;
+                s[o + 31] = v.adsr_control;
+            }
+            // the waveform the synth effects change, and its bytes
+            let b = if self.v22 { 0xb8 } else { 0x92 } + 36 * i;
+            w32(&mut s, b, v.wave);
+            s[b + 4..b + 36].copy_from_slice(&v.saved);
+        }
+        let g = 2 + 4 * size;
+        w16(&mut s, g, self.step);
+        s[g + 2] = self.pat;
+        s[g + 3] = self.st;
+        s[g + 4] = self.tr;
+        s[g + 5] = self.count;
+        s[g + 6] = self.delay;
+        s[g + 7] = self.arp;
+        s[g + 8] = self.rep;
+        s[g + 9] = self.b(29);
+        let (periods, samples) = if self.v22 {
+            w32(&mut s, g + 12, self.empty + 0xa2 + 2 * self.vib as u32);
+            for (k, v) in VIBRATO.iter().enumerate() {
+                w16(&mut s, 0xa2 + 2 * k, *v as u16);
+            }
+            w16(&mut s, 0xb2, 0x8000 | self.mask);
+            w32(&mut s, 0xb4, self.waves);
+            (0x148, 0x1f0)
+        } else {
+            w16(&mut s, g + 10, self.mask);
+            w32(&mut s, g + 12, self.waves);
+            (0x122, 0x1ca)
+        };
+        for (k, p) in PERIODS.iter().enumerate() {
+            w16(&mut s, periods + 2 * k, *p);
+        }
+        for (k, a) in self.samples.iter().enumerate() {
+            w32(&mut s, samples + 4 * k, *a);
+        }
+        bus.write_bytes(self.empty, &s);
+    }
+
     fn b(&self, o: usize) -> u8 {
         self.d.get(o).copied().unwrap_or(0)
     }
@@ -986,6 +1094,33 @@ mod tests {
         e.render(&mut out);
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
         e.m.bus.write_log.take().unwrap()
+    }
+
+    /// The player's variables follow its empty word in guest memory, in each version's layout.
+    #[test]
+    fn keeps_its_variables_after_the_empty_word() {
+        for (mark, volume_at, periods, voice) in [(b"V.2", 0x19, 0x122, 32), (b"V.3", 0x1d, 0x148, 36)] {
+            let mut e = Engine::new(48000.0);
+            e.open_replayers = true;
+            e.m.bus.write_log = Some(Vec::new());
+            e.play_data(Path::new("test.bp"), module(mark, volume_at)).unwrap();
+            let mut out = vec![0f32; 2 * 4800];
+            e.render(&mut out);
+            let log = e.m.bus.write_log.take().unwrap();
+            // the first tick points every voice at the empty word
+            let empty = (reg(&log, 0xDFF0A0)[0] as u32) << 16 | reg(&log, 0xDFF0A2)[0] as u32;
+            let bus = &e.m.bus;
+            assert_eq!(bus.r16(empty), 0);
+            for i in 0..4 {
+                let v = empty + 2 + voice * i;
+                assert_eq!(bus.r16(v), super::PERIODS[60], "{mark:?} voice {i}");
+                assert_eq!(bus.r8(v + 3), 1, "the instrument");
+                assert_eq!(bus.r16(v + 8), 16, "the length");
+            }
+            for (k, p) in super::PERIODS.iter().enumerate() {
+                assert_eq!(bus.r16(empty + periods + 2 * k as u32), *p);
+            }
+        }
     }
 
     fn reg(log: &[(u32, u16, u64)], a: u32) -> Vec<u16> {

@@ -633,3 +633,12 @@ data; 330 modules):
   modules with more than one over 20 s, 1179 subsongs of 393 modules built with three table
   entries over 5 s (2 of them read positions past the file and differ), and a change while the
   song plays on 403 modules: values and write times equal.
+* 6 (a program that never waits): a pitch program or a volume program whose commands run in a
+  circle without a wait (a jump to a jump, to itself, ...) keeps the original inside that tick
+  for ever: the engine reports "guest code did not return" with the program counter in the
+  pitch program's code (29 built modules) or the volume program's (2), and the reference writes
+  nothing after the tick before. That is the module's data, not the hosting: the code that runs
+  is the player's own loop over the commands. The port takes 4096 commands of one program in
+  one tick for it, writes nothing from that tick on and reports the song's end. All 31 modules
+  are then equal to the reference in values and write times over 30 s (they were 31 "the
+  reference stops" cases), and no other of the 606 modules reaches the count.

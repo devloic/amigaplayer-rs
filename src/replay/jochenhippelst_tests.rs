@@ -217,3 +217,14 @@ fn a_change_of_subsong_ends_the_sound_as_the_original_does() {
     let gaps: Vec<_> = w.windows(2).map(|p| p[1].2 - p[0].2).collect();
     assert_eq!(gaps, [8, 6, 6, 6]);
 }
+
+#[test]
+fn a_pitch_program_that_never_waits_stops_the_player() {
+    // a jump to itself: the original does not come back from that tick and writes nothing more
+    let d = build(b"TFMX", &[0xE0, 0x00], &[1, 0, 0, 0, 0, 0x10, 0xE1], &[0x10, 0x00, 0xFF], 3);
+    assert!(detect(&d));
+    let (a, b) = (run(&d, 30).unwrap(), run(&d, 300).unwrap());
+    assert_eq!(a, b);
+    // (the same module with a program that waits goes on writing)
+    assert!(run(&small(), 300).unwrap().len() > run(&small(), 30).unwrap().len());
+}

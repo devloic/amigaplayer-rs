@@ -53,6 +53,22 @@ use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "Jochen Hippel ST", detect, new };
 
+/// The same replayer for a COSO file with the `TFMX` tag and no prefix code, which is also what
+/// the Amiga "Hippel COSO" replayer takes: this entry stands before that one in the list and
+/// takes the files whose layout is the ST's (`st_layout`).
+pub const OPEN_COSO: Open = Open { name: "Jochen Hippel ST", detect: detect_coso, new };
+
+fn detect_coso(d: &[u8]) -> bool {
+    tag_at(d, 0) == Some(*b"COSO") && tag_at(d, 0x20) == Some(*b"TFMX") && st_layout(d) && parse(d).is_some()
+}
+
+/// What tells an ST image from an Amiga one, whose header is the same: the table behind the
+/// subsongs has 6 bytes per entry and the sample table follows it. In an Amiga module that table
+/// is the sample list, of 10 bytes per sample, with the sample data behind it.
+fn st_layout(h: &[u8]) -> bool {
+    h.len() >= 0x44 && be32(h, 0x1C).wrapping_sub(be32(h, 0x18)) == 6 * (be16(h, 0x32) as u32 + 1)
+}
+
 /// Colour clocks between two ticks.
 const TICK: u64 = 70940;
 /// The volume table (18 values) and the 34 bytes after it.
@@ -96,6 +112,11 @@ const LINE: u64 = 227;
 /// From the end of the music code to channel A's first event, by its case (tone held, noise
 /// held, tone started, noise started, silent), with the tick's entry code.
 const HEAD_A: [u64; 5] = [866, 937, 662, 679, 978];
+/// From a tick's last write to its end: after the digital voice's volume write, and after
+/// channel C's period write when the digital voice goes on playing. A note start waits for the
+/// channel's sample to end, which can take longer than a tick (the noise at a long period): the
+/// next tick then starts where this one ends (measured on 77,600 ticks, one value each).
+const TAIL: [u64; 2] = [188, 433];
 /// From the original's call of the host at the song's end to the end of the music code, less
 /// the paths counted after the call (measured on 193 song ends: one value in every build).
 const END_CALL: i64 = 2214;
@@ -290,8 +311,13 @@ fn parse(d: &[u8]) -> Option<Module> {
     }
     if !m.mmme {
         let n = m.n_fs.min(0x400);
-        let e2 = (0..n).filter(|&i| m.g(m.entry(m.t_fs, i) as i64) == 0xE2).count() as u64;
-        m.check_cycles += 152 + (85 + 39 * coso) * n as u64 + 21 * e2 - 96 * coso;
+        let first = |i: usize| m.entry(m.t_fs, i) as i64;
+        let e2 = (0..n).filter(|&i| m.g(first(i)) == 0xE2).count() as u64;
+        // (a positive byte after it: the Amiga shape, counted on another path)
+        let amiga = (0..n).filter(|&i| m.g(first(i)) == 0xE2 && m.g(first(i) + 1) < 0x80).count() as u64;
+        // a COSO file's programs are found through its table: 16-bit entries take 6 cycles more
+        let per = if coso == 0 { 85 } else if m.short { 124 } else { 118 };
+        m.check_cycles += 152 + per * n as u64 + 21 * e2 + 10 * amiga - 96 * coso;
     }
     Some(m)
 }
@@ -338,6 +364,11 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     };
     // the Amiga flavour of the format starts its pitch programs with a command that the ST
     // flavour has other uses for: more of those than the opposite shape and it is not ours
+    // (the original's check looks at this for the TFMX tag only: 6 files with the MMME tag
+    // and more of the Amiga shape are played, 8 with the TFMX tag are refused)
+    if mmme {
+        return Some(m);
+    }
     let (mut p, mut n) = (0, 0);
     for i in 0..m.n_fs.min(0x400) {
         let o = m.entry(m.t_fs, i);
@@ -665,15 +696,14 @@ enum F {
 /// build of the original (old or new command set, without or with the MMME pitch code), one cost
 /// per path of `F`, then a constant (and an unused column). The reference's cycles per tick were
 /// measured from the addresses it executes and solved for whole-cycle costs of these paths:
-/// they give the reference's count on every tick measured (66,716 ticks of 330 modules). A cost
+/// they give the reference's count on every tick measured (117,126 ticks of 575 modules). A cost
 /// is the sum over the addresses a path adds, so it can be negative (a path that skips more than
-/// it runs). Not measured, and taken as the other build's step: the SID section's leave on a
-/// period above $EEE in the build without the MMME code (17 cycles after the leave on a period
-/// of $10 or less), and the old set's `$E7` and sample command in a COSO file with 16-bit
-/// tables and the MMME code (`FsE7Old`, `FsDigOld`: measured without the MMME code only).
+/// it runs). Not measured, and taken as the other build's step: the old set's `$E7` and sample
+/// command in a COSO file with 16-bit tables and the MMME code (`FsE7Old`, `FsDigOld`:
+/// measured without the MMME code only).
 #[rustfmt::skip]
 const COST: [[i32; F::N as usize + 2]; 4] = [
-    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 67, 19, 0, 0, 0, 0, 5108, 0],
+    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 18, 0, 0, 0, 0, 0, 8, 0, 0, 67, 19, 0, 0, 0, 0, 5108, 0],
     [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 18, 0, 0, 0, 0, 0, 0, 0, 0, 67, 19, 0, 0, 0, 0, 5279, 0],
     [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 0, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 0, 0, 0, 0, 8, -14, 48, 0, 19, -19, 0, -60, 27, 5528, 0],
     [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 153, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 4, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 87, -19, 0, 0, 0, -14, 67, 0, 0, -19, 0, -60, 27, 5699, 0],
@@ -1577,7 +1607,11 @@ impl JochenHippelSt {
                 self.cy += 385;
                 self.note_start(hw, 3, d.start, d.lp, d.len1, d.len2);
             }
-            _ => return,
+            _ => {
+                self.cy += TAIL[1];
+                self.now(hw);
+                return;
+            }
         }
         self.cy += 40;
         self.now(hw);
@@ -1585,6 +1619,8 @@ impl JochenHippelSt {
         self.cy += if d.vol.is_none() { 499 } else { 487 };
         self.now(hw);
         hw.vol(1, d.vol.unwrap_or(self.a_vol));
+        self.cy += TAIL[0];
+        self.now(hw);
     }
 }
 
@@ -1657,7 +1693,8 @@ impl Replayer for JochenHippelSt {
 /// lengths were measured (68000 cycles per executed address, counted per module and related to
 /// the module's data) and are equal to the figures here on all 330 modules compared:
 /// * the check (`Module::check_cycles`): the words up to the prefix's address load, and for a
-///   TFMX module a look at every pitch program;
+///   TFMX module a look at every pitch program (found through the table in a COSO file: 6
+///   cycles less per program with 32-bit entries; 10 more for a program of the Amiga shape);
 /// * the initialisation: 292051 cycles (nearly all of it the noise buffer's filling), 12 more
 ///   with the MMME tag, 4 more for a COSO file with 16-bit tables; the look through the prefix
 ///   (`Prefix::scan`); the sample table (`table`: the word at its place when that is inside
@@ -1671,8 +1708,7 @@ impl Replayer for JochenHippelSt {
 /// image's memory), and each stretch between ends on a whole clock as well: the first is 145479
 /// clocks, the last 8, and a raw module's sample table is looked at before the memory request.
 /// Not observed, so guessed from the nearest case: a table word of $100 in a raw module (taken
-/// as $80), a companion sample file (as no table), a TFMX-tagged COSO file without prefix (the
-/// prefixed one's figures).
+/// as $80), a companion sample file (as no table).
 fn reference_start(m: &Module, table: Option<u16>, samples: usize, converted: Option<(usize, usize)>) -> u64 {
     let coso = m.in_file.is_some();
     let valid = matches!(table, Some(0x80 | 0x100));

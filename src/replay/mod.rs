@@ -293,6 +293,8 @@ pub const REPLAYERS: &[Open] = &[
     tfhd::OPEN_PRO,
     iffsmus::OPEN,
     bendaglish::OPEN,
+    // before Hippel COSO, which takes any "COSO" with "TFMX": the files laid out as the ST's
+    jochenhippelst::OPEN_COSO,
     hippel::OPEN_COSO,
     hippel::OPEN,
     davidwhittaker::OPEN,

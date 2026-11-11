@@ -1812,7 +1812,7 @@ impl Musicline {
                                 x.tune_position = x.tune_position.wrapping_add(1);
                             }
                         } else if pos > target {
-                            self.cyc += 13;
+                            self.cyc += 13 + 20 * (arg == 0) as u64;
                             x.tune_jump_counter = arg;
                             x.tune_position = target;
                         } else {
@@ -2906,10 +2906,15 @@ impl Musicline {
                     x.part_note = 0;
                     x.pt_pitch_slide_to = p2 as i16;
                     if p != p2 {
+                        // (measured, with the instrument's own portamento branch)
+                        self.cyc += 22;
                         x.pt_pitch_slide_down = p < p2;
                         return;
                     }
                     x.pt_pitch_slide_to = -1;
+                } else {
+                    // (measured: the row without a note)
+                    self.cyc -= 16;
                 }
                 if x.pt_pitch_slide_to == -1 {
                     x.pt_pitch_slide = 0;
@@ -3217,6 +3222,7 @@ impl Musicline {
                 let p = Self::get_period(x, x.note).wrapping_add(x.pt_pitch_slide_note).wrapping_sub(x.pt_pitch_slide_to as u16) as i16;
                 self.cyc += 226;
                 if p <= 0 {
+                    self.cyc += 32;
                     x.pt_pitch_slide_note = x.pt_pitch_slide_note.wrapping_sub(p as u16);
                     x.pt_pitch_slide_to = -1;
                 }
@@ -3284,6 +3290,8 @@ impl Musicline {
                     x.arp_volume_slide_speed = a as u16;
                 }
             }
+            // (only the note's start comes here with it, and leaves 68 cycles earlier: measured)
+            AE_RESTART => self.cyc -= 68,
             _ => {}
         }
     }

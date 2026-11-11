@@ -30,7 +30,7 @@
 //!
 //! The reference is the Eagleplayer 2.06 "Tim Follin II" player in the project's 68000
 //! engine: the register writes are equal in value and in time (colour clocks from the
-//! song's start) on the 13 corpus files and Puzznic's ten subsongs over 120 s. The time of
+//! song's start) on the 13 corpus files and Puzznic's ten subsongs over 600 s. The time of
 //! a tick's first write is a sum of 68000 cycles of the code paths the tick takes (`COST`),
 //! the times between its writes are fixed by the voices written (`play`), and the song's
 //! start is where the original's start-up puts it (`START_HEADER`).

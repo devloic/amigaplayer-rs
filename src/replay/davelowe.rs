@@ -246,9 +246,7 @@ pub struct DaveLowe {
     vbase: i64,
     vadj: bool,
     last_vol: Option<i64>,
-    /// Layout B: the delay the DMA enable writes have put on the rest of the tick, and the voice
-    /// that is the first with the longest order list.
-    fill: i64,
+    /// Dave Lowe New: the voice that is the first with the longest order list.
     special_voice: usize,
     /// The `dl` driver's wrapper constants (cycles) and, per voice, whether its DMA start writes
     /// carry the master enable bit.
@@ -260,6 +258,10 @@ pub struct DaveLowe {
     resume: Option<u64>,
     /// The cycle of the last volume write of the tick so far (`dl` timing).
     vol_t: Option<i64>,
+    /// Dave Lowe New: 68000 cycles since the tick's entry (the ledger of `F`), and the two path
+    /// pieces that lead to the next volume write (held value, envelope step).
+    cy: i64,
+    vf: (F, F),
 }
 
 fn rows_key(d: &[u8], n: usize) -> Cfg {
@@ -1033,11 +1035,9 @@ impl DaveLowe {
             &[0, 0, END]
         } else if !cfg.held {
             &[END]
-        } else if cfg.kind == Kind::DlnA {
-            // (a layout A rest's envelope is still stepping for a few ticks, which shows only
-            // in the time the voice takes)
-            &[0, 0, 0, 0, 0, 0, 0, END]
-        } else if cfg.kind == Kind::DlnB {
+        } else if matches!(cfg.kind, Kind::DlnA | Kind::DlnB) {
+            // (a Dave Lowe New rest's envelope is still stepping for eight ticks, which shows
+            // only in the time the voice takes)
             &[0, 0, 0, 0, 0, 0, 0, 0, END]
         } else {
             &[0, END]
@@ -1077,13 +1077,14 @@ impl DaveLowe {
             vbase: 0,
             vadj: true,
             last_vol: None,
-            fill: 0,
             special_voice: 0,
             wrap: Wrap { w: [0; 5], core: [0; 4], na: [0; 4] },
             dmaon_master: [false; 4],
             chain: Vec::new(),
             resume: None,
             vol_t: None,
+            cy: 0,
+            vf: (F::VolHeld, F::VolStep),
         };
         s.start(1);
         s
@@ -1160,24 +1161,41 @@ impl DaveLowe {
         vi == 3 && self.fx.as_ref().is_some_and(|f| f.active)
     }
 
-    /// Layout A: the original's work between writes is modelled per voice slot (the `SLOT_*`
-    /// tables); `tw` lets the clock run to the moment `t` (colour clocks after the tick's entry).
+    /// `older_*`: the original's work between writes is modelled per voice slot (the `OLD_*` and
+    /// `SLOT_*` tables); `tw` lets the clock run to the moment `t` (colour clocks after the tick's entry).
     fn timed(&self) -> bool {
-        matches!(self.cfg.kind, Kind::DlnA | Kind::DlnB | Kind::Older)
+        self.cfg.kind == Kind::Older
     }
 
-    /// Layout B differs from layout A in some of the slot constants: `a` for A, `b` for B.
-    fn kb(&self, a: i64, b: i64) -> i64 {
-        if self.cfg.kind == Kind::DlnB {
-            b
+    /// Dave Lowe New: the writes come at the ledger's cycle count.
+    fn ledger(&self) -> bool {
+        matches!(self.cfg.kind, Kind::DlnA | Kind::DlnB)
+    }
+
+    /// The path piece `f` of voice `vi` has run.
+    fn c(&mut self, f: F, vi: usize) {
+        let (cost, b) = COST[f as usize];
+        self.cy += cost[vi & 3] as i64 + if self.cfg.kind == Kind::DlnB { b as i64 } else { 0 };
+    }
+
+    /// The stream command's cost: a ledger piece for Dave Lowe New, else a figure for `cmd`.
+    fn cc(&mut self, f: F, vi: usize, other: i64) {
+        if self.ledger() {
+            self.c(f, vi);
         } else {
-            a
+            self.cmd += other;
         }
     }
 
     fn tw(&self, hw: &mut Hw, t: i64) {
-        if self.timed() {
-            let target = (self.base as i64 + t + self.fill).max(0) as u64;
+        if self.ledger() {
+            // (the ledger counts cycles from the tick's entry; the clock is at the floor of half)
+            let target = (self.base as i64 + t.div_euclid(2)).max(0) as u64;
+            if hw.bus.clock < target {
+                hw.bus.clock = target;
+            }
+        } else if self.timed() {
+            let target = (self.base as i64 + t).max(0) as u64;
             if hw.bus.clock < target {
                 hw.bus.clock = target;
             }
@@ -1203,6 +1221,9 @@ impl DaveLowe {
         if self.muted(vi) && !on {
             return;
         }
+        if self.ledger() {
+            self.tt = self.cy;
+        }
         self.tw(hw, self.tt);
         let bit = 1u16 << self.v[vi].ch;
         // (the original's DMA start also sets the master enable bit)
@@ -1214,10 +1235,10 @@ impl DaveLowe {
         };
         hw.dmacon(if on { 0x8000 | master | bit } else { bit });
         if self.cfg.kind == Kind::DlnB {
-            // the enable follows 10 colour clocks later and delays all that comes after
-            hw.bus.clock += 10;
+            // the enable follows
+            self.c(F::Filler, vi);
+            self.tw(hw, self.cy);
             hw.dmacon(FILLER);
-            self.fill += 10;
         }
     }
 
@@ -1225,9 +1246,15 @@ impl DaveLowe {
         if self.muted(vi) {
             return;
         }
+        if self.ledger() {
+            self.tt = self.cy;
+        }
         self.tw(hw, self.tt);
         hw.loc(self.v[vi].ch, self.mem.wrapping_add(a));
-        if self.cfg.kind == Kind::Dl {
+        if self.ledger() {
+            self.c(F::LocLen, vi);
+            self.tw(hw, self.cy);
+        } else if self.cfg.kind == Kind::Dl {
             // (a note's length goes through the Eagleplayer's intercept, a loop reload's does not)
             self.tw(hw, self.tt + if note { DL_PRE_LEN[self.v[vi].ch & 3] } else { DL_RELOAD_LEN });
         } else {
@@ -1237,6 +1264,9 @@ impl DaveLowe {
     }
 
     fn per(&mut self, vi: usize, p: u16, hw: &mut Hw) {
+        if self.ledger() {
+            self.tt = self.cy;
+        }
         if !self.muted(vi) {
             self.tw(hw, self.tt);
             hw.per(self.v[vi].ch, p);
@@ -1245,6 +1275,9 @@ impl DaveLowe {
 
     /// A volume written straight, which the master volume does not see.
     fn vol_raw(&mut self, vi: usize, val: u16, hw: &mut Hw) {
+        if self.ledger() {
+            self.tt = self.cy;
+        }
         self.vol_t = Some(self.tt);
         if !self.muted(vi) {
             self.tw(hw, self.tt);
@@ -1287,7 +1320,10 @@ impl DaveLowe {
     fn vol_step(&mut self, vi: usize, hw: &mut Hw) {
         let e = self.v[vi].env;
         let w = self.w(e);
-        if self.timed() {
+        if self.ledger() {
+            self.c(if w == END { self.vf.0 } else { self.vf.1 }, vi);
+            self.tt = self.cy;
+        } else if self.timed() {
             self.tt = self.vbase - if w != END && self.vadj { 9 } else { 0 };
             self.last_vol = Some(self.tt);
         } else if self.cfg.kind == Kind::Dl {
@@ -1325,11 +1361,22 @@ impl DaveLowe {
             self.songcnt = [0xFF; 4];
             end = true;
         }
+        if self.ledger() {
+            self.c(if rest { F::RestFlag } else if first { F::WrapFirst } else if zero { F::Wrap0 } else { F::Wrap1 }, vi);
+            if end {
+                // (the original reports the song's end to its host and goes on from that call at a
+                // whole colour clock, which drops an odd cycle: the call comes an odd number of
+                // cycles before this piece's end, in a rest an even number)
+                self.c(F::WrapEnd, vi);
+                self.cy = if rest { self.cy & !1 } else { (self.cy - 1) | 1 };
+            }
+            return;
+        }
         if self.cfg.kind == Kind::Dl {
             self.cmd += if rest { DL_WRAP_REST } else if zero || first { DL_WRAP0 } else { DL_WRAP1 } + if end { 2 * WRAP_END } else { 0 };
             return;
         }
-        self.cmd += if rest { REST_FLAG_COST[vi] } else { WRAP_COST[(zero || (first && self.cfg.kind != Kind::DlnB)) as usize][vi] + self.kb(0, B_WRAP) } + if end { WRAP_END } else { 0 };
+        self.cmd += if rest { REST_FLAG_COST[vi] } else { WRAP_COST[(zero || first) as usize][vi] } + if end { WRAP_END } else { 0 };
     }
 
     // ------------------------------------------------------------ the voice
@@ -1337,6 +1384,9 @@ impl DaveLowe {
     fn voice(&mut self, vi: usize, hw: &mut Hw) {
         if self.cfg.kind == Kind::Dl {
             return self.voice_dl(vi, hw);
+        }
+        if self.ledger() {
+            return self.voice_new(vi, hw);
         }
         if self.v[vi].dead {
             return;
@@ -1379,11 +1429,10 @@ impl DaveLowe {
             self.vol_step(vi, hw);
         }
         if self.timed() {
-            let extra = self.kb(0, B_TAIL[k]);
             self.slot = match self.last_vol {
                 Some(t) if old => t + OLD_TAIL[k],
-                Some(t) => t + SLOT_TAIL[k] + extra,
-                None => s0 + SLOT_PLAIN[k] + extra,
+                Some(t) => t + SLOT_TAIL[k],
+                None => s0 + SLOT_PLAIN[k],
             };
         }
         if self.cfg.dma_tick && !self.v[vi].dead {
@@ -1394,6 +1443,116 @@ impl DaveLowe {
                 }
             }
             self.dma(vi, !off, hw);
+        }
+    }
+
+    /// One voice of a tick of Dave Lowe New: every piece of the path the original takes adds its
+    /// cycles to the ledger, and a write comes where the ledger stands.
+    fn voice_new(&mut self, vi: usize, hw: &mut Hw) {
+        if self.v[vi].dead {
+            self.c(F::Dead, vi);
+            return;
+        }
+        if self.v[vi].left == 0 {
+            self.c(F::Fetch, vi);
+            self.fetch(vi, hw);
+            return;
+        }
+        if self.v[vi].left == 1 {
+            if self.v[vi].smode != 0 {
+                self.c(F::LastOff, vi);
+                self.dma(vi, false, hw);
+                self.c(F::OffPost, vi);
+            } else {
+                self.c(F::Last, vi);
+            }
+            self.v[vi].left = 0;
+        } else {
+            if self.v[vi].smode == 3 {
+                let (a, l) = self.v[vi].lp;
+                self.c(F::Reload, vi);
+                self.lc(vi, a, l, false, hw);
+                self.v[vi].smode = 1;
+                self.c(F::ReloadPost, vi);
+            } else {
+                self.c(F::Count, vi);
+            }
+            self.v[vi].left -= 1;
+        }
+        self.slide_new(vi, hw);
+        self.vf = (F::VolHeld, F::VolStep);
+        self.vol_step(vi, hw);
+        self.c(F::VolPost, vi);
+    }
+
+    /// Portamento and vibrato of Dave Lowe New.
+    fn slide_new(&mut self, vi: usize, hw: &mut Hw) {
+        let mut p = self.v[vi].period;
+        let mut stepped = 0;
+        if self.v[vi].pmode != 0 {
+            if self.v[vi].pdelay != 0 {
+                self.v[vi].pdelay -= 1;
+                self.c(F::PDelay, vi);
+            } else {
+                stepped += 1;
+                let v = &mut self.v[vi];
+                let up = v.pmode == 1;
+                if up {
+                    p = p.wrapping_add(v.pstep);
+                    if p > v.ptarget {
+                        p = v.ptarget;
+                        v.pmode = 0;
+                    }
+                } else {
+                    p = p.wrapping_sub(v.pstep);
+                    if p <= v.ptarget {
+                        p = v.ptarget;
+                        v.pmode = 0;
+                    }
+                }
+                let done = v.pmode == 0;
+                self.c(match (up, done) {
+                    (true, false) => F::PUp,
+                    (true, true) => F::PUpEnd,
+                    (false, false) => F::PDown,
+                    (false, true) => F::PDownEnd,
+                }, vi);
+            }
+        }
+        if self.v[vi].vstate != 0 {
+            if self.v[vi].vdelay != 0 {
+                self.v[vi].vdelay -= 1;
+                self.c(F::VDelay, vi);
+            } else if self.v[vi].vcount != 0 {
+                self.v[vi].vcount -= 1;
+                self.c(F::VRate, vi);
+            } else {
+                let v = &mut self.v[vi];
+                v.vcount = v.vreload;
+                stepped += 1;
+                let f;
+                if v.vstate < 3 {
+                    p = p.wrapping_sub(v.vdown);
+                    v.vstate += 1;
+                    f = F::VDown;
+                } else {
+                    p = p.wrapping_add(v.vup);
+                    v.vstate += 1;
+                    f = if v.vstate == 5 { F::VWrap } else { F::VUp };
+                    if v.vstate == 5 {
+                        v.vstate = 1;
+                    }
+                }
+                self.c(f, vi);
+            }
+        }
+        if stepped != 0 {
+            if stepped == 2 {
+                self.c(F::Both, vi);
+            }
+            self.v[vi].period = p;
+            self.per(vi, p, hw);
+            self.c(F::PerPost, vi);
         }
     }
 
@@ -1462,14 +1621,12 @@ impl DaveLowe {
         let mut cost = 0;
         let mut pt = 0;
         let mut pt_dl = 0;
-        let mut stepped = 0;
         if v.pmode != 0 {
             if v.pdelay != 0 {
                 v.pdelay -= 1;
                 cost += if dl { DL_DELAY } else { SLOT_DELAY };
             } else {
                 changed = true;
-                stepped += 1;
                 pt = SLOT_PORTA;
                 pt_dl = DL_PORTA;
                 if v.pmode == 1 {
@@ -1497,7 +1654,6 @@ impl DaveLowe {
             } else {
                 v.vcount = v.vreload;
                 changed = true;
-                stepped += 1;
                 if v.vstate < 3 {
                     p = p.wrapping_sub(v.vdown);
                     v.vstate += 1;
@@ -1519,9 +1675,6 @@ impl DaveLowe {
         if changed {
             v.period = p;
             self.add += cost;
-            if stepped == 2 && self.cfg.kind == Kind::DlnB {
-                self.add += B_SLIDE_BOTH;
-            }
             let s0 = self.slot;
             if self.cfg.kind == Kind::Dl {
                 let k = vi & 3;
@@ -1554,7 +1707,7 @@ impl DaveLowe {
             match w / 4 {
                 0 => return,
                 1 => {
-                    self.cmd += self.kc(CMD_SAMPLE, DL_CMD[1]);
+                    self.cc(F::Cmd1, vi, self.kc(CMD_SAMPLE, DL_CMD[1]));
                     let rec = self.l(pos + 2) as usize;
                     pos += 6;
                     let mut r = [0u8; 14];
@@ -1576,7 +1729,13 @@ impl DaveLowe {
                     let len = be16(&r, 6);
                     if ty == 0 {
                         self.v[vi].smode = 0;
+                        if self.ledger() {
+                            self.c(F::Direct, vi);
+                        }
                         self.lc(vi, start, len, false, hw);
+                        if self.ledger() {
+                            self.c(F::DirectPost, vi);
+                        }
                     } else {
                         let lp = (be32(&r, 8), be16(&r, 12));
                         let v = &mut self.v[vi];
@@ -1592,14 +1751,22 @@ impl DaveLowe {
                     }
                     let mut order = v.order;
                     let order_was_none = order == NONE;
-                    let next = if self.cfg.kind == Kind::DlnB {
-                        CMD_NEXT + B_NEXT + if vi == self.special_voice { B_NEXT_SPECIAL } else { 0 }
+                    let next = self.kc(CMD_NEXT, DL_CMD[2]);
+                    let wraps = order == NONE || self.l(order) == 0;
+                    if self.ledger() {
+                        if !wraps {
+                            self.c(F::Next, vi);
+                            if vi == self.special_voice {
+                                self.c(F::NextSpecial, vi);
+                            }
+                        }
                     } else {
-                        self.kc(CMD_NEXT, DL_CMD[2])
-                    };
-                    self.cmd += next;
-                    if order == NONE || self.l(order) == 0 {
-                        self.cmd -= next;
+                        self.cmd += next;
+                    }
+                    if wraps {
+                        if !self.ledger() {
+                            self.cmd -= next;
+                        }
                         order = self.v[vi].order0;
                         self.wrap_test(vi, false, order_was_none);
                     }
@@ -1608,7 +1775,7 @@ impl DaveLowe {
                     pos = entry;
                 }
                 3 => {
-                    self.cmd += self.kc(CMD_ENV, DL_CMD[3]);
+                    self.cc(F::Cmd3, vi, self.kc(CMD_ENV, DL_CMD[3]));
                     let b = self.l(pos + 2) as usize;
                     pos += 6;
                     self.v[vi].env0 = match self.cfg.env_hdr {
@@ -1618,7 +1785,7 @@ impl DaveLowe {
                     };
                 }
                 4 => {
-                    self.cmd += self.kc(CMD_PORTA, DL_CMD[4]);
+                    self.cc(F::Cmd4, vi, self.kc(CMD_PORTA, DL_CMD[4]));
                     let v = &mut self.v[vi];
                     let a = [2, 4, 6, 8].map(|k| be16(&self.img, pos + k));
                     v.pmode = a[0];
@@ -1628,7 +1795,7 @@ impl DaveLowe {
                     pos += 10;
                 }
                 5 => {
-                    self.cmd += self.kc(CMD_VIBRATO, DL_CMD[5]);
+                    self.cc(F::Cmd5, vi, self.kc(CMD_VIBRATO, DL_CMD[5]));
                     let a = [2, 4, 6, 8, 10, 12].map(|k| be16(&self.img, pos + k));
                     let v = &mut self.v[vi];
                     v.vstate = 1;
@@ -1643,12 +1810,12 @@ impl DaveLowe {
                     pos += 14;
                 }
                 6 => {
-                    self.cmd += self.kb(0, B_CMD6);
+                    self.cc(F::Cmd6, vi, 0);
                     self.v[vi].pmode = 0;
                     pos += 2;
                 }
                 7 => {
-                    self.cmd += self.kc(CMD_VIBOFF, DL_CMD[7]);
+                    self.cc(F::Cmd7, vi, self.kc(CMD_VIBOFF, DL_CMD[7]));
                     self.v[vi].vstate = 0;
                     pos += 2;
                 }
@@ -1661,6 +1828,14 @@ impl DaveLowe {
                     if len & 0x8000 != 0 {
                         self.wrap_test(vi, true, false);
                     }
+                    if self.ledger() {
+                        self.c(F::Rest, vi);
+                        self.vol_raw(vi, 0, hw);
+                        self.vf = (F::Rest2Held, F::Rest2Step);
+                        self.vol_step(vi, hw);
+                        self.c(F::VolPost, vi);
+                        return;
+                    }
                     self.tt = self.slot + self.kc(SLOT_REST, DL_REST) + self.cmd;
                     self.vol_raw(vi, 0, hw);
                     if !self.cfg.rest_returns {
@@ -1671,28 +1846,31 @@ impl DaveLowe {
                     return;
                 }
                 9 | 10 if !self.cfg.ik => {
+                    if self.ledger() {
+                        self.c(F::Stop, vi);
+                    }
                     self.stop(vi, hw);
                     return;
                 }
                 9 | 10 => pos += 2,
                 // bclr / bset.b #1,$bfe001: the LED filter on, off
                 11 => {
-                    self.cmd += self.kb(0, B_CMD11);
+                    self.cc(F::Cmd11, vi, 0);
                     hw.bus.ciaa.pra &= !2;
                     pos += 2;
                 }
                 12 => {
-                    self.cmd += self.kb(0, B_CMD11);
+                    self.cc(F::Cmd12, vi, 0);
                     hw.bus.ciaa.pra |= 2;
                     pos += 2;
                 }
                 13 => {
-                    self.cmd += self.kc(0, DL_CMD[13]);
+                    self.cc(F::Cmd13, vi, self.kc(0, DL_CMD[13]));
                     self.v[vi].boost = true;
                     pos += 2;
                 }
                 14 => {
-                    self.cmd += self.kc(CMD_JUMP, DL_CMD[14]);
+                    self.cc(F::Cmd14, vi, self.kc(CMD_JUMP, DL_CMD[14]));
                     pos = self.l(pos + 2) as usize;
                 }
                 _ => return,
@@ -1704,6 +1882,9 @@ impl DaveLowe {
     fn note(&mut self, vi: usize, pos: usize, hw: &mut Hw) {
         if self.cfg.kind == Kind::Dl {
             return self.note_dl(vi, pos, hw);
+        }
+        if self.ledger() {
+            return self.note_new(vi, pos, hw);
         }
         let period = self.w(pos);
         let k = vi & 3;
@@ -1738,6 +1919,41 @@ impl DaveLowe {
         // (layout B: a note whose envelope steps also takes the 9 less)
         self.vadj = self.cfg.kind == Kind::DlnB;
         self.vol_step(vi, hw);
+    }
+
+    /// A note of Dave Lowe New: the period, the address and length, the DMA start, the volume.
+    fn note_new(&mut self, vi: usize, pos: usize, hw: &mut Hw) {
+        let period = self.w(pos);
+        self.c(F::NotePer, vi);
+        self.per(vi, period, hw);
+        let length = self.w(pos + 2);
+        let v = &mut self.v[vi];
+        v.period = period;
+        v.left = length.wrapping_sub(1);
+        v.seq = pos + 4;
+        v.env = v.env0;
+        v.vdelay = v.vdelay_reload;
+        let vib = v.vstate != 0;
+        if vib {
+            v.vstate = 1;
+        }
+        let looped = v.smode != 0;
+        let (a, l) = v.att;
+        if vib {
+            self.c(F::NoteVib, vi);
+        }
+        if looped {
+            self.v[vi].smode = 3;
+            self.c(F::NoteLoc, vi);
+            self.lc(vi, a, l, true, hw);
+            self.c(F::NoteDma, vi);
+        } else {
+            self.c(F::NoteNoLoc, vi);
+        }
+        self.dma(vi, true, hw);
+        self.vf = (F::NoteVolHeld, F::NoteVolStep);
+        self.vol_step(vi, hw);
+        self.c(F::VolPost, vi);
     }
 
     /// A note of the `dl` driver: the period, the address and length (through the Eagleplayer's
@@ -1792,6 +2008,9 @@ impl DaveLowe {
         }
         self.dma(vi, false, hw);
         if !self.muted(vi) {
+            if self.ledger() {
+                self.tw(hw, self.cy);
+            }
             hw.per(0, 1);
             hw.vol(self.v[vi].ch, 0);
         }
@@ -1806,19 +2025,14 @@ const TIMER_DELAY: u64 = 565;
 /// `dl`: the tick's entry lies exactly 70940 clocks after the song-init call returns.
 const DL_TIMER_DELAY: u64 = 0;
 
-/// Layout A: the part of `TIMER_DELAY` the write model takes into its own start offsets.
-const DLNA_TIMER_SHIFT: u64 = 565;
-
-/// Layout A write timing, in colour clocks after the tick's entry or after the start of a voice's
+/// `older_*` write timing, in colour clocks after the tick's entry or after the start of a voice's
 /// slot (the time its processing takes, measured from the original's register writes). A slot
-/// starts where the previous one ended; the first starts `SLOT_FIRST` after the tick's entry.
-/// `older_*` (colour clocks): the first volume write after the tick's entry, the distance from a
+/// starts where the previous one ended: the first volume write after the tick's entry, the distance from a
 /// voice's volume write to the next voice's, the volume write to its DMA start, and the fade step.
 const OLD_VOL: [i64; 4] = [429, 0, 0, 0];
 const OLD_TAIL: [i64; 4] = [398, 407, 410, 0];
 const OLD_VOL_DON: i64 = 54;
 const OLD_NOFADE: [i64; 4] = [23, 23, 20, 23];
-const SLOT_FIRST: i64 = 194;
 /// A counting-down voice: the volume write, and the slot's end after it.
 const SLOT_VOL: [i64; 4] = [374, 383, 386, 400];
 const SLOT_TAIL: [i64; 4] = [79, 94, 110, 113];
@@ -1865,18 +2079,116 @@ const REST_FLAG_COST: [i64; 4] = [103, 104, 105, 106];
 /// More when that wrap ends the song.
 const WRAP_END: i64 = 52;
 
-/// Layout B against layout A (colour clocks): the first slot after the tick's entry, the extra at
-/// the end of each voice's slot, the next-sequence command (less one for all voices, 27 more for
-/// the first voice with the longest order list), the wrap of an order list, commands 6, 11 and 12,
-/// and a voice that steps a portamento and a vibrato in one tick.
-const B_FIRST: i64 = 259;
-const B_TAIL: [i64; 4] = [29, 30, 29, 29];
-const B_NEXT: i64 = -1;
-const B_NEXT_SPECIAL: i64 = 27;
-const B_WRAP: i64 = -17;
-const B_CMD6: i64 = 54;
-const B_CMD11: i64 = 58;
-const B_SLIDE_BOTH: i64 = 57;
+/// Dave Lowe New: the pieces of the path a tick takes through the original, in the order the
+/// replayer walks them. Each has a cost in 68000 cycles (`COST`); a register write comes where the
+/// sum of the pieces walked since the tick's entry stands, at the colour clock of half that sum
+/// (rounded down).
+#[derive(Clone, Copy)]
+#[repr(u8)]
+#[rustfmt::skip]
+enum F {
+    /// The tick's entry, up to the first voice.
+    Tick,
+    /// A stopped voice.
+    Dead,
+    /// A voice that reads its stream; a voice that counts a note down; one in the note's last tick
+    /// without and with a sample to stop (the DMA stop, then `OffPost`).
+    Fetch, Count, Last, LastOff, OffPost,
+    /// The loop's address and length after a note's first tick, and what follows; an address to
+    /// its length; a DMA write to the enable that layout B lets follow.
+    Reload, ReloadPost, LocLen, Filler,
+    /// Portamento: a delay count, a step up or down, and one that reaches its target. Vibrato: a
+    /// delay count, a rate count, a step down, up, and the one that closes the cycle. Both stepping
+    /// in one tick; a period write to what follows.
+    PDelay, PUp, PUpEnd, PDown, PDownEnd, VDelay, VRate, VDown, VUp, VWrap, Both, PerPost,
+    /// The volume write of a counting voice (the envelope's held value, a step), and from a volume
+    /// write to the next voice.
+    VolHeld, VolStep, VolPost,
+    /// Stream commands: the sample (and a direct sample's address and length), the next sequence
+    /// (more for the first voice with the longest list), the list's wrap (at the song's start, with
+    /// the voice's counter at zero, otherwise), the song's end, a rest carrying the list flag.
+    Cmd1, Direct, DirectPost, Next, NextSpecial, WrapFirst, Wrap0, Wrap1, WrapEnd, RestFlag,
+    /// The other stream commands by index.
+    Cmd3, Cmd4, Cmd5, Cmd6, Cmd7, Cmd11, Cmd12, Cmd13, Cmd14,
+    /// A note: its period write, more with a vibrato running, to the address (or, without a loop
+    /// pair, straight to the DMA start), from the length to the DMA start, to the volume.
+    NotePer, NoteVib, NoteLoc, NoteNoLoc, NoteDma, NoteVolHeld, NoteVolStep,
+    /// A rest: its volume write of 0, then the envelope's; the stop command.
+    Rest, Rest2Held, Rest2Step, Stop,
+    N,
+}
+
+/// The pieces' costs for voices 0 to 3, and what layout B adds. Solved from the reference's write
+/// times in half colour clocks (all 41 corpus files over 120 s: 657,062 writes, no remainder, every
+/// cost a whole number). The pieces are only determined in sums along the paths taken, so of the
+/// solutions the one with the fewest differences between voices and layouts is kept: what a piece
+/// holds of the path before or after it is a convention, the sums are not. The differences
+/// between the voices follow the write routines (+31, +62, +70 after a write, +17, +24, +51
+/// before a volume write).
+/// Not in the corpus, so not measured: `Dead`, `Direct`, `DirectPost`, `Cmd13`, `Stop` (0);
+/// `PUpEnd` (as `PDownEnd`), `Cmd11` (as `Cmd12`), `Rest2Held` (as `NoteVolHeld`), `NoteNoLoc` of
+/// voices 0, 1, 3 (seen on voice 2, the others by the voices' pattern after a period write);
+/// single voices of `Last`, `PDown`, `PDownEnd`, `Both`, `Cmd6`, `Cmd7`, `Cmd14` take the value
+/// of the voices seen. `VolPost` of voice 3 ends the tick and shows in no write.
+#[rustfmt::skip]
+const COST: [([u16; 4], i16); F::N as usize] = [
+    /* Tick        */ ([738, 738, 738, 738], 130),
+    /* Dead        */ ([0, 0, 0, 0], 0),
+    /* Fetch       */ ([13, 13, 13, 13], 0),
+    /* Count       */ ([242, 242, 242, 242], 0),
+    /* Last        */ ([252, 252, 252, 252], 0),
+    /* LastOff     */ ([0, 0, 0, 0], 0),
+    /* OffPost     */ ([268, 268, 268, 268], 0),
+    /* Reload      */ ([8, 8, 8, 8], 0),
+    /* ReloadPost  */ ([284, 284, 284, 284], 0),
+    /* LocLen      */ ([20, 20, 20, 20], 0),
+    /* Filler      */ ([20, 20, 20, 20], 0),
+    /* PDelay      */ ([49, 49, 49, 49], 0),
+    /* PUp         */ ([0, 0, 0, 0], 0),
+    /* PUpEnd      */ ([30, 30, 30, 30], 0),
+    /* PDown       */ ([0, 0, 0, 0], 0),
+    /* PDownEnd    */ ([30, 30, 30, 30], 0),
+    /* VDelay      */ ([49, 49, 49, 49], 0),
+    /* VRate       */ ([72, 72, 72, 72], 0),
+    /* VDown       */ ([42, 42, 42, 42], 0),
+    /* VUp         */ ([59, 59, 59, 59], 0),
+    /* VWrap       */ ([75, 75, 75, 75], 0),
+    /* Both        */ ([113, 113, 113, 113], 0),
+    /* PerPost     */ ([262, 293, 324, 332], 0),
+    /* VolHeld     */ ([157, 174, 181, 208], 0),
+    /* VolStep     */ ([139, 156, 163, 190], 0),
+    /* VolPost     */ ([507, 538, 569, 577], 59),
+    /* Cmd1        */ ([305, 305, 305, 305], -2),
+    /* Direct      */ ([0, 0, 0, 0], 0),
+    /* DirectPost  */ ([0, 0, 0, 0], 0),
+    /* Next        */ ([228, 228, 228, 228], -2),
+    /* NextSpecial */ ([54, 54, 54, 54], 0),
+    /* WrapFirst   */ ([434, 465, 488, 501], -2),
+    /* Wrap0       */ ([412, 439, 462, 485], -2),
+    /* Wrap1       */ ([434, 465, 488, 501], -2),
+    /* WrapEnd     */ ([104, 104, 104, 104], 0),
+    /* RestFlag    */ ([177, 208, 231, 244], 0),
+    /* Cmd3        */ ([168, 168, 168, 168], 0),
+    /* Cmd4        */ ([140, 140, 140, 140], 0),
+    /* Cmd5        */ ([180, 180, 180, 180], 0),
+    /* Cmd6        */ ([108, 108, 108, 108], 0),
+    /* Cmd7        */ ([108, 108, 108, 108], 0),
+    /* Cmd11       */ ([116, 116, 116, 116], 0),
+    /* Cmd12       */ ([116, 116, 116, 116], 0),
+    /* Cmd13       */ ([0, 0, 0, 0], 0),
+    /* Cmd14       */ ([128, 128, 128, 128], 0),
+    /* NotePer     */ ([0, 0, 0, 0], 0),
+    /* NoteVib     */ ([16, 16, 16, 16], 0),
+    /* NoteLoc     */ ([293, 324, 355, 363], 0),
+    /* NoteNoLoc   */ ([259, 290, 321, 329], 0),
+    /* NoteDma     */ ([294, 356, 418, 434], 0),
+    /* NoteVolHeld */ ([304, 321, 328, 355], 0),
+    /* NoteVolStep */ ([286, 303, 310, 337], 0),
+    /* Rest        */ ([132, 132, 132, 132], 0),
+    /* Rest2Held   */ ([304, 321, 328, 355], 0),
+    /* Rest2Step   */ ([286, 303, 310, 337], 0),
+    /* Stop        */ ([0, 0, 0, 0], 0),
+];
 
 /// The `dl` driver's tick ledger (68000 cycles; spec dl2 section 1). The Eagleplayer's intercept costs,
 /// by voice: before and after the store of the volume (form 1), of the period, the address and the
@@ -1940,7 +2252,8 @@ impl Replayer for DaveLowe {
         // the write-spacing models' start gaps are shifted so that none is negative
         match self.cfg.kind {
             Kind::Dl => DL_TIMER_DELAY,
-            Kind::DlnA | Kind::DlnB => TIMER_DELAY - DLNA_TIMER_SHIFT,
+            // (Dave Lowe New: the first tick comes one period after the song's start)
+            Kind::DlnA | Kind::DlnB => 0,
             Kind::Older => TIMER_DELAY - 420 - DL_START_PHASE - OLD_PHASE,
         }
     }
@@ -1990,8 +2303,11 @@ impl Replayer for DaveLowe {
         }
         let first = self.tickno == 1;
         self.base = hw.bus.clock;
-        self.fill = 0;
-        self.slot = if self.cfg.kind == Kind::Dl { self.wrap.w[0] as i64 } else { if self.cfg.kind == Kind::Older { 0 } else { self.kb(SLOT_FIRST, B_FIRST) } };
+        self.cy = 0;
+        if self.ledger() {
+            self.c(F::Tick, 0);
+        }
+        self.slot = if self.cfg.kind == Kind::Dl { self.wrap.w[0] as i64 } else { 0 };
         for vi in 0..3 {
             self.voice(vi, hw);
         }

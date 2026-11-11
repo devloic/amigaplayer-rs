@@ -582,3 +582,6 @@ data; 330 modules):
 * 6.6 (timing): the SID section's range test is two tests, the first a signed one: a source period
   of `$8000` or more leaves where one of `$10` or less does, one above `$EEE` (and below `$8000`)
   17 cycles later. The values are the same either way.
+* 7: the tracker counter is a word. A position flag `$E0` sets the speed to zero; the counter is
+  then reloaded with zero and the next sequencer step comes 65536 ticks later (one module, compared
+  over 69,997 ticks: equal with a word counter, different from tick 696 on with a byte one).

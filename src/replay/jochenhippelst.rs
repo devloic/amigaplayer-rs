@@ -21,7 +21,7 @@
 //! paths a tick takes (`COST`), and the beam position at the song start comes from the length of
 //! the original's start-up, which depends on the module (`reference_start`). All of it is from
 //! counts of executed addresses and their cycles, related to the module's data and the port's
-//! own state: all 962,425 writes of 330 modules (5 s each) are at the reference's colour
+//! own state: all 1,842,570 writes of 330 modules (30 s each) are at the reference's colour
 //! clock, counted from the song start.
 //!
 //! Embedded data: `jochenhippelst_data.bin` (52 bytes) is the volume table together with the bytes
@@ -699,7 +699,7 @@ pub struct JochenHippelSt {
     level_cell: u32,
     // song state
     sub: u16,
-    counter: u8,
+    counter: u16,
     speed: u8,
     songpos: i32,
     sub_start: u16,
@@ -1274,12 +1274,13 @@ impl JochenHippelSt {
     }
 
     fn tracker(&mut self) {
+        // a word: after a position sets the speed to zero the next step is 65536 ticks on
         self.counter = self.counter.wrapping_sub(1);
         if self.counter != 0 {
             self.f[F::TrIdle as usize] += 1;
             return;
         }
-        self.counter = self.speed;
+        self.counter = self.speed as u16;
         for i in 0..3 {
             self.sequencer(i);
         }

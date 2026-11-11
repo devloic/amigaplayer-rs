@@ -122,7 +122,7 @@ const LF_REL: i64 = 1341;
 const LF_REL_ID: i64 = 545;
 const LF_REL_CNT0: i64 = 244;
 const LF_ARP: i64 = 68;
-const LF_CV: [i64; 6] = [0, 119, 0, 145, 0, 57];
+const LF_CV: [i64; 6] = [0, 119, 0, 119, 0, 54];
 /// A voice the block mutes while its row has a note (half clocks, more than an idle voice).
 const LF_BLOCK_MUTE: i64 = 39;
 /// The cost of a row's work between two writes, in half colour clocks (fitted jointly on the
@@ -208,19 +208,22 @@ const LAT_LOC_H: u64 = 1003;
 const LAT_VOL_H: u64 = 1022;
 const LAT_MUTED_H: u64 = 742;
 const LAT_START_H: u64 = 1026;
-/// What a tick whose timer is already due adds to its start, by how the previous call ended: after
-/// a LOC, a VOL, a sample start or key tail, an interrupt handler (half clocks).
-const LATE_LOC_H: u64 = 860;
-const LATE_VOL_H: u64 = 878;
-const LATE_START_H: u64 = 882;
-const LATE_HANDLER_H: u64 = 292;
-/// ... after a handler that only disabled its interrupt (its event record is none of the chain shapes).
-const LATE_HANDLER_NONE_H: u64 = 534;
+/// The tail of a call after its last write (half clocks): the handler after a LOC, a plain VOL, a
+/// silent voice's VOL or a sample start's DMACON is the `LAT_*` less the handler's own `START_IRQ_H`
+/// (the code of an AUDxDAT write's tail is `LAT_DAT_H` less it); the call ends on a whole colour clock.
+const TAIL_LOC_H: u64 = 743;
+const TAIL_VOL_H: u64 = 762;
+const TAIL_MUTED_H: u64 = 482;
+const TAIL_START_H: u64 = 765;
+/// The tail of an interrupt handler after its last write, and of one that only disabled its interrupt.
+const TAIL_HANDLER_H: u64 = 176;
+const TAIL_HANDLER_NONE_H: u64 = 418;
+/// A tick that starts when the previous call returns begins its work this long after (half clocks).
+const TICK_DISPATCH_H: u64 = 116;
 /// Handler gaps per channel in half clocks (the same for both handler shapes): LOC to LEN, and LEN to
 /// DMACON (the loop shape's LEN to INTENA is 10 more).
 const H_LEN_H: [u64; 4] = [219, 250, 281, 289];
 const H_DMA_H: [u64; 4] = [187, 218, 249, 257];
-const IRQ_NEXT: u64 = 218;
 
 /// Instructions budget guards.
 const SEQ_GUARD: usize = 4096;
@@ -363,12 +366,10 @@ pub struct Aps {
     first_block_seen: bool,
     first_irq: bool,
     last_key: usize,
-    irq_end: u64,
     lat_h: u64,
     /// The clock at the end of the last call (a tick or an interrupt handler), and what a tick that
     /// finds the timer already due adds to start (half clocks).
     act_end: u64,
-    late_h: u64,
     first_tick: Option<u64>,
     /// The sequence entry costs a tick's advance has paid (half clocks).
     sq_paid: u64,
@@ -982,6 +983,8 @@ impl Aps {
             let mut h = MUTED_AFTER[self.last_kind as usize][v];
             if self.last_kind == 0 && v >= 2 {
                 h = h + 1 - if self.last_mov { 2 } else { 0 };
+            } else if self.last_kind == 0 && self.last_mov {
+                h -= 2;
             }
             self.wh(hw, h);
             hw.vol(v, 0);
@@ -1358,32 +1361,11 @@ impl Aps {
         if hw.bus.paula.intreq & bit == 0 {
             return;
         }
-        let lat = if self.first_irq {
-            // the host takes the audio interrupts of the start-up at the next output sample
-            self.first_irq = false;
-            self.half = 0;
-            START_IRQ_H
-        } else if hw.bus.clock > self.act_end + 1 {
-            // taken at an output sample some time after the last call ended: the one after the call's
-            // return is skipped when it falls less than about 69 colour clocks after it (one output
-            // sample is 148 half clocks)
-            self.half = 0;
-            START_IRQ_H + if (27..69).contains(&(hw.bus.clock - self.act_end)) { 148 } else { 0 }
-        } else if hw.bus.clock <= self.irq_end + 2 {
-            self.half = 0;
-            2 * IRQ_NEXT
-        } else {
-            // the handler starts on a whole colour clock: after the AUDxDAT write or a silent voice's
-            // VOL it is the next one (these latencies are even), after a plain VOL the one at or before
-            // the write
-            if (self.lat_h == LAT_MUTED_H || LAT_DAT_H.contains(&self.lat_h)) && self.half != 0 {
-                hw.wait(1);
-            }
-            if self.lat_h == LAT_VOL_H || self.lat_h == LAT_MUTED_H || LAT_DAT_H.contains(&self.lat_h) {
-                self.half = 0;
-            }
-            self.lat_h
-        };
+        // the handler's code starts on a whole colour clock, where the engine takes the interrupt (the
+        // end of the previous call, or later when the request comes after it)
+        self.first_irq = false;
+        self.half = 0;
+        let lat = START_IRQ_H;
         self.wh(hw, lat);
         self.intena(hw, bit);
         let ev = self.v[ch].ev;
@@ -1424,9 +1406,11 @@ impl Aps {
             }
             _ => {}
         }
-        self.irq_end = hw.bus.clock;
+        // the code returns a little after its last write (the one that only disabled its interrupt
+        // does more first); the call ends on a whole colour clock
+        self.wh(hw, if matches!(e >> 28, 0 | 1 | 2 | 13) { TAIL_HANDLER_H } else { TAIL_HANDLER_NONE_H });
+        self.half = 0;
         self.act_end = hw.bus.clock;
-        self.late_h = if matches!(e >> 28, 0 | 1 | 2 | 13) { LATE_HANDLER_H } else { LATE_HANDLER_NONE_H };
     }
 }
 
@@ -1450,55 +1434,10 @@ struct SynthFeat {
     fresh: bool,
 }
 
-/// Exact corrections (half clocks) to `synth_cost_h`: reference minus the stage model, per
-/// (mode, op, comb, fvar, fill, skip, t1, t2, q22, g1nz, g2nz); nonzero only.
-const SYNTH_FIX: [([u8; 11], i8); 27] = [
-    ([0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1], 1),
-    ([0, 5, 0, 1, 1, 0, 0, 0, 1, 1, 1], 1),
-    ([1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0], 1),
-    ([1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1], -1),
-    ([1, 1, 1, 1, 1, 0, 4, 0, 1, 1, 1], -1),
-    ([1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1], 1),
-    ([1, 3, 0, 0, 1, 0, 4, 0, 0, 0, 0], -1),
-    ([1, 3, 0, 1, 1, 0, 5, 0, 0, 1, 1], -1),
-    ([1, 4, 1, 1, 1, 0, 0, 0, 0, 1, 1], -1),
-    ([1, 4, 1, 1, 1, 0, 4, 0, 1, 1, 1], -1),
-    ([1, 4, 1, 1, 1, 0, 5, 0, 1, 1, 1], -1),
-    ([1, 7, 1, 2, 1, 0, 0, 0, 1, 1, 1], 1),
-    ([2, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0], -1),
-    ([2, 2, 0, 1, 1, 0, 5, 1, 1, 1, 1], 1),
-    ([2, 3, 0, 1, 1, 0, 0, 1, 1, 1, 1], -1),
-    ([2, 3, 0, 2, 1, 0, 5, 1, 1, 1, 1], -1),
-    ([2, 3, 0, 2, 1, 0, 5, 4, 0, 1, 1], -1),
-    ([2, 3, 0, 2, 1, 0, 5, 5, 1, 1, 1], -1),
-    ([2, 4, 1, 0, 1, 0, 0, 4, 0, 0, 0], 1),
-    ([2, 4, 1, 1, 1, 0, 1, 0, 1, 1, 1], 1),
-    ([2, 5, 0, 1, 1, 0, 1, 0, 0, 1, 1], -1),
-    ([2, 5, 1, 0, 1, 0, 5, 0, 0, 0, 0], -1),
-    ([2, 6, 0, 0, 1, 0, 0, 0, 0, 0, 0], -1),
-    ([2, 7, 0, 2, 1, 0, 0, 4, 1, 1, 1], -1),
-    ([2, 9, 0, 0, 1, 0, 0, 0, 0, 0, 0], -1),
-    ([2, 9, 0, 1, 1, 0, 5, 1, 0, 1, 1], -1),
-    ([3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0], -1),
-];
-/// ... and the exceptions by length: (mode, op, n, comb, fvar, fill, skip, t1, t2, q22, g1nz, g2nz) -> correction.
-const SYNTH_FIX_N: [([u8; 12], i8); 1] = [
-    ([0, 1, 8, 1, 1, 1, 0, 0, 0, 0, 1, 1], -1),
-];
-
-/// The half colour clocks the synthesis of one buffer takes, from VOL to LOC: measured on the
-/// reference with probe modules (one stage at a time; the stages add up).
+/// The half colour clocks the synthesis of one buffer takes, from VOL to LOC. Every stage is a constant
+/// plus a per-sample term, and the stages add up (the cost of an operation grows with its number in
+/// steps of 27 for mode 2): an exact linear fit of 2500 combinations of the reference's costs.
 fn synth_cost_h(f: &SynthFeat) -> u64 {
-    let k = [f.mode as u8, f.op as u8, f.comb as u8, f.fvar, f.fill as u8, f.skip as u8, f.t1 as u8, f.t2 as u8, f.q22 as u8, f.g1nz as u8, f.g2nz as u8];
-    let mut fix = SYNTH_FIX.iter().find(|e| e.0 == k).map_or(0, |e| e.1 as i64);
-    let kn = [k[0], k[1], f.n as u8, k[2], k[3], k[4], k[5], k[6], k[7], k[8], k[9], k[10]];
-    if let Some(e) = SYNTH_FIX_N.iter().find(|e| e.0 == kn) {
-        fix = e.1 as i64;
-    }
-    (synth_cost_base_h(f) as i64 + fix) as u64
-}
-
-fn synth_cost_base_h(f: &SynthFeat) -> u64 {
     let n = f.n;
     let mut c: u64 = match f.mode {
         0 => match f.op {
@@ -1509,7 +1448,7 @@ fn synth_cost_base_h(f: &SynthFeat) -> u64 {
                     1261
                 }
             }
-            1 => 1695 + 144 * (n >> 3) + ((n >> 3) & 1),
+            1 => 1695 + 144 * (n >> 3),
             2 => 1328 + 76 * n,
             _ => 1262,
         },
@@ -1518,14 +1457,14 @@ fn synth_cost_base_h(f: &SynthFeat) -> u64 {
                 810
             } else {
                 let extra: i64 = match f.t1 {
-                    4 => 634,
-                    5 => 415,
+                    4 => 633,
+                    5 => 414,
                     1 => -7,
                     _ => 0,
                 };
                 let b: i64 = match f.op {
-                    0 => 987 + 22 * n as i64,
-                    1 => 1014 + 42 * n as i64,
+                    0 => 988 + 22 * n as i64,
+                    1 => 1013 + 42 * n as i64,
                     2 => 1047 + 46 * n as i64,
                     3 => {
                         if n >= 3 {
@@ -1534,39 +1473,42 @@ fn synth_cost_base_h(f: &SynthFeat) -> u64 {
                             1034
                         }
                     }
-                    4 => 1445 + 243 * n as i64,
+                    4 => 1444 + 243 * n as i64,
                     _ => 1046,
                 };
                 (b + extra) as u64
             }
         }
         2 => {
-            let extra: u64 = [f.t1, f.t2].iter().map(|t| match t {
-                4 => 620,
-                5 => 402,
-                _ => 0,
-            }).sum();
+            let extra: u64 = [f.t1, f.t2]
+                .iter()
+                .map(|t| match t {
+                    4 => 621,
+                    5 => 402,
+                    _ => 0,
+                })
+                .sum();
             let (b, k): (u64, u64) = match f.op {
-                1 => (1174, 54),
+                1 => (1173, 54),
                 2 => (1200, 116),
-                3 => (1229, 38),
+                3 => (1227, 38),
                 4 => (1254, 38),
-                5 => (1282, 38),
-                6 => (1309, 40),
-                7 => (1354, 52),
-                9 => (1390, 70),
+                5 => (1281, 38),
+                6 => (1308, 40),
+                7 => (1351, 52),
+                9 => (1389, 70),
                 _ => (3000, 0),
             };
             b + k * n + extra
         }
-        _ => 690,
+        _ => 689,
     };
     if f.comb {
         c += 924 + 417 * n;
     }
     if f.fvar != 0 {
         if f.q22 {
-            c += 42 + if f.fresh { 52 } else { 0 };
+            c += 43 + if f.fresh { 52 } else { 0 };
         }
         if f.fvar == 1 {
             c += 956;
@@ -1577,9 +1519,9 @@ fn synth_cost_base_h(f: &SynthFeat) -> u64 {
                 c += 76 + 200 * n;
             }
         } else {
-            c += 610;
+            c += 611;
             if f.g1nz {
-                c += 328;
+                c += 327;
                 if f.g2nz {
                     c += 92 + 368 * n;
                 }
@@ -1651,10 +1593,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         feat: [0; 6],
         pm: 0,
         half: 0,
-        irq_end: 0,
         lat_h: LAT_VOL_H,
-        act_end: u64::MAX / 2,
-        late_h: 0,
+        act_end: 0,
         start_origin: 0,
         starting: true,
         sq_acc: 0,
@@ -1724,18 +1664,26 @@ impl Replayer for Aps {
 
     fn tick(&mut self, hw: &mut Hw) {
         // a tick is a guest call: it starts on a whole colour clock, whatever the half clock the
-        // previous call ended on (the clock only counts whole colour clocks)
+        // previous call ended on (the clock only counts whole colour clocks); a timer already due
+        // is served when the previous call returns, the tick's code starting a little after that
         self.half = 0;
-        if hw.bus.clock <= self.act_end + 1 {
-            self.wh(hw, self.late_h);
+        let since = 2 * hw.bus.clock.saturating_sub(self.act_end);
+        if since < TICK_DISPATCH_H {
+            self.wh(hw, TICK_DISPATCH_H - since);
         }
         self.tick_voices(hw);
-        self.act_end = hw.bus.clock;
-        self.late_h = match self.lat_h {
-            LAT_LOC_H => LATE_LOC_H,
-            LAT_VOL_H | LAT_MUTED_H => LATE_VOL_H,
-            _ => LATE_START_H,
+        // the call returns a while after its last write
+        let h = self.half;
+        let tail = match self.lat_h {
+            LAT_LOC_H => TAIL_LOC_H + (h == 0) as u64 - if self.last_mov { 2 } else { 0 },
+            LAT_VOL_H => TAIL_VOL_H - h,
+            LAT_MUTED_H => TAIL_MUTED_H + h,
+            LAT_START_H => TAIL_START_H + (h == 0) as u64,
+            d => d - START_IRQ_H + h,
         };
+        self.wh(hw, tail);
+        self.half = 0;
+        self.act_end = hw.bus.clock;
     }
 
     fn audio_irq_ch(&mut self, ch: usize, hw: &mut Hw) -> bool {

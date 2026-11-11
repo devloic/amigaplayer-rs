@@ -62,57 +62,50 @@
 //! reference's register writes are identical to the port's for all of module 243
 //! (corpus line 245). refcmp runs the reference that way for such modules.
 //!
-//! Late ticks (4 voices): a tune whose effects (256-byte phase, mix and resonance voices)
-//! take a tick's whole period on a 68000 makes the original's next tick late. The
-//! original's CIA-B has two timers in play: timer A, the tick (its underflows go on
-//! while the code runs and are one pending interrupt when the tick overran), and
-//! timer B, the DMA restart's two waits (100 E-clocks, or the longest period those
-//! voices played, and then 150), whose interrupts are taken after a tick that
-//! overran, in the order of the CIA's bits (the tick, then timer B). The port keeps
-//! both timers (`grid`, `TimerB`) and takes the interrupts at those moments:
-//! * the DMA routine at a tick's end (DMA off for the voices that restart and those
-//!   still waiting, timer B started, the interrupt's step set to the first) and the
-//!   interrupt's two steps (the voices' registers and DMA on, then their loops and
-//!   the DMA mask cleared) are separate; a timer B interrupt that waited for a tick
-//!   to end runs the first step again (the routine set it), so a note starts two ticks
-//!   late, the second step never comes and the DMA mask stays set (the voice
-//!   restarts every tick with no LOC/LEN writes);
-//! * the interrupt that runs while timer B counts again only changes its latch (the
-//!   timer is not restarted), as the CIA does;
-//! * the engine takes the next tick's time from `Replayer::next_tick_at`, the first
-//!   underflow after the tick that was called.
-//! The time the original's code takes on a 68000 is priced by what a tick does, not by
-//! averages: a pass of each effect (per byte of its wave, and a setup by its type: the
-//! phase types and fill, the mix sources, the filter types), the lines and instruments
-//! of a row, and the slides, envelope, arpeggio and loop steps of each voice, each with
-//! a price in colour clocks (`PHASE_PASS`, `RES_BYTE`, `SEQ_ENTRY` ...) that was measured
-//! on the Eagleplayer's runs on the engine's 68000 clock (the instruction cycles the
-//! code ran on 174 four-voice modules, regressed on these counts; 130 of them fitted
-//! and 44 held out: a tick is right to 0.2% on average and 0.9% at worst on those, and
-//! to 0.1% on corpus lines 244 and the list's synthmix, which were drifting by 0.1 s over
-//! 20 s). The costs are charged where the port does the work and paid after the row and
-//! after each voice's effects (`pay`); the time from the last voice's volume write to the
-//! DMA routine depends on how many voices write (`TAIL`). The effects' output is copied
-//! to the played wave without running Paula up to the copy, as the original's code
-//! does under the engine (it touches no register meanwhile). UADE has none of this
-//! (a faster CPU: its ticks stay on the timer's period).
+//! 4 voices, the time of every register write. The reference is the Eagleplayer run by the engine's
+//! 68000, whose clock counts the cycles of each instruction (half a colour clock each, whatever the
+//! data), so the port counts the same cycles: every branch of the code it follows adds what the
+//! original's takes (`cyc`, from the handler's entry; the numbers were measured on the Eagleplayer's runs
+//! of 192 four-voice modules, as the cycles between two register writes against the branches the port
+//! took between them, and on modules made to change one thing at a time), and a register is written
+//! when the clock reaches the entry plus half of that (`reach`). This covers the row (sequence, part
+//! lines, instrument start, arpeggio, the effects of a line), each voice's slides, envelope, vibrato,
+//! tremolo and loop, the five waveform effects (their set-up by type and each byte of a pass) and the
+//! copy of their output, the writes of the voices that do not restart and the DMA routine. The effects'
+//! output is copied to the played wave without running Paula up to the copy, as the original's code does
+//! under the engine (it touches no register meanwhile). UADE has none of this (a faster CPU: its ticks
+//! stay on the timer's period).
 //!
-//! Inside a 4-voice tick (all of it measured on the Eagleplayer's runs with half-cycle write times,
-//! 192 four-voice corpus modules): the tick's fixed work (`PLAY_TIME`) is not all before the voices'
-//! effects: a voice's loop location and length writes come at the end of its effects, `LOOP_PRE` after
-//! the row and `VOICE_GAP` more for each voice after the first, and the rest of the fixed work comes
-//! after the last voice, before the first period write, which does not move. An idle tick costs `VOICE_PLAY`
-//! for each voice plus `VOICE_PLAYING` for each voice that plays an instrument, except a sample with
-//! the sample-loop flag (E1 bit 7; a wave with it pays); the volume slides measured (`SLIDE_*`) add
-//! theirs; the instrument start is priced by the voice that starts (`INST_START_BY_VOICE`); the time
-//! that the last voice's tail takes off its effects (`TAIL`, which depends on which voices write) is
-//! not carried to the next tick if it was not used up. What is still off, by module and not
-//! by what the tick's counts say (a regression on those counts does not hold on modules left out):
-//! the first write after the effect passes of the filter, mix and phase types (errors from 5 to 100
-//! colour clocks, constant in a module and tick class), the other slides, tremolo and ProTracker
-//! slides, the start ticks (the error is a step of about 33 or 42 colour clocks, by voice), the
-//! first tick's total, and the voice's play cost where the instrument is blank or its sample
-//! is long.
+//! The interrupts (4 voices). The original's CIA-B has two timers in play: timer A, the tick, which
+//! runs on whatever the code does, and timer B (one-shot), the DMA restart's two waits (100 E-clocks, or
+//! the longest period the restarted voices played, and then 150). A tune whose effects (256-byte phase,
+//! mix and resonance passes) take longer than the timer's period makes the next tick late, and what
+//! happens then is the reference engine's way of serving the CIA, which the port follows (`CiaB`,
+//! `tick`):
+//! * the engine counts the timers only when it looks at the CIA: when the original's code reads or
+//!   writes a CIA register (the DMA routine's write of timer B at a tick's end, the read of the interrupt
+//!   flags that follows it, timer B's own write in its interrupt, a tempo effect's write of timer A) and
+//!   after it has let time pass itself;
+//! * a dispatch takes the underflows found so far and calls their handlers one after the other with no
+//!   time between, the tick first, then timer B's; an underflow found during those calls waits for the
+//!   next dispatch;
+//! * the next dispatch comes at the next underflow as the timers stood at the last look (at once when
+//!   that is past: an underflow nothing has looked at yet); when an underflow is already pending and
+//!   the next one is still to come, it comes where the engine stops next: the end of the output sample,
+//!   or at once when a vertical blank (the engine's frame grid, from clock 0) has passed since the
+//!   dispatch before began;
+//! * the tick's handler returns 29 cycles sooner when its read of the flags does not show timer A (the
+//!   tick was called for an underflow that an earlier read had seen), and the first tick, which finds
+//!   no timer B flag, signals the player's process: 90 cycles more, and the engine runs the process for
+//!   226 colour clocks after that dispatch's handlers;
+//! * timer B's interrupt has three steps: the voices' registers and DMA on (and timer B again, 150), then
+//!   their loops and the DMA mask cleared, then nothing; the DMA routine at a tick's end (DMA off for the
+//!   voices that restart and those still waiting, timer B started) sets the first step again, so an
+//!   interrupt that waited for a tick to end runs the first step again, a note starts two ticks late,
+//!   the second step never comes and the DMA mask stays set (the voice restarts every tick with no
+//!   LOC/LEN writes); a write of timer B while it counts only changes its latch.
+//! The engine asks the port for the time of the next dispatch (`Replayer::next_tick_at`).
+//!
 //! 8 voices (the CPU of the reference eight times as fast, `DELI_CPU_SPEED`, so a colour clock is 16
 //! cycles): InitSound's writes come `EIGHT_FIRST_WRITE` after the loading (8 colour clocks later when
 //! the tune has a groove), StartInt's acknowledge after the pre-roll row, whose time is counted in
@@ -293,16 +286,12 @@ const FX_PT_VOLUME_DOWN: u8 = 0xe7;
 const FX_PT_TREMOLO: u8 = 0xe8;
 const FX_PT_VIBRATO: u8 = 0xea;
 
-// Colour clocks the original's code takes between its writes (68000, from
-// the Eagleplayer's write log) and the CIA's wait.
+// The CIA's E-clock in colour clocks, and the times of the 8-voice handler and of the starts (colour
+// clocks the original's code takes, from the Eagleplayer's write logs).
 const ECLOCK: u64 = 5;
-/// The tick's fixed work before the effects.
+/// 8 voices: the time the handler lets pass after its register writes.
 const PLAY_TIME: u64 = 2669;
-/// ... of which this long passes before the end of the first voice's effects (its loop writes) with none to
-/// price, and this long more before the end of each next voice's (measured on the loop writes of 3 modules).
-const LOOP_PRE: u64 = 650;
-const VOICE_GAP: u64 = 375;
-/// The first tick's (the volume writes instead of the tune's reading).
+/// ... on the first tick (the volume writes instead of the tune's reading).
 const FIRST_PLAY_TIME: u64 = 2683;
 /// 4 voices: the first tick's handler signals the player's process (the tick whose read of the CIA's
 /// flags finds no timer B underflow yet); the engine runs that process for this long right after the
@@ -333,106 +322,7 @@ const EIGHT_ACK_TO_START: u64 = 22;
 const EIGHT_CALL_TO_ACK: u64 = 6;
 const EIGHT_LOC_AT: [u64; 4] = [9, 11, 12, 14];
 const EIGHT_FIRST_VOL_AT: [u64; 4] = [19, 20, 22, 23];
-/// 4 voices: the first tick's four volume writes (0) come these colour clocks after its acknowledge;
-/// they come out of the tick's fixed work (`FIRST_PLAY_TIME`).
-const FIRST_VOL_AT: [u64; 4] = [60, 72, 84, 96];
 
-// Prices, in colour clocks, of what the original's code does (see PLAY_TIME).
-// A row:
-const SEQ_ENTRY: f64 = 196.2;
-const PART_LINE: f64 = 153.7;
-const CHECK_INSTRUMENT: f64 = 514.2;
-const CHECK_NOTE: f64 = 0.0;
-const CHECK_NEW_INSTRUMENT: f64 = 98.5;
-const PART_FX: f64 = 32.0;
-const ARP_START: f64 = 365.9;
-const PLAY_INSTRUMENT: f64 = 122.3;
-const INST_PLAY: f64 = 756.2;
-/// A tick in which instruments start takes less than the prices say. 8 voices: per instrument started,
-/// and once for the tick (a fit on the 623 such ticks of 15 modules).
-const INST_START_VOICE: f64 = -124.3;
-const INST_START_TICK: f64 = 105.1;
-/// 4 voices: the error of the prices on a start tick (the DMA-on write of 563 ticks of 18 modules) is
-/// better described by a term per started voice, growing with the voice's index (a start of voice 0 or 1
-/// is priced right, one of voice 3 takes 190 colour clocks less), than by terms per instrument and tick:
-/// about half of those ticks come within 37 colour clocks, against 40% with no term and fewer with those.
-const INST_START_BY_VOICE: [f64; 4] = [-15.0, 0.0, -65.0, -190.0];
-const INST_ENVELOPE: f64 = 104.1;
-const INST_FILTER: f64 = 199.9;
-const INST_MIX: f64 = 80.5;
-const INST_PHASE: f64 = 116.7;
-const INST_RESONANCE: f64 = 164.0;
-// Each tick and voice:
-/// (An idle tick takes 4411.25 + 7.5 per voice that plays an instrument to the first period write: 4418, 4426,
-/// 4433 with one, two, three; 15 cycles of the 68000 for each; 814 idle ticks of 3 modules.)
-const VOICE_PLAY: f64 = 453.8125;
-/// (not for a sample with the sample-loop flag, which takes 7.5 less)
-const VOICE_PLAYING: f64 = 7.5;
-const SLIDE_NOTE: f64 = 51.8;
-/// The volume slides that were measured (the others take what the idle tick does): a volume slide down
-/// (FX $12) and its ProTracker form ($E7), a channel volume slide up and down. Each is constant to a
-/// colour clock on its tick (151, 87, 180, 109, 223, 160 of the corpus: 23, 47, 16.5, 22.5 per voice).
-const SLIDE_VOLUME_DOWN: f64 = 23.0;
-const SLIDE_PT_VOLUME_DOWN: f64 = 47.0;
-const SLIDE_CHANNEL_UP: f64 = 16.5;
-const SLIDE_CHANNEL_DOWN: f64 = 22.5;
-const ARP_WAIT: f64 = 25.6;
-const ARP_STEP: f64 = 313.1;
-const ARP_LINE: f64 = 170.4;
-const ENVELOPE: f64 = 78.5;
-const ENVELOPE_END1: f64 = 4.2;
-const ENVELOPE_END2: f64 = 30.5;
-const ENVELOPE_STEP: f64 = 20.3;
-const VIBRATO: f64 = 191.7;
-const TREMOLO: f64 = 165.5;
-const LOOP_MOVE: f64 = 120.3;
-const LOOP_COUNT: f64 = 148.6;
-const WAVE_COPY: f64 = 58.9;
-const WAVE_COPY_BYTE: f64 = 2.88;
-// The effects: a pass and a byte of it.
-const RES_PASS: f64 = 316.4;
-const RES_BYTE: f64 = 155.26;
-const TRANSFORM_PASS: f64 = 442.5;
-const TRANSFORM_BYTE: f64 = 62.49;
-const FILTER_PASS: f64 = 315.5;
-const FILTER_BYTE: f64 = 110.12;
-const RFILTER_PASS: f64 = 311.3;
-const RFILTER_BYTE: f64 = 109.13;
-const MIX_BYTE: f64 = 29.82;
-const MIX_BYTE_BOOST: f64 = 29.83;
-const PHASE_EARLY_PASS: f64 = 284.5;
-const PHASE_EARLY_BYTE: f64 = 10.69;
-/// A mix pass by its source (own buffer or not), whether it uses a wave of its own and
-/// whether its offset is 0: [buffer][wave of its own][offset 0].
-const MIX_PASS: [[[f64; 2]; 2]; 2] = [[[333.2, 350.6], [351.6, 370.9]], [[346.4, 336.4], [337.9, 319.4]]];
-/// A phase pass by type (0 to 3) and fill: (pass, per interpolated byte, per filled byte).
-const PHASE_PASS: [[(f64, f64, f64); 2]; 4] = [[(386.4, 17.65, 8.64), (414.3, 17.82, 10.49)],
-    [(391.9, 38.89, 21.84), (384.1, 39.04, 41.05)],
-    [(732.2, 27.97, 14.68), (375.1, 34.05, 34.95)],
-    [(348.7, 39.06, 28.01), (423.3, 38.24, 41.29)]];
-/// ... and per restart of the row of a fill (types 1 and 2).
-const PHASE_RESTART: [f64; 4] = [0.0, 0.0, 11.0, 0.0];
-/// Colour clocks from the last volume write to the DMA routine's first write, by the last
-/// voice that wrote and how many voices wrote (the rest restart; measured on the original).
-const TAIL: [[u64; 4]; 4] = [[347, 0, 0, 0], [320, 263, 0, 0], [276, 241, 192, 0], [250, 201, 166, 131]];
-const PER_TO_VOL: u64 = 114;
-const VOL_TO_PER: u64 = 58;
-// The writes of the voices that do not restart (measured on the original): from a voice's
-// volume write to the next written voice's period write, by that voice (the last one comes
-// 9 sooner), plus a price for each voice skipped between; from the last volume write to the
-// DMA-off write, by the mask of the voices written, plus a price for each voice that
-// restarts and sets its DMA bit.
-const VOL_TO_NEXT: [u64; 4] = [58, 58, 58, 49];
-const SKIPPED_VOICE: u64 = 35;
-const TAIL_TO_DMA: [u64; 16] = [0, 333, 298, 263, 262, 227, 227, 192, 236, 200, 200, 166, 201, 165, 165, 131];
-const TAIL_ADD: u64 = 14;
-// The tick's entry to its first write (the acknowledge), after the timer's underflow.
-// The DMA routine at a tick's end: DMA off, 90 colour clocks to the low byte of timer B's
-// latch and 17 more to the high byte, which starts the timer.
-const OFF_TO_TB_LOW: u64 = 90;
-const TB_LOW_TO_HIGH: u64 = 17;
-// ... and the tick returns 107 colour clocks after that.
-const TICK_RETURN: u64 = 107;
 
 // The original's loading and init, with 4 voices, as stretches of code between host calls (the
 // library's A-line calls; the clock counts floor(cycles / 2) of each stretch, see `Cost`).
@@ -849,14 +739,10 @@ pub struct Musicline {
     voices: [Voice; 8],
     vol_table: Vec<u8>,
     title: String,
-    /// The prices of the work done since the last `pay` (colour clocks, with fractions).
-    owed: f64,
     /// 4 voices: the 68000 cycles the original's code has run since the call's entry (the clock is at
     /// `call_start` + `cyc` / 2 when a register is written), and the clock at that entry.
     cyc: u64,
     call_start: u64,
-    /// An instrument has started on this tick (the tick's share of the start's price is paid).
-    inst_started: bool,
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -958,10 +844,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         chan_written: [false; 4],
         voices,
         vol_table,
-        owed: 0.0,
         cyc: 0,
         call_start: 0,
-        inst_started: false,
         title: String::new(),
     };
     let mut hw = Hw { bus: &mut m.bus };
@@ -985,8 +869,6 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         hw.wait(at.saturating_sub(hw.bus.clock));
     }
     ml.start_int(&mut hw);
-    // what the init's row cost is in the start time already
-    ml.owed = 0.0;
     Some(Box::new(ml))
 }
 
@@ -1583,7 +1465,6 @@ impl Musicline {
             self.isr_step = 1;
         } else {
             // the pre-roll row's work and the calls up to StartInt
-            self.owed = 0.0;
             hw.wait(self.eight_ack_at.saturating_sub(hw.bus.clock));
             hw.bus.write_word(0xdff09c, 0x0080);
             hw.wait(1);
@@ -1659,7 +1540,6 @@ impl Musicline {
     /// what the original's takes; measured on the Eagleplayer's runs under the engine, whose instruction times
     /// do not depend on the data).
     fn handler4(&mut self, hw: &mut Hw) {
-        self.owed = 0.0;
         self.cyc += 100;
         self.reach(hw, 0);
         hw.bus.write_word(0xdff09c, 0x0080);
@@ -1796,8 +1676,7 @@ impl Musicline {
         // the 68000 cycles from the interrupt's entry, as in the tick
         let c = hw.bus.clock;
         let mut cyc: u64 = 181;
-        if self.isr_step > 2 {
-        } else if self.isr_step == 1 {
+        if self.isr_step == 1 {
             cyc += 56;
             self.isr_step = 2;
             for v in 0..4 {
@@ -1826,7 +1705,7 @@ impl Musicline {
             self.cia.sync(hw.bus.clock);
             self.cia.tb.write_high(150);
             cyc += 134;
-        } else {
+        } else if self.isr_step == 2 {
             cyc += 56;
             self.isr_step = 3;
             for v in 0..4 {
@@ -1881,7 +1760,6 @@ impl Musicline {
         x.groove_part = 0;
         for _ in 0..256 {
             self.cyc += 125;
-            self.owed += SEQ_ENTRY;
             let x = &mut self.voices[v];
             let pos = x.tune_position;
             let data = rw(hw, seq + 2 * pos as u32);
@@ -1964,7 +1842,6 @@ impl Musicline {
         let part = rl(hw, self.tab + T_PARTS + 4 * x.part_number as u32);
         loop {
             self.cyc += 236;
-            self.owed += PART_LINE;
             let x = &mut self.voices[v];
             let pos = x.part_position;
             x.part_position = x.part_position.wrapping_add(1) & 0x7f;
@@ -2023,13 +1900,8 @@ impl Musicline {
 
     fn check_instrument(&mut self, hw: &mut Hw, v: usize) {
         let pi = self.voices[v].part_instrument;
-        self.owed += CHECK_INSTRUMENT;
         if pi != 0 {
             self.cyc += 167;
-            self.owed += CHECK_NEW_INSTRUMENT;
-        }
-        if self.voices[v].part_note != 0 {
-            self.owed += CHECK_NOTE;
         }
         if pi != 0 {
             let inst = rl(hw, self.tab + T_INSTS + 4 * pi as u32);
@@ -2070,7 +1942,6 @@ impl Musicline {
             return;
         }
         x.arp |= A_WILL_SET_NOTE;
-        self.owed += ARP_START;
         let mut num = rw(hw, inst + I_ARP_TABLE) as u32;
         if x.arp & A_USE_TABLE != 0 {
             self.cyc -= 13;
@@ -2140,7 +2011,6 @@ impl Musicline {
             return;
         }
         self.cyc += 177;
-        self.owed += PLAY_INSTRUMENT;
         let mut is = inst;
         let mut st = rb(hw, inst + IS_TYPE);
         let x = &mut self.voices[v];
@@ -2363,26 +2233,12 @@ impl Musicline {
 
     fn inst_play(&mut self, hw: &mut Hw, v: usize) {
         let inst = self.voices[v].instrument;
-        self.owed += INST_PLAY;
-        if self.eight {
-            self.owed += INST_START_VOICE;
-            if !std::mem::replace(&mut self.inst_started, true) {
-                self.owed += INST_START_TICK;
-            }
-        } else {
-            self.owed += INST_START_BY_VOICE[v & 3];
-        }
         let x = &mut self.voices[v];
         if x.pitch_slide != FX_PORTAMENTO && !x.arp_wait {
-            for (flag, price) in [(E2_PHASE, INST_PHASE), (E2_RESONANCE, INST_RESONANCE), (E2_FILTER, INST_FILTER), (E2_MIX, INST_MIX)] {
-                self.cyc += 168;
-                if x.effect2 & flag != 0 {
-                    self.owed += price;
-                }
-            }
+            // (the phase, resonance, filter and mix flags' tests)
+            self.cyc += 4 * 168;
             if x.effect1 & E1_ENVELOPE != 0 {
                 self.cyc += 152;
-                self.owed += INST_ENVELOPE;
             }
             x.play |= P_RETRIGGER;
             let w = |o: u32| rw(hw, inst + o);
@@ -2604,9 +2460,6 @@ impl Musicline {
         for k in 0..5 {
             self.cyc += 88;
             let (e, a) = self.voices[v].part_effects[k];
-            if e != 0 || a != 0 {
-                self.owed += PART_FX;
-            }
             self.part_effect(hw, v, e, a);
         }
     }
@@ -3087,10 +2940,6 @@ impl Musicline {
         self.cyc += 572;
         if self.voices[v].play & P_RETRIGGER == 0 {
             self.cyc += 622;
-            self.owed += VOICE_PLAY;
-            if self.voices[v].instrument != 0 && !(self.voices[v].effect1 & E1_WAVE_SAMPLE_LOOP != 0 && self.voices[v].wave_or_sample == SAMPLE) {
-                self.owed += VOICE_PLAYING;
-            }
             self.slide_volume(v);
             self.slide_channel_volume(v);
             self.slide_master_volume(v);
@@ -3123,7 +2972,6 @@ impl Musicline {
                 }
                 let n = (x.repeat_length >> 3) as u32 * 16;
                 self.cyc += 90 * (n as u64 / 16);
-                self.owed += WAVE_COPY + WAVE_COPY_BYTE * n as f64;
                 // Paula is not run up to the copy: the original's code touches no register
                 // while its effects run, so under the engine Paula catches up at the next
                 // register access (the next tick's acknowledge, or the tick's first period
@@ -3162,7 +3010,6 @@ impl Musicline {
         let x = &mut self.voices[v];
         let first = x.play & P_FIRST_ROW_TICK != 0;
         let vol;
-        let mut cost = 0.0;
         self.cyc += 25 * (x.volume_slide != FX_VOLUME_UP) as u64;
         if x.volume_slide == FX_SLIDE_TO_VOLUME {
             if x.volume_slide_off {
@@ -3193,7 +3040,6 @@ impl Musicline {
             self.cyc += 85;
             self.cyc += 50 * (x.volume_slide != FX_VOLUME_DOWN) as u64;
             vol = (x.volume1 as i16).wrapping_sub(x.volume_slide_speed as i16).max(0);
-            cost = if x.volume_slide == FX_VOLUME_DOWN { SLIDE_VOLUME_DOWN } else { SLIDE_PT_VOLUME_DOWN };
         } else {
             self.cyc += 71;
             return;
@@ -3202,13 +3048,11 @@ impl Musicline {
         x.volume1 = vol as u16;
         x.volume2 = vol as u16;
         x.volume3 = vol as u16;
-        self.owed += cost;
     }
 
     fn slide_channel_volume(&mut self, v: usize) {
         let x = &mut self.voices[v];
         let vol;
-        let mut cost = 0.0;
         if x.channel_volume_slide == FX_SLIDE_TO_CHANNEL {
             if x.channel_volume_slide_off {
                 return;
@@ -3231,17 +3075,14 @@ impl Musicline {
         } else if x.channel_volume_slide == FX_CHANNEL_UP {
             self.cyc += 69;
             vol = (x.channel_volume as i16).wrapping_add(x.channel_volume_slide_speed as i16).min(1024);
-            cost = SLIDE_CHANNEL_UP;
         } else if x.channel_volume_slide == FX_CHANNEL_DOWN {
             self.cyc += 86;
             vol = (x.channel_volume as i16).wrapping_sub(x.channel_volume_slide_speed as i16).max(0);
-            cost = SLIDE_CHANNEL_DOWN;
         } else {
             self.cyc += 41;
             return;
         }
         x.channel_volume = vol as u16;
-        self.owed += cost;
     }
 
     fn slide_master_volume(&mut self, v: usize) {
@@ -3302,7 +3143,6 @@ impl Musicline {
                 return;
             }
             self.cyc += 33;
-            self.owed += SLIDE_NOTE;
             if x.pitch_slide_down {
                 self.cyc += 61;
                 x.pitch_slide_note = x.pitch_slide_note.wrapping_sub(x.pitch_slide_speed);
@@ -3446,11 +3286,9 @@ impl Musicline {
             self.cyc += 27;
             x.arp_speed_counter = x.arp_speed_counter.wrapping_sub(1);
             if x.arp_speed_counter != 0 {
-                self.owed += ARP_WAIT;
                 return;
             }
             self.cyc += 161;
-            self.owed += ARP_STEP;
             let mut spd = rb(hw, inst + I_ARP_SPEED);
             x.arp_groove = !x.arp_groove;
             let g = rb(hw, inst + I_ARP_GROOVE);
@@ -3469,7 +3307,6 @@ impl Musicline {
         let arp = rl(hw, self.tab + T_ARPS + 4 * (num & 0xff));
         loop {
             self.cyc += 176;
-            self.owed += ARP_LINE;
             let x = &mut self.voices[v];
             let pos = x.arp_position;
             x.arp_position = x.arp_position.wrapping_add(1) & 0x7f;
@@ -3589,7 +3426,6 @@ impl Musicline {
             return;
         }
         self.cyc += 119;
-        self.owed += ENVELOPE;
         let set3 = |x: &mut Voice, d: u16| {
             x.volume3 = ((d as u32 * x.volume2 as u32) >> 6).min(1024) as u16;
         };
@@ -3598,7 +3434,6 @@ impl Musicline {
         i += 1;
         if d == 0 {
             self.cyc += 17;
-            self.owed += ENVELOPE_END1;
             d = x.envelope[i];
             i += 1;
             if d == 0 {
@@ -3607,7 +3442,6 @@ impl Musicline {
                 i += 1;
                 if d == 0 {
                     self.cyc += 25;
-                    self.owed += ENVELOPE_END2;
                     if x.arg1 & F_HOLD_SUSTAIN != 0 {
                         self.cyc += 22;
                         let s = x.envelope[i + 7];
@@ -3627,7 +3461,6 @@ impl Musicline {
             }
         }
         self.cyc += 79;
-        self.owed += ENVELOPE_STEP;
         let mut vol = x.envelope_volume.wrapping_add(x.envelope[i + 3]);
         x.envelope_volume = vol;
         vol >>= 8;
@@ -3681,7 +3514,6 @@ impl Musicline {
             }
         }
         self.cyc += 338;
-        self.owed += TREMOLO;
         if x.tremolo_attack_length == 0 {
             self.cyc += 30;
             x.tremolo_depth_now = x.tremolo_depth;
@@ -3760,7 +3592,6 @@ impl Musicline {
             }
         }
         self.cyc += 311;
-        self.owed += VIBRATO;
         if x.vibrato_attack_length == 0 {
             self.cyc += 30;
             x.vibrato_depth_now = x.vibrato_depth;
@@ -3800,7 +3631,6 @@ impl Musicline {
         let step = x.arg2 & M_LOOP_STEP != 0;
         if !step {
             self.cyc += 64;
-            self.owed += LOOP_MOVE;
             x.loop_delay = x.loop_delay.wrapping_sub(1);
             if x.loop_delay >= 0 {
                 self.cyc += 39;
@@ -3820,7 +3650,6 @@ impl Musicline {
                 x.loop_wait_counter = x.loop_wait as i16;
             }
             self.cyc += 202;
-            self.owed += LOOP_COUNT;
             x.loop_counter_save = x.loop_counter;
             Self::loop_count(x, &mut self.cyc);
         } else if x.arg2 & M_LOOP_INIT == 0 {
@@ -4021,7 +3850,6 @@ impl Musicline {
             }
         }
         let factor = prev as i32;
-        self.owed += TRANSFORM_PASS + TRANSFORM_BYTE * len as f64;
         let sn = x.transform_waves[octave];
         if sn == 0 {
             return;
@@ -4047,13 +3875,6 @@ impl Musicline {
             let s2 = rs8(hw, src2.wrapping_add(k));
             hw.bus.w8(buf + k, ((((s2 - s1) * factor) >> 8) + s1) as u8);
         }
-    }
-
-    /// Lets the time of the work counted since the last call pass (4-voice tunes).
-    fn pay(&mut self, hw: &mut Hw) {
-        let due = self.owed.floor().max(0.0);
-        self.owed -= due;
-        let _ = hw;
     }
 
     fn phase_mix(ptype: u16, s1: i32, s2: i32) -> i32 {
@@ -4104,7 +3925,6 @@ impl Musicline {
         let prev = prev as u32;
         if prev >= len || prev == 0 {
             self.cyc += 20;
-            self.owed += PHASE_EARLY_PASS + PHASE_EARLY_BYTE * len as f64;
         } else {
             self.cyc += 92;
             // the type's tests and pass, the interpolated bytes, then the rest's set-up, passes and bytes
@@ -4115,11 +3935,6 @@ impl Musicline {
                 self.cyc += 33 + 17 * left.div_ceil(prev as u64) + [0, 82, 0, 82][t] * left;
             } else if t != 0 {
                 self.cyc += [0, 59, 47, 47][t] + [0, 0, 42, 56][t] * left;
-            }
-            let (pass, interpolated, filled) = PHASE_PASS[(ptype as usize).min(3)][fill as usize];
-            self.owed += pass + interpolated * prev as f64 + filled * (len - prev) as f64;
-            if fill {
-                self.owed += PHASE_RESTART[(ptype as usize).min(3)] * ((len - prev + prev - 1) / prev) as f64;
             }
         }
         let rd = |hw: &Hw, k: u32| rs8(hw, src.wrapping_add(k));
@@ -4257,9 +4072,9 @@ impl Musicline {
             off = 256 + 128 + 64 + 32;
         }
         self.cyc += 17 * ((len <= 128) as u64 + (len <= 64) as u64);
-        let pass = MIX_PASS[(x.arg2 & M_MIX_BUFF != 0) as usize][(x.mix_wave != 0) as usize][(prev == 0) as usize];
-        let byte = if x.boost & B_MIX != 0 { self.cyc += 4; MIX_BYTE_BOOST } else { MIX_BYTE };
-        self.owed += pass + byte * len as f64;
+        if x.boost & B_MIX != 0 {
+            self.cyc += 4;
+        }
         let src = x.repeat_pointer;
         let dest = x.bufs + B_MIXB;
         let mut mixb = dest;
@@ -4308,7 +4123,6 @@ impl Musicline {
         Self::set_effect_output(x, buf, true);
         self.cyc += 21 * (x.effect1 & E1_LOOP == 0 && x.wave_or_sample != SAMPLE) as u64;
         let len = x.repeat_length as u32 * 2;
-        self.owed += RES_PASS + RES_BYTE * len as f64;
         let mut last = x.resonance_last;
         if x.resonance_last_init {
             self.cyc += 40;
@@ -4354,7 +4168,6 @@ impl Musicline {
         Self::set_effect_output(x, buf, true);
         self.cyc += 21 * (x.effect1 & E1_LOOP == 0 && x.wave_or_sample != SAMPLE) as u64;
         let len = x.repeat_length as u32 * 2;
-        self.owed += if x.filter_type == 0 { FILTER_PASS + FILTER_BYTE * len as f64 } else { RFILTER_PASS + RFILTER_BYTE * len as f64 };
         let mut last = x.filter_last;
         let normal = x.filter_type == 0;
         if x.filter_last_init {

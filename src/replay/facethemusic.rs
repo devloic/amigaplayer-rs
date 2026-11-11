@@ -161,8 +161,8 @@ pub struct FaceTheMusic {
     songend: bool,
     visited: Vec<bool>,
     // the mixer
-    /// Each track's period and volume as the last tick left them.
-    per: [u16; 8],
+    /// Each track's note (index of the period table) and volume as the last tick left them.
+    idx: [usize; 8],
     vol: [u16; 8],
     /// Where each track's sample plays.
     play: [Play; 8],
@@ -173,45 +173,75 @@ pub struct FaceTheMusic {
     /// audio interrupt, of any channel.
     ch_per: [u16; 4],
     ch_vol: [u16; 4],
+    /// When the timer's next interrupt comes (it was started before the channels).
+    tick_due: u64,
+    /// What the tick just played takes.
+    tick_time: u64,
+    /// The timer has run: the pairs' detune counts from then on.
+    ticked: bool,
 }
 
-/// A track's sample in the mixer: the byte played next, the end of the block, the fraction of
-/// a byte passed (16 bits), and the loop (0 bytes: none).
+/// A track's sample in the mixer: the byte played next, the end of the block, what the track
+/// has fallen behind a byte a byte (16 bits of a byte), and the loop (0 bytes: none).
 #[derive(Clone, Copy, Default)]
 struct Play {
     cur: u32,
     end: u32,
-    frac: u32,
+    behind: u32,
     loop_start: u32,
     loop_bytes: u32,
     on: bool,
-    /// Of the buffer being mixed: the bytes it gave and the times it went back to its loop.
-    bytes: u32,
-    wraps: u32,
+    /// Bytes of the buffer being mixed that it gives before its block ends.
+    left: u32,
 }
 
 impl Play {
-    /// The byte played now; then `step` (16.16 bytes) further.
+    /// Before a buffer: how many bytes the track gives until its block ends. The count is of
+    /// the buffer's bytes, whatever the step: a stepped track goes to its loop (or ends)
+    /// before it has reached the block's end.
+    fn begin(&mut self) {
+        self.left = self.end.saturating_sub(self.cur);
+    }
+
+    /// The track's next byte of a buffer. At the channel's own rate (`step` 1.0) that is the
+    /// byte it stands on, and it moves on by one. A stepped track falls behind by
+    /// 1.0 - `step` (16.16 bytes) a byte, and each time that makes a whole byte it gives the
+    /// byte before once more: its byte n is byte ceil((n + 1) * step) - 1 of the sample. A
+    /// track that was at the channel's rate starts from nothing behind.
     fn next(&mut self, bus: &Bus, step: u32) -> i32 {
         if !self.on {
             return 0;
         }
-        let s = bus.r8(self.cur) as i8 as i32;
-        self.frac += step;
-        self.cur += self.frac >> 16;
-        self.frac &= 0xffff;
-        self.bytes += 1;
-        if self.cur >= self.end {
+        if self.left == 0 {
             if self.loop_bytes == 0 {
                 self.on = false;
-            } else {
-                self.cur = self.loop_start + (self.cur - self.end) % self.loop_bytes;
-                self.end = self.loop_start + self.loop_bytes;
-                self.wraps += 1;
+                return 0;
             }
+            self.cur = self.loop_start;
+            self.end = self.loop_start + self.loop_bytes;
+            self.left = self.loop_bytes;
         }
+        self.left -= 1;
+        if step == 0x10000 {
+            // at the channel's own rate nothing is kept of it
+            self.behind = 0;
+        }
+        self.behind += 0x10000u32.saturating_sub(step);
+        if self.behind >= 0x10000 {
+            self.behind -= 0x10000;
+            self.cur = self.cur.wrapping_sub(1);
+        }
+        let s = bus.r8(self.cur) as i8 as i32;
+        self.cur = self.cur.wrapping_add(1);
         s
     }
+}
+
+/// The step of a track `d` period table entries (eighths of a semitone) below the channel's
+/// track: 2 ^ (-d / 96) in 16 bits, rounded up (measured for 19 intervals: 0xaadd for 56,
+/// 0xa146 for 64, 0x6ba3 for 120, where the value is 43740.03, 41285.09 and 27554.49).
+fn ratio(d: usize) -> u32 {
+    (65536.0 * 2f64.powf(-(d as f64) / 96.0) - 1e-6).ceil() as u32
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -377,13 +407,16 @@ fn build(d: &[u8], base: u32, m: &mut Machine) -> Option<FaceTheMusic> {
         end_reached: false,
         songend: false,
         visited: vec![false; measures as usize + 1],
-        per: [PERIODS[0]; 8],
+        idx: [0; 8],
         vol: [0; 8],
         play: [Play::default(); 8],
         bufs,
         flip: [0; 4],
         ch_per: [214; 4],
         ch_vol: [64; 4],
+        tick_due: 0,
+        tick_time: 0,
+        ticked: false,
     };
     for i in 0..8 {
         f.adjust_track_indexes(i);
@@ -400,11 +433,16 @@ fn build(d: &[u8], base: u32, m: &mut Machine) -> Option<FaceTheMusic> {
 }
 
 /// Colour clocks from an audio interrupt to its handler's first write.
-const T_ENTRY: u64 = 60;
-/// From the handler's last write to its end.
-const T_EXIT: u64 = 60;
-/// A tick's time.
-const T_TICK: u64 = 2000;
+const T_ENTRY: u64 = 18;
+/// From the handler's last write to its end: with the entry, what lies between a handler's
+/// last write and the first of one that waited for it (166, 151, 135 or 129 by channel).
+const T_EXIT: u64 = 127;
+/// A tick's time: a handler whose interrupt came while a tick ran makes its first write
+/// about 1100 after the timer's interrupt, 1580 if the tick took a row, and 335 more for
+/// each track that row started a sample on.
+const T_TICK: u64 = 1080;
+const T_ROW: u64 = 480;
+const T_NOTE: u64 = 335;
 
 impl Replayer for FaceTheMusic {
     fn format(&self) -> &'static str {
@@ -423,9 +461,15 @@ impl Replayer for FaceTheMusic {
         (self.cia as u64 + 1) * 5
     }
 
+    fn next_tick_at(&self) -> Option<u64> {
+        Some(self.tick_due)
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
+        self.tick_due += (self.cia as u64 + 1) * 5;
+        self.ticked = true;
         self.step();
-        hw.wait(T_TICK);
+        hw.wait(self.tick_time);
     }
 
     /// The handler of a channel's audio interrupt: the channel's buffer has started. It writes
@@ -499,15 +543,28 @@ impl FaceTheMusic {
         }
         channels(hw, 2348, 64);
         hw.wait(5193);
+        // where the write falls in the raster line decides when Paula starts the channels:
+        // with a line's start within the 88 clocks the start routine still takes, at that
+        // line (9 of the 20 runs measured), else a line after the routine's end (11 runs). In
+        // the original that depends on the time its init takes (module by module, to a
+        // clock); here always the first, 77 clocks before the line (see the spec, "Start")
+        let line = crate::paula::LINE;
+        hw.wait((line + 150 - hw.bus.clock % line) % line);
+        // the timer was started 10 before
+        self.tick_due = hw.bus.clock - 10 + (self.cia as u64 + 1) * 5;
         hw.dmacon(0x800f);
+        // the start routine's end: the DMA line grid restarts there
+        hw.wait(88);
     }
 
     /// One tick of the song.
     fn step(&mut self) {
         self.speed_counter = self.speed_counter.wrapping_sub(1);
+        self.tick_time = T_TICK;
         if self.speed_counter == 0 {
             self.speed_counter = self.speed;
             self.take_next_row();
+            self.tick_time += T_ROW;
         }
         for i in 0..8 {
             self.run_effects(i);
@@ -1184,54 +1241,58 @@ impl FaceTheMusic {
             let v = &mut self.voices[t];
             if v.retrig {
                 v.retrig = false;
+                self.tick_time += T_NOTE;
                 let (data, start, total) = (v.data, v.start_offset, v.total);
                 let on = start < total && (total - start) / 2 != 0;
-                self.play[t] = Play {
+                // the quiet sample is no sample: the track is as one that has not played yet
+                let quiet = self.quiet;
+                self.play[t] = if data == quiet { Play::default() } else { Play {
                     cur: data.wrapping_add(start),
                     end: data.wrapping_add(total),
-                    frac: 0,
+                    behind: 0,
                     loop_start: data.wrapping_add(v.loop_start),
                     loop_bytes: v.loop_len as u32 * 2,
                     on,
-                    bytes: 0,
-                    wraps: 0,
-                };
+                    left: 0,
+                } };
             }
             let v = &self.voices[t];
-            let mut period = PERIODS.get(v.note_index as usize / 2).copied().unwrap_or(0) as f64;
-            if period != 0.0 {
-                let detune = self.detune[v.detune_index] as i32 * -8;
-                if detune != 0 {
-                    // the frequency is scaled by 2 ^ (detune / (12 * 256 * 128))
-                    period /= 2f64.powf(detune as f64 / (12.0 * 256.0 * 128.0));
-                }
-                self.per[t] = period.round().clamp(1.0, 65535.0) as u16;
+            // a note past the table's end leaves the track where it was
+            let i = v.note_index as usize / 2;
+            if i < PERIODS.len() {
+                self.idx[t] = i;
             }
-            self.vol[t] = (v.volume as u32 * self.gvol as u32 / 64).min(64) as u16;
+            self.vol[t] = (v.volume as u16).min(64);
         }
     }
 
     /// Mixes the two tracks of channel `ch` into the buffer at `dst`: the channel plays at the
-    /// shorter of their periods and the higher of their volumes, the other track is stepped
-    /// and scaled to them. Returns the time it takes.
+    /// period of the higher of their notes and the higher of their volumes; the track with the
+    /// lower note (the even one, if they are the same) is stepped by the notes' ratio less the
+    /// pair's detune, the track with the lower volume is scaled. Returns the time it takes.
     fn mix(&mut self, ch: usize, bus: &mut Bus, dst: u32) -> u64 {
         let t = [2 * ch, 2 * ch + 1];
-        let per = self.per[t[0]].min(self.per[t[1]]);
-        let vol = self.vol[t[0]].max(self.vol[t[1]]);
+        let fast = if self.idx[t[0]] > self.idx[t[1]] { 0 } else { 1 };
+        let slow = 1 - fast;
+        let per = PERIODS[self.idx[t[fast]]];
+        // the volumes before the global volume decide; the global volume scales the channel's
+        let top = self.vol[t[0]].max(self.vol[t[1]]) as u32;
+        let vol = (top * self.gvol as u32 / 64).min(64) as u16;
         let mut gain = [64i32; 2];
         let mut step = [0x10000u32; 2];
+        // the buffers mixed before the timer's first interrupt take the time of pairs without
+        // detune
+        let detune = if self.ticked { self.detune[self.voices[t[slow]].detune_index] as i64 } else { 0 };
+        step[slow] = (ratio(self.idx[t[fast]] - self.idx[t[slow]]) as i64 - detune).max(0) as u32;
         for k in 0..2 {
-            let (p, v) = (self.per[t[k]] as u32, self.vol[t[k]] as u32);
-            if v != vol as u32 {
-                gain[k] = ((v * 64 + vol as u32 / 2) / vol as u32) as i32;
-            }
-            if p != per as u32 {
-                step[k] = ((per as u32) << 16) / p;
+            let v = self.vol[t[k]] as u32;
+            if v != top {
+                gain[k] = (v * 64 / top) as i32;
             }
         }
+        let was_on = [self.play[t[0]].on, self.play[t[1]].on];
         for k in 0..2 {
-            self.play[t[k]].bytes = 0;
-            self.play[t[k]].wraps = 0;
+            self.play[t[k]].begin();
         }
         for i in 0..BUF {
             let mut s = 0;
@@ -1240,9 +1301,43 @@ impl FaceTheMusic {
             }
             bus.w8(dst + i, s.clamp(-128, 127) as u8);
         }
+        for k in 0..2 {
+            let p = &mut self.play[t[k]];
+            if p.on && p.left == 0 && p.loop_bytes == 0 {
+                p.on = false;
+            }
+        }
         self.ch_per[ch] = per;
         self.ch_vol[ch] = vol;
-        3347
+        // the time, as measured on the original's handlers (see the spec)
+        let mut time = 3347;
+        if step[slow] != 0x10000 {
+            let passed = (BUF as u64 * step[slow] as u64) >> 16;
+            time += 500 + 4 * passed;
+            if gain[slow] != 64 {
+                time += 6 * passed + 10;
+            }
+        } else if gain[slow] != 64 {
+            time += 1207;
+        }
+        if gain[fast] != 64 {
+            time += 1794;
+        }
+        // two tracks at the end of the same sample (or reaching it), neither stepped nor scaled
+        let (p0, p1) = (&self.play[t[0]], &self.play[t[1]]);
+        if !p0.on && !p1.on && p0.end != 0 && p0.end == p1.end && step[slow] == 0x10000 && gain == [64, 64] {
+            time -= 59;
+        }
+        for k in 0..2 {
+            if !was_on[k] {
+                // less for a track that has not played yet, unless it is stepped
+                let never = self.play[t[k]].end == 0 && step[k] == 0x10000;
+                time += if never { [16, 21][k] } else { [108, 113][k] };
+            } else if !self.play[t[k]].on {
+                time += [172, 177][k];
+            }
+        }
+        time
     }
 }
 
@@ -1331,17 +1426,19 @@ mod tests {
         let at = m.alloc(d.len() as u32);
         m.bus.write_bytes(at, &d);
         let mut f = build(&d, at, m).unwrap();
-        let on = Play { cur: base, end: base + 16, frac: 0, loop_start: base, loop_bytes: 16, on: true, bytes: 0, wraps: 0 };
+        let on = Play { cur: base, end: base + 16, behind: 0, loop_start: base, loop_bytes: 16, on: true, left: 0 };
         f.play[0] = on;
         f.play[1] = on;
-        f.per[0] = 200;
-        f.per[1] = 400;
+        f.idx[0] = 96;
+        f.idx[1] = 0;
         f.vol[0] = 32;
         f.vol[1] = 64;
         let dst = m.alloc(BUF);
         f.mix(0, &mut m.bus, dst);
-        assert_eq!((f.ch_per[0], f.ch_vol[0]), (200, 64));
-        // track 0 at half the volume, a byte each; track 1 in full, a byte every two
+        // the channel's volume is the higher one under the global volume (63)
+        assert_eq!((f.ch_per[0], f.ch_vol[0]), (PERIODS[96], 63));
+        // track 0, an octave up, at half the volume, a byte each; track 1 in full, each byte
+        // twice
         let got: Vec<i8> = (0..6).map(|i| m.bus.r8(dst + i) as i8).collect();
         assert_eq!(got, [0, 4, 8 + 8, 12 + 8, 16 + 16, 20 + 16]);
     }

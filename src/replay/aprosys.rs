@@ -84,14 +84,10 @@ const SKIP_ARP_H: i64 = 78;
 /// A silent voice's VOL write (half clocks), per voice, when the previous voice ended with a plain
 /// VOL (or the tick starts); after another kind of end the lead differs as it does for the PER write.
 const MUTED_VOL_H: [i64; 4] = [672, 695, 718, 708];
-/// The gap before a row's work (DMACON 0x8200).
-const ROW_PRE: u64 = 580;
-/// ... after a plain volume write, and after a silent voice's.
-const ROW_PRE_VOL: u64 = 591;
-const ROW_PRE_MUTED: u64 = 451;
-/// ... after the key tail of a row (the last AUDxDAT write, by voice; only voice 1 measured, the others
-/// follow the 70 half clocks per voice of the key tail's other gaps).
-const ROW_PRE_KEY_H: [u64; 4] = [1057, 987, 917, 847];
+/// A row's first write (DMACON 0x8200) comes this much later than the call would have returned
+/// without the row (`tail_h` after the last write: of a voice's turn, or of the row before when that
+/// took no time), in half clocks; costs of the advance in between add to it.
+const ROW_LEAD_H: u64 = 420;
 /// Sequence entry costs (half clocks; exact on the reference's gaps: a loop entry costs 76 more the
 /// first time it is met than when repeated, and a finished loop 59 less than a repeated one), and
 /// the advance's block-end, block-start and move-to-the-next-entry costs.
@@ -167,9 +163,10 @@ const H_DMA_H: [u64; 4] = [187, 218, 249, 257];
 /// Instructions budget guards.
 const SEQ_GUARD: usize = 4096;
 const ADV_GUARD: usize = 100_000;
-/// Half clocks from the end of the last voice's turn to the song-end INTENA write (by what it wrote: a
-/// LOC, a VOL, a silent voice's VOL), and colour clocks from it to the DMACON write.
-const END_TO_INTENA_H: [u64; 3] = [1601, 1619, 1340];
+/// The song-end INTENA write comes this much later than the call would have returned without the end
+/// (`tail_h` after the last write, as for a row; half clocks) plus the sequence entries met on the way
+/// to the end entry; colour clocks from it to the DMACON write.
+const END_LEAD_H: u64 = 857;
 const END_TO_DMACON: u64 = 10;
 const STOP: u32 = u32::MAX;
 
@@ -305,10 +302,10 @@ pub struct Aps {
     first_block_seen: bool,
     /// The tail of the tick's call after the last write made (half clocks).
     tail_h: u64,
-    /// The sequence entry costs a tick's advance has paid (half clocks).
+    /// The sequence entry costs a tick's advance has paid since the last row (half clocks), and the
+    /// time (clock, half clock) that advance began at.
     sq_paid: u64,
-    /// The row just processed ended with the key tail of this voice.
-    row_key: Option<usize>,
+    adv_at: (u64, u64),
 }
 
 fn rd8(hw: &Hw, a: u32) -> u8 {
@@ -539,6 +536,8 @@ impl Aps {
                 self.v[v].trow = self.v[v].trow.wrapping_add(1);
             }
             self.row = self.row.wrapping_add(1);
+            self.adv_at = (hw.bus.clock, self.half);
+            self.sq_paid = 0;
             if self.step2(hw, false)? {
                 return Ok(());
             }
@@ -549,12 +548,7 @@ impl Aps {
     // ---------------------------------------------------------------- rows
 
     fn process_row(&mut self, hw: &mut Hw) {
-        self.wh(hw, match (self.last_kind, self.row_key) {
-            (_, Some(k)) => ROW_PRE_KEY_H[k],
-            (2, _) => 2 * ROW_PRE_MUTED + 1,
-            (1, _) => 2 * ROW_PRE_VOL,
-            _ => 2 * ROW_PRE + 4 - if self.last_mov { 2 } else { 0 },
-        });
+        self.wh(hw, self.tail_h + ROW_LEAD_H);
         hw.dmacon(0x8200);
         let blk = self.blk;
         let mut keys = [false; 4];
@@ -699,7 +693,6 @@ impl Aps {
         if after == 0 {
             self.tail_h = TAIL_ROW_H;
         }
-        self.row_key = None;
         let mut first = true;
         for v in 0..4 {
             if !keys[v] {
@@ -722,7 +715,6 @@ impl Aps {
                 self.wc(hw, 31);
                 wr16(hw, 0xDFF0AA + 16 * v as u32, 0);
                 self.tail_h = TAIL_DAT_H[v];
-                self.row_key = Some(v);
             }
         }
         // the work of the last voices, when no write follows
@@ -778,7 +770,6 @@ impl Aps {
 
     fn tick_voices(&mut self, hw: &mut Hw) {
         self.budget = 255;
-        self.row_key = None;
         self.last_kind = 1;
         self.last_mov = false;
         for v in 0..4 {
@@ -795,21 +786,15 @@ impl Aps {
         if self.timer != 0 {
             return;
         }
-        let (t_adv, h_adv) = (hw.bus.clock, self.half);
-        self.sq_paid = 0;
         if self.advance(hw).is_err() {
             self.ended = true;
-            // the song-end stop falls a fixed time after the last voice's turn (by what that wrote), plus
-            // the sequence entries met on the way to the end entry, whatever the rest of the advance
-            // cost the port charged (measured: INTENA 1601 half clocks after a LOC, 1619 after a VOL,
-            // 1340 after a silent voice's VOL; the DMACON 20 later)
-            hw.bus.clock = t_adv;
-            self.half = h_adv;
-            let base = match self.last_kind {
-                0 => END_TO_INTENA_H[0] - if self.last_mov { 2 } else { 0 },
-                k => END_TO_INTENA_H[k as usize],
-            };
-            self.wh(hw, base + self.sq_paid);
+            // the song-end stop falls a fixed time after the last voice's turn or the last row (by what
+            // that wrote last), plus the sequence entries met on the way to the end entry, whatever the
+            // rest of the advance cost the port charged (measured: INTENA 1601 half clocks after a LOC,
+            // 1619 after a VOL, 1340 after a silent voice's VOL; the DMACON 20 later)
+            hw.bus.clock = self.adv_at.0;
+            self.half = self.adv_at.1;
+            self.wh(hw, self.tail_h + END_LEAD_H + self.sq_paid);
             self.intena(hw, 0x0780);
             self.wc(hw, END_TO_DMACON);
             hw.dmacon(0x000F);
@@ -1511,7 +1496,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         sq_acc: 0,
         first_block_seen: false,
         sq_paid: 0,
-        row_key: None,
+        adv_at: (0, 0),
     };
     for v in 0..4 {
         r.v[v].front = area + 128 * v as u32;
@@ -1525,7 +1510,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the rest of the start-up call (blocks of no rows, further entries) passes in time
     r.starting = false;
     if started.is_ok() {
-        let h = 2 * origin + START_PLAIN_H + r.sq_acc - (2 * ROW_PRE + 4);
+        r.tail_h = TAIL_LOC_H;
+        let h = 2 * origin + START_PLAIN_H + r.sq_acc - (TAIL_LOC_H + ROW_LEAD_H);
         hw.bus.clock = h / 2;
         r.half = h % 2;
         // the first row is processed without moving the pointer

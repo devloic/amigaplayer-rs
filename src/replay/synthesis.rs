@@ -12,7 +12,11 @@
 //! variables with the wrong register, it reads too. The hunk starts as zeros
 //! (the voices on, their buffer flags 1), not with the leftovers of an earlier
 //! session that the original's file holds, so an effect that reads past what
-//! a note copied into its buffer can take other times (never other writes).
+//! a note copied into its buffer can take other times (never other writes:
+//! `Human Strength`'s Alising effect), and a voice that InitSound's location
+//! plays before its first note (the hunk's bytes after the pointers, which the
+//! original's file holds) is silent here (`Digital Man (embedded player)`,
+//! `Labyrinth Theme`, `Super Module 2`).
 //!
 //! Where NostalgicPlayer differs from what the original writes to Paula, this
 //! follows the original:
@@ -203,7 +207,7 @@ pub struct Synthesis {
     /// 68000 cycles the original spends since its last host call (`Cost`).
     spent: f64,
     fit: Option<std::io::BufWriter<std::fs::File>>,
-    counts: Vec<(u8, u32)>,
+    counts: Vec<(u16, u32)>,
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -311,7 +315,7 @@ impl Replayer for Synthesis {
         }
         self.t(Cost::FxStart);
         for v in 0..4 {
-            self.t(Cost::FxCall);
+            self.tv(Cost::FxCall0, v);
             self.voice_fx(v, hw);
         }
     }
@@ -330,9 +334,14 @@ enum W {
 macro_rules! costs {
     ($($name:ident = $c:expr,)*) => {
         /// The original's code paths, each with the 68000 cycles it takes (as the
-        /// emulator counts them): fitted to the gaps between the writes of the
-        /// Eagleplayer's write logs. A write waits half the cycles of the paths
-        /// since the last host call, as the emulator's clock follows the CPU.
+        /// emulator counts them). A write waits half the cycles of the paths since
+        /// the last host call, as the emulator's clock follows the CPU. The figures
+        /// are a whole-number solution of the Eagleplayer's gaps between host calls
+        /// (half-cycle write logs): exact on every gap of 53 modules over 120 s
+        /// (2.2 million) and on the 20 later subsongs held out of the solve; only
+        /// sums along a path mean something (a path's cost can sit in a neighbour's).
+        /// A path the corpus never takes keeps an estimate. Where the original has
+        /// its code once for each voice, voice 0's entry is followed by the others'.
         #[derive(Clone, Copy)]
         #[allow(dead_code)]
         enum Cost { $($name,)* }
@@ -346,43 +355,50 @@ costs! {
     TickStart = -239,
     RowCall = 313,
     RowNewPos = 121,
-    RowSongEnd = 62,
-    RowPosCopy = 121,
+    RowSongEnd = 63,
+    RowPosCopy = 120,
     RowTracks = 313,
-    VoiceOn = 125,
-    VoiceOff = 20,
+    VoiceOn0 = 126,
+    VoiceOn1 = 125,
+    VoiceOn2 = 125,
+    VoiceOn3 = 125,
+    VoiceOff0 = 20,
+    VoiceOff1 = 20,
+    VoiceOff2 = 20,
+    VoiceOff3 = 20,
     VrEntry = 125,
-    VrEffect = 386,
-    VrFx1 = 10,
-    VrFx2 = 42,
+    VrEffect = 384,
+    VrFx1 = 12,
+    VrFx2 = 44,
     VrFx3 = 20,
     VrFx4Set = 8,
     VrFx4 = 12,
     VrFx5 = 8,
-    VrFx6 = 6,
+    VrFx6 = 8,
     VrFx8Set = 17,
     VrFx8 = 19,
-    VrFx9 = 11,
+    VrFx9 = 12,
     VrFxA = 8,
-    VrFxB = 9,
-    VrFxC = 10,
+    VrFxB = 12,
+    VrFxC = 12,
     VrFxD = 8,
     VrFxE = 8,
-    VrFxF = 10,
+    VrFxF = 12,
     VrNote0 = -111,
     VrNote = 227,
-    VrNoteNoTr = 20,
-    VrCut = 9,
+    VrNoteNoTr = 22,
+    VrCut = 10,
     VrCutAfter = -35,
     VrCutLoc = -35,
-    VrNoInstr = -322,
-    VrBitLoop = 32,
+    VrCutEnd = 0,
+    VrNoInstr = -321,
+    VrBitLoop = 31,
     VrInstr = 312,
-    VrInstrNoTr = -3,
-    VrInstrB = 23,
+    VrInstrNoTr = -4,
+    VrInstrB = 24,
     VrAdsrOn = 16,
-    VrSampleNoLen = 10,
-    VrSample = 121,
+    VrSampleNoLen = -194,
+    VrSample = 122,
     VrSampleSum = 41,
     VrSampleLen = -88,
     VrSampleVolNew = 161,
@@ -396,7 +412,7 @@ costs! {
     VrSynthEgcOff = -14,
     VrSynthLen0 = 4,
     VrSynthCopy = 30,
-    VrSynthNegSetup = 3,
+    VrSynthNegSetup = 4,
     VrSynthNeg = 22,
     VrSynthEgc = 205,
     VrSynthLen = 20,
@@ -404,33 +420,48 @@ costs! {
     VrSynthVolNew = 161,
     VrSynthVolAfter = 1,
     VrSynthVol = 151,
-    VrSynthEnd = -163,
-    VoiceNext = 146,
+    VrSynthEnd = -162,
+    VoiceNext0 = 144,
+    VoiceNext1 = 146,
+    VoiceNext2 = 146,
+    VoiceNext3 = 146,
     RowDma = 163,
-    RowNoDma = 170,
+    RowNoDma = 171,
     RowEnd = -238,
-    LoopVoice = 44,
-    LoopCall = 240,
+    LoopVoice0 = 44,
+    LoopVoice1 = 44,
+    LoopVoice2 = 44,
+    LoopVoice3 = 44,
+    LoopCall0 = 240,
+    LoopCall1 = 240,
+    LoopCall2 = 240,
+    LoopCall3 = 240,
     LoopSynth = -51,
     LoopNoRepeat = -30,
     LoopEmpty = 118,
+    LoopEmptyEnd = 0,
     EmptyLen = -120,
     LoopSample = 199,
     LoopSampleSum = 20,
     LoopLen = -100,
-    LoopReturn = -43,
+    LoopReturn = -44,
     FxStart = 238,
-    FxCall = 120,
+    FxCall0 = 120,
+    FxCall1 = 120,
+    FxCall2 = 120,
+    FxCall3 = 120,
     FxNoInstr = -87,
+    FxNoInstrEnd = 1,
     FxInstrArp = 83,
     FxNoNote = 10,
+    FxNoNoteEnd = 0,
     FxArpStep = 92,
     FxArpWrap = 43,
     FxArpInc = 49,
     FxPeriods = 83,
-    FxTrackArp = 123,
+    FxTrackArp = 122,
     FxSynthNone = 26,
-    FxSynthEgcOn = 71,
+    FxSynthEgcOn = 72,
     FxSynthEgcDisabled = 10,
     FxSynthEgcOff = 111,
     FxSynthOff = 10,
@@ -448,10 +479,10 @@ costs! {
     SfxRotate1Iter = 22,
     SfxRotate2Run = 22,
     SfxRotate2Go = 0,
-    SfxRotate2Slow = 0,
+    SfxRotate2Slow = 13,
     SfxRotate2 = 21,
     SfxRotate2Iter = 29,
-    SfxAlienGo = 16,
+    SfxAlienGo = 17,
     SfxAlienSlow = 0,
     SfxAlien = 40,
     SfxAlienIter = 30,
@@ -466,22 +497,22 @@ costs! {
     SfxPolyNegSlow = -1,
     SfxPolyNeg = 33,
     SfxPolyNegWrap = 28,
-    SfxShaker1Go = 0,
-    SfxShaker1Slow = 0,
+    SfxShaker1Go = 76,
+    SfxShaker1Slow = -14,
     SfxShaker1 = 40,
-    SfxShaker1Iter = 16,
+    SfxShaker1Iter = 22,
     SfxShaker2Go = 0,
-    SfxShaker2Slow = 0,
+    SfxShaker2Slow = -12,
     SfxShaker2 = 40,
-    SfxShaker2Iter = 16,
+    SfxShaker2Iter = 35,
     SfxShakerWrap = 8,
-    SfxShaker2Neg = 8,
+    SfxShaker2Neg = 98,
     SfxAmfLfoWrap = 8,
     SfxAmfLfoGo = 0,
     SfxAmfLfoSlow = 0,
     SfxAmfLfo = 40,
     SfxLaserGo = 0,
-    SfxLaserSlow = -33,
+    SfxLaserSlow = -32,
     SfxLaser = 48,
     SfxLaserWrap = 16,
     SfxOctFx1Hold = 8,
@@ -491,13 +522,13 @@ costs! {
     SfxOctFx2Slow = 0,
     SfxOctFx2 = 40,
     SfxOctFx2Iter = 24,
-    SfxAlisingGo = -14,
+    SfxAlisingGo = -15,
     SfxAlisingSlow = 18,
     SfxAlising = -44,
     SfxAlisingUp = 61,
     SfxAlisingDown = 64,
     SfxAlisingIter = 62,
-    SfxEgFx1Wrap = 17,
+    SfxEgFx1Wrap = 18,
     SfxEgFx1Go = 98,
     SfxEgFx1Slow = 0,
     SfxEgFx1 = -8,
@@ -525,21 +556,22 @@ costs! {
     FxVibNeg = -6,
     FxVibRun = 189,
     FxPer = 207,
-    FxAfterPer = -32,
+    FxAfterPer = -34,
     FxAdsr = 63,
-    FxAdsrEnd = -104,
+    FxAdsrEnd = -103,
+    FxAdsrEndEnd = -1,
     FxAdsrNewVol = -10,
     FxAdsrStep = 166,
     FxEgcDisabled = 10,
     FxEgcBuf2 = 10,
-    FxEgcOnce = 52,
-    FxEgcRepeat = 42,
+    FxEgcOnce = 51,
+    FxEgcRepeat = 41,
     FxEgc = 40,
-    FxEgcRun = 174,
+    FxEgcRun = 175,
     FxEgcCopy = 90,
     FxEgcNegSetup = 4,
     FxEgcNeg = 22,
-    FxEgcEnd = -43,
+    FxEgcEnd = -42,
     // the host calls, before and after the write, and the Eagleplayer's
     // compares of the voice (before the volume's call, after the others')
     LocPre = 565,
@@ -547,12 +579,12 @@ costs! {
     LenPre = 306,
     LenPost = -399,
     PerPre = 434,
-    PerPost = -41,
+    PerPost = -39,
     VolPre = 608,
     VolPost = -251,
     DmaPre = 382,
     DmaPost = -190,
-    LocCh1 = 24,
+    LocCh1 = 23,
     LocCh2 = 46,
     LocCh3 = 46,
     LenCh1 = 23,
@@ -560,10 +592,10 @@ costs! {
     LenCh3 = 46,
     PerCh1 = 23,
     PerCh2 = 46,
-    PerCh3 = 45,
+    PerCh3 = 46,
     VolCh1 = 23,
     VolCh2 = 30,
-    VolCh3 = 37,
+    VolCh3 = 36,
     VolClamp = 4,
 }
 
@@ -577,13 +609,21 @@ impl Synthesis {
         self.tn(c, 1);
     }
 
+    /// The cost of voice `v`'s copy of a path the original has once for each voice (`c` is voice 0's).
+    fn tv(&mut self, c: Cost, v: usize) {
+        self.tk(c as usize + v, 1);
+    }
+
     fn tn(&mut self, c: Cost, n: u32) {
-        let k = c as usize;
+        self.tk(c as usize, n);
+    }
+
+    fn tk(&mut self, k: usize, n: u32) {
         self.spent += COSTS[k] * n as f64;
         if self.fit.is_some() && n != 0 {
             match self.counts.iter_mut().find(|e| e.0 as usize == k) {
                 Some(e) => e.1 += n,
-                None => self.counts.push((k as u8, n)),
+                None => self.counts.push((k as u16, n)),
             }
         }
     }
@@ -815,14 +855,14 @@ impl Synthesis {
         let mut d5 = 0u16;
         for v in 0..4 {
             if self.rb(hw, VOICE_ON + v as u32) != 0 {
-                self.t(Cost::VoiceOn);
+                self.tv(Cost::VoiceOn0, v);
                 let d0 = hw.bus.r32(self.mem + TRACK_ROW + 4 * v as u32);
                 let d3 = hw.bus.r32(self.mem + POS_ROW + 4 * v as u32);
                 self.voice_row(v, d0, d3, &mut d5, hw);
             } else {
-                self.t(Cost::VoiceOff);
+                self.tv(Cost::VoiceOff0, v);
             }
-            self.t(Cost::VoiceNext);
+            self.tv(Cost::VoiceNext0, v);
         }
         if d5 != 0 {
             self.t(Cost::RowDma);
@@ -840,9 +880,9 @@ impl Synthesis {
         self.wb(hw, ROW, row);
         self.t(Cost::RowEnd);
         for v in 0..4 {
-            self.t(Cost::LoopVoice);
+            self.tv(Cost::LoopVoice0, v);
             if self.rb(hw, VOICE_ON + v as u32) != 0 && d5 & 1 << v != 0 {
-                self.t(Cost::LoopCall);
+                self.tv(Cost::LoopCall0, v);
                 self.sample_loop(v, hw);
             }
         }
@@ -938,6 +978,7 @@ impl Synthesis {
             self.vwb(hw, v, V_VOLUME, 0);
             *d5 |= d6;
             self.empty_loop(v, hw);
+            self.t(Cost::VrCutEnd);
             return;
         }
         self.t(Cost::VrNote);
@@ -1114,6 +1155,7 @@ impl Synthesis {
             self.poke_loc(hw, v, self.mem + EMPTY);
             self.t(Cost::EmptyLen);
             self.poke_len(hw, v, 2);
+            self.t(Cost::LoopEmptyEnd);
             return;
         }
         self.t(Cost::LoopSample);
@@ -1133,6 +1175,7 @@ impl Synthesis {
         if ins == 0 {
             self.t(Cost::FxNoInstr);
             self.poke_vol(hw, v, 0);
+            self.t(Cost::FxNoInstrEnd);
             return;
         }
         let arp = (d0 >> 12) as u8 & 0xf;
@@ -1146,6 +1189,7 @@ impl Synthesis {
             if d1 == 0 {
                 self.t(Cost::FxNoNote);
                 self.poke_vol(hw, v, 0);
+                self.t(Cost::FxNoNoteEnd);
                 return;
             }
             let ib = |hw: &Hw, o: u32| hw.bus.r8(a0.wrapping_add(o));
@@ -1257,6 +1301,7 @@ impl Synthesis {
                 self.t(Cost::FxAdsrEnd);
                 self.vwb(hw, v, V_INSTRUMENT, 0);
                 self.poke_vol(hw, v, 0);
+                self.t(Cost::FxAdsrEndEnd);
                 return;
             }
             self.t(Cost::FxAdsrStep);

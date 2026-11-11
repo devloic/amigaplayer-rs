@@ -29,8 +29,12 @@ const STUB_AREA_END: u32 = 0x2000;
 pub const HEAP_START: u32 = 0x2000;
 const STACK_SIZE: u32 = 0x20000;
 pub const STACK_TOP: u32 = RAM_SIZE as u32 - 0x10;
-/// Max instructions for a single host->guest call (catches hung players).
-const CALL_BUDGET: u64 = 200_000_000;
+/// Max instructions for a single host->guest call (catches hung players). For interpreted
+/// code the calls it nests (an interrupt handler run from inside a library call) count too.
+pub const CALL_BUDGET: u64 = 200_000_000;
+/// How deep host->guest calls may nest (a guest function that calls a host function that
+/// calls the guest again, ...): each level is a frame on the host's stack.
+const MAX_CALL_DEPTH: u32 = 64;
 /// Where recompiled players live. Must match tools/native-players.py.
 pub const NATIVE_LO: u32 = 0x80_0000;
 pub const NATIVE_HI: u32 = STACK_TOP + 0x10 - STACK_SIZE;
@@ -123,6 +127,11 @@ pub struct Machine {
     /// Set by a host call that blocks the running task: where it resumes.
     yield_pc: Option<Option<u32>>,
     yielded: bool,
+    /// The instructions one host->guest call may run before it is given up as hung
+    /// (`CALL_BUDGET` unless the host lowers it).
+    pub call_budget: u64,
+    /// Instructions interpreted since the outermost call began.
+    spent: u64,
 }
 
 impl Machine {
@@ -152,6 +161,8 @@ impl Machine {
             task_depth: 0,
             yield_pc: None,
             yielded: false,
+            call_budget: CALL_BUDGET,
+            spent: 0,
         };
         m.add_trap_at(SENTINEL_ADDR, Trap::Sentinel);
         m.add_trap_at(EXCEPTION_ADDR, Trap::Exception);
@@ -266,6 +277,9 @@ impl Machine {
         }
         let (saved_dar, saved_pc, saved_sr) = (self.cpu.dar, self.cpu.pc, self.cpu.get_sr());
         let (saved_task, saved_cur) = (self.task_depth, self.os.current_task);
+        if self.depth == 0 {
+            self.spent = 0;
+        }
         self.cpu.dar = t.regs;
         self.cpu.set_sr(t.sr);
         self.cpu.pc = t.pc;
@@ -300,6 +314,12 @@ impl Machine {
     pub fn call(&mut self, entry: u32, regs: &Regs) -> Result<Regs, String> {
         if entry == 0 {
             return Err("call to NULL".into());
+        }
+        if self.depth >= MAX_CALL_DEPTH {
+            return Err("guest calls nested too deep".into());
+        }
+        if self.depth == 0 {
+            self.spent = 0;
         }
         let saved_dar = self.cpu.dar;
         let saved_pc = self.cpu.pc;
@@ -339,7 +359,6 @@ impl Machine {
     }
 
     fn run_until_return(&mut self, ret_sp: u32) -> Result<(), String> {
-        let mut executed: u64 = 0;
         let mut cycles: u64 = 0;
         self.bus.rebase(cycles);
         loop {
@@ -357,8 +376,8 @@ impl Machine {
                 m68k_rc::Bus::cycles(&mut self.bus, cycles);
             }
             let r = self.cpu.step(&mut self.bus);
-            executed += 1;
-            if executed > CALL_BUDGET {
+            self.spent += 1;
+            if self.spent > self.call_budget {
                 return Err(format!("guest code did not return (PC=${:06x})", self.cpu.pc));
             }
             match r {

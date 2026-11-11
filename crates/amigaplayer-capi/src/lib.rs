@@ -10,13 +10,13 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use amigaplayer_rs::{Error, Song};
+use amigaplayer_rs::{Error, Options, Song};
 use std::cell::RefCell;
 use std::ffi::{c_char, c_double, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Version of this C API, not of the crate: `major * 10000 + minor * 100 + patch`.
-const API_VERSION: c_int = 100; // 0.1.0
+const API_VERSION: c_int = 200; // 0.2.0
 
 thread_local! {
     static LAST: RefCell<(c_int, CString)> = RefCell::new((0, CString::default()));
@@ -28,21 +28,31 @@ const E_RATE: c_int = 3;
 const E_SUBSONG: c_int = 4;
 const E_INTERNAL: c_int = 5;
 const E_ARGUMENT: c_int = 6;
+const E_GUEST: c_int = 7;
+#[cfg_attr(feature = "host-68k", allow(dead_code))]
+const E_UNSUPPORTED: c_int = 8;
+
+/// `ap_open_opts` flag: custom modules may play (their own 68k code is run).
+const OPEN_CUSTOM: u32 = 1;
 
 fn set_error(code: c_int, msg: &str) {
     let msg = CString::new(msg.replace('\0', " ")).unwrap_or_default();
     LAST.with(|l| *l.borrow_mut() = (code, msg));
 }
 
-fn set_from(e: &Error) {
-    let code = match e {
+fn code_of(e: &Error) -> c_int {
+    match e {
         Error::NotRecognised => E_NOT_RECOGNISED,
         Error::Invalid(_) => E_INVALID,
         Error::InvalidRate(_) => E_RATE,
         Error::SubsongOutOfRange { .. } => E_SUBSONG,
+        Error::Guest(_) => E_GUEST,
         _ => E_INTERNAL,
-    };
-    set_error(code, &e.to_string());
+    }
+}
+
+fn set_from(e: &Error) {
+    set_error(code_of(e), &e.to_string());
 }
 
 /// Runs `f`, turning a panic into an error and `fail`.
@@ -61,6 +71,7 @@ pub struct ApSong {
     song: Song,
     title: CString,
     format: CString,
+    error: CString,
 }
 
 fn cstring(s: &str) -> CString {
@@ -70,7 +81,7 @@ fn cstring(s: &str) -> CString {
 impl ApSong {
     fn new(song: Song) -> Box<ApSong> {
         let (title, format) = (cstring(song.title()), cstring(song.format()));
-        Box::new(ApSong { song, title, format })
+        Box::new(ApSong { song, title, format, error: CString::default() })
     }
 }
 
@@ -144,6 +155,54 @@ pub unsafe extern "C" fn ap_open_with(
     datas: *const *const u8,
     lens: *const usize,
 ) -> *mut ApSong {
+    unsafe { ap_open_opts(name, data, len, rate, n, paths, datas, lens, 0) }
+}
+
+/// 1 if `data` is a custom module (an executable that carries its own player, which
+/// `ap_open_opts` plays with `AP_OPEN_CUSTOM`), else 0. Always 0 in a build without the
+/// `host-68k` feature.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_detect_custom(data: *const u8, len: usize) -> c_int {
+    let Some(d) = (unsafe { bytes(data, len) }) else {
+        set_error(E_ARGUMENT, "null data");
+        return 0;
+    };
+    #[cfg(feature = "host-68k")]
+    return guard(0, || amigaplayer_rs::detect_custom(d) as c_int);
+    #[cfg(not(feature = "host-68k"))]
+    {
+        let _ = d;
+        0
+    }
+}
+
+/// As `ap_open_with`, with `flags` (`AP_OPEN_*`, or 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_open_opts(
+    name: *const c_char,
+    data: *const u8,
+    len: usize,
+    rate: u32,
+    n: usize,
+    paths: *const *const c_char,
+    datas: *const *const u8,
+    lens: *const usize,
+    flags: u32,
+) -> *mut ApSong {
+    if flags & !OPEN_CUSTOM != 0 {
+        set_error(E_ARGUMENT, "unknown flags");
+        return std::ptr::null_mut();
+    }
+    #[cfg(feature = "host-68k")]
+    let opts = Options::new().allow_custom(flags & OPEN_CUSTOM != 0);
+    #[cfg(not(feature = "host-68k"))]
+    let opts = {
+        if flags & OPEN_CUSTOM != 0 {
+            set_error(E_UNSUPPORTED, "this build cannot play custom modules (built without the host-68k feature)");
+            return std::ptr::null_mut();
+        }
+        Options::new()
+    };
     let (Some(name), Some(data)) = (unsafe { str_arg(name) }, unsafe { bytes(data, len) }) else {
         set_error(E_ARGUMENT, "null or invalid name or data");
         return std::ptr::null_mut();
@@ -161,7 +220,7 @@ pub unsafe extern "C" fn ap_open_with(
         };
         files.push((p, d));
     }
-    guard(std::ptr::null_mut(), || match Song::open_with(name, data, &files, rate) {
+    guard(std::ptr::null_mut(), || match Song::open_opts(name, data, &files, rate, &opts) {
         Ok(s) => Box::into_raw(ApSong::new(s)),
         Err(e) => {
             set_from(&e);
@@ -311,6 +370,28 @@ pub unsafe extern "C" fn ap_sample_rate(song: *mut ApSong) -> u32 {
     s.song.sample_rate()
 }
 
+/// Why the song has stopped by itself and renders silence (the 68k code of a custom module
+/// failed, or a replayer did), or null while all is well. Valid until the next `ap_error`
+/// call on `song`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_error(song: *mut ApSong) -> *const c_char {
+    let s = song!(song, std::ptr::null());
+    match s.song.error() {
+        Some(e) => {
+            s.error = cstring(&e.to_string());
+            s.error.as_ptr()
+        }
+        None => std::ptr::null(),
+    }
+}
+
+/// The `AP_ERR_*` code of `ap_error` (`AP_ERR_GUEST` or `AP_ERR_INTERNAL`), 0 while all is well.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_error_code(song: *mut ApSong) -> c_int {
+    let s = song!(song, 0);
+    s.song.error().map_or(0, code_of)
+}
+
 /// The module's title (UTF-8, may be empty). Valid until the next `ap_title` call on `song`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_title(song: *mut ApSong) -> *const c_char {
@@ -325,4 +406,104 @@ pub unsafe extern "C" fn ap_format(song: *mut ApSong) -> *const c_char {
     let s = song!(song, std::ptr::null());
     s.format = cstring(s.song.format());
     s.format.as_ptr()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use amigaplayer_rs::testdata::{minimal_custom, minimal_mod};
+
+    fn last_error() -> (c_int, String) {
+        (ap_last_error_code(), unsafe { CStr::from_ptr(ap_last_error()) }.to_string_lossy().into_owned())
+    }
+
+    unsafe fn open(data: &[u8], flags: u32) -> *mut ApSong {
+        unsafe { ap_open_opts(c"cust.test".as_ptr(), data.as_ptr(), data.len(), 48000, 0, std::ptr::null(), std::ptr::null(), std::ptr::null(), flags) }
+    }
+
+    #[test]
+    fn open_opts_without_flags_is_open_with() {
+        let m = minimal_mod();
+        unsafe {
+            let (a, b) = (open(&m, 0), ap_open(c"a.mod".as_ptr(), m.as_ptr(), m.len(), 48000));
+            assert!(!a.is_null() && !b.is_null());
+            let (mut x, mut y) = (vec![0i16; 2000], vec![0i16; 2000]);
+            assert_eq!(ap_render_s16(a, x.as_mut_ptr(), 1000), 1000);
+            assert_eq!(ap_render_s16(b, y.as_mut_ptr(), 1000), 1000);
+            assert_eq!(x, y);
+            assert!(ap_error(a).is_null());
+            assert_eq!(ap_error_code(a), 0);
+            ap_close(a);
+            ap_close(b);
+            assert!(open(&m, 0x8000).is_null());
+            assert_eq!(last_error().0, E_ARGUMENT);
+            assert_eq!(ap_detect_custom(m.as_ptr(), m.len()), 0);
+            assert_eq!(ap_detect_custom(std::ptr::null(), 4), 0);
+        }
+    }
+
+    #[test]
+    fn a_custom_module_is_refused_without_the_flag() {
+        let m = minimal_custom();
+        unsafe {
+            assert!(open(&m, 0).is_null());
+            assert_eq!(last_error().0, E_NOT_RECOGNISED);
+            assert!(ap_open(c"cust.test".as_ptr(), m.as_ptr(), m.len(), 48000).is_null());
+        }
+    }
+
+    #[cfg(feature = "host-68k")]
+    #[test]
+    fn a_custom_module_plays_with_the_flag() {
+        let m = minimal_custom();
+        unsafe {
+            assert_eq!(ap_detect_custom(m.as_ptr(), m.len()), 1);
+            let s = open(&m, OPEN_CUSTOM);
+            assert!(!s.is_null(), "{:?}", last_error());
+            assert_eq!(CStr::from_ptr(ap_format(s)).to_str(), Ok("Custom"));
+            assert_eq!(CStr::from_ptr(ap_title(s)).to_str(), Ok("synthetic"));
+            let (mut first, mut last, mut cur) = (9u16, 9u16, 9u16);
+            assert_eq!(ap_subsongs(s, &mut first, &mut last, &mut cur), 0);
+            assert_eq!((first, last, cur), (0, 1, 0));
+            let mut pcm = vec![0i16; 2 * 4800];
+            assert_eq!(ap_render_s16(s, pcm.as_mut_ptr(), 4800), 4800);
+            assert!(pcm.iter().any(|&v| v.abs() > 1000));
+            assert!(ap_error(s).is_null());
+            assert_eq!(ap_set_subsong(s, 1), 0);
+            ap_close(s);
+        }
+    }
+
+    #[cfg(feature = "host-68k")]
+    #[test]
+    fn a_custom_module_that_hangs_reports_it() {
+        // its interrupt routine is `bra.s *`
+        let m = amigaplayer_rs::testdata::custom_with(&[], &[0x60, 0xFE]);
+        unsafe {
+            let s = open(&m, OPEN_CUSTOM);
+            assert!(!s.is_null(), "{:?}", last_error());
+            let mut pcm = vec![0f32; 2 * 48000];
+            assert_eq!(ap_render_f32(s, pcm.as_mut_ptr(), 48000), 48000);
+            assert_eq!(ap_error_code(s), E_GUEST);
+            let why = CStr::from_ptr(ap_error(s)).to_string_lossy().into_owned();
+            assert!(why.contains("did not return"), "{why}");
+            assert_eq!(ap_songend(s), 0);
+            assert_eq!(ap_set_subsong(s, 1), -1);
+            assert_eq!(last_error().0, E_GUEST);
+            assert_eq!(ap_restart(s), 0);
+            assert!(ap_error(s).is_null());
+            ap_close(s);
+        }
+    }
+
+    #[cfg(not(feature = "host-68k"))]
+    #[test]
+    fn the_flag_is_refused_without_the_feature() {
+        let m = minimal_custom();
+        unsafe {
+            assert!(open(&m, OPEN_CUSTOM).is_null());
+            assert_eq!(last_error().0, E_UNSUPPORTED);
+            assert_eq!(ap_detect_custom(m.as_ptr(), m.len()), 0);
+        }
+    }
 }

@@ -10,6 +10,12 @@ repository = "https://fg.lolo.asia/adminlolo/amigaplayer-rs.git"
 name = "amigaplayer"
 crate-type = ["cdylib", "staticlib"]
 
+[features]
+default = ["host-68k"]
+# The emulated 68000 hosting a custom module's own code (`ap_open_opts` with AP_OPEN_CUSTOM,
+# `ap_detect_custom`). No external player is ever loaded. Without it the flag is refused.
+host-68k = ["amigaplayer-rs/host-68k"]
+
 [dependencies]
-# The open-replayer library only: no SDL, no 68k player hosting.
+# The open-replayer library: no SDL, no original players.
 amigaplayer-rs = { path = "../..", default-features = false }

@@ -577,7 +577,13 @@ REFUSED_NO_FALLBACK = {'hippel7v'}
 # so Paula plays 128 KB of memory from there on: the player's own variables, then whatever was
 # loaded after its hunk. In the full directory that is the next Eagleplayer's code, which no port
 # can hold; loaded alone, zeros follow and the original is one a port can equal.
-ALONE = {'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2')}
+# PreTracker (UADE): a wave at a note of octave 9 (prt.m065's wave 2) is generated from an
+# oscillator index that runs away, up to 64K past the oscillator buffers in the player's BSS hunk:
+# through the player's own first hunk (which the port models) and 43 KB further. In the full
+# directory that is Pokeynoise's hunk (200 of the wave's 295 reads past the buffers, 197 of them
+# not zero); loaded alone, zeros follow.
+ALONE = {'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2'),
+         'pretracker': ('uade', 'PreTracker')}
 
 
 def alone_dir(ctx, src, name):

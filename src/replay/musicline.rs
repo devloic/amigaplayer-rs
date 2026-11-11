@@ -422,38 +422,12 @@ const SKIPPED_VOICE: u64 = 35;
 const TAIL_TO_DMA: [u64; 16] = [0, 333, 298, 263, 262, 227, 227, 192, 236, 200, 200, 166, 201, 165, 165, 131];
 const TAIL_ADD: u64 = 14;
 // The tick's entry to its first write (the acknowledge), after the timer's underflow.
-const CALL_TO_ACK: u64 = 50;
 // The DMA routine at a tick's end: DMA off, 90 colour clocks to the low byte of timer B's
 // latch and 17 more to the high byte, which starts the timer.
 const OFF_TO_TB_LOW: u64 = 90;
 const TB_LOW_TO_HIGH: u64 = 17;
 // ... and the tick returns 107 colour clocks after that.
 const TICK_RETURN: u64 = 107;
-const VOL_TO_LOC: u64 = 64;
-const LOC_TO_LEN: u64 = 10;
-const LEN_TO_PER: u64 = 10;
-// Timer B's first interrupt (the voices' registers and DMA on), measured from its entry
-// (the timer's underflow, or the end of the tick it waited for): the first voice's
-// first write by the voice (the skipped voices take about 20 colour clocks each); from
-// a voice's period write to the next voice's first write by the voices skipped between
-// (125 and about 20 more for each); from the last voice's period write to the DMA-on
-// write by the voices after it; with no voice to start, the DMA-on write comes at 218.
-// The routine then writes timer B's latch (24 colour clocks after the DMA-on write, and 17
-// more for the high byte, which starts the 150 wait) and returns 82 after that.
-const START_FIRST: [u64; 4] = [243, 264, 284, 305];
-const START_NEXT: [u64; 3] = [125, 145, 166];
-const START_LAST_TO_ON: [u64; 4] = [80, 59, 39, 18];
-const START_NONE_ON: u64 = 218;
-const ON_TO_TB_LOW: u64 = 24;
-const TB_HIGH_TO_END: u64 = 82;
-// The second interrupt (the loop registers of the voices in the mask): the first voice's
-// location write by the voice, the length 10 later, the next voice's location by the voices
-// skipped (63, 10 more each), the return by the voices after the last (98, 9 more each);
-// with an empty mask it returns at 260.
-const LOOP_FIRST: [u64; 4] = [188, 197, 207, 216];
-const LOOP_NEXT: [u64; 3] = [63, 73, 82];
-const LOOP_LAST_TO_END: [u64; 4] = [126, 117, 107, 98];
-const LOOP_NONE_END: u64 = 260;
 
 // The original's loading and init, with 4 voices, as stretches of code between host calls (the
 // library's A-line calls; the clock counts floor(cycles / 2) of each stretch, see `Cost`).
@@ -468,15 +442,6 @@ const CHUNK_ENTRY: u64 = 70;
 /// (fixed, 1083 colour clocks) and the init's fixed stretch (372668 cycles), to which the
 /// first row's work is added.
 const AFTER_LOAD: u64 = 1_083 + 372_668 / 2;
-/// The first row's work in the init (colour clocks). Its cost is known only as a range (the
-/// instrument starts of the voices), so it is calibrated, not exact: a fixed part, a part of the
-/// port's price of the pre-roll row, and for each voice that starts an instrument what its
-/// effects add (a fit on 123 four-voice modules; median error 47 colour clocks on them and 61
-/// on 60 held out, against 100 for the price alone).
-const INIT_ROW_BASE: f64 = 638.3;
-const INIT_ROW: f64 = 0.93;
-const INIT_START_E2: [(u8, f64); 5] = [(E2_TRANSFORM, 158.8), (E2_PHASE, 55.1), (E2_MIX, 43.5), (E2_RESONANCE, -4.8), (E2_FILTER, -40.2)];
-const INIT_START_E1: [(u8, f64); 5] = [(E1_ENVELOPE, -6.6), (E1_VIBRATO, 79.3), (E1_ARPEGGIO, 36.7), (E1_LOOP, 257.2), (E1_WAVE_SAMPLE_LOOP, -19.4)];
 
 #[derive(Clone, Copy, Default)]
 struct Counter {
@@ -491,29 +456,42 @@ struct Counter {
 }
 
 impl Counter {
-    fn one_way(&mut self) {
+    fn one_way(&mut self, cyc: &mut u64) {
+        *cyc += 124;
         if self.step || self.delay == 0 {
             self.counter = self.counter.wrapping_add(self.speed as u16) & 0x1ff;
         } else {
+            *cyc -= 12;
             self.delay -= 1;
         }
     }
 
-    fn count(&mut self) {
+    fn count(&mut self, cyc: &mut u64) {
+        *cyc += 29;
         if !(self.step || self.delay == 0) {
+            *cyc += 53;
             self.delay -= 1;
             return;
         }
+        *cyc += 37;
         if self.turns < 0 {
+            *cyc += 21;
             return;
         }
+        *cyc += 41;
         let mut c = self.counter as i16;
         c = c.wrapping_add(self.speed);
+        if !self.step {
+            *cyc += 21;
+        }
         let (lo, hi) = if self.repeat < self.repeat_end {
+            *cyc += 21;
             (self.repeat, self.repeat_end)
         } else {
+            *cyc += 31;
             (self.repeat_end, self.repeat)
         };
+        *cyc += 33;
         if self.speed < 0 {
             if c as i32 >= lo as i32 {
                 self.counter = c as u16;
@@ -523,9 +501,12 @@ impl Counter {
             self.counter = c as u16;
             return;
         }
+        *cyc += 59;
         if self.turns != 0 {
+            *cyc += 25;
             self.turns -= 1;
             if self.turns == 0 {
+                *cyc += 16;
                 self.turns = -1;
             }
         }
@@ -803,6 +784,10 @@ pub struct Musicline {
     title: String,
     /// The prices of the work done since the last `pay` (colour clocks, with fractions).
     owed: f64,
+    /// 4 voices: the 68000 cycles the original's code has run since the call's entry (the clock is at
+    /// `call_start` + `cyc` / 2 when a register is written), and the clock at that entry.
+    cyc: u64,
+    call_start: u64,
     /// An instrument has started on this tick (the tick's share of the start's price is paid).
     inst_started: bool,
 }
@@ -906,6 +891,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         voices,
         vol_table,
         owed: 0.0,
+        cyc: 0,
+        call_start: 0,
         inst_started: false,
         title: String::new(),
     };
@@ -919,8 +906,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         ml.init_sound(&mut hw, 0, false);
     } else {
         ml.init_sound(&mut hw, 0, true);
-        // the pre-roll's row is priced in `owed`
-        let at = cost.four_clocks(ml.owed, &ml.voices[..4]);
+        // the pre-roll's row is counted in `cyc`
+        let at = cost.four_clocks(ml.cyc);
         if ml.voices[0].ended {
             // a tune that ends in its first row: the init makes EndSound's writes 579 colour
             // clocks before it starts the timer
@@ -1244,15 +1231,9 @@ impl Cost {
 
     /// Colour clocks from the start to the original's timer start with 4 voices: the
     /// loading (`clk`), the calls that close it and the init's fixed stretch, and the
-    /// first row's work (`preroll`, in the port's price, which fits the init's time to a
-    /// median of about 100 colour clocks).
-    fn four_clocks(&self, preroll: f64, starts: &[Voice]) -> u64 {
-        let mut row = INIT_ROW_BASE + INIT_ROW * preroll;
-        for x in starts.iter().filter(|x| x.play & P_RETRIGGER != 0) {
-            row += INIT_START_E2.iter().filter(|(b, _)| x.effect2 & b != 0).map(|(_, c)| c).sum::<f64>();
-            row += INIT_START_E1.iter().filter(|(b, _)| x.effect1 & b != 0).map(|(_, c)| c).sum::<f64>();
-        }
-        self.base + self.clk + AFTER_LOAD + row.max(0.0) as u64
+    /// first row's work (`row`: the 68000 cycles the tune's routine runs for it, as in a tick).
+    fn four_clocks(&self, row: u64) -> u64 {
+        self.base + self.clk + AFTER_LOAD + (row + 37) / 2
     }
 }
 
@@ -1352,7 +1333,8 @@ impl Replayer for Musicline {
         // order of the CIA's bits (timer A, timer B)
         self.tb.sync(now);
         let take_b = std::mem::take(&mut self.tb.pending);
-        hw.wait(CALL_TO_ACK);
+        self.call_start = hw.bus.clock;
+        self.cyc = 0;
         self.handler(hw);
         if take_b {
             self.timer_b_interrupt(hw);
@@ -1546,6 +1528,10 @@ impl Musicline {
 
     /// The interrupt handler: one tick.
     fn handler(&mut self, hw: &mut Hw) {
+        if !self.eight {
+            self.handler4(hw);
+            return;
+        }
         hw.bus.write_word(0xdff09c, 0x0080);
         if self.eight {
             self.half ^= 0xa00;
@@ -1622,6 +1608,112 @@ impl Musicline {
             self.period_volume_play(hw);
             self.dma(hw);
         }
+    }
+
+    /// The interrupt handler with 4 voices. The time of each register write is the 68000 cycles the
+    /// original's code runs from the call's entry to it (`cyc`: every branch of the code the port follows adds
+    /// what the original's takes; measured on the Eagleplayer's runs under the engine, whose instruction times
+    /// do not depend on the data).
+    fn handler4(&mut self, hw: &mut Hw) {
+        self.owed = 0.0;
+        self.cyc += 100;
+        self.reach(hw, 0);
+        hw.bus.write_word(0xdff09c, 0x0080);
+        self.cyc += 81;
+        if std::mem::take(&mut self.first) {
+            // the first tick writes the four volumes instead of reading the tune
+            for ch in 0..4 {
+                self.cyc += if ch == 0 { 40 } else { 24 };
+                self.reach(hw, 0);
+                hw.vol(ch, 0);
+            }
+            self.cyc += 10;
+        } else {
+            self.cyc += 18;
+            self.play_tune(hw);
+            self.cyc += 37;
+        }
+        self.cyc += 18;
+        for v in 0..4 {
+            self.cyc += if v == 3 { 45 } else { 42 };
+            self.play_effects(hw, v);
+        }
+        self.cyc += 18;
+        for v in 0..4 {
+            self.cyc += 30;
+            self.period(v);
+        }
+        self.cyc += 37 + 18;
+        self.period_volume_play4(hw);
+        self.cyc += 18;
+        self.dma4(hw);
+    }
+
+    /// The periods and volumes of the voices that do not restart.
+    fn period_volume_play4(&mut self, hw: &mut Hw) {
+        for v in 0..4 {
+            self.cyc += [51, 30, 30, 12][v] + 25;
+            if self.voices[v].play & P_RETRIGGER == 0 {
+                self.cyc += 273;
+                self.reach(hw, 241);
+                hw.per(v, self.voices[v].period);
+                if !self.voices[v].muted {
+                    self.reach(hw, 12);
+                    hw.vol(v, self.amiga_volume(v));
+                }
+            }
+            self.cyc += 16;
+        }
+    }
+
+    /// The DMA routine, at a tick's end: the voices that restart (and those of earlier
+    /// ticks whose restart has not run yet) are switched off, timer B starts its wait (100
+    /// E-clocks, or the longest period those voices played on the last tick) and the
+    /// timer B interrupt will take its first step.
+    fn dma4(&mut self, hw: &mut Hw) {
+        let mut mask = self.dma_mask;
+        let mut wait = 100u16;
+        for v in 0..4 {
+            self.cyc += if v == 0 { 92 } else { 37 };
+            let x = &mut self.voices[v];
+            if x.play & P_RETRIGGER == 0 {
+                continue;
+            }
+            self.cyc += 57;
+            let (n, old) = (x.wave_number, x.wave_number_old);
+            x.wave_number_old = n;
+            if x.wave_or_sample != SAMPLE {
+                self.cyc += 13;
+                if n == old {
+                    continue;
+                }
+            }
+            self.cyc += 29;
+            mask |= 1 << v;
+            if self.prev_period[v] > wait {
+                self.cyc += 12;
+                wait = self.prev_period[v];
+            }
+        }
+        self.cyc += 242;
+        self.reach(hw, 230);
+        hw.dmacon(mask);
+        self.dma_mask = mask;
+        for v in 0..4 {
+            self.prev_period[v] = self.voices[v].period;
+        }
+        self.reach(hw, 16);
+        self.tb.write_high(hw.bus.clock, wait);
+        self.isr_step = 1;
+        // the handler's end and the return: the call ends on a whole colour clock
+        self.cyc += 198;
+        Self::until(hw, self.call_start + self.cyc.div_ceil(2));
+    }
+
+    /// 4 voices: lets the clock reach the time of the original's code `back` cycles before the point
+    /// counted so far.
+    fn reach(&self, hw: &mut Hw, back: u64) {
+        Self::until(hw, self.call_start + (self.cyc - back) / 2);
     }
 
     fn amiga_volume(&self, v: usize) -> u16 {
@@ -1745,69 +1837,60 @@ impl Musicline {
     /// interrupt that waited for a tick to end runs the first step again, and the second
     /// (which clears the DMA mask) never comes while the ticks overrun.
     fn timer_b_interrupt(&mut self, hw: &mut Hw) {
+        // the 68000 cycles from the interrupt's entry, as in the tick
         let c = hw.bus.clock;
+        let mut cyc: u64 = 181 + 56;
         if self.isr_step == 1 {
             self.isr_step = 2;
-            let mut last: Option<(usize, u64)> = None;
             for v in 0..4 {
+                cyc += 41;
                 if self.voices[v].play & P_RETRIGGER == 0 {
                     continue;
                 }
                 self.voices[v].play &= !P_RETRIGGER;
-                let mut at = match last {
-                    None => START_FIRST[v],
-                    Some((l, per)) => per + START_NEXT[v - l - 1],
-                };
                 if !self.voices[v].muted {
-                    Self::until(hw, c + at);
+                    Self::until(hw, c + (cyc + 209) / 2);
                     let vol = self.amiga_volume(v);
                     hw.vol(v, vol);
-                    at += VOL_TO_LOC;
                 }
-                Self::until(hw, c + at);
                 let x = &self.voices[v];
+                Self::until(hw, c + (cyc + 337) / 2);
                 hw.loc(v, x.wave_pointer);
-                at += LOC_TO_LEN;
-                Self::until(hw, c + at);
+                Self::until(hw, c + (cyc + 357) / 2);
                 hw.len(v, x.wave_length);
-                at += LEN_TO_PER;
-                Self::until(hw, c + at);
+                cyc += 377;
+                Self::until(hw, c + cyc / 2);
                 hw.per(v, x.period);
-                last = Some((v, at));
             }
-            let on = last.map_or(START_NONE_ON, |(l, per)| per + START_LAST_TO_ON[l]);
-            Self::until(hw, c + on);
+            Self::until(hw, c + (cyc + 36) / 2);
             hw.dmacon(0x8000 | self.dma_mask);
-            Self::until(hw, c + on + ON_TO_TB_LOW + TB_LOW_TO_HIGH);
+            Self::until(hw, c + (cyc + 118) / 2);
             self.tb.write_high(hw.bus.clock, 150);
-            Self::until(hw, c + on + ON_TO_TB_LOW + TB_LOW_TO_HIGH + TB_HIGH_TO_END);
+            cyc += 134;
         } else {
-            let mut last: Option<(usize, u64)> = None;
             for v in 0..4 {
+                cyc += if v == 0 { 31 } else { 19 };
                 if self.dma_mask & 1 << v == 0 {
                     continue;
                 }
-                let at = match last {
-                    None => LOOP_FIRST[v],
-                    Some((l, len)) => len + LOOP_NEXT[v - l - 1],
-                };
-                Self::until(hw, c + at);
                 let x = &self.voices[v];
+                Self::until(hw, c + (cyc + 108) / 2);
                 hw.loc(v, x.repeat_pointer);
-                Self::until(hw, c + at + LOC_TO_LEN);
+                cyc += 128;
+                Self::until(hw, c + cyc / 2);
                 hw.len(v, x.repeat_length);
-                last = Some((v, at + LOC_TO_LEN));
             }
-            let end = last.map_or(LOOP_NONE_END, |(l, len)| len + LOOP_LAST_TO_END[l]);
-            Self::until(hw, c + end);
+            cyc += 48;
             self.dma_mask = 0;
         }
+        Self::until(hw, c + (cyc + 148_u64).div_ceil(2));
     }
 
     // ---- the tune ----
 
     fn play_tune(&mut self, hw: &mut Hw) {
         for v in 0..self.voice_count() {
+            self.cyc += 101;
             self.play_voice(hw, v);
         }
     }
@@ -1818,13 +1901,17 @@ impl Musicline {
         if x.voice_off {
             return;
         }
+        self.cyc += 27;
         x.speed_counter = x.speed_counter.wrapping_sub(1);
         if x.speed_counter != 0 {
             return;
         }
+        self.cyc += 117;
         let mut spd = x.speed;
         x.part_groove = !x.part_groove;
+        self.cyc += 21 * x.part_groove as u64;
         if x.part_groove && x.groove != 0 {
+            self.cyc += 6;
             spd = x.groove;
         }
         x.speed_counter = spd;
@@ -1832,20 +1919,25 @@ impl Musicline {
         x.speed_part = 0;
         x.groove_part = 0;
         for _ in 0..256 {
+            self.cyc += 125;
             self.owed += SEQ_ENTRY;
             let x = &mut self.voices[v];
             let pos = x.tune_position;
             let data = rw(hw, seq + 2 * pos as u32);
+            self.cyc += 20 * (pos == 0) as u64;
             let arg = (data & 0x1f) as u8;
             let target = (data >> 8) as u8;
             if data & 0x20 != 0 {
+                self.cyc += 81;
                 match (data & 0xc0) >> 6 {
                     1 => {
+                        self.cyc += 12;
                         x.voice_off = true;
                         x.ended = true;
                         return;
                     }
                     2 => {
+                        self.cyc += 55;
                         if x.tune_jump_counter != 0 {
                             x.tune_jump_counter -= 1;
                             if x.tune_jump_counter != 0 {
@@ -1854,6 +1946,7 @@ impl Musicline {
                                 x.tune_position = x.tune_position.wrapping_add(1);
                             }
                         } else if pos > target {
+                            self.cyc += 13;
                             x.tune_jump_counter = arg;
                             x.tune_position = target;
                         } else {
@@ -1862,14 +1955,19 @@ impl Musicline {
                         continue;
                     }
                     3 => {
+                        self.cyc += 21;
                         if x.tune_wait != 0 {
+                            self.cyc += 25;
                             x.tune_wait -= 1;
                             if x.tune_wait != 0 {
+                                self.cyc += 10;
                                 return;
                             }
+                            self.cyc += 26;
                             x.tune_position = x.tune_position.wrapping_add(1);
                             continue;
                         }
+                        self.cyc += 178;
                         x.tune_wait = target;
                         if target == 0 {
                             x.tune_position = x.tune_position.wrapping_add(1);
@@ -1889,7 +1987,9 @@ impl Musicline {
                     _ => {}
                 }
             }
+            self.cyc += 150;
             if self.parse_part(hw, v, data) {
+                self.cyc += 509;
                 return;
             }
         }
@@ -1902,11 +2002,13 @@ impl Musicline {
         x.transpose_number = ((data & 0x1f) as u8).wrapping_sub(16);
         let part = rl(hw, self.tab + T_PARTS + 4 * x.part_number as u32);
         loop {
+            self.cyc += 236;
             self.owed += PART_LINE;
             let x = &mut self.voices[v];
             let pos = x.part_position;
             x.part_position = x.part_position.wrapping_add(1) & 0x7f;
             if x.part_position == 0 {
+                self.cyc += 56;
                 x.tune_position = x.tune_position.wrapping_add(1);
                 x.speed = self.tune_speed;
                 x.groove = self.tune_groove;
@@ -1918,6 +2020,7 @@ impl Musicline {
                 x.part_effects[k] = (rb(hw, line + 2 + 2 * k as u32), rb(hw, line + 3 + 2 * k as u32));
             }
             if x.part_note == 61 {
+                self.cyc += 131;
                 if pos == 0 {
                     self.end_sound(hw);
                     return true;
@@ -1930,20 +2033,26 @@ impl Musicline {
                 x.tune_position = x.tune_position.wrapping_add(1);
                 return false;
             }
+            self.cyc += 23;
             let jump = x.part_note & 0x7f;
             if x.part_note & 0x80 != 0 {
+                self.cyc += 21;
                 if x.part_jump_counter != 0 {
+                    self.cyc += 25;
                     x.part_jump_counter -= 1;
                     if x.part_jump_counter != 0 {
+                        self.cyc += 34;
                         x.part_position = jump;
                     }
                 } else if pos > jump {
+                    self.cyc += 78;
                     x.part_jump_counter = x.part_instrument;
                     x.part_position = jump;
                 }
                 continue;
             }
             if jump != 0 {
+                self.cyc += 54;
                 x.transpose = ((x.transpose_number as i8 as i16) << 5) as i16;
             }
             self.check_instrument(hw, v);
@@ -1955,6 +2064,7 @@ impl Musicline {
         let pi = self.voices[v].part_instrument;
         self.owed += CHECK_INSTRUMENT;
         if pi != 0 {
+            self.cyc += 167;
             self.owed += CHECK_NEW_INSTRUMENT;
         }
         if self.voices[v].part_note != 0 {
@@ -1965,6 +2075,7 @@ impl Musicline {
             let x = &mut self.voices[v];
             x.instrument = inst;
             if pi != x.old_instrument {
+                self.cyc += 44;
                 x.arp = 0;
                 x.instrument_pitch_slide = 0;
                 x.old_instrument = pi;
@@ -1977,17 +2088,23 @@ impl Musicline {
 
     fn play_arpeggio(&mut self, hw: &mut Hw, v: usize) {
         let inst = self.voices[v].instrument;
+        self.cyc += 25 * (self.voices[v].part_note != 0 && inst == 0) as u64;
         if self.voices[v].part_note == 0 || inst == 0 {
+            self.cyc += 16;
             return;
         }
+        self.cyc += 142;
         let x = &mut self.voices[v];
         x.arp_wait = false;
         if x.arp & (A_USE_TABLE | A_ENABLED) == 0 {
+            self.cyc += 25;
             if rb(hw, inst + I_EFFECT1) & E1_ARPEGGIO == 0 {
                 return;
             }
+            self.cyc += 30;
             x.arp |= A_ENABLED;
         }
+        self.cyc += 592;
         if x.restart == 0 && x.part_instrument == 0 {
             return;
         }
@@ -1995,6 +2112,7 @@ impl Musicline {
         self.owed += ARP_START;
         let mut num = rw(hw, inst + I_ARP_TABLE) as u32;
         if x.arp & A_USE_TABLE != 0 {
+            self.cyc -= 13;
             num = x.arp_table as u32;
         }
         let arp = rl(hw, self.tab + T_ARPS + 4 * (num & 0xff));
@@ -2025,13 +2143,16 @@ impl Musicline {
             let sn = rb(hw, line + 1);
             x.wave_number = if sn == 0 { rb(hw, inst + IS_NUMBER) } else { sn };
             for k in 0..2 {
+                self.cyc += 103;
                 let e = (rb(hw, line + 2 + 2 * k), rb(hw, line + 3 + 2 * k));
                 self.arpeggio_effect(v, e);
             }
             let x = &mut self.voices[v];
             if tr < 0 {
+                self.cyc += 20;
                 tr = tr.wrapping_add((61u8.wrapping_add(x.arp_note)) as i8);
             } else {
+                self.cyc += 30;
                 x.arp |= A_NOTE_ABSOLUTE;
             }
             x.note = ((tr as i16) << 5) as u16;
@@ -2052,20 +2173,28 @@ impl Musicline {
     }
 
     fn play_instrument(&mut self, hw: &mut Hw, v: usize) {
+        self.cyc += 80;
         let inst = self.voices[v].instrument;
         if self.voices[v].arp_wait || inst == 0 {
             return;
         }
+        self.cyc += 177;
         self.owed += PLAY_INSTRUMENT;
         let mut is = inst;
         let mut st = rb(hw, inst + IS_TYPE);
         let x = &mut self.voices[v];
         let mut setup = true;
         if x.restart & (R_PART_FX | R_ARP) != 0 {
+            self.cyc += 69;
             x.wave_number = rb(hw, inst + IS_NUMBER);
         } else if x.part_instrument == 0 {
             setup = false;
         } else if x.pitch_slide == FX_PORTAMENTO || x.part_note == 0 {
+            if x.pitch_slide == FX_PORTAMENTO {
+                self.cyc -= 37;
+            } else {
+                self.cyc += 11;
+            }
             x.volume1 = rw(hw, inst + I_VOLUME).wrapping_mul(16);
             setup = false;
         } else if x.arp & A_USE_WAVE_SAMPLE != 0 {
@@ -2077,6 +2206,7 @@ impl Musicline {
                 st = SAMPLE;
             }
         } else {
+            self.cyc -= 91;
             x.wave_number = rb(hw, inst + IS_NUMBER);
         }
         if setup {
@@ -2086,10 +2216,12 @@ impl Musicline {
             }
             let x = &mut self.voices[v];
             if rb(hw, inst + I_TRANSPOSABLE) == 0 {
+                self.cyc += 16;
                 x.transpose = 0;
             }
             let mut flag = rb(hw, inst + I_ETPF_BITS);
             if x.effect1 & E1_HOLD_SUSTAIN != 0 {
+                self.cyc += 6;
                 flag &= !F_HOLD_SUSTAIN;
                 x.arg1 &= F_HOLD_SUSTAIN;
                 flag |= x.arg1;
@@ -2100,9 +2232,11 @@ impl Musicline {
             x.effect2 = rb(hw, inst + I_EFFECT2);
             x.wave_or_sample = st;
             if st != SAMPLE {
+                self.cyc += 28;
                 let len = rw(hw, inst + IS_LENGTH);
-                Self::fix_wave_length(x, len, st, ptr);
+                Self::fix_wave_length(x, len, st, ptr, &mut self.cyc);
             } else {
+                self.cyc += 200;
                 let mut len = rw(hw, is + IS_LENGTH);
                 if x.sample_offset_active {
                     let off = (x.sample_offset as u16) << 7;
@@ -2117,6 +2251,7 @@ impl Musicline {
                 x.wave_length = len;
                 let (mut rp, mut rl_) = (rl(hw, is + IS_REPEAT), rw(hw, is + IS_REPEAT_LENGTH));
                 if x.arp & A_USE_WAVE_SAMPLE == 0 && rb(hw, inst + I_EFFECT1) & E1_WAVE_SAMPLE_LOOP == 0 || rl_ == 0 {
+                    self.cyc += 16;
                     // no loop: the empty sample
                     rp = self.data;
                     rl_ = 1;
@@ -2127,13 +2262,15 @@ impl Musicline {
             }
             x.restart &= R_PART_FX | R_ARP | R_ARP_VOLUME;
             if x.restart == 0 {
+                self.cyc += 38;
                 x.volume1 = rw(hw, inst + I_VOLUME).wrapping_mul(16);
             }
         }
         // PlayNote
         let x = &mut self.voices[v];
-        let mut vol = if x.volume != 0 { x.volume_set as i16 } else { x.volume1 as i16 };
+        let mut vol = if x.volume != 0 { self.cyc += 12; x.volume_set as i16 } else { x.volume1 as i16 };
         if x.volume_add != 0 {
+            self.cyc += 38;
             vol = vol.wrapping_add(x.volume_add_number).clamp(0, 1024);
         }
         x.volume1 = vol as u16;
@@ -2142,8 +2279,11 @@ impl Musicline {
         if x.pitch_slide == FX_PORTAMENTO {
             return;
         }
+        self.cyc += 21;
         let slide = rb(hw, inst + I_SLIDE_SPEED);
+        self.cyc += 25 * (slide != 0) as u64;
         if slide != 0 && x.part_note != 0 {
+            self.cyc += 107;
             x.pitch_slide_speed = slide as u16;
             let new_note = x.note.wrapping_add(x.pitch_slide_note);
             x.pitch_slide_to = (x.part_note as i16) << 5;
@@ -2152,22 +2292,28 @@ impl Musicline {
                 self.inst_play(hw, v);
                 return;
             }
+            self.cyc += 16;
             x.instrument_pitch_slide = FX_PORTAMENTO;
         }
+        self.cyc += 29;
         let x = &mut self.voices[v];
         let had = x.arp & A_WILL_SET_NOTE != 0;
         x.arp &= !A_WILL_SET_NOTE;
         if !had {
+            self.cyc += 25;
             if x.part_note == 0 {
                 return;
             }
+            self.cyc += 76;
             x.note = (x.part_note as u16) << 5;
             x.arp_volume_slide = 0;
             x.arp_pitch_slide = 0;
             x.arp_pitch_slide_note = 0;
         }
+        self.cyc += 216;
         x.semi_tone = ((rw(hw, is + IS_SEMI_TONE) as i16) << 5) as i16;
         if x.play & P_KEEP_FINE_TUNE == 0 {
+            self.cyc += 20;
             x.fine_tune = rw(hw, is + IS_FINE_TUNE) as i16;
         }
         x.pt_pitch_slide_note = 0;
@@ -2178,18 +2324,20 @@ impl Musicline {
         x.vibrato_note = 0;
         x.pt_pitch_add = 0;
         x.pitch_add = 0;
+        self.cyc += 31 * (x.part_instrument == 0 && x.restart & (R_PART_FX | R_ARP) != 0) as u64;
         if x.part_instrument != 0 || x.restart & (R_PART_FX | R_ARP) != 0 {
             self.inst_play(hw, v);
         }
     }
 
-    fn fix_wave_length(x: &mut Voice, len: u16, st: u8, ptr: u32) {
+    fn fix_wave_length(x: &mut Voice, len: u16, st: u8, ptr: u32, cyc: &mut u64) {
+        *cyc += 50;
         let (off, sh) = match st {
-            WAVE16 => (256 + 128 + 64 + 32, 4),
-            WAVE32 => (256 + 128 + 64, 3),
-            WAVE64 => (256 + 128, 2),
-            WAVE128 => (256, 1),
-            _ => (0, 0),
+            WAVE16 => { *cyc += 77; (256 + 128 + 64 + 32, 4) },
+            WAVE32 => { *cyc += 105; (256 + 128 + 64, 3) },
+            WAVE64 => { *cyc += 137; (256 + 128, 2) },
+            WAVE128 => { *cyc += 169; (256, 1) },
+            _ => { *cyc += 152; (0, 0) },
         };
         let p = ptr.wrapping_add(off);
         x.wave_pointer = p;
@@ -2200,18 +2348,21 @@ impl Musicline {
     }
 
     /// An instrument effect's counter, as InstPlay sets it up.
-    fn init_counter(hw: &Hw, inst: u32, o: u32, step: bool, init_flag: bool, init: &mut u8, pi: u8, c: &mut Counter, speed: &mut u16) -> bool {
+    fn init_counter(hw: &Hw, inst: u32, o: u32, step: bool, init_flag: bool, init: &mut u8, pi: u8, c: &mut Counter, speed: &mut u16, cyc: &mut u64) -> bool {
         let w = |k: u32| rw(hw, inst + o + 2 * k);
         let mut fresh = false;
         let mut check = false;
         c.step = step;
         if step {
+            *cyc += 46;
             *speed = w(4);
             c.turns = 0;
             check = true;
         } else {
+            *cyc += 45;
             c.turns = w(4) as i16;
             if !init_flag {
+                *cyc += 16;
                 *init = 0;
                 fresh = true;
             } else {
@@ -2219,20 +2370,29 @@ impl Musicline {
             }
         }
         if check {
+            *cyc += 53;
             let old = *init;
             *init = pi;
             if old == pi {
+                *cyc += 10;
                 c.delay = w(5);
             } else {
                 fresh = true;
             }
         }
         if fresh {
+            // (the resonance's and the filter's are counted with their flag, in InstPlay)
+            *cyc += match o {
+                I_TRANSFORM => 97,
+                I_PHASE | I_MIX => 101,
+                _ => 0,
+            };
             c.counter = w(0);
             c.speed = w(3) as i16;
             c.repeat = w(1);
             c.repeat_end = w(2);
             if w(0) > w(1) {
+                *cyc += 16;
                 c.speed = c.speed.wrapping_neg();
             }
             c.delay = w(5);
@@ -2254,16 +2414,19 @@ impl Musicline {
         let x = &mut self.voices[v];
         if x.pitch_slide != FX_PORTAMENTO && !x.arp_wait {
             for (flag, price) in [(E2_PHASE, INST_PHASE), (E2_RESONANCE, INST_RESONANCE), (E2_FILTER, INST_FILTER), (E2_MIX, INST_MIX)] {
+                self.cyc += 168;
                 if x.effect2 & flag != 0 {
                     self.owed += price;
                 }
             }
             if x.effect1 & E1_ENVELOPE != 0 {
+                self.cyc += 152;
                 self.owed += INST_ENVELOPE;
             }
             x.play |= P_RETRIGGER;
             let w = |o: u32| rw(hw, inst + o);
             if x.vibrato == 0 && x.effect1 & E1_VIBRATO != 0 {
+                self.cyc += 172;
                 x.vibrato_counter = 0;
                 x.vibrato_depth_now = 0;
                 x.vibrato_speed = w(I_VIBRATO + 2);
@@ -2274,7 +2437,9 @@ impl Musicline {
                 x.vibrato_wave = rb(hw, inst + I_VIBRATO + 1);
                 x.vibrato_down = rb(hw, inst + I_VIBRATO) == 0;
             }
+            self.cyc += 25 * (x.tremolo == 0) as u64;
             if x.tremolo == 0 && x.effect1 & E1_TREMOLO != 0 {
+                self.cyc += 172;
                 x.tremolo_counter = 0;
                 x.tremolo_depth_now = 0;
                 x.tremolo_speed = w(I_TREMOLO + 2);
@@ -2293,68 +2458,85 @@ impl Musicline {
             }
             let pi = x.part_instrument;
             if x.effect2 & E2_PHASE != 0 {
+                self.cyc += 99;
                 x.phase_type = w(I_PHASE_TYPE);
                 let (s, i) = (x.arg1 & F_PHASE_STEP != 0, x.arg1 & F_PHASE_INIT != 0);
-                Self::init_counter(hw, inst, I_PHASE, s, i, &mut x.phase_init, pi, &mut x.phase_counter, &mut x.phase_speed);
+                Self::init_counter(hw, inst, I_PHASE, s, i, &mut x.phase_init, pi, &mut x.phase_counter, &mut x.phase_speed, &mut self.cyc);
             }
             x.boost = rb(hw, inst + I_BOOST);
             if x.effect2 & E2_RESONANCE != 0 {
+                self.cyc += 99;
                 x.resonance_amp = rb(hw, inst + I_RESONANCE_AMP);
                 let (s, i) = (x.arg2 & M_RESONANCE_STEP != 0, x.arg2 & M_RESONANCE_INIT != 0);
-                if Self::init_counter(hw, inst, I_RESONANCE, s, i, &mut x.resonance_init, pi, &mut x.resonance_counter, &mut x.resonance_speed) {
+                if Self::init_counter(hw, inst, I_RESONANCE, s, i, &mut x.resonance_init, pi, &mut x.resonance_counter, &mut x.resonance_speed, &mut self.cyc) {
+                    self.cyc += 117;
                     x.resonance_last_init = true;
                 }
             }
             if x.effect2 & E2_FILTER != 0 {
+                self.cyc += 99;
                 x.filter_type = rb(hw, inst + I_FILTER_TYPE);
                 let (s, i) = (x.arg1 & F_FILTER_STEP != 0, x.arg1 & F_FILTER_INIT != 0);
-                if Self::init_counter(hw, inst, I_FILTER, s, i, &mut x.filter_init, pi, &mut x.filter_counter, &mut x.filter_speed) {
+                if Self::init_counter(hw, inst, I_FILTER, s, i, &mut x.filter_init, pi, &mut x.filter_counter, &mut x.filter_speed, &mut self.cyc) {
+                    self.cyc += 117;
                     x.filter_last_init = true;
                 }
             }
             if x.effect2 & E2_MIX != 0 {
+                self.cyc += 99;
                 x.mix_wave = rb(hw, inst + I_MIX_WAVE);
                 let (s, i) = (x.arg2 & M_MIX_STEP != 0, x.arg2 & M_MIX_INIT != 0);
-                Self::init_counter(hw, inst, I_MIX, s, i, &mut x.mix_init, pi, &mut x.mix_counter, &mut x.mix_speed);
+                Self::init_counter(hw, inst, I_MIX, s, i, &mut x.mix_init, pi, &mut x.mix_counter, &mut x.mix_speed, &mut self.cyc);
             }
             if x.effect2 & E2_TRANSFORM != 0 {
+                self.cyc += 216;
                 x.transform_waves[0] = rb(hw, inst + IS_NUMBER);
                 for k in 0..5 {
+                    self.cyc -= 9;
                     x.transform_waves[k + 1] = rb(hw, inst + I_TRANSFORM_WAVES + k as u32);
                 }
                 let (s, i) = (x.arg1 & F_TRANSFORM_STEP != 0, x.arg1 & F_TRANSFORM_INIT != 0);
-                Self::init_counter(hw, inst, I_TRANSFORM, s, i, &mut x.transform_init, pi, &mut x.transform_counter, &mut x.transform_speed);
+                Self::init_counter(hw, inst, I_TRANSFORM, s, i, &mut x.transform_init, pi, &mut x.transform_counter, &mut x.transform_speed, &mut self.cyc);
             }
             if x.effect1 & E1_LOOP != 0 {
+                self.cyc += 275;
                 let ll = w(I_LOOP + 6);
+                self.cyc += 21 * (rb(hw, inst + IS_TYPE) == SAMPLE && ll == 0) as u64;
                 if rb(hw, inst + IS_TYPE) != SAMPLE || ll == 0 {
+                    self.cyc -= 224;
                     x.effect1 &= !E1_LOOP;
                 } else {
                     let (mut init, mut part_init, mut check) = (false, false, false);
                     if x.arg2 & M_LOOP_STEP != 0 {
+                        self.cyc += 105;
                         x.loop_speed = w(I_LOOP + 14) as i16;
                         x.loop_turns = 0;
                         check = true;
                     } else {
                         x.loop_turns = w(I_LOOP + 14) as i16;
                         if x.arg2 & M_LOOP_INIT == 0 {
+                            self.cyc += 334;
                             x.loop_init = 0;
                             init = true;
                         } else {
+                            self.cyc += 85;
                             check = true;
                         }
                     }
                     if check {
+                        self.cyc += 17;
                         let old = x.loop_init;
                         x.loop_init = pi;
                         if old == pi {
                             x.play &= !P_RETRIGGER;
                             part_init = true;
                         } else {
+                            self.cyc += 237;
                             init = true;
                         }
                     }
                     if init {
+                        self.cyc += 17;
                         let s = rl(hw, self.tab + T_SAMPLES + 4 * rb(hw, inst + IS_NUMBER) as u32);
                         x.loop_sample = rl(hw, s + IS_POINTER);
                         x.loop_counter = w(I_LOOP);
@@ -2366,6 +2548,7 @@ impl Musicline {
                         x.loop_step = w(I_LOOP + 8) as i32;
                         x.loop_repeat = w(I_LOOP + 2);
                         if w(I_LOOP) > w(I_LOOP + 2) {
+                            self.cyc += 24;
                             x.loop_step = -x.loop_step;
                         }
                     }
@@ -2384,12 +2567,14 @@ impl Musicline {
         }
         let x = &mut self.voices[v];
         if !matches!(x.repeat_length, 8 | 16 | 32 | 64 | 128) {
+            self.cyc += 33;
             x.effect2 = 0;
         }
     }
 
     fn period(&mut self, v: usize) {
         let x = &mut self.voices[v];
+        self.cyc += 283 + 21 * (x.arp & A_NOTE_ABSOLUTE == 0) as u64;
         let mut note = x
             .note
             .wrapping_add(x.vibrato_note)
@@ -2399,8 +2584,10 @@ impl Musicline {
             .wrapping_add(x.fine_tune as u16)
             .wrapping_add(x.pitch_add as u16) as i16;
         if x.arp & A_NOTE_ABSOLUTE == 0 && x.transpose != 0 {
+            self.cyc += 4;
             note = note.wrapping_add(x.transpose);
         }
+        self.cyc += 8 * (note > 5 * 12 * 32) as u64;
         let p = period_of(note as i32)
             .wrapping_add(x.pt_pitch_slide_note)
             .wrapping_add(x.pt_vibrato_note)
@@ -2443,6 +2630,7 @@ impl Musicline {
         x.restart = 0;
         x.arp &= !(A_WILL_SET_NOTE | A_USE_WAVE_SAMPLE);
         if x.arp & A_ONE_STEP != 0 {
+            self.cyc += 64;
             x.arp = 0;
             x.arp_volume_slide = 0;
             x.arp_pitch_slide = 0;
@@ -2453,6 +2641,7 @@ impl Musicline {
             x.pt_pitch_slide_to = -1;
         }
         for k in 0..5 {
+            self.cyc += 88;
             let (e, a) = self.voices[v].part_effects[k];
             if e != 0 || a != 0 {
                 self.owed += PART_FX;
@@ -2467,29 +2656,36 @@ impl Musicline {
         let a16 = a as u16;
         match e {
             0x01 => {
+                self.cyc += 65;
                 x.pitch_slide = e;
                 x.pitch_slide_down = false;
                 if a != 0 {
+                    self.cyc += 12;
                     x.pitch_slide_speed = a16;
                 }
                 x.pitch_slide_to = 59 * 32 + 32;
             }
             0x02 => {
+                self.cyc += 65;
                 x.pitch_slide = e;
                 x.pitch_slide_down = true;
                 if a != 0 {
+                    self.cyc += 12;
                     x.pitch_slide_speed = a16;
                 }
                 x.pitch_slide_to = 0;
             }
             0x03 => {
+                self.cyc += 107;
                 x.pitch_slide = e;
                 if a != 0 {
+                    self.cyc += 12;
                     x.pitch_slide_speed = a16;
                 }
                 let note = x.note.wrapping_add(x.pitch_slide_note);
                 let mut to = x.part_note as u16;
                 if to != 0 {
+                    self.cyc += 73;
                     to <<= 5;
                     x.part_note = 0;
                     x.pitch_slide_to = to as i16;
@@ -2500,10 +2696,11 @@ impl Musicline {
                     x.pitch_slide_to = -1;
                 }
                 if x.pitch_slide_to == -1 {
+                    self.cyc += 16;
                     x.pitch_slide = 0;
                 }
             }
-            0x04 => x.instrument_pitch_slide = 0,
+            0x04 => { self.cyc += 16; x.instrument_pitch_slide = 0 },
             0x05 => {
                 if a != 0 {
                     x.pitch_add = x.pitch_add.wrapping_add(a as i16);
@@ -2520,6 +2717,7 @@ impl Musicline {
                 }
             }
             0x08 | 0x09 => {
+                self.cyc += 112;
                 x.vibrato = e;
                 if x.part_note != 0 {
                     x.vibrato_down = e == 0x09;
@@ -2530,6 +2728,7 @@ impl Musicline {
                     x.vibrato_attack_length = 0;
                 }
                 if a != 0 {
+                    self.cyc += 17;
                     x.vibrato_depth = a16 << 8;
                 }
                 x.vibrato_wave = x.part_vibrato_wave;
@@ -2541,28 +2740,34 @@ impl Musicline {
                 }
             }
             0x0b => {
+                self.cyc += 74;
                 x.fine_tune = (a as i8).clamp(-31, 31) as i16;
                 x.play |= P_KEEP_FINE_TUNE;
             }
             0x10 => {
+                self.cyc += 50;
                 x.volume = e;
                 // no clamp in the original (NostalgicPlayer clamps to 1024)
                 x.volume_set = a16 << 4;
             }
             0x11 | 0x12 => {
+                self.cyc += 33;
                 x.volume_slide = e;
                 if a != 0 {
+                    self.cyc += 12;
                     x.volume_slide_speed = a16;
                 }
             }
             0x13 => x.volume_slide_to = a16 << 4,
             0x14 => {
+                self.cyc += 110;
                 x.volume_slide = e;
                 if a != 0 {
                     x.volume_slide_speed = a16;
                 }
                 let vol = x.volume1;
                 if x.volume_slide_to != vol {
+                    self.cyc += 16;
                     x.volume_slide_down = x.volume_slide_to < vol;
                     x.volume_slide_off = false;
                 } else {
@@ -2570,18 +2775,21 @@ impl Musicline {
                 }
             }
             0x15 => {
+                self.cyc += 59;
                 x.volume_add = e;
                 if a != 0 {
                     x.volume_add_number = (a16 << 4) as i16;
                 }
             }
             0x16 => {
+                self.cyc += 63;
                 x.volume_add = e;
                 if a != 0 {
                     x.volume_add_number = -((a16 << 4) as i16);
                 }
             }
             0x17 => {
+                self.cyc += 145;
                 if a != 0 {
                     x.tremolo_speed = a16;
                 }
@@ -2589,6 +2797,7 @@ impl Musicline {
             0x18 | 0x19 => {
                 x.tremolo = e;
                 if x.part_note != 0 {
+                    self.cyc += 92;
                     x.tremolo_down = e == 0x19;
                     x.tremolo_counter = 0;
                     x.tremolo_depth_now = 0;
@@ -2608,10 +2817,12 @@ impl Musicline {
                 }
             }
             // no clamp in the original
-            0x20 => x.channel_volume = a16 << 4,
+            0x20 => { self.cyc += 38; x.channel_volume = a16 << 4 },
             0x21 | 0x22 => {
+                self.cyc += 33;
                 x.channel_volume_slide = e;
                 if a != 0 {
+                    self.cyc += 12;
                     x.channel_volume_slide_speed = a16;
                 }
             }
@@ -2630,6 +2841,7 @@ impl Musicline {
                 }
             }
             0x25 => {
+                self.cyc += 100;
                 if a != 0 {
                     x.channel_volume_add_number = (a16 << 4) as i16;
                 }
@@ -2644,11 +2856,16 @@ impl Musicline {
                 x.channel_volume = n.max(0) as u16;
             }
             0x27 => {
+                self.cyc += 159;
                 for k in 0..nv {
+                    self.cyc -= 4;
                     self.voices[k].channel_volume = a16 << 4;
                 }
             }
-            0x30 => self.master = a16 << 4,
+            0x30 => {
+                self.cyc += 38;
+                self.master = a16 << 4;
+            }
             0x31 | 0x32 => {
                 x.master_volume_slide = e;
                 if a != 0 {
@@ -2684,16 +2901,19 @@ impl Musicline {
                 self.master = (self.master as i16).wrapping_sub(x.master_volume_add_number).max(0) as u16;
             }
             0x40 => {
+                self.cyc += 104;
                 if a != 0 {
                     let s = a.min(31);
                     x.speed_part = 1;
                     x.speed = s;
                     if x.groove == 0 || !x.part_groove {
+                        self.cyc -= 9;
                         x.speed_counter = s;
                     }
                 }
             }
             0x41 => {
+                self.cyc += 104;
                 if a != 0 {
                     let g = a.min(31);
                     x.groove_part = 1;
@@ -2704,8 +2924,10 @@ impl Musicline {
                 }
             }
             0x42 => {
+                self.cyc += 24;
                 if a == 0 {
                 } else if a < 32 {
+                    self.cyc += 463;
                     self.tune_speed = a;
                     for k in 0..nv {
                         let w = &mut self.voices[k];
@@ -2717,10 +2939,12 @@ impl Musicline {
                                 }
                             }
                         } else {
+                            self.cyc -= 64;
                             w.speed = a;
                         }
                     }
                 } else {
+                    self.cyc += 226;
                     self.tempo = a16;
                     self.timer = (0x1b0f88 / a as u32) as u16;
                     if !self.started && !self.eight {
@@ -2748,14 +2972,17 @@ impl Musicline {
                 }
             }
             0x44 => {
+                self.cyc += 36;
                 x.arp |= A_USE_TABLE;
                 x.arp_table = a;
             }
             0x45 => {
+                self.cyc += 36;
                 x.arp |= A_ONE_STEP | A_USE_TABLE;
                 x.arp_table = a;
             }
             0x46 => {
+                self.cyc += 57;
                 x.effect1 |= E1_HOLD_SUSTAIN;
                 x.arg1 &= !F_HOLD_SUSTAIN;
                 if a != 0 {
@@ -2763,11 +2990,13 @@ impl Musicline {
                 }
             }
             0x47 => {
+                self.cyc += 41;
                 // the LED filter, through the CIA
                 let b = hw.bus.read_byte(0xbfe001);
                 hw.bus.write_byte(0xbfe001, if a != 0 { b & !2 } else { b | 2 });
             }
             0x48 => {
+                self.cyc += 45;
                 x.sample_offset_active = true;
                 if a != 0 {
                     x.sample_offset = a;
@@ -2779,6 +3008,7 @@ impl Musicline {
                 }
             }
             0x4a => {
+                self.cyc += 45;
                 if a != 0 {
                     let s = rl(hw, self.tab + T_SAMPLES + 4 * a as u32);
                     let x = &mut self.voices[v];
@@ -2787,6 +3017,7 @@ impl Musicline {
                 }
             }
             0x4b => {
+                self.cyc += 96;
                 x.phase_init = 0;
                 x.resonance_init = 0;
                 x.filter_init = 0;
@@ -2811,14 +3042,17 @@ impl Musicline {
                 x.pt_pitch_slide_to = 3591;
             }
             0xe3 => {
+                self.cyc += 161;
                 x.pitch_slide = FX_PORTAMENTO;
                 x.pt_pitch_slide = e;
                 if a != 0 {
                     x.pt_pitch_slide_speed2 = a16;
                 }
                 let p = Self::get_period(x, x.note).wrapping_add(x.pt_pitch_slide_note);
+                self.cyc += 226;
                 if x.part_note != 0 {
                     let p2 = Self::get_period(x, (x.part_note as u16) << 5);
+                    self.cyc += 226;
                     x.part_note = 0;
                     x.pt_pitch_slide_to = p2 as i16;
                     if p != p2 {
@@ -2843,12 +3077,14 @@ impl Musicline {
                 }
             }
             0xe6 | 0xe7 => {
+                self.cyc += 80;
                 x.volume_slide = e;
                 if a != 0 {
                     x.volume_slide_speed = a16;
                 }
             }
             0xe8 => {
+                self.cyc += 107;
                 x.tremolo = e;
                 x.pt_tremolo_command = Self::pt_command(x.pt_tremolo_command, a);
             }
@@ -2882,7 +3118,9 @@ impl Musicline {
             let x = &mut self.voices[v];
             x.repeat_pointer = x.repeat_original;
         }
+        self.cyc += 572;
         if self.voices[v].play & P_RETRIGGER == 0 {
+            self.cyc += 622;
             self.owed += VOICE_PLAY;
             if self.voices[v].instrument != 0 && !(self.voices[v].effect1 & E1_WAVE_SAMPLE_LOOP != 0 && self.voices[v].wave_or_sample == SAMPLE) {
                 self.owed += VOICE_PLAYING;
@@ -2913,13 +3151,17 @@ impl Musicline {
         let x = &mut self.voices[v];
         if !eight {
             let rp = x.repeat_pointer;
+            self.cyc += 15 * (rp >= x.bufs) as u64;
             if rp >= x.bufs && rp <= x.bufs + B_FILT {
+                self.cyc += 97;
                 let wb = x.wave_buffer;
                 x.repeat_pointer = wb;
+                self.cyc += [25, 10][(x.wave_or_sample != SAMPLE) as usize];
                 if x.wave_or_sample != SAMPLE || x.effect1 & E1_LOOP != 0 {
                     x.wave_pointer = wb;
                 }
                 let n = (x.repeat_length >> 3) as u32 * 16;
+                self.cyc += 90 * (n as u64 / 16);
                 self.owed += WAVE_COPY + WAVE_COPY_BYTE * n as f64;
                 // Paula is not run up to the copy: the original's code touches no register
                 // while its effects run, so under the engine Paula catches up at the next
@@ -2934,13 +3176,21 @@ impl Musicline {
             }
         }
         let x = &mut self.voices[v];
+        self.cyc += 11 * (x.play & P_RETRIGGER == 0) as u64;
         if x.play & P_RETRIGGER == 0 && x.effect1 & E1_LOOP != 0 {
+            self.cyc += 137;
             if !eight {
-                hw.loc(ch, x.repeat_pointer);
-                hw.len(ch, x.loop_length);
+                let (rp, ll) = (x.repeat_pointer, x.loop_length);
+                self.reach(hw, 72);
+                hw.loc(ch, rp);
+                self.reach(hw, 44);
+                hw.len(ch, ll);
             }
+            let x = &mut self.voices[v];
             x.repeat_length = x.loop_length;
         }
+        self.cyc += 73;
+        let x = &mut self.voices[v];
         if !x.arp_wait {
             x.part_note = 0;
         }
@@ -2952,10 +3202,13 @@ impl Musicline {
         let first = x.play & P_FIRST_ROW_TICK != 0;
         let vol;
         let mut cost = 0.0;
+        self.cyc += 25 * (x.volume_slide != FX_VOLUME_UP) as u64;
         if x.volume_slide == FX_SLIDE_TO_VOLUME {
             if x.volume_slide_off {
+                self.cyc -= 8;
                 return;
             }
+            self.cyc += 64;
             let mut n;
             if x.volume_slide_down {
                 n = (x.volume1 as i16).wrapping_sub(x.volume_slide_speed as i16);
@@ -2972,13 +3225,19 @@ impl Musicline {
             }
             vol = n;
         } else if x.volume_slide == FX_VOLUME_UP || (x.volume_slide == FX_PT_VOLUME_UP && !first) {
+            self.cyc += 68;
+            self.cyc += 29 * (x.volume_slide != FX_VOLUME_UP) as u64;
             vol = (x.volume1 as i16).wrapping_add(x.volume_slide_speed as i16).min(1024);
         } else if x.volume_slide == FX_VOLUME_DOWN || (x.volume_slide == FX_PT_VOLUME_DOWN && !first) {
+            self.cyc += 85;
+            self.cyc += 50 * (x.volume_slide != FX_VOLUME_DOWN) as u64;
             vol = (x.volume1 as i16).wrapping_sub(x.volume_slide_speed as i16).max(0);
             cost = if x.volume_slide == FX_VOLUME_DOWN { SLIDE_VOLUME_DOWN } else { SLIDE_PT_VOLUME_DOWN };
         } else {
+            self.cyc += 71;
             return;
         }
+        self.cyc += 30;
         x.volume1 = vol as u16;
         x.volume2 = vol as u16;
         x.volume3 = vol as u16;
@@ -3009,12 +3268,15 @@ impl Musicline {
             }
             vol = n;
         } else if x.channel_volume_slide == FX_CHANNEL_UP {
+            self.cyc += 69;
             vol = (x.channel_volume as i16).wrapping_add(x.channel_volume_slide_speed as i16).min(1024);
             cost = SLIDE_CHANNEL_UP;
         } else if x.channel_volume_slide == FX_CHANNEL_DOWN {
+            self.cyc += 86;
             vol = (x.channel_volume as i16).wrapping_sub(x.channel_volume_slide_speed as i16).max(0);
             cost = SLIDE_CHANNEL_DOWN;
         } else {
+            self.cyc += 41;
             return;
         }
         x.channel_volume = vol as u16;
@@ -3069,33 +3331,43 @@ impl Musicline {
     fn slide_note(&mut self, v: usize) {
         let x = &mut self.voices[v];
         if x.pt_pitch_slide == 0 {
+            self.cyc += 37;
+            self.cyc += 21 * (x.pitch_slide == 0) as u64;
             if x.pitch_slide == 0 && x.instrument_pitch_slide == 0 {
                 return;
             }
+            self.cyc += 21;
             if x.pitch_slide_to < 0 {
                 return;
             }
+            self.cyc += 33;
             self.owed += SLIDE_NOTE;
             if x.pitch_slide_down {
+                self.cyc += 61;
                 x.pitch_slide_note = x.pitch_slide_note.wrapping_sub(x.pitch_slide_speed);
                 let n = x.note.wrapping_add(x.pitch_slide_note).wrapping_sub(x.pitch_slide_to as u16) as i16;
                 if n <= 0 {
+                    self.cyc += 32;
                     x.pitch_slide_note = x.pitch_slide_note.wrapping_sub(n as u16);
                     x.pitch_slide_to = -1;
                 }
             } else {
+                self.cyc += 61;
                 x.pitch_slide_note = x.pitch_slide_note.wrapping_add(x.pitch_slide_speed);
                 let n = x.note.wrapping_add(x.pitch_slide_note).wrapping_sub(x.pitch_slide_to as u16) as i16;
                 if n >= 0 {
+                    self.cyc += 32;
                     x.pitch_slide_note = x.pitch_slide_note.wrapping_sub(n as u16);
                     x.pitch_slide_to = -1;
                 }
             }
         } else if x.play & P_FIRST_ROW_TICK == 0 && x.pt_pitch_slide_to >= 0 {
-            let speed = if x.pt_pitch_slide == FX_PT_PORTAMENTO { x.pt_pitch_slide_speed2 } else { x.pt_pitch_slide_speed };
+            self.cyc += 138;
+            let speed = if x.pt_pitch_slide == FX_PT_PORTAMENTO { self.cyc += 12; x.pt_pitch_slide_speed2 } else { x.pt_pitch_slide_speed };
             if x.pt_pitch_slide_down {
                 x.pt_pitch_slide_note = x.pt_pitch_slide_note.wrapping_add(speed);
                 let p = Self::get_period(x, x.note).wrapping_add(x.pt_pitch_slide_note).wrapping_sub(x.pt_pitch_slide_to as u16) as i16;
+                self.cyc += 226;
                 if p >= 0 {
                     x.pt_pitch_slide_note = x.pt_pitch_slide_note.wrapping_sub(p as u16);
                     x.pt_pitch_slide_to = -1;
@@ -3103,6 +3375,7 @@ impl Musicline {
             } else {
                 x.pt_pitch_slide_note = x.pt_pitch_slide_note.wrapping_sub(speed);
                 let p = Self::get_period(x, x.note).wrapping_add(x.pt_pitch_slide_note).wrapping_sub(x.pt_pitch_slide_to as u16) as i16;
+                self.cyc += 226;
                 if p <= 0 {
                     x.pt_pitch_slide_note = x.pt_pitch_slide_note.wrapping_sub(p as u16);
                     x.pt_pitch_slide_to = -1;
@@ -3116,6 +3389,7 @@ impl Musicline {
         if x.arp_pitch_slide == 0 || x.arp_pitch_slide_to < 0 {
             return;
         }
+        self.cyc += 115;
         if x.arp_pitch_down {
             x.arp_pitch_slide_note = x.arp_pitch_slide_note.wrapping_sub(x.arp_pitch_slide_speed);
             let n = x.arp_calc_note.wrapping_add(x.arp_pitch_slide_note).wrapping_sub(x.arp_pitch_slide_to as u16) as i16;
@@ -3134,9 +3408,11 @@ impl Musicline {
     }
 
     fn arpeggio_effect(&mut self, v: usize, (e, a): (u8, u8)) {
+        self.cyc += 8;
         let x = &mut self.voices[v];
         match e {
             AE_SLIDE_UP => {
+                self.cyc += 77;
                 x.arp_pitch_slide = e;
                 x.arp_pitch_down = false;
                 if a != 0 {
@@ -3145,6 +3421,7 @@ impl Musicline {
                 }
             }
             AE_SLIDE_DOWN => {
+                self.cyc += 77;
                 x.arp_pitch_slide = e;
                 x.arp_pitch_down = true;
                 if a != 0 {
@@ -3153,6 +3430,7 @@ impl Musicline {
                 }
             }
             AE_SET_VOLUME => {
+                self.cyc += 82;
                 // no clamp in the original
                 let vol = (a as u16) << 4;
                 x.restart |= R_ARP_VOLUME;
@@ -3174,10 +3452,12 @@ impl Musicline {
         let x = &mut self.voices[v];
         x.restart |= R_ARP;
         if x.arg1 & F_PHASE_INIT != 0 {
+            self.cyc += 16;
             x.phase_init = 0;
         }
         // tested on effect 1's flags, as the original does
         if x.arg1 & F_PHASE_STEP != 0 {
+            self.cyc += 16;
             x.resonance_init = 0;
         }
         if x.arg1 & F_FILTER_INIT != 0 {
@@ -3198,18 +3478,22 @@ impl Musicline {
         let inst = self.voices[v].instrument;
         {
             let x = &mut self.voices[v];
+            self.cyc += 27 * (x.arp & A_ENABLED != 0 || x.arp & A_USE_TABLE == 0) as u64;
             if x.arp & (A_USE_TABLE | A_ENABLED) == 0 {
                 return;
             }
+            self.cyc += 27;
             x.arp_speed_counter = x.arp_speed_counter.wrapping_sub(1);
             if x.arp_speed_counter != 0 {
                 self.owed += ARP_WAIT;
                 return;
             }
+            self.cyc += 161;
             self.owed += ARP_STEP;
             let mut spd = rb(hw, inst + I_ARP_SPEED);
             x.arp_groove = !x.arp_groove;
             let g = rb(hw, inst + I_ARP_GROOVE);
+            self.cyc += 21 * x.arp_groove as u64;
             if x.arp_groove && g != 0 {
                 spd = g;
             }
@@ -3218,10 +3502,12 @@ impl Musicline {
         let x = &self.voices[v];
         let mut num = rw(hw, inst + I_ARP_TABLE) as u32;
         if x.arp & A_USE_TABLE != 0 {
+            self.cyc += 12;
             num = x.arp_table as u32;
         }
         let arp = rl(hw, self.tab + T_ARPS + 4 * (num & 0xff));
         loop {
+            self.cyc += 176;
             self.owed += ARP_LINE;
             let x = &mut self.voices[v];
             let pos = x.arp_position;
@@ -3233,21 +3519,26 @@ impl Musicline {
                 return;
             }
             if tr == 61 {
+                self.cyc += 46;
                 x.arp = 0;
                 x.note = x.arp_calc_note;
                 return;
             }
+            self.cyc += 17;
             if tr == 62 {
+                self.cyc += 43;
                 if sn != pos {
                     x.arp_position = sn;
                 }
                 continue;
             }
-            x.wave_number = if sn == 0 { rb(hw, inst + IS_NUMBER) } else { sn };
+            self.cyc += 124;
+            x.wave_number = if sn == 0 { self.cyc += 12; rb(hw, inst + IS_NUMBER) } else { self.cyc += 309; sn };
             x.restart = 0;
             x.arp_pitch_slide = 0;
             x.arp_volume_slide = 0;
             for k in 0..2 {
+                self.cyc += 109;
                 let e = (rb(hw, line + 2 + 2 * k), rb(hw, line + 3 + 2 * k));
                 if e.0 == AE_RESTART {
                     self.arpeggio_restart(v);
@@ -3261,6 +3552,7 @@ impl Musicline {
                 return;
             }
             if tr < 0 {
+                self.cyc += 162;
                 tr = tr.wrapping_add(61u8.wrapping_add(x.arp_note) as i8);
             } else {
                 x.arp |= A_NOTE_ABSOLUTE;
@@ -3287,6 +3579,7 @@ impl Musicline {
                 return;
             }
             if sn == 0 {
+                self.cyc += 97;
                 x.semi_tone = ((rw(hw, inst + IS_SEMI_TONE) as i16) << 5) as i16;
                 if x.play & P_KEEP_FINE_TUNE == 0 {
                     x.fine_tune = rw(hw, inst + IS_FINE_TUNE) as i16;
@@ -3308,8 +3601,9 @@ impl Musicline {
                 }
                 x.wave_or_sample = st;
                 let len = rw(hw, inst + IS_LENGTH);
-                Self::fix_wave_length(x, len, st, rl(hw, s + IS_POINTER));
+                Self::fix_wave_length(x, len, st, rl(hw, s + IS_POINTER), &mut self.cyc);
             } else {
+                self.cyc += 114;
                 x.wave_pointer = rl(hw, s + IS_POINTER);
                 x.wave_length = rw(hw, s + IS_LENGTH);
                 let mut rp = rl(hw, s + IS_REPEAT);
@@ -3333,6 +3627,7 @@ impl Musicline {
         if x.effect1 & E1_ENVELOPE == 0 {
             return;
         }
+        self.cyc += 119;
         self.owed += ENVELOPE;
         let set3 = |x: &mut Voice, d: u16| {
             x.volume3 = ((d as u32 * x.volume2 as u32) >> 6).min(1024) as u16;
@@ -3341,22 +3636,28 @@ impl Musicline {
         let mut d = x.envelope[i];
         i += 1;
         if d == 0 {
+            self.cyc += 17;
             self.owed += ENVELOPE_END1;
             d = x.envelope[i];
             i += 1;
             if d == 0 {
+                self.cyc += 17;
                 d = x.envelope[i];
                 i += 1;
                 if d == 0 {
+                    self.cyc += 25;
                     self.owed += ENVELOPE_END2;
                     if x.arg1 & F_HOLD_SUSTAIN != 0 {
+                        self.cyc += 22;
                         let s = x.envelope[i + 7];
                         set3(x, s);
                         return;
                     }
+                    self.cyc += 17;
                     d = x.envelope[i];
                     i += 1;
                     if d == 0 {
+                        self.cyc += 22;
                         let s = x.envelope[i + 7];
                         set3(x, s);
                         return;
@@ -3364,6 +3665,7 @@ impl Musicline {
                 }
             }
         }
+        self.cyc += 79;
         self.owed += ENVELOPE_STEP;
         let mut vol = x.envelope_volume.wrapping_add(x.envelope[i + 3]);
         x.envelope_volume = vol;
@@ -3372,6 +3674,7 @@ impl Musicline {
         i -= 1;
         x.envelope[i] = d;
         if d == 0 {
+            self.cyc += 12;
             vol = x.envelope[i + 8];
         }
         set3(x, vol);
@@ -3380,14 +3683,18 @@ impl Musicline {
     fn tremolo_play(&mut self, v: usize) {
         let x = &mut self.voices[v];
         if x.tremolo == FX_PT_TREMOLO {
+            self.cyc += 43;
             if x.play & P_FIRST_ROW_TICK != 0 {
                 return;
             }
+            self.cyc += 311;
             let wd = Self::pt_wave(x.pt_tremolo_wave, x.pt_tremolo_position);
             let mut t = ((x.pt_tremolo_command & 15) as i32 * wd) >> 2;
             if x.pt_tremolo_position < 0 {
+                self.cyc += 27;
                 t = -t.abs();
             } else {
+                self.cyc += 13;
                 t = t.abs();
             }
             let mut vol = x.volume1 as i32;
@@ -3399,22 +3706,30 @@ impl Musicline {
             x.pt_tremolo_position = x.pt_tremolo_position.wrapping_add(((x.pt_tremolo_command >> 2) & 0x3c) as i8);
             return;
         }
+        self.cyc += 37;
         if x.tremolo == 0 {
+            self.cyc += 27;
             if x.effect1 & E1_TREMOLO == 0 {
                 return;
             }
+            self.cyc += 21;
             if x.tremolo_delay != 0 {
+                self.cyc += 16;
                 x.tremolo_delay -= 1;
                 return;
             }
         }
+        self.cyc += 338;
         self.owed += TREMOLO;
         if x.tremolo_attack_length == 0 {
+            self.cyc += 30;
             x.tremolo_depth_now = x.tremolo_depth;
         } else {
+            self.cyc += 53;
             x.tremolo_depth_now = x.tremolo_depth_now.wrapping_add(x.tremolo_attack_speed);
             x.tremolo_attack_length -= 1;
             if x.tremolo_attack_length == 0 {
+                self.cyc += 20;
                 x.tremolo_depth_now = x.tremolo_depth;
             }
         }
@@ -3425,10 +3740,12 @@ impl Musicline {
         }
         let mut t = ((wd * (x.tremolo_depth_now >> 8) as i32) >> 1) as i16;
         if t < 0 {
+            self.cyc += 8;
             t = t.wrapping_add(16);
         }
         let mut vol = x.volume1 as i32;
         if x.volume1 != 0 {
+            self.cyc += 34;
             vol = (vol + t as i32).clamp(0, 1024);
         }
         x.volume2 = vol as u16;
@@ -3470,30 +3787,39 @@ impl Musicline {
             return;
         }
         if x.vibrato == 0 {
+            self.cyc += 21;
             if x.effect1 & E1_VIBRATO == 0 {
                 return;
             }
+            self.cyc += 21;
             if x.vibrato_delay != 0 {
+                self.cyc += 16;
                 x.vibrato_delay -= 1;
                 return;
             }
         }
+        self.cyc += 311;
         self.owed += VIBRATO;
         if x.vibrato_attack_length == 0 {
+            self.cyc += 30;
             x.vibrato_depth_now = x.vibrato_depth;
         } else {
+            self.cyc += 53;
             x.vibrato_depth_now = x.vibrato_depth_now.wrapping_add(x.vibrato_attack_speed);
             x.vibrato_attack_length -= 1;
             if x.vibrato_attack_length == 0 {
+                self.cyc += 20;
                 x.vibrato_depth_now = x.vibrato_depth;
             }
         }
         let mut wd = wave_table(x.vibrato_wave)[(x.vibrato_counter >> 2) as usize & 0x7f] as i32;
         if x.vibrato_down {
+            self.cyc += 4;
             wd = (-wd) as i8 as i32;
         }
         let mut n = ((wd * (x.vibrato_depth_now >> 8) as i32) >> 4) as i16;
         if n < 0 {
+            self.cyc += 4;
             n = n.wrapping_add(1);
         }
         x.vibrato_note = n as u16;
@@ -3509,11 +3835,14 @@ impl Musicline {
         if x.effect1 & E1_LOOP == 0 {
             return;
         }
+        self.cyc += 25;
         let step = x.arg2 & M_LOOP_STEP != 0;
         if !step {
+            self.cyc += 64;
             self.owed += LOOP_MOVE;
             x.loop_delay = x.loop_delay.wrapping_sub(1);
             if x.loop_delay >= 0 {
+                self.cyc += 39;
                 let p = x.loop_sample.wrapping_add(2 * x.loop_counter_save as u32);
                 x.repeat_pointer = p;
                 x.repeat_original = p;
@@ -3521,26 +3850,31 @@ impl Musicline {
             }
             x.loop_delay = 0;
             if x.loop_wait != 0 {
+                self.cyc += 27;
                 x.loop_wait_counter = x.loop_wait_counter.wrapping_sub(1);
                 if x.loop_wait_counter >= 0 {
                     return;
                 }
+                self.cyc += 30;
                 x.loop_wait_counter = x.loop_wait as i16;
             }
+            self.cyc += 202;
             self.owed += LOOP_COUNT;
             x.loop_counter_save = x.loop_counter;
-            Self::loop_count(x);
+            Self::loop_count(x, &mut self.cyc);
         } else if x.arg2 & M_LOOP_INIT == 0 {
+            self.cyc += 300;
             if x.part_note != 0 {
                 x.loop_counter_save = x.loop_counter;
-                Self::loop_count(x);
+                Self::loop_count(x, &mut self.cyc);
             }
         } else {
             if x.part_note != 0 {
                 x.loop_counter_save = x.loop_counter;
             }
-            Self::loop_count(x);
+            Self::loop_count(x, &mut self.cyc);
         }
+        self.cyc += 122;
         let prev = x.loop_counter_save;
         if step {
             x.loop_delay = x.loop_delay.wrapping_sub(1);
@@ -3572,6 +3906,7 @@ impl Musicline {
         if x.loop_turns >= 0 || x.effect1 & E1_LOOP_STOP == 0 {
             return;
         }
+        self.cyc += 179;
         x.effect1 &= !E1_LOOP;
         x.mix_loop = false;
         if !eight {
@@ -3580,7 +3915,7 @@ impl Musicline {
         }
     }
 
-    fn loop_count(x: &mut Voice) {
+    fn loop_count(x: &mut Voice, cyc: &mut u64) {
         if x.loop_turns < 0 {
             return;
         }
@@ -3589,6 +3924,7 @@ impl Musicline {
         let (lo, hi) = if x.loop_repeat < x.loop_repeat_end {
             (x.loop_repeat, x.loop_repeat_end)
         } else {
+            *cyc += 10;
             (x.loop_repeat_end, x.loop_repeat)
         };
         if x.loop_step < 0 {
@@ -3600,6 +3936,7 @@ impl Musicline {
             x.loop_counter = c as u16;
             return;
         }
+        *cyc += 73;
         if x.loop_turns != 0 {
             x.loop_turns -= 1;
             if x.loop_turns == 0 {
@@ -3612,42 +3949,52 @@ impl Musicline {
     }
 
     /// The counter step of an effect: whether it counts, then its saved value.
-    fn effect_counter(c: &mut Counter, step: bool, init: bool, part_note: u8, one_way: bool, speed: u16, phase: bool) -> u16 {
+    fn effect_counter(c: &mut Counter, step: bool, init: bool, part_note: u8, one_way: bool, speed: u16, phase: bool, cyc: &mut u64) -> u16 {
         let count = if step {
+            *cyc += 21;
             if !init {
                 if part_note == 0 {
                     false
                 } else {
+                    *cyc += 30;
                     c.save = c.counter;
                     true
                 }
             } else {
                 if part_note != 0 {
+                    *cyc += 20;
                     c.save = c.counter;
                 }
                 true
             }
         } else {
+            *cyc += 20;
             c.save = c.counter;
             true
         };
         if count {
             if one_way {
-                c.one_way();
+                c.one_way(cyc);
             } else {
-                c.count();
+                *cyc += 18;
+                c.count(cyc);
             }
         }
         let prev = c.save;
         if step {
+            *cyc += 46;
             if c.delay != 0 {
+                *cyc += 26;
                 c.delay -= 1;
             } else {
+                *cyc += 25;
                 let s = speed as i8 as i16;
                 if phase {
+                    *cyc += 41;
                     c.save = c.save.wrapping_sub(s as u16);
                     if s < 0 {
                         if c.save as i16 > 512 {
+                            *cyc += 16;
                             c.save = 512;
                         }
                     } else if (c.save as i16) < 2 {
@@ -3656,11 +4003,17 @@ impl Musicline {
                 } else {
                     c.save = c.save.wrapping_add(s as u16);
                     if s < 0 {
+                        *cyc += 25;
                         if (c.save as i16) < 0 {
+                            *cyc += 26;
                             c.save = 0;
                         }
-                    } else if c.save > 510 {
-                        c.save = 510;
+                    } else {
+                        *cyc += 41;
+                        if c.save > 510 {
+                            *cyc += 16;
+                            c.save = 510;
+                        }
                     }
                 }
             }
@@ -3679,23 +4032,27 @@ impl Musicline {
         if self.voices[v].effect2 & E2_TRANSFORM == 0 {
             return;
         }
+        self.cyc += 459;
         let x = &mut self.voices[v];
         let len = x.repeat_length as u32 * 2;
         let off = match len {
             256 => 0,
             128 => 256,
-            64 => 256 + 128,
-            32 => 256 + 128 + 64,
-            _ => 256 + 128 + 64 + 32,
+            64 => { self.cyc += 10; 256 + 128 },
+            32 => { self.cyc += 25; 256 + 128 + 64 },
+            _ => { self.cyc += 33; 256 + 128 + 64 + 32 },
         };
+        // (the tests of the length, one after the other)
+        self.cyc += match len { 256 => 0, 128 => 25, 64 => 40, _ => 50 };
         let (s, i) = (x.arg1 & F_TRANSFORM_STEP != 0, x.arg1 & F_TRANSFORM_INIT != 0);
-        let mut prev = Self::effect_counter(&mut x.transform_counter, s, i, x.part_note, false, x.transform_speed, false);
+        let mut prev = Self::effect_counter(&mut x.transform_counter, s, i, x.part_note, false, x.transform_speed, false, &mut self.cyc);
         prev >>= 1;
         let mut octave = 0usize;
         let mut rem = prev as i16;
         for _ in 0..5 {
             rem = rem.wrapping_sub(256);
             if rem > 0 {
+                self.cyc += 21;
                 octave += 1;
                 prev = rem as u16;
             } else {
@@ -3711,6 +4068,7 @@ impl Musicline {
         let mut src1 = rl(hw, self.sample(hw, sn) + IS_REPEAT).wrapping_add(off);
         let x = &self.voices[v];
         if octave == 0 {
+            self.cyc += 16;
             src1 = x.repeat_pointer;
         }
         let sn2 = x.transform_waves[octave + 1];
@@ -3721,7 +4079,9 @@ impl Musicline {
         let x = &mut self.voices[v];
         let buf = x.bufs + B_TRANSFORM;
         Self::set_effect_output(x, buf, true);
+        self.cyc += 21 * (x.effect1 & E1_LOOP == 0 && x.wave_or_sample != SAMPLE) as u64;
         for k in 0..len {
+            self.cyc += 126;
             let s1 = rs8(hw, src1.wrapping_add(k));
             let s2 = rs8(hw, src2.wrapping_add(k));
             hw.bus.w8(buf + k, ((((s2 - s1) * factor) >> 8) + s1) as u8);
@@ -3732,41 +4092,69 @@ impl Musicline {
     fn pay(&mut self, hw: &mut Hw) {
         let due = self.owed.floor().max(0.0);
         self.owed -= due;
-        if !self.eight {
-            hw.wait(due as u64);
+        let _ = hw;
+    }
+
+    fn phase_mix(ptype: u16, s1: i32, s2: i32) -> i32 {
+        match ptype {
+            1 => ((s1 + s2) + s1 * 2) >> 2,
+            2 => (s1 + s2) >> 1,
+            3 => ((s1 + s2) + s2 * 2) >> 2,
+            _ => s1,
         }
     }
 
     fn phase_play(&mut self, hw: &mut Hw, v: usize) {
         if self.voices[v].effect2 & E2_PHASE == 0 {
+            self.cyc += 16;
             return;
         }
+        self.cyc += 230;
         let x = &mut self.voices[v];
         let (s, i) = (x.arg1 & F_PHASE_STEP != 0, x.arg1 & F_PHASE_INIT != 0);
-        let mut prev = Self::effect_counter(&mut x.phase_counter, s, i, x.part_note, false, x.phase_speed, true);
+        let mut prev = Self::effect_counter(&mut x.phase_counter, s, i, x.part_note, false, x.phase_speed, true, &mut self.cyc);
         let len = x.repeat_length as u32 * 2;
         let n: u32 = if len > 128 {
+            self.cyc += 46;
             256
         } else if len > 64 {
+            self.cyc += 48;
             128
         } else if len > 32 {
+            self.cyc += 50;
             64
         } else if len > 16 {
+            self.cyc += 73;
             32
         } else {
+            self.cyc += 65;
             16
         };
+        // (the tests of the length, one after the other)
+        self.cyc += 17 * ((n < 256) as u64 + (n < 128) as u64);
         let sh = 512 / n;
         prev = prev.wrapping_add(sh as u16 - 1) >> sh.trailing_zeros();
         let src = x.repeat_pointer;
         let buf = x.bufs + B_PHASE;
         Self::set_effect_output(x, buf, true);
+        self.cyc += 21 * (x.effect1 & E1_LOOP == 0 && x.wave_or_sample != SAMPLE) as u64;
         let fill = x.arg1 & F_PHASE_FILL != 0;
         let ptype = x.phase_type;
         let prev = prev as u32;
         if prev >= len || prev == 0 {
+            self.cyc += 20;
             self.owed += PHASE_EARLY_PASS + PHASE_EARLY_BYTE * len as f64;
         } else {
+            self.cyc += 92;
+            // the type's tests and pass, the interpolated bytes, then the rest's set-up, passes and bytes
+            let t = [0, 1, 2, 3, 0][(ptype as usize).min(4)];
+            let left = (len - prev) as u64;
+            self.cyc += [52, 62, 89, 37][t] + [36, 78, 68, 78][t] * prev as u64;
+            if t != 0 && fill {
+                self.cyc += 33 + 17 * left.div_ceil(prev as u64) + [0, 82, 0, 82][t] * left;
+            } else if t != 0 {
+                self.cyc += [0, 59, 47, 47][t] + [0, 0, 42, 56][t] * left;
+            }
             let (pass, interpolated, filled) = PHASE_PASS[(ptype as usize).min(3)][fill as usize];
             self.owed += pass + interpolated * prev as f64 + filled * (len - prev) as f64;
             if fill {
@@ -3776,6 +4164,7 @@ impl Musicline {
         let rd = |hw: &Hw, k: u32| rs8(hw, src.wrapping_add(k));
         if prev >= len || prev == 0 {
             for k in 0..len {
+                self.cyc += 22;
                 let b = rb(hw, src.wrapping_add(k));
                 hw.bus.w8(buf + k, b);
             }
@@ -3790,14 +4179,6 @@ impl Musicline {
             hw.bus.w8(buf + o, b as u8);
             o += 1;
         };
-        let mix = |s1: i32, s2: i32| -> i32 {
-            match ptype {
-                1 => ((s1 + s2) + s1 * 2) >> 2,
-                2 => (s1 + s2) >> 1,
-                3 => ((s1 + s2) + s2 * 2) >> 2,
-                _ => s1,
-            }
-        };
         let mut idx = 0u32;
         let mut rc = 0u32;
         for k in 0..todo {
@@ -3805,18 +4186,23 @@ impl Musicline {
             let s1 = rd(hw, idx);
             let s2 = rd(hw, rc);
             rc += 1;
-            w(hw, mix(s1, s2) as i8 as i32);
+            w(hw, Self::phase_mix(ptype, s1, s2) as i8 as i32);
         }
         if ptype == 0 {
+            self.cyc += 33;
             if fill {
+                self.cyc += 33;
                 // the start of the phase buffer again
                 for k in 0..left {
+                    self.cyc += 22;
                     let b = rb(hw, buf + k);
                     w(hw, b as i32);
                 }
             } else if left > 0 {
+                self.cyc += 43;
                 let s = rd(hw, idx);
                 for _ in 0..left {
+                    self.cyc += 18;
                     w(hw, s);
                 }
             }
@@ -3842,12 +4228,13 @@ impl Musicline {
                         }
                         (((t - r * (r - 1) / 2 + 1) * n) / r).wrapping_sub(1)
                     } else {
+                        self.cyc += 72;
                         sizer(k)
                     };
                     let s1 = rd(hw, i);
                     let s2 = rd(hw, rc);
                     rc += 1;
-                    w(hw, mix(s1, s2) as i8 as i32);
+                    w(hw, Self::phase_mix(ptype, s1, s2) as i8 as i32);
                 }
                 left -= c;
             }
@@ -3857,8 +4244,8 @@ impl Musicline {
                 let s2 = rd(hw, rc);
                 rc += 1;
                 let out = match ptype {
-                    1 => ((s1 + s1 * 2) as i16 as i32 + s2) >> 2,
-                    _ => mix(s1, s2),
+                    1 => { self.cyc += 44; ((s1 + s1 * 2) as i16 as i32 + s2) >> 2 },
+                    _ => Self::phase_mix(ptype, s1, s2),
                 };
                 w(hw, out as i8 as i32);
             }
@@ -3869,37 +4256,57 @@ impl Musicline {
         if self.voices[v].effect2 & E2_MIX == 0 {
             return;
         }
+        self.cyc += 302;
         let x = &mut self.voices[v];
         let (s, i) = (x.arg2 & M_MIX_STEP != 0, x.arg2 & M_MIX_INIT != 0);
         let one_way = x.arg2 & M_MIX_COUNTER != 0;
-        let mut prev = Self::effect_counter(&mut x.mix_counter, s, i, x.part_note, one_way, x.mix_speed, false) as u32;
+        // (the counter's kind is tested when it counts; the mixing loop takes 60 cycles a byte)
+        let counts = !(s && !i && x.part_note == 0);
+        let mut prev = Self::effect_counter(&mut x.mix_counter, s, i, x.part_note, one_way, x.mix_speed, false, &mut self.cyc) as u32;
         let mut len = x.repeat_length as u32 * 2;
+        self.cyc += 25 * counts as u64 + 60 * len as u64 + 16;
+        if s && !i {
+            // (the mix has its own way through the counter's start)
+            if x.part_note == 0 {
+                self.cyc -= 21;
+            } else {
+                self.cyc += 170;
+            }
+        }
         let off;
         if len > 128 {
+            self.cyc += 22;
             prev >>= 1;
             off = 0;
         } else if len > 64 {
+            self.cyc += 32;
             prev >>= 2;
             off = 256;
         } else if len > 32 {
+            self.cyc += 34;
             prev >>= 3;
             off = 256 + 128;
         } else if len > 16 {
+            self.cyc += 53;
             prev >>= 4;
             off = 256 + 128 + 64;
         } else {
+            self.cyc += 45;
             prev >>= 5;
             off = 256 + 128 + 64 + 32;
         }
+        self.cyc += 17 * ((len <= 128) as u64 + (len <= 64) as u64);
         let pass = MIX_PASS[(x.arg2 & M_MIX_BUFF != 0) as usize][(x.mix_wave != 0) as usize][(prev == 0) as usize];
-        let byte = if x.boost & B_MIX != 0 { MIX_BYTE_BOOST } else { MIX_BYTE };
+        let byte = if x.boost & B_MIX != 0 { self.cyc += 4; MIX_BYTE_BOOST } else { MIX_BYTE };
         self.owed += pass + byte * len as f64;
         let src = x.repeat_pointer;
         let dest = x.bufs + B_MIXB;
         let mut mixb = dest;
         if x.arg2 & M_MIX_BUFF == 0 {
+            self.cyc += 29;
             mixb = src;
             if x.mix_wave != 0 {
+                self.cyc += 66;
                 let s = rl(hw, self.tab + T_SAMPLES + 4 * x.mix_wave as u32);
                 mixb = rl(hw, s + IS_REPEAT).wrapping_add(off);
             }
@@ -3908,9 +4315,11 @@ impl Musicline {
         let src2 = mixb;
         x.repeat_pointer = dest;
         if x.wave_or_sample != SAMPLE {
+            self.cyc += 16;
             x.wave_pointer = dest;
         }
         let mixb = mixb.wrapping_add(prev);
+        self.cyc += 8 * (prev.min(len) > 0) as u64;
         len -= prev.min(len);
         let boost = if x.boost & B_MIX != 0 { 0 } else { 1 };
         for k in 0..len {
@@ -3929,16 +4338,19 @@ impl Musicline {
         if self.voices[v].effect2 & E2_RESONANCE == 0 {
             return;
         }
+        self.cyc += 444;
         let x = &mut self.voices[v];
         let (s, i) = (x.arg2 & M_RESONANCE_STEP != 0, x.arg2 & M_RESONANCE_INIT != 0);
-        let prev = Self::effect_counter(&mut x.resonance_counter, s, i, x.part_note, false, x.resonance_speed, false);
+        let prev = Self::effect_counter(&mut x.resonance_counter, s, i, x.part_note, false, x.resonance_speed, false, &mut self.cyc);
         let src = x.repeat_pointer;
         let buf = x.bufs + B_RES;
         Self::set_effect_output(x, buf, true);
+        self.cyc += 21 * (x.effect1 & E1_LOOP == 0 && x.wave_or_sample != SAMPLE) as u64;
         let len = x.repeat_length as u32 * 2;
         self.owed += RES_PASS + RES_BYTE * len as f64;
         let mut last = x.resonance_last;
         if x.resonance_last_init {
+            self.cyc += 40;
             x.resonance_last_init = false;
             last = (rb(hw, src.wrapping_add(len).wrapping_sub(1)) as i8) >> 2;
         }
@@ -3948,8 +4360,9 @@ impl Musicline {
         damp = ((damp as u32 * 0xe666) >> 16) as u16;
         let mut vel: i16 = 0;
         let mut out = last;
-        let boost = if x.boost & B_RESONANCE != 0 { 6 } else { 7 };
+        let boost = if x.boost & B_RESONANCE != 0 { self.cyc += 4; 6 } else { 7 };
         for k in 0..len {
+            self.cyc += 310;
             // the original subtracts in 16 bits, and its divs.w leaves the
             // dividend as it was when the quotient overflows 16 bits
             let diff = ((rs8(hw, src.wrapping_add(k)) << 5) as i16).wrapping_sub(state) as i32;
@@ -3967,14 +4380,18 @@ impl Musicline {
 
     fn filter_play(&mut self, hw: &mut Hw, v: usize) {
         if self.voices[v].effect2 & E2_FILTER == 0 {
+            self.cyc += 16;
             return;
         }
+        self.cyc += 229;
         let x = &mut self.voices[v];
         let (s, i) = (x.arg1 & F_FILTER_STEP != 0, x.arg1 & F_FILTER_INIT != 0);
-        let prev = Self::effect_counter(&mut x.filter_counter, s, i, x.part_note, false, x.filter_speed, false);
+        let prev = Self::effect_counter(&mut x.filter_counter, s, i, x.part_note, false, x.filter_speed, false, &mut self.cyc);
         let src = x.repeat_pointer;
         let buf = x.bufs + B_FILT;
+        self.cyc += x.repeat_length as u64 * 2 * [218, 220][(x.filter_type == 0) as usize] + 218 + 4 * (x.boost & B_FILTER != 0) as u64;
         Self::set_effect_output(x, buf, true);
+        self.cyc += 21 * (x.effect1 & E1_LOOP == 0 && x.wave_or_sample != SAMPLE) as u64;
         let len = x.repeat_length as u32 * 2;
         self.owed += if x.filter_type == 0 { FILTER_PASS + FILTER_BYTE * len as f64 } else { RFILTER_PASS + RFILTER_BYTE * len as f64 };
         let mut last = x.filter_last;
@@ -3982,7 +4399,7 @@ impl Musicline {
         if x.filter_last_init {
             x.filter_last_init = false;
             let b = rb(hw, src.wrapping_add(len).wrapping_sub(1)) as i8;
-            last = if normal { b } else { b >> 1 };
+            last = if normal { self.cyc += 30; b } else { self.cyc += 38; b >> 1 };
         }
         let mut state = (last as i16) << 7;
         let idx = ((prev & 0xfffe) / 2) as usize & 0xff;

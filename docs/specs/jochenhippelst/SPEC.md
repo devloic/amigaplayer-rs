@@ -523,3 +523,34 @@ gaps above have a spread of up to +-12 cc in the real logs.
 
 See README.md. In brief: the write order and values (not the timing) are reproduced for both real
 modules (about 500 ticks each) and several hundred synthetic modules by a model built from this text.
+
+## 13. Errata from black-box runs (write values, 347 modules against the reference)
+
+Each item replaces what an earlier section says or adds what it leaves out. All were found by running
+built modules through the reference and comparing register writes and memory dumps.
+
+* 3 (image of a raw module): the three tables hold 16-bit offsets whatever the command set. The image
+  ends after the extra table: the sample table is not copied. The seventh header long is the distance
+  from the image to the module's sample table (a negative number, the image being allocated after the
+  module) when the word at the table's place is $80 or $100, and the image's end otherwise. The empty
+  instrument is the player's own data, not part of the image.
+* 3 (pattern packing): a leading wait `FD n` sets the row speed too, so no `FE n` follows it for the
+  same value. The third byte of a row whose flags have one of the bits $E0 set is the byte before the
+  row; for the first row it is the pattern's last byte.
+* 3 (sample conversion in place): only when the prefix holds the first code pattern and not the
+  second (kind 2), and the first long of the first sample has no bit set in a high nibble.
+* 5: a subsong speed of 0 is replaced by 4 in the subsong table itself.
+* 6.1: `E2` also sets the volume program's wait to 1. In the new command set `E7` restarts the pitch
+  program at the image's first byte (the header is then read as a program).
+* 6.2: `E8 0` goes back to the speed counter (the reloaded wait is decremented, and the program goes
+  on only when it reaches 0). The bytes `E2..E7` end the voice's update for the tick: the YM period
+  becomes the byte's value, the volume 0, and the period, mixer and vibrato part is skipped. Bytes
+  from `E9` on crash the reference.
+* 6.3: the sample command takes a note argument when the prefix holds either code pattern and a sample
+  table is there; a note argument with bit 7 set is absolute (no row note, no transpose). A sample
+  number past the table reads what follows it. Without a table the command still plays what the
+  bytes at the table's place say.
+* 6.5 (MMME): portamento is `per -= (acc * per) >> 10` on the period after vibrato; vibrato turns at
+  the top only when the position is above twice the depth (TFMX: at or above).
+* 6.6: SID sources 2 and 3 take the other voice's period before the pitch-end forcing; the others
+  take voice 0's period after it. The level cell starts as $80.

@@ -619,3 +619,17 @@ data; 330 modules):
   this one ends, not on its 70940 clock grid (the ticks after it are on the grid again).
 * Timing (6.6): the SID section's leave on a period above `$EEE` costs the same 17 cycles more
   in the build without the MMME pitch code (measured; it was taken from the other build).
+* 4 and 5 (a change of subsong, from the host): the original first ends the sound (all Paula DMA
+  off 123 colour clocks into the call, the four volumes zero at 131, 137, 143 and 149; 157 in
+  all), sets the volume and the balance (two calls of 118 clocks) and then sets the subsong up
+  (half the set-up cycles of section 11 in clocks). The set-up costs 30 cycles more when the
+  table entry is patched to an empty song (end before start; 4 cases). The timer is not started
+  again: before the first tick the song starts later by these times, and while the song plays
+  the ticks stay on their grid. The set-up clears the voices but not their vibrato flags (the
+  direction and the every-other-tick bit): a voice whose vibrato was going down starts the new
+  subsong going down (seen as 2 clocks in the first tick; the values follow from it). No
+  channel counts as running after it. The patches of the subsong table (speed 0 to 4, the empty
+  song) stay in the module for the later set-ups. Compared: 38 subsongs of the 10 real and built
+  modules with more than one over 20 s, 1179 subsongs of 393 modules built with three table
+  entries over 5 s (2 of them read positions past the file and differ), and a change while the
+  song plays on 403 modules: values and write times equal.

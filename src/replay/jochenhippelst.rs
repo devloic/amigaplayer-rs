@@ -21,7 +21,7 @@
 //! paths a tick takes (`COST`), and the beam position at the song start comes from the length of
 //! the original's start-up, which depends on the module (`reference_start`). All of it is from
 //! counts of executed addresses and their cycles, related to the module's data and the port's
-//! own state: 962,035 of 962,425 writes of 330 modules (5 s each) are at the reference's colour
+//! own state: all 962,425 writes of 330 modules (5 s each) are at the reference's colour
 //! clock, counted from the song start.
 //!
 //! Embedded data: `jochenhippelst_data.bin` (52 bytes) is the volume table together with the bytes
@@ -661,15 +661,17 @@ enum F {
 /// build of the original (old or new command set, without or with the MMME pitch code), one cost
 /// per path of `F`, then a constant (and an unused column). The reference's cycles per tick were
 /// measured from the addresses it executes and solved for whole-cycle costs of these paths:
-/// they give the reference's count on every tick measured in three of the builds and on 99.93%
-/// in the fourth (new command set with the MMME code). A cost is the sum over the addresses a
-/// path adds, so it can be negative (a path that skips more than it runs).
+/// they give the reference's count on every tick measured (60,720 ticks of 330 modules). A cost
+/// is the sum over the addresses a path adds, so it can be negative (a path that skips more than
+/// it runs). One cost is not measured: the SID section's leave on a period above $EEE in the
+/// build without the MMME code, taken as the other build's step (17 cycles after the leave on
+/// a period of $10 or less).
 #[rustfmt::skip]
 const COST: [[i32; F::N as usize + 2]; 4] = [
-    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 0, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 67, 19, 0, 0, 5108, 0],
+    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 67, 19, 0, 0, 5108, 0],
     [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 18, 0, 0, 0, 0, 0, 0, 0, 0, 67, 19, 0, 0, 5279, 0],
-    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 0, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -221, 0, 0, 0, 0, 0, 0, 0, 8, -14, 48, 0, 19, -19, 0, 5528, 0],
-    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 153, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 4, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -211, 0, 0, 0, 87, -19, 0, 0, 0, -14, 67, 0, 0, -19, 0, 5699, 0],
+    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 0, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 0, 0, 0, 0, 8, -14, 48, 0, 19, -19, 0, 5528, 0],
+    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 153, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 4, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -204, 0, 0, 0, 87, -19, 0, 0, 0, -14, 67, 0, 0, -19, 0, 5699, 0],
 ];
 
 pub struct JochenHippelSt {
@@ -1239,7 +1241,9 @@ impl JochenHippelSt {
         };
         if mode != 4 {
             if p <= 0x10 || p > 0xEEE {
-                self.f[if p <= 0x10 { F::SidRange } else { F::SidRangeHi } as usize] += 1;
+                // the original's first test is a signed one: a period of $8000 or more leaves
+                // where one of $10 or less does, one above $EEE a test later
+                self.f[if p as i16 <= 0x10 { F::SidRange } else { F::SidRangeHi } as usize] += 1;
                 if p == 0x10 {
                     self.f[F::SidRange10 as usize] += 1;
                 }

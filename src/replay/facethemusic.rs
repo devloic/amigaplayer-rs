@@ -3,18 +3,17 @@
 //!
 //! Face The Music has eight tracks, with sound effect scripts and LFOs on them. The
 //! Eagleplayer ("Face The Music") plays them on Paula's four channels as pairs of tracks
-//! (the panning of NostalgicPlayer's port, left left right right right right left left,
-//! is by pair), writing each channel's registers on audio interrupts with a mixing
-//! scheme of its own that this port does not know: the register writes cannot be taken
-//! from NostalgicPlayer, which has a mixer of its own, so they do not match the
-//! Eagleplayer's. The port plays the eight tracks through the host's Eagleplayer
-//! amplifier (`Hw::voice_*`) instead, one virtual voice a track, a track's side being
-//! its pair's, and follows the Eagleplayer for what it can read in its logs: the CIA
-//! timer is the module's, and the song ends as NostalgicPlayer's does. The samples play
-//! from the module in guest memory (modules with external samples are not played).
+//! (tracks 0 and 1 on channel 0, and so on: left left right right right right left left),
+//! which it mixes itself: NostalgicPlayer has a mixer of its own, so the song is
+//! NostalgicPlayer's and the mixing is the Eagleplayer's, taken from its register writes
+//! and from the bytes Paula fetched in its runs (docs/specs/facethemusic/SPEC.md).
+//! The samples play from the module in guest memory (modules with external samples are
+//! not played).
 
 use super::facethemusic_tables::{LFO_SHAPES, PERIODS};
 use super::{be16, be32, Hw, Open, Replayer};
+use crate::bus::Bus;
+use m68k::AddressBus;
 use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "Face The Music", detect, new };
@@ -26,8 +25,13 @@ const VOLUME_DOWN: u8 = 13;
 const PATTERN_LOOP: u8 = 14;
 const SKIP_EMPTY_ROWS: u8 = 15;
 
-/// The volume of each track volume effect.
-const EFFECT_VOLUME: [u8; 10] = [0, 7, 14, 21, 28, 36, 43, 50, 57, 64];
+/// The volume of each track volume effect, as the Eagleplayer plays them: its third is silent
+/// and its ninth 56 (measured on the channel volumes of 20 modules: under the global volume 63
+/// the channels never show the 13 and 56 of the even steps 14 and 57, but 0 and 55).
+const EFFECT_VOLUME: [u8; 10] = [0, 7, 0, 21, 28, 36, 43, 50, 56, 64];
+
+/// Bytes of a mixing buffer: 100 words a buffer.
+const BUF: u32 = 200;
 
 /// The sample played when none is: index in `samples`.
 const QUIET: usize = 64;
@@ -156,15 +160,59 @@ pub struct FaceTheMusic {
     end_reached: bool,
     songend: bool,
     visited: Vec<bool>,
-    // the amplifier
-    first_tick: bool,
-    last_period: [u16; 8],
-    last_vol: [u16; 8],
+    // the mixer
+    /// Each track's period and volume as the last tick left them.
+    per: [u16; 8],
+    vol: [u16; 8],
+    /// Where each track's sample plays.
+    play: [Play; 8],
+    /// Each channel's two buffers and which of them is mixed next.
+    bufs: [[u32; 2]; 4],
+    flip: [usize; 4],
+    /// The period and volume of each channel's buffer mixed last: written at the next
+    /// audio interrupt, of any channel.
+    ch_per: [u16; 4],
+    ch_vol: [u16; 4],
 }
 
-/// The amplifier voice of each track: its sides are LRRL, a track's side is its pair's
-/// (left left right right right right left left).
-const AMP_VOICE: [usize; 8] = [0, 3, 1, 2, 5, 6, 4, 7];
+/// A track's sample in the mixer: the byte played next, the end of the block, the fraction of
+/// a byte passed (16 bits), and the loop (0 bytes: none).
+#[derive(Clone, Copy, Default)]
+struct Play {
+    cur: u32,
+    end: u32,
+    frac: u32,
+    loop_start: u32,
+    loop_bytes: u32,
+    on: bool,
+    /// Of the buffer being mixed: the bytes it gave and the times it went back to its loop.
+    bytes: u32,
+    wraps: u32,
+}
+
+impl Play {
+    /// The byte played now; then `step` (16.16 bytes) further.
+    fn next(&mut self, bus: &Bus, step: u32) -> i32 {
+        if !self.on {
+            return 0;
+        }
+        let s = bus.r8(self.cur) as i8 as i32;
+        self.frac += step;
+        self.cur += self.frac >> 16;
+        self.frac &= 0xffff;
+        self.bytes += 1;
+        if self.cur >= self.end {
+            if self.loop_bytes == 0 {
+                self.on = false;
+            } else {
+                self.cur = self.loop_start + (self.cur - self.end) % self.loop_bytes;
+                self.end = self.loop_start + self.loop_bytes;
+                self.wraps += 1;
+            }
+        }
+        s
+    }
+}
 
 fn detect(d: &[u8]) -> bool {
     d.len() >= 82 && &d[0..3] == b"FTM" && d[4] == 3
@@ -177,6 +225,10 @@ fn text(d: &[u8], o: usize, n: usize) -> String {
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    Some(Box::new(build(d, base, m)?))
+}
+
+fn build(d: &[u8], base: u32, m: &mut Machine) -> Option<FaceTheMusic> {
     if !detect(d) {
         return None;
     }
@@ -262,26 +314,15 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         p += s.total as usize;
     }
 
-    // the quiet sample and the amplifier's voices
+    // the quiet sample, and the mixer's buffers: four, four more, and one that stays empty
     let quiet = m.alloc(16);
-    let structs = m.alloc(8 * crate::amplifier::aus::SIZE);
-    if quiet == 0 || structs == 0 {
+    let mixbuf = m.alloc(9 * BUF + 24);
+    if quiet == 0 || mixbuf == 0 {
         return None;
     }
     samples[QUIET] = Samp { named: false, oneshot: 2, loop_start: 0, loop_len: 0, total: 4, addr: quiet };
-    for (t, &v) in AMP_VOICE.iter().enumerate() {
-        // left for the tracks of the pairs 0 and 3, right for the others
-        let left = matches!(t, 0 | 1 | 6 | 7);
-        m.bus.w16(structs + v as u32 * crate::amplifier::aus::SIZE + crate::amplifier::aus::PAN, if left { 1 } else { 0xFFFF });
-    }
-    use crate::eagle::epamb;
-    // the Eagleplayer, two tracks to each of Paula's four channels, plays 11.8 dB
-    // (median of 55 modules) louder than the amplifier's factory boost does with
-    // its one channel a side; 360 percent of it puts the port at -0.5 dB (-5.3 to
-    // +2.0), at the cost of the 8-bit mix clipping in 4 of them (1 in the original)
-    if !crate::amplifier::start_gain(m, 8, structs, epamb::DIRECT | epamb::BIT8 | epamb::CHIP_RAM, 360) {
-        return None;
-    }
+    let bufs = std::array::from_fn(|c| [mixbuf + c as u32 * BUF, mixbuf + (4 + c as u32) * BUF]);
+    let idle = mixbuf + 8 * BUF + 24;
 
     let voices = (0..8)
         .map(|i| Voice {
@@ -336,9 +377,13 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         end_reached: false,
         songend: false,
         visited: vec![false; measures as usize + 1],
-        first_tick: true,
-        last_period: [0; 8],
-        last_vol: [0xffff; 8],
+        per: [PERIODS[0]; 8],
+        vol: [0; 8],
+        play: [Play::default(); 8],
+        bufs,
+        flip: [0; 4],
+        ch_per: [214; 4],
+        ch_vol: [64; 4],
     };
     for i in 0..8 {
         f.adjust_track_indexes(i);
@@ -347,8 +392,19 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     f.visited[0] = true;
     // the init routine sets the LED bit of CIA-A's port: the filter is off
     m.bus.ciaa.pra |= 2;
-    Some(Box::new(f))
+    let mut hw = Hw { bus: &mut m.bus };
+    f.init_hardware(&mut hw, idle);
+    // the first tick is played before the timer runs
+    f.step();
+    Some(f)
 }
+
+/// Colour clocks from an audio interrupt to its handler's first write.
+const T_ENTRY: u64 = 60;
+/// From the handler's last write to its end.
+const T_EXIT: u64 = 60;
+/// A tick's time.
+const T_TICK: u64 = 2000;
 
 impl Replayer for FaceTheMusic {
     fn format(&self) -> &'static str {
@@ -368,16 +424,86 @@ impl Replayer for FaceTheMusic {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        if self.first_tick {
-            self.first_tick = false;
-            hw.voice_dma(0xff, false);
-            for v in 0..8 {
-                hw.voice_loc(v, self.quiet);
-                hw.voice_len(v, 2);
-                hw.voice_per(v, 428);
-                hw.voice_vol(v, 0);
-            }
+        self.step();
+        hw.wait(T_TICK);
+    }
+
+    /// The handler of a channel's audio interrupt: the channel's buffer has started. It writes
+    /// every channel's period and volume as the buffers mixed last have them, gives the channel
+    /// its other buffer and mixes it.
+    fn audio_irq_ch(&mut self, ch: usize, hw: &mut Hw) -> bool {
+        if hw.bus.read_word(0xdff01e) & (0x80 << ch) == 0 {
+            // taken already: the request came again while its handler waited
+            return true;
         }
+        hw.wait(T_ENTRY);
+        hw.bus.write_word(0xdff09c, 0x80 << ch);
+        for c in 0..4 {
+            hw.wait([93, 38, 38, 38][c]);
+            hw.per(c, self.ch_per[c]);
+            hw.wait([115, 127, 139, 133][c]);
+            hw.vol(c, self.ch_vol[c]);
+        }
+        hw.wait([51, 66, 82, 97][ch]);
+        hw.bus.write_word(0xdff09a, 0x2000);
+        hw.wait(154);
+        let buf = self.bufs[ch][self.flip[ch]];
+        self.flip[ch] ^= 1;
+        hw.loc(ch, buf);
+        let time = self.mix(ch, hw.bus, buf);
+        hw.wait(time);
+        hw.bus.write_word(0xdff09a, 0xa000);
+        hw.wait(T_EXIT);
+        true
+    }
+}
+
+impl FaceTheMusic {
+    /// The init and start routines' register writes, as the Eagleplayer's logs have them.
+    fn init_hardware(&mut self, hw: &mut Hw, idle: u32) {
+        hw.bus.write_word(0xdff09a, 0xa000);
+        hw.wait(22);
+        hw.bus.write_word(0xdff09c, 0x0780);
+        hw.wait(278);
+        hw.bus.write_word(0xdff09a, 0x8780);
+        hw.wait(29);
+        hw.dmacon(0x000f);
+        hw.wait(8);
+        hw.bus.write_word(0xdff09e, 0x00ff);
+        for c in 0..4 {
+            hw.wait([8, 6, 6, 6][c]);
+            hw.bus.write_word(0xdff0aa + 16 * c as u32, 0);
+        }
+        for c in 0..4 {
+            hw.wait(6);
+            hw.vol(c, 0);
+        }
+        let channels = |hw: &mut Hw, first: u64, vol: u16| {
+            for c in 0..4 {
+                hw.wait(if c == 0 { first } else { 51 });
+                hw.loc(c, idle);
+                hw.wait(8);
+                hw.len(c, (BUF / 2) as u16);
+                hw.wait(8);
+                hw.per(c, 428);
+                hw.wait([235, 246, 258, 253][c]);
+                hw.vol(c, vol);
+            }
+        };
+        channels(hw, 2134, 1);
+        // the start routine
+        hw.wait(249474);
+        for k in 0..8 {
+            hw.wait([0, 156, 168, 162, 206, 156, 168, 162][k]);
+            hw.vol(k & 3, 64);
+        }
+        channels(hw, 2348, 64);
+        hw.wait(5193);
+        hw.dmacon(0x800f);
+    }
+
+    /// One tick of the song.
+    fn step(&mut self) {
         self.speed_counter = self.speed_counter.wrapping_sub(1);
         if self.speed_counter == 0 {
             self.speed_counter = self.speed;
@@ -386,16 +512,14 @@ impl Replayer for FaceTheMusic {
         for i in 0..8 {
             self.run_effects(i);
         }
-        self.setup_hardware(hw);
+        self.setup_voices();
         if self.end_reached {
             self.end_reached = false;
             self.songend = true;
             self.mark_visited();
         }
     }
-}
 
-impl FaceTheMusic {
     fn rpm(&self) -> u16 {
         self.rows_per_measure as u16
     }
@@ -1051,35 +1175,27 @@ impl FaceTheMusic {
         }
     }
 
-    /// Tells the amplifier what to play.
-    fn setup_hardware(&mut self, hw: &mut Hw) {
+    /// The tick's result for the mixer: the samples started, each track's period and volume.
+    fn setup_voices(&mut self) {
         for t in 0..8 {
             if self.mute_status & (1 << t) == 0 {
                 continue;
             }
-            let av = AMP_VOICE[t];
             let v = &mut self.voices[t];
             if v.retrig {
                 v.retrig = false;
-                let (data, start, total, loop_start, loop_len) = (v.data, v.start_offset, v.total, v.loop_start, v.loop_len);
-                let words = (total.wrapping_sub(start) / 2) as u16;
-                hw.voice_dma(1 << av, false);
-                if (start as u64) < total as u64 && words != 0 {
-                    hw.voice_loc(av, data.wrapping_add(start));
-                    hw.voice_len(av, words);
-                } else {
-                    hw.voice_loc(av, self.quiet);
-                    hw.voice_len(av, 2);
-                }
-                hw.voice_dma(1 << av, true);
-                if loop_len != 0 {
-                    hw.voice_loc(av, data.wrapping_add(loop_start));
-                    hw.voice_len(av, loop_len);
-                } else {
-                    // a sample without a loop plays once, then silence
-                    hw.voice_loc(av, self.quiet);
-                    hw.voice_len(av, 2);
-                }
+                let (data, start, total) = (v.data, v.start_offset, v.total);
+                let on = start < total && (total - start) / 2 != 0;
+                self.play[t] = Play {
+                    cur: data.wrapping_add(start),
+                    end: data.wrapping_add(total),
+                    frac: 0,
+                    loop_start: data.wrapping_add(v.loop_start),
+                    loop_bytes: v.loop_len as u32 * 2,
+                    on,
+                    bytes: 0,
+                    wraps: 0,
+                };
             }
             let v = &self.voices[t];
             let mut period = PERIODS.get(v.note_index as usize / 2).copied().unwrap_or(0) as f64;
@@ -1089,25 +1205,50 @@ impl FaceTheMusic {
                     // the frequency is scaled by 2 ^ (detune / (12 * 256 * 128))
                     period /= 2f64.powf(detune as f64 / (12.0 * 256.0 * 128.0));
                 }
-                let p = period.round().clamp(1.0, 65535.0) as u16;
-                if p != self.last_period[t] {
-                    self.last_period[t] = p;
-                    hw.voice_per(av, p);
-                }
+                self.per[t] = period.round().clamp(1.0, 65535.0) as u16;
             }
-            let vol = (v.volume as u32 * self.gvol as u32 / 64).min(64) as u16;
-            if vol != self.last_vol[t] {
-                self.last_vol[t] = vol;
-                hw.voice_vol(av, vol);
+            self.vol[t] = (v.volume as u32 * self.gvol as u32 / 64).min(64) as u16;
+        }
+    }
+
+    /// Mixes the two tracks of channel `ch` into the buffer at `dst`: the channel plays at the
+    /// shorter of their periods and the higher of their volumes, the other track is stepped
+    /// and scaled to them. Returns the time it takes.
+    fn mix(&mut self, ch: usize, bus: &mut Bus, dst: u32) -> u64 {
+        let t = [2 * ch, 2 * ch + 1];
+        let per = self.per[t[0]].min(self.per[t[1]]);
+        let vol = self.vol[t[0]].max(self.vol[t[1]]);
+        let mut gain = [64i32; 2];
+        let mut step = [0x10000u32; 2];
+        for k in 0..2 {
+            let (p, v) = (self.per[t[k]] as u32, self.vol[t[k]] as u32);
+            if v != vol as u32 {
+                gain[k] = ((v * 64 + vol as u32 / 2) / vol as u32) as i32;
+            }
+            if p != per as u32 {
+                step[k] = ((per as u32) << 16) / p;
             }
         }
+        for k in 0..2 {
+            self.play[t[k]].bytes = 0;
+            self.play[t[k]].wraps = 0;
+        }
+        for i in 0..BUF {
+            let mut s = 0;
+            for k in 0..2 {
+                s += (self.play[t[k]].next(bus, step[k]) * gain[k]) >> 6;
+            }
+            bus.w8(dst + i, s.clamp(-128, 127) as u8);
+        }
+        self.ch_per[ch] = per;
+        self.ch_vol[ch] = vol;
+        3347
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amplifier::LOG_BASE;
     use crate::engine::Engine;
     use std::path::Path;
 
@@ -1149,10 +1290,6 @@ mod tests {
         (format, log.iter().map(|w| (w.0, w.1)).collect())
     }
 
-    fn reg(log: &[(u32, u16)], voice: u32, r: u32) -> Vec<u16> {
-        log.iter().filter(|w| w.0 == LOG_BASE | voice << 4 | r).map(|w| w.1).collect()
-    }
-
     #[test]
     fn detects_only_ftm() {
         let d = module();
@@ -1165,18 +1302,47 @@ mod tests {
     }
 
     #[test]
-    fn plays_two_notes_on_a_voice_of_the_amplifier() {
+    fn plays_two_notes_on_paula() {
         let (format, log) = play(module(), 60);
         assert_eq!(format, "Face The Music");
-        // track 0 is amplifier voice 0: volume 64 of the global 63, then the note's period
-        assert_eq!(reg(&log, 0, 8).last().copied(), Some(63));
-        let per = reg(&log, 0, 6);
+        // tracks 0 and 1 are channel 0: volume 64 of the global 63, the note's period (track 1
+        // stays at the lowest note's, which is longer)
+        let reg = |r: u32| log.iter().filter(|w| w.0 == r).map(|w| w.1).collect::<Vec<_>>();
+        assert_eq!(reg(0xdff0a8).last().copied(), Some(63));
+        let per = reg(0xdff0a6);
         assert!(per.contains(&PERIODS[24 * 8]), "{per:x?}");
         assert!(per.contains(&PERIODS[26 * 8]), "{per:x?}");
-        // the sample's 4 words once, then the quiet loop
-        assert!(reg(&log, 0, 4).contains(&4));
-        // track 0 starts its DMA, track 1 (voice 3) never does
-        assert!(reg(&log, 0, 0xa).contains(&0x8000));
-        assert!(!reg(&log, 3, 0xa).contains(&0x8000));
+        // the other channels are silent
+        assert_eq!(reg(0xdff0b8).last().copied(), Some(0));
+        // every buffer is 100 words
+        assert!(reg(0xdff0a4).iter().all(|&l| l == 100));
+    }
+
+    #[test]
+    fn mixes_two_tracks_to_the_shorter_period_and_higher_volume() {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        let m = &mut e.m;
+        let base = m.alloc(64);
+        for i in 0..16 {
+            m.bus.w8(base + i, (i as u8) * 8);
+        }
+        let d = module();
+        let at = m.alloc(d.len() as u32);
+        m.bus.write_bytes(at, &d);
+        let mut f = build(&d, at, m).unwrap();
+        let on = Play { cur: base, end: base + 16, frac: 0, loop_start: base, loop_bytes: 16, on: true, bytes: 0, wraps: 0 };
+        f.play[0] = on;
+        f.play[1] = on;
+        f.per[0] = 200;
+        f.per[1] = 400;
+        f.vol[0] = 32;
+        f.vol[1] = 64;
+        let dst = m.alloc(BUF);
+        f.mix(0, &mut m.bus, dst);
+        assert_eq!((f.ch_per[0], f.ch_vol[0]), (200, 64));
+        // track 0 at half the volume, a byte each; track 1 in full, a byte every two
+        let got: Vec<i8> = (0..6).map(|i| m.bus.r8(dst + i) as i8).collect();
+        assert_eq!(got, [0, 4, 8 + 8, 12 + 8, 16 + 16, 20 + 16]);
     }
 }

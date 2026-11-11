@@ -2099,6 +2099,8 @@ impl Musicline {
                 if x.sample_offset_active {
                     let off = (x.sample_offset as u16) << 7;
                     if off < len {
+                        // (measured: a zero offset costs nothing)
+                        self.cyc += 69 * (off != 0) as u64;
                         len -= off;
                         ptr = ptr.wrapping_add(2 * off as u32);
                     } else {

@@ -41,18 +41,18 @@ const PERIODS: [u16; 48] = [
 const INTENA: u32 = 0xDFF09A;
 const CIAA_PRA: u32 = 0xBFE001;
 
+/// 68000 cycles (half colour clocks) the song start (the engine's clock when the start-up call
+/// returns) lies from the point the port's start-up reaches, for a keyed and a plain start.
+const SONG_START_KEYED_H: i64 = -146;
+const SONG_START_PLAIN_H: i64 = 655;
 /// The start-up call's first DMACON write and the CIA write of a filter command (in half colour
 /// clocks from the run's origin), before the sum of the costs of the sequence entries met until
 /// them (the first entry's included).
-/// Colour clocks the song start (the engine's clock when the start-up call returns) lies from the end
-/// of the start-up call, for a keyed and a plain start.
-const SONG_START_KEYED: i64 = -73;
-const SONG_START_PLAIN: i64 = 327;
 const START_PLAIN_H: u64 = 7967;
 const START_CIA_H: u64 = 5207;
 /// Colour clocks from the end of the start-up call (the audio interrupts it requests come after)
 /// to the first tick's call: with a keyed voice (plus the latency of the first interrupt handler
-/// after the last AUDxDAT write, `lat_h`), and without.
+/// after the last AUDxDAT write), and without.
 const START_TO_TICK_KEYED_H: u64 = 141849;
 const START_TO_TICK_H: u64 = 142650;
 /// Half colour clocks from the last AUDxDAT write of channel 0 to the end of the start-up call
@@ -111,110 +111,47 @@ const SQ_LOOP_FIRST: u64 = 400;
 const ADV_END_BLOCK: u64 = 1198;
 const ADV_START_BLOCK: u64 = 1199;
 const ADV_NEXT_ENTRY: u64 = 784;
-/// The work of voices after the last write of a row, when no write follows (a late tick or a
-/// handler comes next), in half colour clocks, from the leftovers of the reference logs: an idle
-/// voice, a note without a write, a release (plus the instrument change, less a skipped division),
-/// the arpeggio bit, and the channel-volume update class (set, up, up and clamped, down, down and
-/// clamped, same).
-const LF_IDLE: i64 = 433;
-const LF_NOTE: i64 = 1454;
-const LF_REL: i64 = 1341;
-const LF_REL_ID: i64 = 545;
-const LF_REL_CNT0: i64 = 244;
-const LF_ARP: i64 = 68;
-const LF_CV: [i64; 6] = [0, 119, 0, 119, 0, 54];
-/// A voice the block mutes while its row has a note (half clocks, more than an idle voice).
-const LF_BLOCK_MUTE: i64 = 39;
-/// The cost of a row's work between two writes, in half colour clocks (fitted jointly on the
-/// reference logs): a constant by the previous write (row start, key-off, other), the work of each
-/// voice processed since (by voice, and by what the voice does), and a constant by the write that
-/// ends it (the sample or synth start of a voice, a key-off, or the first interrupt enable).
-struct RowCost {
-    a: [i64; 3],
-    tl_len: [[i64; 4]; 3],
-    tl_key: [[i64; 4]; 4],
-    note: [i64; 4],
-    idle: [i64; 4],
-    rel: [i64; 4],
-    rel_id: [i64; 4],
-    rel_id280: [i64; 4],
-    r280: [i64; 4],
-    r240: [i64; 4],
-    retrig: [i64; 4],
-    row0r: [i64; 4],
-    e3: [i64; 4],
-    n_arp: [i64; 4],
-    q_arp: [i64; 4],
-    n_cv: [[i64; 4]; 6],
-    q_cv: [[i64; 4]; 6],
-    rel_cnt0: i64,
-    rel_div: i64,
-    idle_then_note: i64,
-}
-const RC_MAIN: RowCost = RowCost {
-    a: [1639, 86, 86],
-    tl_len: [[-95, -95, -95, 1413], [-76, -76, -76, 1432], [-49, -49, -49, 1459]],
-    tl_key: [[0, -1, -1, 1507], [1, 0, 0, 1508], [1, 0, 0, 1508], [1, 0, 0, 1508]],
-    note: [0, 1573, 1621, 0],
-    idle: [-1023, 549, 550, 0],
-    rel: [-1629, -57, -56, 0],
-    rel_id: [545, 545, 545, 1337],
-    rel_id280: [10, 10, 10, 0],
-    r280: [10, 10, 10, 10],
-    r240: [14, 14, 14, 14],
-    retrig: [905, 905, 905, 905],
-    row0r: [115, 115, 115, 115],
-    e3: [174, 174, 174, 174],
-    n_arp: [68, 68, 68, 68],
-    q_arp: [68, 68, 68, 466],
-    n_cv: [[-116, -119, -167, -54], [3, 0, -48, 65], [0, 0, -51, 0], [3, 0, -48, 65], [51, 0, 0, 0], [-62, -65, -113, 0]],
-    q_cv: [[-114, -116, -117, -1074], [5, 3, 2, 0], [2, 0, -1, 0], [5, 3, 2, 0], [0, 0, 0, 0], [-60, 0, -24, 0]],
-    rel_cnt0: 1270,
-    rel_div: 1514,
-    idle_then_note: 0,
-};
-const RC_INT: RowCost = RowCost {
-    a: [0, -328, -328],
-    tl_len: [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
-    tl_key: [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
-    note: [0, 0, 1574, 1974],
-    idle: [0, 0, 552, 1009],
-    rel: [0, 0, -516, 0],
-    rel_id: [0, 0, 2196, 545],
-    rel_id280: [0, 0, 0, 10],
-    r280: [0, 0, -111, 13],
-    r240: [0, 0, 0, 0],
-    retrig: [0, 0, 0, 0],
-    row0r: [0, 0, 0, 0],
-    e3: [0, 0, 0, 0],
-    n_arp: [0, 0, 184, 70],
-    q_arp: [0, 0, 68, 68],
-    n_cv: [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
-    q_cv: [[0, 491, -61, -55], [0, 0, 0, 65], [0, 0, 0, 0], [0, 699, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
-    rel_cnt0: 1673,
-    rel_div: 1917,
-    idle_then_note: 0,
-};
+/// The work of a row, in 68000 cycles (half colour clocks). Each voice costs the same whatever its
+/// number and whatever follows it: an idle voice, a note, a release (plus the instrument change, plus
+/// the instrument-relative record bit, less a skipped division), the arpeggio bit, the two note flags
+/// (bits 7 and 6 of the row's third byte), a retrigger (more on a block's first row, more again when
+/// the block retriggers the fourth envelope), a voice the block mutes while its row has a note, and
+/// the channel-volume update (set, up, up and clamped, down, down and clamped, same).
+const ROW_IDLE: i64 = 433;
+const ROW_NOTE: i64 = 1454;
+const ROW_REL: i64 = 1341;
+const ROW_REL_ID: i64 = 545;
+const ROW_REL_CNT0: i64 = 244;
+const ROW_ARP: i64 = 68;
+const ROW_F80: i64 = 10;
+const ROW_F40: i64 = 14;
+const ROW_RETRIG: i64 = 905;
+const ROW_RETRIG_ROW0: i64 = 115;
+const ROW_RETRIG_E3: i64 = 174;
+const ROW_BLOCK_MUTE: i64 = 39;
+const ROW_CV: [i64; 6] = [0, 119, 116, 119, 167, 54];
+/// A write of the row comes this long after the previous one, plus the work of the voices since: after
+/// the row start's DMACON and after any later write; a sample or synth start's LEN write (by event
+/// type 3, 4, 5) comes this much sooner than a key-off's DMACON.
+const ROW_AFTER: [i64; 2] = [70, 86];
+const ROW_LEN: [i64; 3] = [-95, -76, -49];
 /// Per voice: LEN to LOC and LOC to INTENA of a synth voice's row start, and of a moving sample's
 /// (half colour clocks).
 const ROW_SYN_H: [(u64, u64); 4] = [(249, 325), (280, 356), (311, 387), (319, 395)];
 const ROW_SMP_H: [(u64, u64); 4] = [(267, 201), (298, 232), (329, 263), (337, 271)];
-/// Colour clocks from the last write of a tick to the first interrupt handler write, and from the
-/// end of one handler to the next one's start.
-/// (the first handler's start follows the tick's last write: by what that was, in half clocks:
-/// AUDxDAT of channel 0..3, a LOC, a plain VOL, a silent voice's VOL, a sample start's DMACON).
-const LAT_DAT_H: [u64; 4] = [896, 826, 756, 686];
-const LAT_LOC_H: u64 = 1003;
-const LAT_VOL_H: u64 = 1022;
-const LAT_MUTED_H: u64 = 742;
-const LAT_START_H: u64 = 1026;
-/// The tail of a call after its last write (half clocks): the handler after a LOC, a plain VOL, a
-/// silent voice's VOL or a sample start's DMACON is the `LAT_*` less the handler's own `START_IRQ_H`
-/// (the code of an AUDxDAT write's tail is `LAT_DAT_H` less it); the call ends on a whole colour clock.
-const TAIL_LOC_H: u64 = 743;
+/// The tail of a tick's call after its last write, in 68000 cycles (half colour clocks; the call ends
+/// on a whole colour clock, an odd cycle is dropped): after the AUDxDAT write of a key tail (by
+/// channel), a voice's LOC (2 less for a moving sample's), a plain VOL, a silent voice's VOL, a
+/// sample or synth start's DMACON in a row (plus the work of the voices after it), the row start's
+/// DMACON when the row writes nothing else (16 less: the difference of `ROW_AFTER`), and the song
+/// end's DMACON. Measured on the reference's call ends (every tick of the 21 modules).
+const TAIL_DAT_H: [u64; 4] = [637, 567, 497, 427];
+const TAIL_LOC_H: u64 = 744;
 const TAIL_VOL_H: u64 = 762;
-const TAIL_MUTED_H: u64 = 482;
-const TAIL_START_H: u64 = 765;
+const TAIL_MUTED_H: u64 = 483;
+const TAIL_START_H: u64 = 766;
+const TAIL_ROW_H: u64 = 750;
+const TAIL_END_H: u64 = 232;
 /// The tail of an interrupt handler after its last write, and of one that only disabled its interrupt.
 const TAIL_HANDLER_H: u64 = 176;
 const TAIL_HANDLER_NONE_H: u64 = 418;
@@ -366,7 +303,8 @@ pub struct Aps {
     first_block_seen: bool,
     first_irq: bool,
     last_key: usize,
-    lat_h: u64,
+    /// The tail of the tick's call after the last write made (half clocks).
+    tail_h: u64,
     /// The clock at the end of the last call (a tick or an interrupt handler), and what a tick that
     /// finds the timer already due adds to start (half clocks).
     act_end: u64,
@@ -624,13 +562,9 @@ impl Aps {
         hw.dmacon(0x8200);
         let blk = self.blk;
         let mut keys = [false; 4];
-        // the work charged since the last write (with the row's cost tables, and the tail's)
-        let mut prev = 0usize;
-        let mut acc = [0i64; 2];
-        // the work of the voices since the last write, as it takes when no write follows (half clocks)
-        let mut lf = 0i64;
-        let mut idle_before = false;
-        let mut pending = false;
+        // the work of the voices since the last write (half clocks), and whether that was the row start
+        let mut after = 0usize;
+        let mut work = 0i64;
         for v in 0..4usize {
             let be = blk.wrapping_add(2 + 6 * v as u32);
             let (b0, b1, b2, b3) = (rd8(hw, be), rd8(hw, be + 1), rd8(hw, be + 2), rd8(hw, be + 3));
@@ -681,46 +615,22 @@ impl Aps {
                     self.v[v].active = false;
                     cnt0 = self.release(hw, v, b1, r1, r2);
                 }
-                for (t, rc) in [&RC_MAIN, &RC_INT].into_iter().enumerate() {
-                    acc[t] += rc.q_arp[v] * arp + rc.q_cv[cvc][v] + if r0 & 63 != 63 { LF_BLOCK_MUTE } else { 0 };
-                    if active {
-                        acc[t] += rc.rel[v]
-                            + rc.rel_id[v] * instdiff
-                            + rc.rel_id280[v] * instdiff * (r2 >> 7) as i64
-                            + if cnt0 { rc.rel_cnt0 } else { rc.rel_div };
+                work += ROW_CV[cvc] + ROW_ARP * arp
+                    + if r0 & 63 != 63 { ROW_BLOCK_MUTE } else { 0 }
+                    + if active {
+                        ROW_REL + ROW_REL_ID * instdiff + ROW_F80 * instdiff * (r2 >> 7) as i64 - if cnt0 { ROW_REL_CNT0 } else { 0 }
                     } else {
-                        acc[t] += rc.idle[v];
-                    }
-                }
-                idle_before = !active;
-                pending = true;
-                lf += LF_CV[cvc] + LF_ARP * arp
-                    + if r0 & 63 != 63 { LF_BLOCK_MUTE } else { 0 }
-                    + if active { LF_REL + LF_REL_ID * instdiff + 10 * instdiff * (r2 >> 7) as i64 - if cnt0 { LF_REL_CNT0 } else { 0 } } else { LF_IDLE };
+                        ROW_IDLE
+                    };
                 continue;
             }
-            for (t, rc) in [&RC_MAIN, &RC_INT].into_iter().enumerate() {
-                acc[t] += rc.note[v]
-                    + rc.n_arp[v] * arp
-                    + rc.n_cv[cvc][v]
-                    + rc.r280[v] * (r2 >> 7) as i64
-                    + rc.r240[v] * ((r2 >> 6) & 1) as i64;
-                if idle_before {
-                    acc[t] += rc.idle_then_note;
-                }
-                if r0 & 0x80 != 0 {
-                    acc[t] += rc.retrig[v];
-                    if self.row == 0 {
-                        acc[t] += rc.row0r[v];
-                        if b0 & 0x80 != 0 {
-                            acc[t] += rc.e3[v];
-                        }
-                    }
+            work += ROW_NOTE + ROW_CV[cvc] + ROW_ARP * arp + ROW_F80 * (r2 >> 7) as i64 + ROW_F40 * ((r2 >> 6) & 1) as i64;
+            if r0 & 0x80 != 0 {
+                work += ROW_RETRIG;
+                if self.row == 0 {
+                    work += ROW_RETRIG_ROW0 + if b0 & 0x80 != 0 { ROW_RETRIG_E3 } else { 0 };
                 }
             }
-            idle_before = false;
-            pending = true;
-            lf += LF_NOTE + LF_CV[cvc] + LF_ARP * arp + 10 * (r2 >> 7) as i64 + 14 * ((r2 >> 6) & 1) as i64;
             self.v[v].active = true;
             self.v[v].note = (r0 & 63).wrapping_add(b0 & 63);
             let (inst, ev);
@@ -746,27 +656,17 @@ impl Aps {
             let ty = e >> 28;
             match ty {
                 3 | 4 | 5 => {
-                    let h = RC_MAIN.a[prev] + acc[0] + RC_MAIN.tl_len[(ty - 3) as usize][v] + (prev == 0) as i64;
-                    acc = [0; 2];
-                    lf = 0;
-                    pending = false;
+                    let h = ROW_AFTER[after] + work + ROW_LEN[(ty - 3) as usize];
+                    work = 0;
+                    after = 1;
                     self.wh(hw, h.max(0) as u64);
-                    prev = 2;
                 }
                 _ => {
                     if r0 & 0x80 != 0 {
-                        let k = match ty {
-                            1 => 1,
-                            2 => 2,
-                            13 => 3,
-                            _ => 0,
-                        };
-                        let h = RC_MAIN.a[prev] + acc[0] + RC_MAIN.tl_key[k][v] + (k == 0) as i64 + (prev == 0 && v >= 1) as i64;
-                        acc = [0; 2];
-                    lf = 0;
-                        pending = false;
+                        let h = ROW_AFTER[after] + work;
+                        work = 0;
+                        after = 1;
                         self.wh(hw, h.max(0) as u64);
-                        prev = 1;
                     }
                 }
             }
@@ -779,7 +679,7 @@ impl Aps {
                     self.intena(hw, 0x0080 << v);
                     self.wc(hw, 25);
                     hw.dmacon(0x8000 | 1 << v);
-                    self.lat_h = LAT_START_H;
+                    self.tail_h = TAIL_START_H;
                 }
                 3 => {
                     hw.len(v, (e & 0xFF) as u16);
@@ -789,7 +689,7 @@ impl Aps {
                     self.intena(hw, 0x0080 << v);
                     self.wc(hw, 25);
                     hw.dmacon(0x8000 | 1 << v);
-                    self.lat_h = LAT_START_H;
+                    self.tail_h = TAIL_START_H;
                 }
                 _ => {
                     if r0 & 0x80 != 0 {
@@ -800,6 +700,9 @@ impl Aps {
             }
         }
         self.start_keyed = keys.iter().any(|&k| k);
+        if after == 0 {
+            self.tail_h = TAIL_ROW_H;
+        }
         self.row_key = None;
         let mut first = true;
         for v in 0..4 {
@@ -810,12 +713,11 @@ impl Aps {
                 continue;
             }
             {
-                if first && pending {
-                    let h = 193 + 70 * v as i64 + lf;
-                    lf = 0;
+                if first {
+                    // the work of the voices after the row's last write comes before the key tail
+                    let h = 193 + 70 * v as i64 + work;
+                    work = 0;
                     self.wh(hw, h.max(0) as u64);
-                } else if first {
-                    self.wh(hw, 193 + 70 * v as u64);
                 } else {
                     self.wc(hw, 67);
                 }
@@ -823,14 +725,14 @@ impl Aps {
                 self.intena(hw, 0x8000 | 0x0080 << v);
                 self.wc(hw, 31);
                 wr16(hw, 0xDFF0AA + 16 * v as u32, 0);
-                self.lat_h = LAT_DAT_H[v];
+                self.tail_h = TAIL_DAT_H[v];
                 self.last_key = v;
                 self.row_key = Some(v);
             }
         }
         // the work of the last voices, when no write follows
-        if lf > 0 {
-            self.wh(hw, lf as u64);
+        if work > 0 {
+            self.wh(hw, work as u64);
         }
     }
 
@@ -929,6 +831,7 @@ impl Aps {
             self.intena(hw, 0x0780);
             self.wc(hw, END_TO_DMACON);
             hw.dmacon(0x000F);
+            self.tail_h = TAIL_END_H;
         }
     }
 
@@ -988,7 +891,7 @@ impl Aps {
             }
             self.wh(hw, h);
             hw.vol(v, 0);
-            self.lat_h = LAT_MUTED_H;
+            self.tail_h = TAIL_MUTED_H;
             self.last_kind = 2;
             return Ok(());
         }
@@ -1096,7 +999,7 @@ impl Aps {
         hw.per(v, per);
         self.wc(hw, PER_VOL[v]);
         hw.vol(v, vol);
-        self.lat_h = LAT_VOL_H;
+        self.tail_h = TAIL_VOL_H;
         // the event
         let (e, w) = self.evrec(hw, self.v[v].ev);
         self.last_mov = false;
@@ -1106,7 +1009,7 @@ impl Aps {
                 self.wh(hw, if e >> 28 == 4 { 984 } else { 765 });
                 self.last_mov = true;
                 hw.loc(v, self.sample_addr(e, f));
-                self.lat_h = LAT_LOC_H;
+                self.tail_h = TAIL_LOC_H - 2;
                 self.last_kind = 0;
             }
             3 => {
@@ -1117,7 +1020,7 @@ impl Aps {
                 std::mem::swap(&mut vo.front, &mut vo.back);
                 let a = vo.back;
                 hw.loc(v, a);
-                self.lat_h = LAT_LOC_H;
+                self.tail_h = TAIL_LOC_H;
                 self.last_kind = 0;
             }
             _ => self.last_kind = 1,
@@ -1550,8 +1453,20 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let offs = parse(d)?;
     // absolute guest addresses of the nine chunks' data
     let c = offs.map(|o| base.wrapping_add(o as u32));
-    let area = m.alloc(1024 + 16 + 2);
-    if area == 0 {
+    // the two chip buffers lie where the reference's do (measured on its AUDxLOC writes: the 2-byte
+    // silence buffer first, the eight synthesis buffers 8 bytes after it), so that a sample start
+    // that an envelope moves out of the module reads the same memory; two more bytes for the byte
+    // the comb stage writes past the last buffer
+    // (for the same reason the module's path is left in the host's path buffer, as the host of the
+    // 68k player leaves it before the player starts: it lies below the module, where such a sample
+    // start can point; measured on the audio DMA fetches of r2mix and r3sample)
+    if m.deli.path_buf != 0 {
+        let full = m.bus.read_cstr(m.deli.dir_buf) + &m.bus.read_cstr(m.deli.file_buf);
+        m.bus.write_cstr(m.deli.path_buf, &full);
+    }
+    let silence = m.alloc(2);
+    let area = m.alloc(1024 + 2);
+    if silence == 0 || area == 0 {
         return None;
     }
     let mut r = Aps {
@@ -1586,14 +1501,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         budget: 0,
         ended: false,
         filter_cmd: false,
-        silence: area + 1040,
+        silence,
         last_kind: 1,
         last_mov: false,
         start_keyed: false,
         feat: [0; 6],
         pm: 0,
         half: 0,
-        lat_h: LAT_VOL_H,
+        tail_h: TAIL_VOL_H,
         act_end: 0,
         start_origin: 0,
         starting: true,
@@ -1641,7 +1556,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     r.first_tick = Some(ft.div_ceil(2));
     // the song start (where Paula's output and line grids restart) is this far from the end of the
     // start-up call in the reference (measured on the first write of each module)
-    hw.bus.clock = (hw.bus.clock as i64 + if keyed { SONG_START_KEYED } else { SONG_START_PLAIN } + r.half as i64) as u64;
+    // (the call returns on a whole colour clock: an odd cycle of its end is dropped, as at the end of
+    // every call; measured on 21 modules, 5 of them with an odd count)
+    let end_h = 2 * hw.bus.clock as i64 + r.half as i64 + if keyed { SONG_START_KEYED_H } else { SONG_START_PLAIN_H };
+    hw.bus.clock = end_h.div_euclid(2) as u64;
     Some(Box::new(r))
 }
 
@@ -1673,15 +1591,7 @@ impl Replayer for Aps {
         }
         self.tick_voices(hw);
         // the call returns a while after its last write
-        let h = self.half;
-        let tail = match self.lat_h {
-            LAT_LOC_H => TAIL_LOC_H + (h == 0) as u64 - if self.last_mov { 2 } else { 0 },
-            LAT_VOL_H => TAIL_VOL_H - h,
-            LAT_MUTED_H => TAIL_MUTED_H + h,
-            LAT_START_H => TAIL_START_H + (h == 0) as u64,
-            d => d - START_IRQ_H + h,
-        };
-        self.wh(hw, tail);
+        self.wh(hw, self.tail_h);
         self.half = 0;
         self.act_end = hw.bus.clock;
     }

@@ -2079,7 +2079,7 @@ impl Musicline {
             }
             let mut flag = rb(hw, inst + I_ETPF_BITS);
             if x.effect1 & E1_HOLD_SUSTAIN != 0 {
-                self.cyc += 6;
+                self.cyc += 40;
                 flag &= !F_HOLD_SUSTAIN;
                 x.arg1 &= F_HOLD_SUSTAIN;
                 flag |= x.arg1;
@@ -2302,9 +2302,11 @@ impl Musicline {
             }
             let pi = x.part_instrument;
             if x.effect2 & E2_PHASE != 0 {
-                self.cyc += 99;
                 x.phase_type = w(I_PHASE_TYPE);
                 let (s, i) = (x.arg1 & F_PHASE_STEP != 0, x.arg1 & F_PHASE_INIT != 0);
+                // (measured on one kind of instrument: 25 cycles less with the step and the init flag when the
+                // transform runs too; neither alone shows it)
+                self.cyc += 99 - 25 * (s && i && x.effect2 & E2_TRANSFORM != 0) as u64;
                 Self::init_counter(hw, inst, I_PHASE, s, i, &mut x.phase_init, pi, &mut x.phase_counter, &mut x.phase_speed, &mut self.cyc);
             }
             x.boost = rb(hw, inst + I_BOOST);
@@ -2375,7 +2377,8 @@ impl Musicline {
                             x.play &= !P_RETRIGGER;
                             part_init = true;
                         } else {
-                            self.cyc += 237;
+                            // (measured on first rows only: 237 with the step, 254 with the init flag)
+                            self.cyc += 237 + 17 * (x.arg2 & M_LOOP_STEP == 0) as u64;
                             init = true;
                         }
                     }

@@ -42,9 +42,9 @@
 //! tempo is a BPM tempo (the CIA's 1773375 / BPM), the speed is byte 9,
 //! and all 31 effects (finetune, volume and master volume slides, tempo, pitch
 //! control, loops, retrigger, note delay and cut, sample offset, tone portamento)
-//! are there. Nothing of the above applies to it: no fitted costs, no clearing of
-//! the samples' first long. Modules without a tempo play exactly as above, their
-//! effects 7 and up ignored.
+//! are there. Nothing of the above applies to it (no clearing of the samples'
+//! first long), and its writes' times are its own (`np.rs`). Modules without a
+//! tempo play exactly as above, their effects 7 and up ignored.
 //!
 //! Every write falls at the reference's colour clock: the code paths between two
 //! writes cost whole 68000 cycles (`Cost`, solved from the reference's cycle

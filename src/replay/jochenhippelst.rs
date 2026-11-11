@@ -11,9 +11,18 @@
 //! YM period, noise a 1024-byte buffer, silence a one-word sample, and a fourth voice plays the
 //! digital samples (or the "volume as sample" trick of the ST) on a fourth Paula channel.
 //!
-//! The write values and their order follow the specification. The write times follow its measured
-//! medians (the original polls the beam position inside every note start, which the spec could only
-//! measure, and its per-tick cost is not reproduced).
+//! The write values and their order follow the specification. The write times are counted in
+//! 68000 cycles from the tick's start, as the reference (the original player on this project's
+//! 68000 engine, where every instruction has a fixed cost) spends them: the Paula conversion is
+//! exact (its waits for the beam, its looks at the interrupt requests and the fixed costs between
+//! its writes were measured with the reference's register reads logged; fed the reference's song
+//! start and first event of each tick it gives 396,026 of 396,070 writes of 347 modules at the
+//! same colour clock). The music code's time before it is a sum of measured costs of the code
+//! paths a tick takes (`COST`), and the beam position at the song start comes from the length of
+//! the original's start-up, which depends on the module (`reference_start`). All of it is from
+//! counts of executed addresses and their cycles, related to the module's data and the port's
+//! own state: 958,299 of 962,425 writes of 330 modules (5 s each) are at the reference's colour
+//! clock, counted from the song start.
 //!
 //! Embedded data: `jochenhippelst_data.bin` (52 bytes) is the volume table together with the bytes
 //! that follow it in the original player, which a volume index above 17 reads. It is taken from the
@@ -69,15 +78,24 @@ const LEVELS: [u8; 18] = [0x80, 0x93, 0xA7, 0xBF, 0xCF, 0xDF, 0xEF, 0xFF, 0x0F, 
 /// Paula channel and DMA mask of the four sound sources A, B, C and the digital voice.
 const CHAN: [(usize, u16); 4] = [(0, 1), (3, 8), (2, 4), (1, 2)];
 
-/// The play code's cost before the first write of a tick, and what the first tick adds to it
-/// (fitted to the reference's logs relative to the song start, over eight modules: the cost varies
-/// with the module by a few hundred colour clocks, the first tick's set-up by about 1000 more).
-const FIRST_GAP: u64 = 2040;
-const FIRST_TICK_EXTRA: u64 = 1200;
 
-/// Colour clocks from the last write of a note start's first half (the length) to the interrupt
-/// request, by source.
-const LEN_TO_INTREQ: [u64; 4] = [195, 198, 195, 189];
+/// The Paula conversion's times, in 68000 cycles (two are one colour clock), measured on the
+/// reference with its beam reads logged; every one of them is the same in all its runs.
+///
+/// From a note start's first length write to the first beam read of its second wait, by source.
+const LEN_TO_WAIT: [u64; 4] = [129, 199, 191, 160];
+/// From a note start's last write to the volume write, by channel (A, B, C) and by what was
+/// started (tone, noise, the silent sample; C's silent case was never seen: taken as B's step).
+const LEN_TO_VOL: [[u64; 3]; 3] = [[324, 378, 362], [445, 499, 483], [410, 464, 448]];
+/// From a channel's period write to the next channel's first event (its volume write, or the
+/// first beam read of its note start), for B and C, by the next channel's case (tone held, noise
+/// held, tone started, noise started, silent; C's silent case was never seen: taken as B's step).
+const HEAD: [[u64; 5]; 2] = [[800, 871, 475, 492, 447], [835, 906, 545, 562, 517]];
+/// Colour clocks of a raster line.
+const LINE: u64 = 227;
+/// From the end of the music code to channel A's first event, by its case (tone held, noise
+/// held, tone started, noise started, silent), with the tick's entry code.
+const HEAD_A: [u64; 5] = [866, 937, 662, 679, 978];
 
 fn vol_table(i: usize) -> u16 {
     VOL_TABLE.get(i).copied().unwrap_or(0) as u16
@@ -121,6 +139,8 @@ struct Prefix {
     timer: Option<u8>,
     /// The two code patterns found (bit 1 and bit 0 of the type).
     kind: u8,
+    /// The 68000 cycles the original's look through the prefix takes (see `reference_start`).
+    scan: u64,
 }
 
 /// A parsed module: the COSO image the player works on.
@@ -133,6 +153,8 @@ struct Module {
     short: bool,
     mmme: bool,
     new_type: bool,
+    /// The prefix code's own word on the type (a file without prefix: 16-bit tables).
+    ext_new: bool,
     n_fs: usize,
     n_inst: usize,
     t_fs: usize,
@@ -148,6 +170,10 @@ struct Module {
     /// The sample table is in a companion file.
     lsmp: bool,
     prefix: Prefix,
+    /// The 68000 cycles of the original's check of this module and of its conversion of a raw
+    /// module (see `reference_start`).
+    check_cycles: u64,
+    conv_cycles: u64,
 }
 
 fn tag_at(d: &[u8], o: usize) -> Option<[u8; 4]> {
@@ -155,48 +181,59 @@ fn tag_at(d: &[u8], o: usize) -> Option<[u8; 4]> {
 }
 
 /// The offset of the module's tag: 0, or the target of the first PC-relative address load of the
-/// first 128 words that points at one.
-fn find_tag(d: &[u8]) -> Option<usize> {
+/// first 128 words that points at one; with it the number of words looked at to find it.
+fn find_tag(d: &[u8]) -> Option<(usize, usize)> {
     let is_tag = |o: usize| matches!(tag_at(d, o), Some(t) if &t == b"COSO" || &t == b"TFMX" || &t == b"MMME");
     if is_tag(0) {
-        return Some(0);
+        return Some((0, 0));
     }
     for i in 0..128 {
         let w = be16(d, 2 * i);
         if w & 0xF1FF == 0x41FA {
             let t = 2 * i as i64 + 2 + be16(d, 2 * i + 2) as i16 as i64;
             if t > 0 && is_tag(t as usize) {
-                return Some(t as usize);
+                return Some((t as usize, i + 1));
             }
         }
     }
     None
 }
 
-/// What the prefix code holds (everything before the tag).
+/// What the prefix code holds: the words before the tag, up to the indirect jump when there is
+/// one (the original looks no further: the time it takes says so).
 fn scan_prefix(d: &[u8], tag: usize) -> Prefix {
     let mut p = Prefix::default();
     let end = tag.min(d.len()) & !1;
     let mut i = 0;
-    while i < end {
+    let mut timers = 0;
+    while i < end && !p.jump {
         let w = be16(d, i);
+        p.scan += 178;
         if w == 0x4EFB {
             p.jump = true;
         }
-        if p.timer.is_none() && matches!(w, 0xFA23 | 0xFA1F | 0xFA25 | 0xFA21) && i > 0 {
-            p.timer = Some(d[i - 1]);
+        if matches!(w, 0xFA23 | 0xFA1F | 0xFA25 | 0xFA21) {
+            timers += 1;
+            if p.timer.is_none() && i > 0 {
+                p.timer = Some(d[i - 1]);
+            }
         }
         if i + 4 <= end {
             let l = be32(d, i);
             if l == 0x0003_C686 {
                 p.kind |= 2;
+                p.scan += 8;
             }
             if l == 0x4840_49FA {
                 p.kind |= 1;
+                p.scan += 8;
             }
         }
         i += 2;
     }
+    // each timer word found, the timer value's divisions (once), the loop's way out
+    p.scan += 25 * timers + if timers > 0 { 290 } else { 0 };
+    p.scan = if p.jump { p.scan - 15 } else { p.scan + 4 };
     p
 }
 
@@ -216,15 +253,40 @@ fn trim_block(b: &[u8]) -> &[u8] {
     b
 }
 
+/// The 68000 cycles the original's trim of a 64-byte block takes: its look back from the end
+/// for the last end or jump command, then the copy of what is kept.
+fn trim_cycles(b: &[u8]) -> u64 {
+    let kept = trim_block(b).len() as u64;
+    let back = match b.iter().rposition(|&x| x == 0xE1 || x == 0xE0) {
+        Some(i) => 54 * (b.len() - 1 - i) as u64 + if b[i] == 0xE1 { 23 } else { 48 },
+        None => 54 * b.len() as u64 + 14,
+    };
+    166 + back + 22 * kept
+}
+
 fn parse(d: &[u8]) -> Option<Module> {
-    let tag = find_tag(d)?;
+    let (tag, words) = find_tag(d)?;
     let h = &d[tag..];
     let prefix = if tag > 0 { scan_prefix(d, tag) } else { Prefix::default() };
-    match tag_at(h, 0)? {
+    let mut m = match tag_at(h, 0)? {
         t if &t == b"COSO" => parse_coso(h, tag, prefix),
         t if &t == b"TFMX" || &t == b"MMME" => parse_raw(h, tag, prefix),
         _ => None,
+    }?;
+    m.ext_new = if tag > 0 { prefix.jump } else { m.in_file.is_some() && m.short };
+    // the original's check: the look for the tag, and for a TFMX module the first byte of
+    // every pitch program
+    let coso = m.in_file.is_some() as u64;
+    m.check_cycles = 245 + 174 * coso;
+    if tag > 0 {
+        m.check_cycles += 135 + 39 * words as u64;
     }
+    if !m.mmme {
+        let n = m.n_fs.min(0x400);
+        let e2 = (0..n).filter(|&i| m.g(m.entry(m.t_fs, i) as i64) == 0xE2).count() as u64;
+        m.check_cycles += 152 + (85 + 39 * coso) * n as u64 + 21 * e2 - 96 * coso;
+    }
+    Some(m)
 }
 
 fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
@@ -251,6 +313,7 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         short,
         mmme,
         new_type: short,
+        ext_new: false,
         n_fs: be16(h, 0x24) as usize + 1,
         n_inst: be16(h, 0x26) as usize + 1,
         t_fs,
@@ -263,6 +326,8 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         raw_dig: None,
         lsmp: false,
         prefix,
+        check_cycles: 0,
+        conv_cycles: 0,
     };
     // the Amiga flavour of the format starts its pitch programs with a command that the ST
     // flavour has other uses for: more of those than the opposite shape and it is not ours
@@ -341,16 +406,21 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     b[0x20..0x40].copy_from_slice(&h[..0x20]);
     let put_off = |b: &mut Vec<u8>, at: usize, v: usize| b[at..at + 2].copy_from_slice(&(v as u16).to_be_bytes());
     // each table is followed by the data its entries point at
+    // the 68000 cycles the original's conversion takes, counted along (see `reference_start`)
+    let mut cycles = 1567 + 70 * npos as u64 + 46 * (w16 as u64 + 1) + 50 * (w18 as u64 + 1);
     let t_fs = b.len();
     b.resize(t_fs + es * nfs, 0);
     for i in 0..nfs {
         let at = b.len();
         put_off(&mut b, t_fs + es * i, at);
-        b.extend_from_slice(trim_block(&h[0x20 + 64 * i..0x20 + 64 * i + 64]));
+        let block = &h[0x20 + 64 * i..0x20 + 64 * i + 64];
+        b.extend_from_slice(trim_block(block));
+        cycles += trim_cycles(block);
     }
     // the next table starts on an even offset, as in the COSO files
     if b.len() & 1 != 0 {
         b.push(0);
+        cycles += 12;
     }
     let t_inst = b.len();
     b.resize(t_inst + es * ninst, 0);
@@ -359,9 +429,11 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         put_off(&mut b, t_inst + es * i, at);
         let s = 0x20 + 64 * (nfs + i);
         b.extend_from_slice(trim_block(&h[s..s + 64]));
+        cycles += trim_cycles(&h[s..s + 64]);
     }
     if b.len() & 1 != 0 {
         b.push(0);
+        cycles += 12;
     }
     let t_pat = b.len();
     b.resize(t_pat + es * npat, 0);
@@ -369,13 +441,14 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         let at = b.len();
         put_off(&mut b, t_pat + es * i, at);
         let s = o_pat + i * pat_size;
-        compact_pattern(h, s, pat_size, &mut b);
+        cycles += compact_pattern(h, s, pat_size, &mut b);
         if b.len() > MAX_IMAGE {
             return None;
         }
     }
     if b.len() & 1 != 0 {
         b.push(0);
+        cycles += 12;
     }
     let t_pos = b.len();
     b.extend_from_slice(&h[o_pos..o_sub]);
@@ -396,6 +469,7 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         short: true,
         mmme,
         new_type,
+        ext_new: false,
         n_fs: nfs,
         n_inst: ninst,
         t_fs,
@@ -408,22 +482,29 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         raw_dig: matches!(be16(h, o_dig), 0x80 | 0x100).then_some(tag + o_dig),
         lsmp,
         prefix,
+        check_cycles: 0,
+        conv_cycles: cycles,
     })
 }
 
 /// Re-encodes a raw pattern (2-byte rows, a third byte before the row when the flags ask for one)
-/// as the compact row stream: waits as row speeds, rows, the end marker.
-fn compact_pattern(h: &[u8], start: usize, size: usize, out: &mut Vec<u8>) {
+/// as the compact row stream: waits as row speeds, rows, the end marker. Returns the 68000
+/// cycles the original takes for it (see `reference_start`).
+fn compact_pattern(h: &[u8], start: usize, size: usize, out: &mut Vec<u8>) -> u64 {
     let rows = size / 2;
     let byte = |o: isize| -> u8 { if o < 0 { 0 } else { h.get(o as usize).copied().unwrap_or(0) } };
     let note = |i: usize| byte(start as isize + 2 * i as isize);
     let end = (0..rows).find(|&i| note(i) == 1).unwrap_or(rows);
     let real: Vec<usize> = (0..end).filter(|&i| note(i) != 0).collect();
+    // the cycles: per pattern, per empty row before the first note, per note and per empty row
+    // after it, and what each of the cases below adds
+    let mut cycles = 262 + 21 * (end < rows) as u64;
     match real.first() {
         None => {
             if end > 0 {
                 out.extend_from_slice(&[0xFD, (end - 1) as u8]);
             }
+            cycles = 219 + 63 * end as u64 + 21 * (end < rows) as u64;
         }
         Some(&r0) => {
             // the leading wait sets the speed as well
@@ -431,14 +512,20 @@ fn compact_pattern(h: &[u8], start: usize, size: usize, out: &mut Vec<u8>) {
             if r0 > 0 {
                 out.extend_from_slice(&[0xFD, (r0 - 1) as u8]);
                 prev = Some((r0 - 1) as u8);
+                cycles += 32 + 63 * r0 as u64;
             }
             for (k, &i) in real.iter().enumerate() {
                 let next = real.get(k + 1).copied().unwrap_or(end);
                 let d = (next - i - 1) as u8;
+                let last = k + 1 == real.len();
+                cycles += 124 + 67 * (next - i - 1) as u64;
                 // the speed is stated only where it changes
                 if prev != Some(d) {
                     out.extend_from_slice(&[0xFE, d]);
                     prev = Some(d);
+                    cycles += if last { 24 } else { 105 };
+                } else if !last {
+                    cycles += 81;
                 }
                 let flags = byte(start as isize + 2 * i as isize + 1);
                 out.push(note(i));
@@ -447,11 +534,13 @@ fn compact_pattern(h: &[u8], start: usize, size: usize, out: &mut Vec<u8>) {
                     // the byte before the row; the first row's is the pattern's last byte
                     let before = if i == 0 { size - 1 } else { 2 * i - 1 };
                     out.push(byte((start + before) as isize));
+                    cycles += if i == 0 { 43 } else { 27 };
                 }
             }
         }
     }
     out.push(0xFF);
+    cycles
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -543,7 +632,52 @@ struct Digital {
     vol: Option<u16>,
 }
 
+/// The code paths of a tick that are counted for the music code's time (see `COST`). Two are
+/// columns of the table that nothing counts any more.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+#[allow(dead_code)]
+enum F {
+    FsWait, FsNote, FsNoteHi, FsE0, FsE1, FsE2, FsE3, FsE4, FsE5, FsE6, FsE7, FsE8Ret, FsE8Go, FsE9, FsEaNew, FsDig, FsDigNone, FsDigPast,
+    FsDigM0, FsDigM10, FsDigEnd, FsDigNote, FsDigNoteHi, FsDigNoteOff, FsEb, FsEd, FsEe, FsEf,
+    VsHold, VsWait, VsVal, VsE0, VsE1, VsE8Ret, VsE8Go, VsOther,
+    PmNoteHi, PmMode0, PmMode1, PmMode1Hi, PmMode2, PmNoise, PmDelay, PmHold, PmDown, PmDownClamp, PmUp, PmUpClamp, PmDepthHi, PmShift, PmShiftAny,
+    PmPorta, PmEnd, PmVolNeg, PmPerZero,
+    SidOff, SidStop, SidRange, SidPlay, SidPlay4, SidSrc2, SidSrc3,
+    TrIdle, TrRowIdle, TrFf, TrFf0, TrEnd, TrPosF, TrPosE, TrFe, TrFd, TrRow, TrRowParam, TrRowHi, TrNote, TrNote40, TrInstPast, TrProgPast,
+    PaTone, PaToneNew, PaNoise, PaNoiseNew, PaSilent,
+    // what the module is (the same in every tick): a COSO file; one with digital samples; one
+    // with note arguments in the sample command; the type the prefix code gives
+    GCoso, GDig, GArgs, GKind1, GKind2, GKind3,
+    VsE1Store, VsE0Mask, FsE1Store, FsE0Mask, SidPlay5, SidRangeHi, TrNoteLong, TrFfLong, FsStepCoso, PmEndAny, PmEnd8, PmEnd4, PmEnd1, PmDeltaNeg, FsE2Ext, FsStepOld, FsStepLtEb, FsStepLtEbNoDig, FsStepGeF0, SidRange10,
+    N,
+}
+
+/// The 68000 cycles from a tick's start to channel A's first event (its volume write, or the
+/// first beam read of its note start), as a sum over the code paths the tick took: one row per
+/// build of the original (old or new command set, without or with the MMME pitch code), one cost
+/// per path of `F`, then a constant (and an unused column). The reference's cycles per tick were
+/// measured from the addresses it executes and solved for whole-cycle costs of these paths:
+/// they give the reference's count on every tick measured in three of the builds and on 99.93%
+/// in the fourth (new command set with the MMME code). A cost is the sum over the addresses a
+/// path adds, so it can be negative (a path that skips more than it runs).
+#[rustfmt::skip]
+const COST: [[i32; F::N as usize + 2]; 4] = [
+    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 0, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 67, 19, 0, 0, 5108, 0],
+    [-187, -93, 0, 183, -62, 185, 150, 146, 134, 134, 165, 0, 187, 126, 0, 444, 0, 0, 1, 14, 0, 0, 66, 0, 0, 0, 0, 0, -1, 0, 113, 160, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 18, 0, 0, 0, 0, 0, 0, 0, 0, 67, 19, 0, 0, 5279, 0],
+    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 0, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -168, 0, -4, 26, 0, 18, 0, 23, 0, 88, 0, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -221, 0, 0, 0, 0, 0, 0, 0, 8, -14, 48, 0, 19, -19, 0, 5528, 0],
+    [-206, -93, 0, 194, -62, 204, 169, 165, 153, 153, 244, 0, 206, 145, 196, 436, 0, 0, 1, 14, 0, 318, 294, -228, 153, 157, 153, 0, -1, 0, 113, 152, 142, 206, 207, 0, -24, -7, 67, 4, 0, 36, -204, 0, -4, 26, 0, 16, 0, 0, 0, 156, 4, 4, 0, -363, -306, -221, -51, -146, 5, 12, -2266, -678, 321, 25, 132, 17, 24, 86, -533, 0, 16, -485, 0, 12, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 8, 30, 8, 0, -211, 0, 0, 0, 87, -19, 0, 0, 0, -14, 67, 0, 0, -19, 0, 5699, 0],
+];
+
 pub struct JochenHippelSt {
+    f: [u32; F::N as usize],
+    /// The reference's clock at the song start (see `reference_start`).
+    ref_start: u64,
+    /// The clock at the tick's start and the 68000 cycles since.
+    t0: u64,
+    cy: u64,
+    /// What to add to the clock to have the reference's beam position.
+    beam: u64,
     m: Module,
     dig: Option<Dig>,
     // guest memory the player allocated
@@ -606,6 +740,10 @@ impl JochenHippelSt {
             let mut v = Voice::default();
             v.inst = NULL_AT;
             v.fs = NULL_AT;
+            // a voice starts as after the tone-only command
+            v.mode = 2;
+            // and, with the MMME pitch code, with its vibrato going up
+            v.vib_flag = if self.m.mmme { 0x20 } else { 0 };
             // the empty instrument's volume program is read from the stream's first byte
             v.vs_idx = -5;
             v.vs_wait = 1;
@@ -653,10 +791,12 @@ impl JochenHippelSt {
         self.tracker();
     }
 
+
     fn voice(&mut self, i: usize) {
         self.v[i].noise = 0;
         self.pitch_program(i);
-        if let Some(c) = self.volume_program(i) {
+        let r = self.volume_program(i);
+        if let Some(c) = r {
             self.v[i].ym_per = c as u16;
             self.v[i].sid_per = c as u16;
             self.v[i].ym_vol = 0;
@@ -668,6 +808,7 @@ impl JochenHippelSt {
     fn pitch_program(&mut self, i: usize) {
         if self.v[i].fs_wait != 0 {
             self.v[i].fs_wait -= 1;
+            self.f[F::FsWait as usize] += 1;
             return;
         }
         let new = self.m.new_type;
@@ -676,6 +817,26 @@ impl JochenHippelSt {
             let v = self.v[i];
             let at = v.fs as i64 + v.fs_idx as i64;
             let c = self.m.g(at);
+            if c >= 0xF0 {
+                self.f[F::FsStepGeF0 as usize] += 1;
+            }
+            if !self.m.ext_new {
+                self.f[F::FsStepOld as usize] += 1;
+                if c < 0xEB {
+                    self.f[F::FsStepLtEb as usize] += 1;
+                    if !has_dig {
+                        self.f[F::FsStepLtEbNoDig as usize] += 1;
+                    }
+                }
+            } else if c == 0xE2 {
+                self.f[F::FsE2Ext as usize] += 1;
+            }
+            if c == 0xE1 && self.m.ext_new {
+                self.f[F::FsE1Store as usize] += 1;
+            }
+            if c == 0xE0 && !self.m.ext_new {
+                self.f[F::FsE0Mask as usize] += 1;
+            }
             let arg = self.m.g(at + 1);
             // in the old command set the bytes from $EB on are notes, and $EA is one when
             // the module has no digital samples
@@ -684,8 +845,30 @@ impl JochenHippelSt {
                 let v = &mut self.v[i];
                 v.note = c;
                 v.fs_idx += 1;
+                self.f[F::FsNote as usize] += 1;
+                if c & 0x80 != 0 {
+                    self.f[F::FsNoteHi as usize] += 1;
+                }
                 return;
             }
+            self.f[match c {
+                0xE0 => F::FsE0,
+                0xE1 => F::FsE1,
+                0xE2 => F::FsE2,
+                0xE3 => F::FsE3,
+                0xE4 => F::FsE4,
+                0xE5 => F::FsE5,
+                0xE6 => F::FsE6,
+                0xE7 => F::FsE7,
+                0xE8 => if arg != 0 { F::FsE8Ret } else { F::FsE8Go },
+                0xE9 => F::FsE9,
+                0xEA if new => F::FsEaNew,
+                0xEA | 0xEC => F::FsDig,
+                0xEB => F::FsEb,
+                0xED => F::FsEd,
+                0xEE => F::FsEe,
+                _ => F::FsEf,
+            } as usize] += 1;
             let v = &mut self.v[i];
             match c {
                 0xE0 => v.fs_idx = if new { arg as i32 } else { (arg & 0x3F) as i32 },
@@ -770,10 +953,21 @@ impl JochenHippelSt {
 
     /// The digital sample command: sample `n`, with a note argument for the converted kind.
     fn digital_command(&mut self, i: usize, n: usize, note_arg: u8) {
-        let Some(dig) = &self.dig else { return };
+        let Some(dig) = &self.dig else {
+            self.f[F::FsDigNone as usize] += 1;
+            return;
+        };
         let start = dig.start(n) as u32;
         let mark = dig.mark(n);
         let addr = dig.base.wrapping_add(start);
+        self.f[match mark {
+            0 => F::FsDigM0,
+            0x10 => F::FsDigM10,
+            _ => F::FsDigEnd,
+        } as usize] += 1;
+        if self.note_args {
+            self.f[if note_arg & 0x80 != 0 { F::FsDigNoteHi } else { F::FsDigNote } as usize] += 1;
+        }
         let (len1, lp, len2) = match mark {
             0 => (((dig.start(n + 1) as u32).wrapping_sub(start) / 2) as u16, self.silent, 1),
             0x10 => (8, addr, 8),
@@ -785,6 +979,9 @@ impl JochenHippelSt {
             // a note with bit 7 set is absolute, as in the pitch program
             let n = if note_arg & 0x80 == 0 { note_arg.wrapping_add(v.row_note).wrapping_add(v.ta) } else { note_arg };
             let idx = (n & 0x7F) as usize;
+            if idx >= 96 {
+                self.f[F::FsDigNoteOff as usize] += 1;
+            }
             if idx < 96 {
                 let t = digital_note(idx);
                 let q = (self.period as u32 * 0x2000) / (t / 8).max(1);
@@ -798,20 +995,29 @@ impl JochenHippelSt {
     /// program's commands that the volume program has no use for ($E2 to $E7): the original then
     /// leaves the voice's update, with that byte as the voice's period and a zero volume.
     fn volume_program(&mut self, i: usize) -> Option<u8> {
-        let new = self.m.new_type;
+        let new = self.m.ext_new;
         let v = &mut self.v[i];
         if v.vs_hold != 0 {
             v.vs_hold -= 1;
+            self.f[F::VsHold as usize] += 1;
             return None;
         }
         v.vs_wait = v.vs_wait.wrapping_sub(1);
         if v.vs_wait != 0 {
+            self.f[F::VsWait as usize] += 1;
             return None;
         }
         v.vs_wait = v.vs_speed;
         for _ in 0..4096 {
             let at = v.inst as i64 + 5 + v.vs_idx as i64;
             let c = self.m.g(at);
+            self.f[match c {
+                0..=0xDF => F::VsVal,
+                0xE0 => F::VsE0,
+                0xE1 => F::VsE1,
+                0xE8 => if self.m.g(at + 1) != 0 { F::VsE8Ret } else { F::VsE8Go },
+                _ => F::VsOther,
+            } as usize] += 1;
             match c {
                 0..=0xDF => {
                     v.volume = c;
@@ -820,11 +1026,15 @@ impl JochenHippelSt {
                 }
                 0xE0 => {
                     let n = self.m.g(at + 1);
+                    if !new {
+                        self.f[F::VsE0Mask as usize] += 1;
+                    }
                     let n = if new { n } else { n & 0x3F };
                     v.vs_idx = n as i32 - 5;
                 }
                 0xE1 => {
                     if new {
+                        self.f[F::VsE1Store as usize] += 1;
                         v.volume = self.m.g(at - 1);
                     }
                     return None;
@@ -856,6 +1066,17 @@ impl JochenHippelSt {
         let p0 = YM_PERIODS.get(n as usize).copied().unwrap_or(0);
         let (tone, nz) = (1u8 << i, 8u8 << i);
         let mut noise = v.noise;
+        if v.note & 0x80 != 0 {
+            self.f[F::PmNoteHi as usize] += 1;
+        }
+        self.f[match v.mode {
+            0 => F::PmMode0,
+            1 => F::PmMode1,
+            _ => F::PmMode2,
+        } as usize] += 1;
+        if v.mode == 1 && v.note & 0x80 != 0 {
+            self.f[F::PmMode1Hi as usize] += 1;
+        }
         match v.mode {
             0 => self.mixer &= !(tone | nz),
             1 => {
@@ -866,36 +1087,53 @@ impl JochenHippelSt {
         }
         if noise != 0 {
             self.noise_reg = !noise & 0x1F;
+            self.f[F::PmNoise as usize] += 1;
         }
         let mut per = p0 as i32;
         let mmme = self.m.mmme;
         let vm = &mut self.v[i];
         if vm.vib_delay != 0 {
             vm.vib_delay -= 1;
+            self.f[F::PmDelay as usize] += 1;
         } else if !mmme {
             let depth = if vm.vib_depth & 0x80 == 0 { vm.vib_depth as i32 * 2 } else { (vm.vib_depth & 0x7F) as i32 };
+            if vm.vib_depth & 0x80 != 0 {
+                self.f[F::PmDepthHi as usize] += 1;
+            }
             let mut pos = vm.vib_pos as i32;
             let hold = vm.vib_flag & 0x81 == 0x81;
+            if hold {
+                self.f[F::PmHold as usize] += 1;
+            }
             if !hold {
                 if vm.vib_flag & 0x20 == 0 {
                     pos -= vm.vib_speed as i32;
+                    self.f[F::PmDown as usize] += 1;
                     if pos < 0 {
                         vm.vib_flag |= 0x20;
                         pos = 0;
+                        self.f[F::PmDownClamp as usize] += 1;
                     }
                 } else {
                     pos += vm.vib_speed as i32;
+                    self.f[F::PmUp as usize] += 1;
                     if pos >= depth {
                         vm.vib_flag &= !0x20;
                         pos = depth;
+                        self.f[F::PmUpClamp as usize] += 1;
                     }
                 }
                 vm.vib_pos = pos as u8;
             }
             let mut delta = pos - depth / 2;
+            if delta < 0 {
+                self.f[F::PmDeltaNeg as usize] += 1;
+            }
             let mut k = 2 * n as u32 + 0xA0;
             if k < 0x100 {
+                self.f[F::PmShiftAny as usize] += 1;
                 loop {
+                    self.f[F::PmShift as usize] += 1;
                     delta *= 2;
                     k += 0x18;
                     if k >= 0x100 {
@@ -910,15 +1148,19 @@ impl JochenHippelSt {
             let mut pos = vm.vib_pos as i32;
             if vm.vib_flag & 0x20 == 0 {
                 pos -= vm.vib_speed as i32;
+                self.f[F::PmDown as usize] += 1;
                 if pos < 0 {
                     vm.vib_flag |= 0x20;
                     pos = 0;
+                    self.f[F::PmDownClamp as usize] += 1;
                 }
             } else {
                 pos += vm.vib_speed as i32;
+                self.f[F::PmUp as usize] += 1;
                 if pos > depth {
                     vm.vib_flag &= !0x20;
                     pos = depth;
+                    self.f[F::PmUpClamp as usize] += 1;
                 }
             }
             vm.vib_pos = pos as u8;
@@ -926,6 +1168,7 @@ impl JochenHippelSt {
             per = (p0 as i32) + ((delta * p0 as i32) >> 10);
         }
         if vm.row_flags & 0x20 != 0 {
+            self.f[F::PmPorta as usize] += 1;
             let sp = vm.row_param as i8 as i32;
             if !mmme {
                 vm.porta = vm.porta.wrapping_add(sp << 12);
@@ -938,11 +1181,26 @@ impl JochenHippelSt {
         }
         let mut per = per as u16;
         vm.sid_per = per;
+        if mmme && vm.pitch_end != 0 {
+            self.f[F::PmEndAny as usize] += 1;
+            for (bit, k) in [(8, F::PmEnd8), (4, F::PmEnd4), (1, F::PmEnd1)] {
+                if vm.pitch_end & bit != 0 {
+                    self.f[k as usize] += 1;
+                }
+            }
+        }
         if mmme && vm.pitch_end & 2 != 0 {
             per = 0;
+            self.f[F::PmEnd as usize] += 1;
         }
         vm.ym_per = per;
         let vol = vm.volume.wrapping_sub(vm.vol_red);
+        if vol & 0x80 != 0 {
+            self.f[F::PmVolNeg as usize] += 1;
+        }
+        if p0 == 0 {
+            self.f[F::PmPerZero as usize] += 1;
+        }
         vm.ym_vol = if vol & 0x80 != 0 { 0 } else { vol };
     }
 
@@ -950,8 +1208,17 @@ impl JochenHippelSt {
     fn sid(&mut self) {
         let mode = self.v[0].sid_src;
         if mode & 0x80 != 0 {
+            self.f[F::SidOff as usize] += 1;
             return;
         }
+        self.f[match mode {
+            0 => F::SidStop,
+            2 => F::SidSrc2,
+            3 => F::SidSrc3,
+            4 => F::SidPlay4,
+            1 => F::SidPlay,
+            _ => F::SidPlay5,
+        } as usize] += 1;
         let src = match mode {
             0 => None,
             2 => Some(self.v[1].sid_per),
@@ -967,6 +1234,10 @@ impl JochenHippelSt {
         };
         if mode != 4 {
             if p <= 0x10 || p > 0xEEE {
+                self.f[if p <= 0x10 { F::SidRange } else { F::SidRangeHi } as usize] += 1;
+                if p == 0x10 {
+                    self.f[F::SidRange10 as usize] += 1;
+                }
                 self.v[0].sid_src = 0xFF;
                 self.d.state = 0;
                 return;
@@ -985,6 +1256,7 @@ impl JochenHippelSt {
     fn tracker(&mut self) {
         self.counter = self.counter.wrapping_sub(1);
         if self.counter != 0 {
+            self.f[F::TrIdle as usize] += 1;
             return;
         }
         self.counter = self.speed;
@@ -997,6 +1269,7 @@ impl JochenHippelSt {
         let v = &mut self.v[i];
         v.row_counter = v.row_counter.wrapping_sub(1);
         if v.row_counter & 0x80 == 0 {
+            self.f[F::TrRowIdle as usize] += 1;
             return;
         }
         v.row_counter = v.row_speed;
@@ -1005,9 +1278,12 @@ impl JochenHippelSt {
             let c = self.m.g(at);
             match c {
                 0xFF => {
+                    self.f[F::TrFf as usize] += 1;
                     if i == 0 {
+                        self.f[F::TrFf0 as usize] += 1;
                         self.songpos -= 1;
                         if self.songpos < 0 {
+                            self.f[F::TrEnd as usize] += 1;
                             self.songend = true;
                             self.reset_ym();
                             self.v[0].sid_src = 0xFF;
@@ -1024,14 +1300,24 @@ impl JochenHippelSt {
                     v.ta = ta;
                     v.tb = tb;
                     match f >> 4 {
-                        0xF => v.vol_red = f & 0xF,
-                        0xE => self.speed = f & 0xF,
+                        0xF => {
+                            v.vol_red = f & 0xF;
+                            self.f[F::TrPosF as usize] += 1;
+                        }
+                        0xE => {
+                            self.speed = f & 0xF;
+                            self.f[F::TrPosE as usize] += 1;
+                        }
                         _ => {}
+                    }
+                    if !self.m.short {
+                        self.f[F::TrFfLong as usize] += 1;
                     }
                     self.v[i].pat = self.pattern(pat as usize);
                 }
                 0xFE | 0xFD => {
                     let n = self.m.g(at + 1);
+                    self.f[if c == 0xFD { F::TrFd } else { F::TrFe } as usize] += 1;
                     let v = &mut self.v[i];
                     v.row_speed = n;
                     v.row_counter = n;
@@ -1042,6 +1328,11 @@ impl JochenHippelSt {
                 }
                 _ => {
                     let flags = self.m.g(at + 1);
+                    self.f[F::TrRow as usize] += 1;
+                    if flags & 0xE0 != 0 {
+                        self.f[F::TrRowParam as usize] += 1;
+                    }
+                    self.f[if c & 0x80 != 0 { F::TrRowHi } else { F::TrNote } as usize] += 1;
                     let v = &mut self.v[i];
                     v.row_note = c;
                     v.row_flags = flags;
@@ -1062,10 +1353,17 @@ impl JochenHippelSt {
     }
 
     fn new_note(&mut self, i: usize, flags: u8) {
+        if !self.m.short {
+            self.f[F::TrNoteLong as usize] += 1;
+        }
         let tb = self.v[i].tb;
         let mut n = (flags & 0x1F).wrapping_add(tb) as usize;
         if n >= self.m.n_inst {
             n = 0;
+            self.f[F::TrInstPast as usize] += 1;
+        }
+        if flags & 0x40 != 0 {
+            self.f[F::TrNote40 as usize] += 1;
         }
         let inst = self.m.entry(self.m.t_inst, n);
         let g = |o: usize| self.m.g((inst + o) as i64);
@@ -1073,6 +1371,7 @@ impl JochenHippelSt {
         let mut prog = if flags & 0x40 != 0 { self.v[i].row_param as usize } else { pnum as usize };
         if prog >= self.m.n_fs {
             prog = 0;
+            self.f[F::TrProgPast as usize] += 1;
         }
         let fs = self.m.entry(self.m.t_fs, prog);
         let v = &mut self.v[i];
@@ -1098,79 +1397,148 @@ impl JochenHippelSt {
         m68k::AddressBus::write_word(hw.bus, 0xDFF09C, v);
     }
 
-    /// The note-start sequence of source `c`: the channel is stopped, started on the first
-    /// sample for one pass, and given its loop.
+    /// Moves the clock to the tick's cycle `self.cy` (two 68000 cycles are one colour clock).
+    fn now(&self, hw: &mut Hw) {
+        hw.bus.clock = hw.bus.clock.max(self.t0 + self.cy / 2);
+    }
+
+    /// The original's wait for the beam, entered at cycle `self.cy` with its first read of the
+    /// beam position: it reads again 12 cycles later and then every 21 until the line has changed,
+    /// then every 25 cycles until the horizontal position is 22 or more. Leaves `self.cy` at the
+    /// last read.
+    fn beam_wait(&mut self) {
+        let pos = |t: u64| self.t0 + t / 2 + self.beam;
+        let mut t = self.cy;
+        let line = pos(t) / LINE;
+        t += 12;
+        while pos(t) / LINE == line {
+            t += 21;
+        }
+        t += 25;
+        while pos(t) % LINE < 22 {
+            t += 25;
+        }
+        self.cy = t;
+    }
+
+    /// The original's look at a channel's interrupt request, every 29 cycles from `self.cy`
+    /// until it is set (one look only when `wait` is false); what follows comes 29 cycles after
+    /// the last look.
+    fn poll(&mut self, hw: &mut Hw, ibit: u16, wait: bool) {
+        if wait {
+            for _ in 0..20000 {
+                let c = self.t0 + self.cy / 2;
+                hw.bus.paula.sync(c.max(hw.bus.clock), &hw.bus.ram);
+                if hw.bus.paula.intreq & ibit != 0 {
+                    break;
+                }
+                self.cy += 29;
+            }
+        }
+        self.cy += 29;
+    }
+
+    /// The note-start sequence of source `c`, its first beam read at `self.cy`: the channel is
+    /// stopped, started on the first sample for one pass, and given its loop. Leaves `self.cy`
+    /// at the last write (the loop's length).
     fn note_start(&mut self, hw: &mut Hw, c: usize, sa: u32, la: u32, l1: u16, l2: u16) {
         let (ch, mask) = CHAN[c];
         let ibit = mask << 7;
         let running = self.running[c];
+        self.beam_wait();
+        self.cy += 25;
+        self.now(hw);
         hw.per(ch, 1);
-        hw.wait(26);
+        self.cy += 52;
+        self.now(hw);
         Self::irq(hw, if running { ibit } else { 0 });
-        hw.wait(6);
+        self.cy += 12;
+        self.now(hw);
         hw.dmacon(if running { mask } else { 0 });
-        if running {
-            // the original polls the channel's audio flag, a look every 14.5 colour clocks
-            let mut t2 = 2 * hw.bus.clock;
-            for _ in 0..5000 {
-                hw.bus.paula.sync(t2 / 2, &hw.bus.ram);
-                if hw.bus.paula.intreq & ibit != 0 {
-                    break;
-                }
-                t2 += 29;
-            }
-            hw.bus.clock = t2 / 2;
-        }
-        hw.wait(20);
+        self.cy += 12;
+        self.poll(hw, ibit, running);
+        self.now(hw);
         hw.loc(ch, sa);
-        hw.wait(6);
+        self.cy += 12;
+        self.now(hw);
         hw.len(ch, l1);
-        hw.wait(LEN_TO_INTREQ[c]);
+        self.cy += LEN_TO_WAIT[c];
+        self.beam_wait();
+        self.cy += 73;
+        self.now(hw);
         Self::irq(hw, ibit);
-        hw.wait(6);
+        self.cy += 12;
+        self.now(hw);
         hw.dmacon(0x8000 | mask);
         self.running[c] = true;
-        hw.wait(421);
+        self.cy += 12;
+        self.poll(hw, ibit, true);
+        self.beam_wait();
+        self.cy += 21;
+        self.now(hw);
         hw.loc(ch, la);
-        hw.wait(6);
+        self.cy += 12;
+        self.now(hw);
         hw.len(ch, l2);
     }
 
-    fn paula(&mut self, hw: &mut Hw) {
+    /// What a tone channel does this tick: 0 holds its tone, 1 holds its noise, 2 starts the
+    /// tone, 3 starts the noise, 4 is silent (and starts the silent sample).
+    fn channel_case(&self, c: usize) -> usize {
         let d7 = !self.mixer & 0x3F;
+        if d7 & (1 << c) != 0 {
+            if self.state[c] != 1 { 2 } else { 0 }
+        } else if d7 & (8 << c) != 0 {
+            if self.state[c] != 2 { 3 } else { 1 }
+        } else {
+            4
+        }
+    }
+
+    /// The YM image as Paula writes; `self.cy` is the cycle of channel A's first event.
+    fn paula(&mut self, hw: &mut Hw) {
         for c in 0..3 {
             let (ch, _) = CHAN[c];
-            let tone = d7 & (1 << c) != 0;
-            let noise = d7 & (8 << c) != 0;
-            let (per, vol);
-            if tone {
-                if self.state[c] != 1 {
-                    self.state[c] = 1;
-                    self.note_start(hw, c, self.pulse, self.pulse, 2, 2);
-                }
-                per = ((self.v[c].ym_per & 0xFFF) as u32 * 7 + 1) as u16;
-                vol = vol_table(self.v[c].ym_vol as usize);
-            } else if noise {
-                if self.state[c] != 2 {
-                    self.state[c] = 2;
-                    self.note_start(hw, c, self.noise, self.noise, 0x200, 0x200);
-                }
-                per = 0x280 - 0x10 * (self.noise_reg & 0x1F) as u16;
-                vol = vol_table(self.v[c].ym_vol as usize);
-            } else {
-                self.note_start(hw, c, self.silent, self.silent, 1, 1);
-                self.state[c] = 0;
-                per = 0x100;
-                vol = 0;
+            let case = self.channel_case(c);
+            if c > 0 {
+                self.cy += HEAD[c - 1][case];
             }
-            hw.wait(20);
+            let (per, vol);
+            match case {
+                0 | 2 => {
+                    if case == 2 {
+                        self.state[c] = 1;
+                        self.note_start(hw, c, self.pulse, self.pulse, 2, 2);
+                        self.cy += LEN_TO_VOL[c][0];
+                    }
+                    per = ((self.v[c].ym_per & 0xFFF) as u32 * 7 + 1) as u16;
+                    vol = vol_table(self.v[c].ym_vol as usize);
+                }
+                1 | 3 => {
+                    if case == 3 {
+                        self.state[c] = 2;
+                        self.note_start(hw, c, self.noise, self.noise, 0x200, 0x200);
+                        self.cy += LEN_TO_VOL[c][1];
+                    }
+                    per = 0x280 - 0x10 * (self.noise_reg & 0x1F) as u16;
+                    vol = vol_table(self.v[c].ym_vol as usize);
+                }
+                _ => {
+                    self.note_start(hw, c, self.silent, self.silent, 1, 1);
+                    self.cy += LEN_TO_VOL[c][2];
+                    self.state[c] = 0;
+                    per = 0x100;
+                    vol = 0;
+                }
+            }
+            self.now(hw);
             hw.vol(ch, vol);
             if c == 0 {
                 self.a_vol = vol;
             }
-            hw.wait(12);
+            self.cy += 24;
+            self.now(hw);
             hw.per(ch, per);
-            hw.wait(400);
         }
         // the digital voice
         let d = self.d;
@@ -1179,17 +1547,21 @@ impl JochenHippelSt {
         }
         match d.state {
             0 => {
+                self.cy += 314;
                 self.note_start(hw, 3, self.silent, self.silent, 1, 1);
             }
             1 => {
                 self.d.state = 2;
+                self.cy += 385;
                 self.note_start(hw, 3, d.start, d.lp, d.len1, d.len2);
             }
             _ => return,
         }
-        hw.wait(20);
+        self.cy += 40;
+        self.now(hw);
         hw.per(1, d.per);
-        hw.wait(243);
+        self.cy += if d.vol.is_none() { 499 } else { 487 };
+        self.now(hw);
         hw.vol(1, d.vol.unwrap_or(self.a_vol));
     }
 }
@@ -1220,11 +1592,91 @@ impl Replayer for JochenHippelSt {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.f = [0; F::N as usize];
         self.play();
-        hw.wait(FIRST_GAP + if self.first_tick_pending { FIRST_TICK_EXTRA } else { 0 });
-        self.first_tick_pending = false;
+        let k = [F::PaTone, F::PaNoise, F::PaToneNew, F::PaNoiseNew, F::PaSilent][self.channel_case(0)];
+        self.f[k as usize] += 1;
+        self.f[F::GCoso as usize] = self.m.in_file.is_some() as u32;
+        self.f[F::GDig as usize] = self.dig.is_some() as u32;
+        self.f[F::GArgs as usize] = self.note_args as u32;
+        if let Some(k) = [None, Some(F::GKind1), Some(F::GKind2), Some(F::GKind3)][(self.m.prefix.kind & 3) as usize] {
+            self.f[k as usize] = 1;
+        }
+        self.t0 = hw.bus.clock;
+        let cost = &COST[2 * self.m.new_type as usize + self.m.mmme as usize];
+        let mut cy = cost[F::N as usize] as i64 + HEAD_A[self.channel_case(0)] as i64;
+        if self.first_tick_pending {
+            // the beam's position is the reference's: its clock at the song start, one tick ago
+            let own = self.t0.saturating_sub(TICK);
+            self.beam = (self.ref_start + LINE * (own / LINE + 1) - own) % LINE;
+            self.first_tick_pending = false;
+        }
+        for (n, c) in self.f.iter().zip(cost) {
+            cy += *n as i64 * *c as i64;
+        }
+        self.cy = cy.clamp(0, TICK as i64) as u64;
         self.paula(hw);
     }
+}
+
+/// The reference's clock at the song start, which gives the beam position its waits see. The
+/// original's start-up is a chain of calls, each ending on a whole colour clock: the check, the
+/// initialisation and the song's set-up, with short calls of constant length between. Their
+/// lengths were measured (68000 cycles per executed address, counted per module and related to
+/// the module's data) and are equal to the figures here on all 330 modules compared:
+/// * the check (`Module::check_cycles`): the words up to the prefix's address load, and for a
+///   TFMX module a look at every pitch program;
+/// * the initialisation: 292051 cycles (nearly all of it the noise buffer's filling), 12 more
+///   with the MMME tag, 4 more for a COSO file with 16-bit tables; the look through the prefix
+///   (`Prefix::scan`); the sample table (`table`: the word at its place when that is inside
+///   the file, `samples` entries when it is a table); the prefix patterns' cases, among them
+///   the samples' conversion in place (`converted`: bytes, and those with the top bit set);
+///   and a raw module's conversion (`Module::conv_cycles`);
+/// * the set-up: 4169, less 54 with 16-bit tables, 18 more for a zero speed and 16 per voice
+///   whose first position sets a volume.
+///
+/// The initialisation calls the host three times (four for a raw module, which asks for the
+/// image's memory), and each stretch between ends on a whole clock as well: the first is 145479
+/// clocks, the last 8, and a raw module's sample table is looked at before the memory request.
+/// Not observed, so guessed from the nearest case: a table word of $100 in a raw module (taken
+/// as $80), a companion sample file (as no table), a TFMX-tagged COSO file without prefix (the
+/// prefixed one's figures).
+fn reference_start(m: &Module, table: Option<u16>, samples: usize, converted: Option<(usize, usize)>) -> u64 {
+    let coso = m.in_file.is_some();
+    let valid = matches!(table, Some(0x80 | 0x100));
+    let mut init = 292_051 + 12 * m.mmme as u64 + 4 * (coso && m.short) as u64 + m.prefix.scan + m.conv_cycles;
+    // a raw module's stretch before its memory request
+    let mut before = 0;
+    match table {
+        Some(w) if coso => {
+            init += 29 + if w != 0x80 { 21 } else { 0 } + if valid { 47 + 33 * samples as u64 } else { 17 };
+        }
+        Some(_) => {
+            init += 33 + if valid { 57 + 33 * samples as u64 } else { 38 };
+            before = 738 + if valid { 56 + 33 * samples as u64 } else { 71 };
+        }
+        None if !coso => before = 738,
+        None => {}
+    }
+    if m.prefix.kind != 0 {
+        init += 17;
+    }
+    if m.prefix.kind == 2 {
+        init += 25 + if valid { 77 } else { 0 };
+    }
+    if let Some((bytes, high)) = converted {
+        init += 42 + 58 * bytes as u64 + 23 * high as u64;
+    }
+    let init_clocks = 145_479 + before / 2 + (init - 290_975 - before) / 2 + 8;
+    let e = m.t_sub;
+    let (mut start, end, speed) = (be16(&m.b, e), be16(&m.b, e + 2), be16(&m.b, e + 4));
+    if (end as i16).wrapping_sub(start as i16) < 0 {
+        start = 0;
+    }
+    let volumes = (0..3).filter(|i| m.g((m.t_pos + start as usize * 12 + i * 4 + 3) as i64) >> 4 == 0xF).count() as u64;
+    let setup = 4169 - 54 * m.short as u64 + 18 * (speed == 0) as u64 + 16 * volumes;
+    // the host's start, the check, four short calls and the two timer set-ups between
+    100 + m.check_cycles / 2 + 20 + init_clocks + 12 + 18 + 118 + 118 + setup / 2
 }
 
 fn build_sounds(m: &mut Machine) -> Option<(u32, u32, u32, u32)> {
@@ -1294,6 +1746,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     let has_dig = dig.as_ref().is_some_and(|d| d.valid);
     let note_args = md.prefix.kind != 0 && has_dig;
+    let mut converted = None;
     if md.prefix.kind == 2 && has_dig {
         if let Some(dg) = &dig {
             // the nibble-coded sample area becomes signed bytes in place, when its first long has
@@ -1306,10 +1759,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
                     .map(|&b| if b & 0x80 == 0 { LEVELS[(b & 15) as usize] } else if b == 0x88 { LEVELS[17] } else { LEVELS[16] })
                     .collect();
                 m.bus.write_bytes(dg.base + first as u32, &conv);
+                converted = Some((end - first, dg.data[first..end].iter().filter(|&&b| b & 0x80 != 0).count()));
             }
         }
     }
     m.bus.write_bytes(level_cell - 1, &[LEVELS[0], LEVELS[0]]);
+    // the word at the sample table's place, when that is inside the file
+    let table = md.dig_file.filter(|&o| o < d.len() && !md.lsmp).map(|o| be16(d, o));
+    let ref_start = reference_start(&md, table, dig.as_ref().filter(|d| d.valid).map_or(0, |d| d.count()), converted);
     let mut p = JochenHippelSt {
         m: md,
         dig,
@@ -1335,6 +1792,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         level: 0,
         songend: false,
         first_tick_pending: true,
+        f: [0; F::N as usize],
+        ref_start,
+        t0: 0,
+        cy: 0,
+        beam: 0,
     };
     p.init_sound(1);
     Some(Box::new(p))

@@ -554,3 +554,22 @@ built modules through the reference and comparing register writes and memory dum
   the top only when the position is above twice the depth (TFMX: at or above).
 * 6.6: SID sources 2 and 3 take the other voice's period before the pitch-end forcing; the others
   take voice 0's period after it. The level cell starts as $80.
+
+Found with the write times (counts of executed addresses and their cycles, related to the module's
+data; 330 modules):
+
+* 2 (prefix): the prefix is looked through only up to its indirect jump (`4EFB`), when it has one:
+  a timer word or a code pattern after it is not seen.
+* 5: a voice starts in the tone-only mode (as after `E4`), and with the MMME pitch code with its
+  vibrato going up.
+* 6.2: the volume program's two type-dependent commands (`E0` with the index masked to 6 bits in the
+  old set, `E1` storing the previous byte as the volume in the new) follow the prefix's word on the
+  type when the module has a prefix, and the table width (16-bit: new) when it has none. The port
+  keeps the type of section 2 for the pitch program's commands; the cycle counts suggest the
+  original uses the same word there too for a COSO file behind a prefix, which no module compared
+  shows in its values.
+* Timing: the original's start-up takes a time that depends on the module (the check looks at the
+  words up to the address load and at every pitch program of a TFMX module; the initialisation
+  looks through the prefix, at the sample table, and converts a raw module block by block and row by
+  row), and its waits for the beam make the write times depend on that time modulo a raster line.
+  The figures are in `reference_start` of the port, with the cases not observed.

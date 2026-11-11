@@ -309,6 +309,24 @@ const FIRST_PER: i64 = 33;
 const FIRST_VOL: [i64; 4] = [121, 144, 167, 157];
 const FIRST_DMA: i64 = 77;
 
+/// After the last voice: to the first loop's location on a tick without a new
+/// row (a tick with one takes `TAIL_ROW` longer up to the mixes, measured on the
+/// mixes' bytes; no loop was seen written on one), with both mixes counting.
+const TAIL: i64 = 965;
+const TAIL_ROW: i64 = 124;
+/// A mix that is off, and the two mixes mixing.
+const MIX_OFF: i64 = -59;
+const MIX: [i64; 2] = [3908, 3916];
+/// A voice without a loop to write (one waiting for its tick was not seen
+/// before a loop and is taken to cost the same), a location to its length, a
+/// length to the next voice, and what a sample with a loop adds before its
+/// location, before its length and after it (the last two measured as their
+/// sum: every loop of a tick was of one kind).
+const LOOP_NONE: i64 = 66;
+const LOOP_LEN: i64 = 210;
+const LOOP_NEXT: i64 = 361;
+const LOOP: [i64; 3] = [8, 8, 10];
+
 #[derive(Clone, Copy)]
 enum Reg {
     None,
@@ -385,7 +403,10 @@ impl Replayer for SidMon1 {
         }
         self.new_track = false;
         self.loop_song = false;
+        // what follows the last voice, to the first loop written (half colour clocks)
+        let mut time = TAIL;
         if self.speed_counter == 0 {
+            time += TAIL_ROW;
             self.row = self.row.wrapping_add(1);
             if self.row == hw.bus.r32(self.song + 0x18) {
                 self.row = 0;
@@ -398,32 +419,32 @@ impl Replayer for SidMon1 {
                 }
             }
         }
-        self.mix(hw, 0);
-        self.mix(hw, 1);
+        time += self.mix(hw, 0);
+        time += self.mix(hw, 1);
         // the filter effect
         let a = self.waveforms.wrapping_add(self.mix_position[0]);
         let b = hw.bus.r8(a).wrapping_neg();
         self.module.w8(hw.bus, a, b);
         // a sample's loop, on the second tick after it started
-        hw.wait(389);
         for ch in 0..4 {
-            hw.wait(34);
             let v = &mut self.voices[ch];
             match v.sample {
-                1 => v.sample = 2,
                 2 => {
                     v.sample = 3;
-                    let (a, len) = if v.loop_addr != 0xffff_ffff {
-                        (v.loop_addr, v.loop_len as u16)
-                    } else {
-                        (self.id.wrapping_sub(0x2c), 1)
-                    };
+                    let looped = v.loop_addr != 0xffff_ffff;
+                    let (a, len) =
+                        if looped { (v.loop_addr, v.loop_len as u16) } else { (self.id.wrapping_sub(0x2c), 1) };
+                    hw.wait(((time + if looped { LOOP[0] } else { 0 }) / 2) as u64);
                     hw.loc(ch, a);
-                    hw.wait(107);
+                    hw.wait(((LOOP_LEN + if looped { LOOP[1] } else { 0 }) / 2) as u64);
                     hw.len(ch, len);
-                    hw.wait(146);
+                    time = LOOP_NEXT + if looped { LOOP[2] } else { 0 };
                 }
-                _ => {}
+                1 => {
+                    v.sample = 2;
+                    time += LOOP_NONE;
+                }
+                _ => time += LOOP_NONE,
             }
         }
     }
@@ -748,13 +769,13 @@ impl SidMon1 {
 
     /// Waveform mix `k`: every `speed` ticks the destination becomes the average
     /// of the first source and the second rotated by the mix position.
-    fn mix(&mut self, hw: &mut Hw, k: usize) {
+    fn mix(&mut self, hw: &mut Hw, k: usize) -> i64 {
         let s = self.song + 4 * k as u32;
         let speed = hw.bus.r32(s + 0x24);
         if speed == 0 {
-            return;
+            return MIX_OFF;
         }
-        hw.wait(if self.mix_counter[k] == 0 { 1985 } else { 31 });
+        let time = if self.mix_counter[k] == 0 { MIX[k] } else { 0 };
         let bus = &mut *hw.bus;
         if self.mix_counter[k] == 0 {
             self.mix_counter[k] = speed;
@@ -772,6 +793,7 @@ impl SidMon1 {
             }
         }
         self.mix_counter[k] -= 1;
+        time
     }
 }
 

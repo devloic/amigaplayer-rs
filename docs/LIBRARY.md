@@ -98,6 +98,26 @@ only because the application, the WebAssembly and C crates and the tools in `too
 The compiled-out `host-68k` code leaves the emulated machine (`machine`, `os`, `deli`, `heap`)
 in place, because the open replayers load their modules and companion files through it.
 
+## Command line without SDL: `amigaplayer-render`
+
+```text
+cargo build --release --no-default-features --features host-68k --bin amigaplayer-render
+amigaplayer-render [--out FILE|-] [--format wav|raw] [--rate HZ] [--subsong N|first|default]
+                   [--seconds S] [--silence S] [--no-songend] [--volume V] [--info] MODULE
+```
+
+A module to 16-bit stereo WAV or raw PCM, on a file or on standard output (the default), for
+servers and pipes: `amigaplayer-render tune.ahx | ffmpeg -i - tune.mp3`. It links only the C
+library, reads no configuration directory and needs no data files. Unlike `Song` it hosts 68k
+code, so custom modules (`CUST.*`, which carry their own player) play; `--players`,
+`--eagleplayers` and `--genies` add original players. The render stops at the player's song
+end, after `--silence` seconds of silence (10) or after `--seconds` (600). `--info` prints one
+line of JSON (`title`, `format`, `author`, `backend`, `subsong_min`, `subsong_max`,
+`subsong_default`, `subsong`) and renders nothing; a render prints the same line on standard
+error. Exit status 0 played, 1 not playable (missing, not recognised, no such subsong: nothing
+is written to standard output), 2 wrong usage. A WAV on standard output carries the largest
+length in its header, as streams do.
+
 ## C and other languages
 
 ```sh

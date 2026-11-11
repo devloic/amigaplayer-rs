@@ -771,6 +771,10 @@ pub struct JochenHippelSt {
     /// The level byte the digital voice plays in SID mode.
     level: u8,
     songend: bool,
+    /// A pitch or volume program runs in a circle without a wait: the original's tick never
+    /// ends there (nothing is written any more, on the machine everything stands still). The
+    /// port ends the song.
+    stuck: bool,
     first_tick_pending: bool,
 }
 
@@ -815,6 +819,7 @@ impl JochenHippelSt {
         self.speed = speed as u8;
         self.songpos = end as i32 - start as i32;
         self.songend = false;
+        self.stuck = false;
         for i in 0..3 {
             let mut v = Voice::default();
             v.inst = NULL_AT;
@@ -1034,6 +1039,8 @@ impl JochenHippelSt {
                 }
             }
         }
+        // (the program never waits: the original does not come back from this tick)
+        self.stuck = true;
     }
 
     /// The digital sample command: sample `n`, with a note argument for the converted kind.
@@ -1142,6 +1149,8 @@ impl JochenHippelSt {
                 _ => return None,
             }
         }
+        // (as the pitch program: no wait, no return)
+        self.stuck = true;
         None
     }
 
@@ -1714,9 +1723,16 @@ impl Replayer for JochenHippelSt {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        if self.stuck {
+            return;
+        }
         self.f = [0; F::N as usize];
         self.f_end = None;
         self.play();
+        if self.stuck {
+            self.songend = true;
+            return;
+        }
         let k = [F::PaTone, F::PaNoise, F::PaToneNew, F::PaNoiseNew, F::PaSilent][self.channel_case(0)];
         self.f[k as usize] += 1;
         self.f[F::GCoso as usize] = self.m.in_file.is_some() as u32;
@@ -1934,6 +1950,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         a_vol: 0,
         level: 0,
         songend: false,
+        stuck: false,
         first_tick_pending: true,
         f: [0; F::N as usize],
         f_end: None,

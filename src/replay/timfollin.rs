@@ -25,21 +25,26 @@
 //! not bounds-checked: a song that calls without returning (Puzznic song 5) spills
 //! into the next voice's stack and, after some six minutes, into the song number and
 //! the fade byte. The port keeps that area with the same layout so that the spill
-//! does what it did in the original, and ends the song when the fade it starts runs
-//! out (the original crashes there).
+//! does what it did in the original: other instruments first, then a fade, at whose
+//! end the original starts song 0 (a silent note, then every voice ends).
+//!
+//! The reference is the Eagleplayer 2.06 "Tim Follin II" player in the project's 68000
+//! engine: the register writes are equal in value and in time (colour clocks from the
+//! song's start) on the 13 corpus files and Puzznic's ten subsongs over 120 s. The time of
+//! a tick's first write is a sum of 68000 cycles of the code paths the tick takes (`COST`),
+//! the times between its writes are fixed by the voices written (`play`), and the song's
+//! start is where the original's start-up puts it (`START_HEADER`).
 
 use super::{be16, be32, Hw, Open, Replayer};
-use crate::paula::LINE;
 use crate::machine::Machine;
+use crate::paula::LINE;
 use m68k::AddressBus;
 
 pub const OPEN: Open = Open { name: "Tim Follin II", detect, new };
 
-/// The address the reference host loads a module at. Pointers are relocated for it
-/// and every position (sequence, call stack entries) is kept in its address space,
-/// so that the stack spill writes the same values into the song number and the fade
-/// byte as in the reference runs; guest addresses are formed only for memory
-/// accesses and Paula's location registers.
+/// The address the port's pointers are relocated for: every position is kept in its
+/// address space, and guest addresses are formed only for memory accesses, Paula's
+/// location registers and the call stack entries (`push`).
 const VIRT: u32 = 0x10000;
 
 /// The jump-table build's data block (file offset).
@@ -74,7 +79,9 @@ const PERIODS: [u16; 97] = [
     25, 24, 22, 21, 20, 19, 18, 17, 16, 8,
 ];
 
-/// The code paths of a tick whose executions are counted (`TimFollin::f`), for the tick's time.
+/// The code paths of a tick whose executions are counted (`TimFollin::f`), for the tick's time
+/// (the commands' are counted by their number, from `Cmd0` on).
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 #[repr(usize)]
 #[rustfmt::skip]
@@ -89,15 +96,17 @@ enum F {
 }
 
 /// 68000 cycles of each path of `F`, and (last) of every tick: the reference's cycles from a tick's
-/// start to its first write are their sum on all 18,771 ticks with a write of 22 runs of 20 s (the
-/// 13 corpus files and Puzznic's ten subsongs), solved from those and equal when solved from 14 of the
-/// runs alone. The paths are not independent (every voice takes one of each group), so a single
-/// figure means nothing by itself; a zero is a path the others cover or one no run takes
-/// (`PwmDownEnd`, `Env1Neg`, the fade's three, `VibZero`, `Cmd0`: not measured).
+/// start to its first write are their sum on all 96,233 ticks with a write of 22 runs of 120 s (the
+/// 13 corpus files and Puzznic's ten subsongs; solved from the runs, and the same figures from 14 of
+/// them alone) and on Puzznic song 5's 600 s. The paths are not independent (every voice takes one
+/// of each group), so a single figure means nothing by itself, and a zero is a path the others
+/// cover. The fade's three are the cycles of the addresses only a fading tick runs (four voices,
+/// one fade: `FadeRun` is a tick with both of its steps). `VibZero` and `Cmd0` are in no run: not
+/// measured, taken as 0.
 #[rustfmt::skip]
 static COST: [i32; F::N as usize + 1] = [
-    643, 29, 158, 176, 148, 0, 0, 95, 147, 29, 145, 110, 0, 0,
-    0, 0, 0, -253, -200, -10, 4, -10, 14,
+    643, 29, 158, 176, 148, 166, 0, 95, 147, 29, 145, 110, 163, 0,
+    25, 4, 62, -253, -200, -10, 4, -10, 14,
     190, 219, 54, 10, 0, 0, 79, 0, 0, 29, 0,
     0, 28, 214, 0, 8, 28, 168,
     427, 128, 28, 60, 274, -8, 52, 101, 115,
@@ -233,8 +242,6 @@ pub struct TimFollin {
     len: u32,
     sub: u16,
     started: bool,
-    /// The fade ran out: the original crashes here; the port stops.
-    dead: bool,
     songend: bool,
     work: [u8; W_SIZE],
     v: [Voice; 4],
@@ -271,10 +278,12 @@ fn work_area() -> [u8; W_SIZE] {
 }
 
 impl TimFollin {
-    /// The guest address of `VIRT`-space address `a`, if it lies in the module.
+    /// The guest address of `VIRT`-space address `a`, if it lies in the module (on the 68000's
+    /// 24 address lines: a spilt song number gives records with a top byte, and the original
+    /// reads the module through them).
     fn guest(&self, a: u32) -> Option<u32> {
-        let o = a.wrapping_sub(VIRT);
-        (o < self.len).then(|| self.gbase.wrapping_add(o))
+        let g = a.wrapping_sub(VIRT).wrapping_add(self.gbase) & 0xFF_FFFF;
+        (g.wrapping_sub(self.gbase) < self.len).then_some(g)
     }
 
     fn b(&self, hw: &Hw, a: u32) -> u8 {
@@ -311,7 +320,8 @@ impl TimFollin {
 
     /// The sample address and length (words) of instrument record `r`.
     fn sample_of(&self, hw: &Hw, r: u32) -> (u32, u16) {
-        let lc = self.guest(r.wrapping_add(SAMPLE)).unwrap_or_else(|| r.wrapping_add(SAMPLE));
+        // (a record outside the module, as a spilt song number gives: the address the original forms)
+        let lc = r.wrapping_add(SAMPLE).wrapping_sub(VIRT).wrapping_add(self.gbase);
         (lc, (self.b(hw, r) as u16) << 8 | self.b(hw, r.wrapping_add(1)) as u16)
     }
 
@@ -356,7 +366,11 @@ impl TimFollin {
         }
     }
 
+    /// The call stacks hold the addresses as the original has them, the module's in guest memory (the
+    /// reference host loads it where the engine does): a spill then puts the reference's bytes
+    /// into the song number and the fade byte (Puzznic song 5 after 370 s: song 1's instruments).
     fn push(&mut self, ch: usize, x: u32) {
+        let x = x.wrapping_sub(VIRT).wrapping_add(self.gbase);
         let o = self.v[ch].sp as usize;
         if let Some(s) = self.work.get_mut(o..o + 4) {
             s.copy_from_slice(&x.to_be_bytes());
@@ -366,7 +380,7 @@ impl TimFollin {
 
     fn pop(&mut self, ch: usize) -> u32 {
         self.v[ch].sp = self.v[ch].sp.wrapping_sub(4);
-        self.wl(self.v[ch].sp as usize)
+        self.wl(self.v[ch].sp as usize).wrapping_sub(self.gbase).wrapping_add(VIRT)
     }
 
     /// Counts a code path of this tick (see `COST`).
@@ -760,8 +774,12 @@ impl TimFollin {
         self.f = [0; F::N as usize];
         let fade0 = self.work[W_FADE];
         if self.fade() {
-            self.dead = true;
-            self.songend = true;
+            // the fade ran out: the original sets song 0 up (the anchor: one silent note of two
+            // ticks on every voice, then the voices end) and writes nothing in this tick
+            self.start(hw, 0);
+            // (unlike a song's start, the voices' flags are clear: the two ticks of the note take
+            // the paths of a voice without the restart and loop-instrument bits, yet the note starts)
+            self.v.iter_mut().for_each(|v| v.flags = 0);
             return;
         }
         if fade0 != 0 {
@@ -940,13 +958,10 @@ impl Replayer for TimFollin {
             // song 0 first, then the requested one, as the original's InitSound
             self.started = true;
             self.songend = false;
-            self.dead = false;
             self.start(hw, 0);
             self.start(hw, self.sub);
         }
-        if !self.dead {
-            self.play(hw);
-        }
+        self.play(hw);
         #[cfg(test)]
         {
             self.ticks += 1;
@@ -978,7 +993,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         len: d.len() as u32,
         sub: 1,
         started: false,
-        dead: false,
         songend: false,
         work: work_area(),
         v: Default::default(),

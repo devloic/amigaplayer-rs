@@ -199,6 +199,9 @@ pub const START_PHASE: u64 = 100;
 impl Engine {
     pub fn new(rate: f64) -> Self {
         let mut m = Machine::new(CpuType::M68020);
+        // Paula's output stage at the rate asked for (the machine's own default is 48000 Hz:
+        // left there, every other rate played slower or faster by the ratio of the two)
+        m.bus.paula = crate::paula::Paula::with_output(rate as u32, Filter::None);
         deli::init_globals(&mut m);
         Engine {
             m,

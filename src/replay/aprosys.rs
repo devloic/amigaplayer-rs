@@ -80,7 +80,7 @@ const PRE_ARP_H: u64 = 9;
 const SKIP_ENV_H: i64 = 500;
 const SKIP_ENV_NEXT_H: i64 = 29;
 /// ... and until the arpeggio ran out of jumps (the rest of the tick's voices are left out).
-const SKIP_ARP_H: i64 = 469;
+const SKIP_ARP_H: i64 = 78;
 /// A silent voice's VOL write (half clocks), per voice, when the previous voice ended with a plain
 /// VOL (or the tick starts); after another kind of end the lead differs as it does for the PER write.
 const MUTED_VOL_H: [i64; 4] = [672, 695, 718, 708];
@@ -1243,7 +1243,7 @@ impl Aps {
         for (i, b) in buf.iter().enumerate() {
             hw.bus.w8(front.wrapping_add(i as u32), *b);
         }
-        synth_cost_h(&SynthFeat { mode, op, n: n as u64, comb: comb_on, fvar, fill, skip, t1, t2, q22, g1nz, g2nz, fresh })
+        synth_cost_h(&SynthFeat { mode, op, n: n as u64, len0: e & 63 == 0, comb: comb_on, fvar, fill, skip, t1, t2, q22, g1nz, g2nz, fresh })
     }
 
     // ---------------------------------------------------------------- the audio interrupt
@@ -1314,6 +1314,8 @@ struct SynthFeat {
     mode: u32,
     op: u32,
     n: u64,
+    /// The record's length code is 0 (128 bytes).
+    len0: bool,
     comb: bool,
     fvar: u8,
     /// Mode 0 operation 0: the pulse is written (its width is below the length).
@@ -1331,7 +1333,8 @@ struct SynthFeat {
 
 /// The half colour clocks the synthesis of one buffer takes, from VOL to LOC. Every stage is a constant
 /// plus a per-sample term, and the stages add up (the cost of an operation grows with its number in
-/// steps of 27 for mode 2): an exact linear fit of 2500 combinations of the reference's costs.
+/// steps of 27 for mode 2): an exact linear fit of 2500 combinations of the reference's costs. A
+/// length code of 0 (128 bytes) costs 8 cycles more, whatever the stages (21 probes).
 fn synth_cost_h(f: &SynthFeat) -> u64 {
     let n = f.n;
     let mut c: u64 = match f.mode {
@@ -1398,6 +1401,9 @@ fn synth_cost_h(f: &SynthFeat) -> u64 {
         }
         _ => 689,
     };
+    if f.len0 {
+        c += 8;
+    }
     if f.comb {
         c += 924 + 417 * n;
     }

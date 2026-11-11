@@ -433,9 +433,13 @@ length L2 (words), mask M = 1, 8, 4, 2 for A, B, C, S:
 
 ### 9.4 Constants
 
-Pulse sample: a 4-byte buffer of two words ($80 $7F ... see the bytes in the memory image: the pulse is a
-square wave of 2 samples). Noise buffer: 1024 bytes of pseudo-noise located 1024 bytes before the pulse
-sample in module memory. Silent sample: 1 word of zero. The sample addresses are host memory choices;
+Pulse sample: a 4-byte buffer of two words, a square wave of 2 samples per half period: $B2 $B2 $4D $4D
+(erratum: an earlier text gave "$80 $7F ..."; these are the bytes the reference's audio DMA fetches).
+Noise buffer: 1024 bytes of pseudo-noise located 1024 bytes before the pulse sample, in one 1032-byte
+block of the player's own memory: noise (1024), pulse (4), the level word of the SID trick (2), the silent
+word (2). The player fills the block at its start-up; the bytes are the same in every run and for every
+module and are not changed while it plays (every audio DMA fetch of a run returns one value per address).
+Silent sample: 1 word of zero. The sample addresses are host memory choices;
 the implementer is free to choose the addresses (the logs show the reference's).
 
 Digital Period: default $248. If the prefix code contains a timer-data word (one of $FA23, $FA1F, $FA25,

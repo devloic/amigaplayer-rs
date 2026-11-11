@@ -141,6 +141,7 @@
 //! 68k player was used only to check them, none of its code or data is copied.
 
 use super::{Hw, Open, Replayer};
+use crate::bus::FRAME;
 use crate::machine::Machine;
 use m68k::AddressBus;
 
@@ -303,6 +304,10 @@ const LOOP_PRE: u64 = 650;
 const VOICE_GAP: u64 = 375;
 /// The first tick's (the volume writes instead of the tune's reading).
 const FIRST_PLAY_TIME: u64 = 2683;
+/// 4 voices: the first tick's handler signals the player's process (the tick whose read of the CIA's
+/// flags finds no timer B underflow yet); the engine runs that process for this long right after the
+/// handlers of that dispatch.
+const FIRST_TICK_PROCESS: u64 = 226;
 /// EndSound's writes of a 4-voice tune that ends in its first row, before the timer starts.
 const END_BEFORE_START: u64 = 579;
 /// 8 voices (the reference's CPU running eight times as fast as the 68000's: it counts floor(cycles / 16) of
@@ -709,35 +714,94 @@ const B_MIXB: u32 = 0x200;
 const B_RES: u32 = 0x300;
 const B_FILT: u32 = 0x400;
 
-/// CIA-B timer B in one-shot mode, as the engine's CIA counts it: a write of the high byte
-/// of the latch starts it when it is stopped (while it runs only the latch changes), it
-/// underflows (latch + 1) E-clocks after that and then stops; the interrupt it raises is
-/// taken by whatever runs the interrupt handlers, which can be late.
-#[derive(Default)]
-struct TimerB {
+/// One of CIA-B's two timers, counted in E-clocks as the reference's engine counts them: the counter
+/// goes below zero (latch + 1) E-clocks after it was loaded; timer A then reloads and runs on,
+/// timer B (one-shot) stops.
+#[derive(Clone, Copy)]
+struct CiaTimer {
     latch: u16,
+    counter: i64,
     running: bool,
-    /// The colour clock of the underflow.
-    fire: u64,
-    /// An underflow no interrupt has taken yet.
-    pending: bool,
+    one_shot: bool,
 }
 
-impl TimerB {
-    fn sync(&mut self, now: u64) {
-        if self.running && self.fire <= now {
+impl CiaTimer {
+    /// Runs the timer for `ticks` E-clocks; true when it underflowed.
+    fn advance(&mut self, ticks: u64) -> bool {
+        if !self.running {
+            return false;
+        }
+        self.counter -= ticks as i64;
+        if self.counter >= 0 {
+            return false;
+        }
+        if self.one_shot {
             self.running = false;
-            self.pending = true;
+            self.counter = self.latch as i64;
+        } else {
+            let period = self.latch as i64 + 1;
+            self.counter += ((-self.counter - 1) / period + 1) * period;
+        }
+        true
+    }
+
+    /// A write of the latch's high byte: a stopped one-shot timer is loaded and started, a running
+    /// timer only has its latch changed.
+    fn write_high(&mut self, latch: u16) {
+        self.latch = latch;
+        if !self.running {
+            self.counter = latch as i64;
+            self.running = self.one_shot;
+        }
+    }
+}
+
+/// CIA-B as the reference's engine keeps it under the original's two interrupt handlers (timer A, the
+/// tick, and timer B, the DMA restart's waits). The engine counts the timers only when it looks at the
+/// CIA (`sync`): when the original's code reads or writes one of its registers, and each time the engine
+/// itself has let time pass. An underflow found by a look sets its bit in the interrupt flags (which the
+/// tick's handler reads, and so clears, near its end) and in `pending`, which the engine's dispatcher
+/// takes: at one dispatch it calls the tick's handler and then timer B's; what comes due meanwhile
+/// waits for the next dispatch.
+struct CiaB {
+    ta: CiaTimer,
+    tb: CiaTimer,
+    /// The E-clock of the last look.
+    e: u64,
+    /// The interrupt flags since the handler's last read of them (timer A 1, timer B 2).
+    flags: u8,
+    /// The underflows no dispatch has taken yet.
+    pending: u8,
+}
+
+impl Default for CiaB {
+    fn default() -> Self {
+        let t = CiaTimer { latch: 0xffff, counter: 0xffff, running: false, one_shot: false };
+        CiaB { ta: t, tb: CiaTimer { one_shot: true, ..t }, e: 0, flags: 0, pending: 0 }
+    }
+}
+
+impl CiaB {
+    fn sync(&mut self, now: u64) {
+        let e = now / ECLOCK;
+        if e > self.e {
+            let ticks = e - self.e;
+            self.e = e;
+            let fired = self.ta.advance(ticks) as u8 | (self.tb.advance(ticks) as u8) << 1;
+            self.flags |= fired;
+            self.pending |= fired;
         }
     }
 
-    fn write_high(&mut self, now: u64, latch: u16) {
-        self.sync(now);
-        self.latch = latch;
-        if !self.running {
-            self.running = true;
-            self.fire = (now / ECLOCK + latch as u64 + 1) * ECLOCK;
+    /// The colour clock of the next underflow as the timers stood at the last look (it is in the
+    /// past when a timer has underflowed since and nothing has looked).
+    fn due(&self) -> Option<u64> {
+        let until = |t: &CiaTimer| t.running.then(|| t.counter.max(0) as u64 + 1);
+        match (until(&self.ta), until(&self.tb)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
+        .map(|n| (self.e + n) * ECLOCK)
     }
 }
 
@@ -770,11 +834,14 @@ pub struct Musicline {
     mix_length: u16,
     half: u16,
     dma_mask: u16,
-    /// CIA-B timer B, the DMA restart's two waits, and the interrupt step it takes next
-    /// (1 after a tick's DMA routine, 2 once the first interrupt has run).
-    tb: TimerB,
+    /// CIA-B: timer A, the tick, and timer B, the DMA restart's two waits; and the step timer B's
+    /// interrupt takes next (1 after a tick's DMA routine, 2 once the first has run, 3 after the second:
+    /// nothing).
+    cia: CiaB,
     isr_step: u8,
-    /// The tick timer's next underflow (CIA-B timer A, which runs on whatever the code does).
+    /// The tick's handler has signalled the player's process (the first tick does).
+    signalled: bool,
+    /// The colour clock at which the engine next calls the interrupt handlers that are due.
     grid: Option<u64>,
     prev_period: [u16; 4],
     /// Each channel buffer's "written this tick" flag.
@@ -883,8 +950,9 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         mix_length: 0,
         half: 0,
         dma_mask: 0,
-        tb: TimerB::default(),
+        cia: CiaB::default(),
         isr_step: 1,
+        signalled: false,
         grid: None,
         prev_period: [0; 4],
         chan_written: [false; 4],
@@ -1319,27 +1387,39 @@ impl Replayer for Musicline {
         if self.eight {
             return;
         }
-        // The timer's underflows go on while the code runs: the next one is the first after
-        // this call (one that came in a tick that ran too long is one pending interrupt,
-        // not several).
+        // One dispatch of the reference's engine: it looks at the CIA, takes the underflows found so
+        // far and calls their handlers one after the other, timer A's (the tick) first.
         let now = hw.bus.clock;
-        let period = (self.timer as u64 + 1) * ECLOCK;
-        let mut next = self.grid.unwrap_or(now);
-        while next <= now {
-            next += period;
+        self.cia.sync(now);
+        let fired = std::mem::take(&mut self.cia.pending);
+        if fired & 1 != 0 {
+            self.call_start = hw.bus.clock;
+            self.cyc = 0;
+            self.handler4(hw);
         }
-        self.grid = Some(next);
-        // the interrupts pending at this point are taken after the tick's, in the
-        // order of the CIA's bits (timer A, timer B)
-        self.tb.sync(now);
-        let take_b = std::mem::take(&mut self.tb.pending);
-        self.call_start = hw.bus.clock;
-        self.cyc = 0;
-        self.handler(hw);
-        if take_b {
+        if fired & 2 != 0 {
             self.timer_b_interrupt(hw);
         }
-        self.until_next_tick(hw, next);
+        // the first tick wakes the player's process, which the engine runs after the handlers
+        if std::mem::take(&mut self.signalled) {
+            hw.wait(FIRST_TICK_PROCESS);
+        }
+        // The next dispatch. The engine lets the time pass to the next underflow as the timers stood
+        // at the CIA's last look, so one that has come since (unseen) is dispatched at once. When that
+        // underflow is still to come but a handler's own look at the CIA has already found another
+        // (it is pending), the dispatch comes where the engine stops next: at the end of the output
+        // sample, or at once when a vertical blank has passed since this dispatch began.
+        let end = hw.bus.clock;
+        let due = self.cia.due().unwrap_or(end + (self.timer as u64 + 1) * ECLOCK);
+        self.grid = Some(if self.cia.pending != 0 && due > end {
+            hw.bus.paula.sync(end, &hw.bus.ram);
+            let sample = end + hw.bus.paula.out.until_sample() as u64;
+            let frame = hw.bus.frame;
+            let vblank = FRAME + if now < FRAME { 0 } else { ((now - FRAME) / frame + 1) * frame };
+            sample.min(vblank).min(due)
+        } else {
+            due
+        });
     }
 
     fn next_tick_at(&self) -> Option<u64> {
@@ -1485,11 +1565,14 @@ impl Musicline {
             // the one a tempo effect of the pre-roll row wrote)
             let t0 = hw.bus.clock;
             let latch = match self.preload.take() {
-                Some(latch) if !self.started => latch as u64,
+                Some(latch) if !self.started => latch,
                 _ => 0xffff,
             };
             self.started = true;
-            let entry = (t0 / ECLOCK + latch + 1) * ECLOCK;
+            self.cia = CiaB::default();
+            self.cia.e = t0 / ECLOCK;
+            self.cia.ta = CiaTimer { latch: self.timer, counter: latch as i64, running: true, one_shot: false };
+            let entry = self.cia.due().unwrap_or(t0);
             hw.wait(131);
             hw.dmacon(0x8000 | self.dma_mask);
             // the song starts (Paula's grids restart) this long after the DMA-on write in the
@@ -1497,7 +1580,6 @@ impl Musicline {
             hw.wait(START_LAG);
             self.used.set(entry.saturating_sub(hw.bus.clock).max(1));
             self.grid = None;
-            self.tb = TimerB::default();
             self.isr_step = 1;
         } else {
             // the pre-roll row's work and the calls up to StartInt
@@ -1526,87 +1608,49 @@ impl Musicline {
         }
     }
 
-    /// The interrupt handler: one tick.
+    /// The interrupt handler with 8 voices: one tick.
     fn handler(&mut self, hw: &mut Hw) {
-        if !self.eight {
-            self.handler4(hw);
-            return;
-        }
         hw.bus.write_word(0xdff09c, 0x0080);
-        if self.eight {
-            self.half ^= 0xa00;
-            let mut at = 0;
-            for ch in 0..4 {
-                hw.wait(EIGHT_LOC_AT[ch] - at);
-                at = EIGHT_LOC_AT[ch];
-                hw.loc(ch, self.mix[1] + self.half as u32 + 0x1400 * ch as u32);
-            }
-            if self.first {
-                for ch in 0..4 {
-                    hw.wait(EIGHT_FIRST_VOL_AT[ch] - at);
-                    at = EIGHT_FIRST_VOL_AT[ch];
-                    hw.vol(ch, 0x40);
-                }
-            }
+        self.half ^= 0xa00;
+        let mut at = 0;
+        for ch in 0..4 {
+            hw.wait(EIGHT_LOC_AT[ch] - at);
+            at = EIGHT_LOC_AT[ch];
+            hw.loc(ch, self.mix[1] + self.half as u32 + 0x1400 * ch as u32);
         }
-        let mut spent = 0;
-        self.inst_started = false;
-        // what the last tick took off its time (the tail) does not come off the next one's
-        self.owed = self.owed.max(0.0);
-        let first = self.first;
-        if self.first {
-            self.first = false;
-            if !self.eight {
-                // the first tick writes the four volumes, a move apart, instead of reading the tune
-                for ch in 0..4 {
-                    hw.wait(FIRST_VOL_AT[ch] - spent);
-                    spent = FIRST_VOL_AT[ch];
-                    hw.vol(ch, 0);
-                }
+        let first = std::mem::take(&mut self.first);
+        if first {
+            for ch in 0..4 {
+                hw.wait(EIGHT_FIRST_VOL_AT[ch] - at);
+                at = EIGHT_FIRST_VOL_AT[ch];
+                hw.vol(ch, 0x40);
             }
         } else {
             self.play_tune(hw);
-            self.pay(hw);
         }
-        // 4 voices, not the first tick: the tick's fixed work is spread over the voices' loop (a voice's
-        // location and length writes come at the end of its effects), `LOOP_PRE` before the first voice's
-        // and `VOICE_GAP` more before each next; the rest comes after the last voice
-        let spread = !first && !self.eight;
-        hw.wait(if first { FIRST_PLAY_TIME } else if spread { LOOP_PRE } else { PLAY_TIME } - spent);
-        for v in 0..self.voice_count() {
-            if spread && v > 0 {
-                hw.wait(VOICE_GAP);
-            }
+        hw.wait(if first { FIRST_PLAY_TIME } else { PLAY_TIME });
+        for v in 0..8 {
             self.play_effects(hw, v);
-            self.pay(hw);
         }
-        if spread {
-            hw.wait(PLAY_TIME - LOOP_PRE - 3 * VOICE_GAP);
-        }
-        for v in 0..self.voice_count() {
+        for v in 0..8 {
             self.period(v);
         }
-        if self.eight {
-            self.chan_written = [false; 4];
-            for v in 0..8 {
-                self.mix_voice(hw, v);
+        self.chan_written = [false; 4];
+        for v in 0..8 {
+            self.mix_voice(hw, v);
+        }
+        for v in 0..8 {
+            self.mix_retrigger(hw, v);
+        }
+        // the fast buffer to the chip one
+        let n = ((self.mix_length >> 4) as i32 - 1).max(0) as u32 + 1;
+        for ch in 0..4u32 {
+            let from = self.mix[0] + self.half as u32 + 0x1400 * ch;
+            let to = self.mix[1] + self.half as u32 + 0x1400 * ch;
+            for k in 0..8 * n {
+                let x = rl(hw, from + 4 * k);
+                hw.bus.w32(to + 4 * k, x);
             }
-            for v in 0..8 {
-                self.mix_retrigger(hw, v);
-            }
-            // the fast buffer to the chip one
-            let n = ((self.mix_length >> 4) as i32 - 1).max(0) as u32 + 1;
-            for ch in 0..4u32 {
-                let from = self.mix[0] + self.half as u32 + 0x1400 * ch;
-                let to = self.mix[1] + self.half as u32 + 0x1400 * ch;
-                for k in 0..8 * n {
-                    let x = rl(hw, from + 4 * k);
-                    hw.bus.w32(to + 4 * k, x);
-                }
-            }
-        } else {
-            self.period_volume_play(hw);
-            self.dma(hw);
         }
     }
 
@@ -1703,11 +1747,25 @@ impl Musicline {
             self.prev_period[v] = self.voices[v].period;
         }
         self.reach(hw, 16);
-        self.tb.write_high(hw.bus.clock, wait);
+        self.cia.sync(hw.bus.clock);
+        self.cia.tb.write_high(wait);
         self.isr_step = 1;
-        // the handler's end and the return: the call ends on a whole colour clock
-        self.cyc += 198;
-        Self::until(hw, self.call_start + self.cyc.div_ceil(2));
+        // the handler's end: it reads the CIA's interrupt flags 63 cycles after starting timer B and
+        // returns 152 cycles later; 29 sooner when timer A's flag is not set (the tick was dispatched
+        // for an underflow an earlier read had already seen), 90 later when timer B's is not (the
+        // first tick)
+        self.cyc += 47;
+        self.cia.sync(self.call_start + self.cyc / 2);
+        let flags = std::mem::take(&mut self.cia.flags);
+        self.cyc += 152;
+        if flags & 1 == 0 {
+            self.cyc -= 29;
+        }
+        if flags & 2 == 0 {
+            self.cyc += 90;
+            self.signalled = true;
+        }
+        Self::until(hw, self.call_start + self.cyc / 2);
     }
 
     /// 4 voices: lets the clock reach the time of the original's code `back` cycles before the point
@@ -1722,87 +1780,6 @@ impl Musicline {
         ((((w * self.master as u32) << 2) >> 16) & 0xffff) as u16
     }
 
-    fn period_volume_play(&mut self, hw: &mut Hw) {
-        let mut prev: Option<usize> = None;
-        let mut written = 0;
-        for v in 0..4 {
-            if self.voices[v].play & P_RETRIGGER != 0 {
-                continue;
-            }
-            if let Some(p) = prev {
-                hw.wait(VOL_TO_NEXT[v] + SKIPPED_VOICE * (v - p - 1) as u64);
-            }
-            hw.per(v, self.voices[v].period);
-            if !self.voices[v].muted {
-                hw.wait(PER_TO_VOL);
-                hw.vol(v, self.amiga_volume(v));
-            }
-            prev = Some(v);
-            written |= 1 << v;
-        }
-        if prev.is_some() {
-            // the voices that restart cost more when their DMA bit is set
-            let mut adds = 0;
-            for v in 0..4 {
-                let x = &self.voices[v];
-                if x.play & P_RETRIGGER != 0 && (x.wave_or_sample == SAMPLE || x.wave_number != x.wave_number_old) {
-                    adds += 1;
-                }
-            }
-            hw.wait(TAIL_TO_DMA[written] + TAIL_ADD * adds);
-        }
-    }
-
-    /// The time from the last voice's volume write to the DMA routine's first write is
-    /// longer than a voice's (VOL_TO_PER) by what the original spends on the voices that
-    /// restart, which write nothing here. It is taken off the effects' time, so that the
-    /// first write comes when the original's does and the tick is as long as before.
-    fn tail_extra(&self) -> f64 {
-        let mut last = None;
-        let mut written = 0;
-        for v in 0..4 {
-            if self.voices[v].play & P_RETRIGGER == 0 {
-                last = Some(v);
-                written += 1;
-            }
-        }
-        match last {
-            Some(l) => (TAIL[l][written - 1] - VOL_TO_PER) as f64,
-            None => 0.0,
-        }
-    }
-
-    /// The DMA routine, at a tick's end: the voices that restart (and those of earlier
-    /// ticks whose restart has not run yet) are switched off, timer B starts its wait (100
-    /// E-clocks, or the longest period those voices played on the last tick) and the
-    /// timer B interrupt will take its first step.
-    fn dma(&mut self, hw: &mut Hw) {
-        let mut mask = self.dma_mask;
-        let mut wait = 100u16;
-        for v in 0..4 {
-            let x = &mut self.voices[v];
-            if x.play & P_RETRIGGER == 0 {
-                continue;
-            }
-            let (n, old) = (x.wave_number, x.wave_number_old);
-            x.wave_number_old = n;
-            if x.wave_or_sample != SAMPLE && n == old {
-                continue;
-            }
-            mask |= 1 << v;
-            wait = wait.max(self.prev_period[v]);
-        }
-        hw.dmacon(mask);
-        self.dma_mask = mask;
-        for v in 0..4 {
-            self.prev_period[v] = self.voices[v].period;
-        }
-        hw.wait(OFF_TO_TB_LOW + TB_LOW_TO_HIGH);
-        self.tb.write_high(hw.bus.clock, wait);
-        self.isr_step = 1;
-        hw.wait(TICK_RETURN);
-    }
-
     /// Lets the time pass to `t`, if it has not.
     fn until(hw: &mut Hw, t: u64) {
         let now = hw.bus.clock;
@@ -1811,36 +1788,17 @@ impl Musicline {
         }
     }
 
-    /// What happens before the tick timer's next underflow `due`: a timer B interrupt
-    /// that is pending is taken (when the tick is not yet due again, and also when it is,
-    /// by the tick's own call), and a timer B that underflows before `due` is waited for.
-    fn until_next_tick(&mut self, hw: &mut Hw, due: u64) {
-        loop {
-            let now = hw.bus.clock;
-            self.tb.sync(now);
-            if now >= due {
-                return;
-            }
-            if self.tb.pending {
-                self.tb.pending = false;
-                self.timer_b_interrupt(hw);
-            } else if self.tb.running && self.tb.fire < due {
-                hw.wait(self.tb.fire - now);
-            } else {
-                return;
-            }
-        }
-    }
-
     /// The CIA-B timer B interrupt: the first step starts the voices, the second sets their
-    /// loops. The DMA routine of every tick sets the first step again, so a timer B
-    /// interrupt that waited for a tick to end runs the first step again, and the second
+    /// loops, a third does nothing. The DMA routine of every tick sets the first step again, so a
+    /// timer B interrupt that waited for a tick to end runs the first step again, and the second
     /// (which clears the DMA mask) never comes while the ticks overrun.
     fn timer_b_interrupt(&mut self, hw: &mut Hw) {
         // the 68000 cycles from the interrupt's entry, as in the tick
         let c = hw.bus.clock;
-        let mut cyc: u64 = 181 + 56;
-        if self.isr_step == 1 {
+        let mut cyc: u64 = 181;
+        if self.isr_step > 2 {
+        } else if self.isr_step == 1 {
+            cyc += 56;
             self.isr_step = 2;
             for v in 0..4 {
                 cyc += 41;
@@ -1865,9 +1823,12 @@ impl Musicline {
             Self::until(hw, c + (cyc + 36) / 2);
             hw.dmacon(0x8000 | self.dma_mask);
             Self::until(hw, c + (cyc + 118) / 2);
-            self.tb.write_high(hw.bus.clock, 150);
+            self.cia.sync(hw.bus.clock);
+            self.cia.tb.write_high(150);
             cyc += 134;
         } else {
+            cyc += 56;
+            self.isr_step = 3;
             for v in 0..4 {
                 cyc += if v == 0 { 31 } else { 19 };
                 if self.dma_mask & 1 << v == 0 {
@@ -1883,7 +1844,7 @@ impl Musicline {
             cyc += 48;
             self.dma_mask = 0;
         }
-        Self::until(hw, c + (cyc + 148_u64).div_ceil(2));
+        Self::until(hw, c + (cyc + 148) / 2);
     }
 
     // ---- the tune ----
@@ -2949,6 +2910,11 @@ impl Musicline {
                     self.timer = (0x1b0f88 / a as u32) as u16;
                     if !self.started && !self.eight {
                         self.preload = Some(self.timer);
+                    } else if !self.eight {
+                        // the write of timer A's latch (the timer runs: it counts from it after its
+                        // next underflow)
+                        self.cia.sync(self.call_start + self.cyc / 2);
+                        self.cia.ta.write_high(self.timer);
                     }
                 }
             }
@@ -3142,11 +3108,6 @@ impl Musicline {
         self.mix_play(hw, v);
         self.resonance_play(hw, v);
         self.filter_play(hw, v);
-        // the writes at the end of the voice's effects come after their time
-        if v + 1 == self.voice_count() {
-            self.owed -= self.tail_extra();
-        }
-        self.pay(hw);
         let eight = self.eight;
         let x = &mut self.voices[v];
         if !eight {

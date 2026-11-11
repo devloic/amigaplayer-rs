@@ -1910,7 +1910,7 @@ impl Musicline {
                         x.part_position = jump;
                     }
                 } else if pos > jump {
-                    self.cyc += 78;
+                    self.cyc += 78 + 20 * (x.part_instrument == 0) as u64;
                     x.part_jump_counter = x.part_instrument;
                     x.part_position = jump;
                 }
@@ -2411,8 +2411,12 @@ impl Musicline {
         }
         let x = &mut self.voices[v];
         if !matches!(x.repeat_length, 8 | 16 | 32 | 64 | 128) {
-            self.cyc += 33;
+            // (measured: 17 cycles less with the loop effect running)
+            self.cyc += 33 - 17 * (x.effect1 & E1_LOOP != 0) as u64;
             x.effect2 = 0;
+        } else if x.wave_or_sample == SAMPLE {
+            // (measured: a sample's short loop; the waves' lengths are in fix_wave_length's costs)
+            self.cyc -= match x.repeat_length { 8 => 47, 16 => 34, 32 => 17, _ => 0 };
         }
     }
 
@@ -3061,8 +3065,12 @@ impl Musicline {
             vol = n;
         } else if x.volume_slide == FX_VOLUME_UP || (x.volume_slide == FX_PT_VOLUME_UP && !first) {
             self.cyc += 68;
-            self.cyc += 29 * (x.volume_slide != FX_VOLUME_UP) as u64;
-            vol = (x.volume1 as i16).wrapping_add(x.volume_slide_speed as i16).min(1024);
+            self.cyc += 25 * (x.volume_slide != FX_VOLUME_UP) as u64;
+            vol = (x.volume1 as i16).wrapping_add(x.volume_slide_speed as i16);
+            if vol > 1024 {
+                self.cyc += 8;
+                vol = 1024;
+            }
         } else if x.volume_slide == FX_VOLUME_DOWN || (x.volume_slide == FX_PT_VOLUME_DOWN && !first) {
             self.cyc += 85;
             self.cyc += 50 * (x.volume_slide != FX_VOLUME_DOWN) as u64;

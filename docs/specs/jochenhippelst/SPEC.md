@@ -642,3 +642,41 @@ data; 330 modules):
   one tick for it, writes nothing from that tick on and reports the song's end. All 31 modules
   are then equal to the reference in values and write times over 30 s (they were 31 "the
   reference stops" cases), and no other of the 606 modules reaches the count.
+* 2.4 and 2.5 (companion sample file; all of it from built modules, a raw module with its table
+  and samples moved to `SMP.<name>`): any companion file that loads counts as having samples,
+  whatever its first word (114 files with that word zero play as the others). The entries are
+  counted from the second one (the first is taken as there). The module's own table place is
+  still looked at when it is inside the file (start-up time only; the samples come from the
+  companion). With the first prefix pattern (the nibble-coded samples) the conversion runs
+  from the first entry's start to the last one's: with a zero first word that is the table
+  itself, which the sample command then reads converted; an area that ends at or before its
+  start still converts one byte.
+* 2.5 and 6.3 (sample length): the length is a 16-bit difference shifted right as unsigned: a
+  next start (or an end word) below the start gives a length under `$8000` words (seen with a
+  raw module's table word made `$100`, the entries then start below it: 47 of 114 built
+  files; 280 files with every end word set below its start).
+* Timing (start-up, the cases that were guessed): a raw module's table word of `$100` costs 21
+  cycles more than `$80`, before the memory request (114 built files). A companion file adds
+  4 cycles to the check and a call between the check and the initialisation that builds the
+  file's path and asks the host for it: 523 cycles, 17 per character of the directory string
+  (with its separator) and 21 per character of the module's file name, the host called 42
+  clocks in and 22 clocks before the end; when that file is missing the path is built again
+  for `SMP.set` (299 cycles and 17 per character of the directory, between stretches of 44
+  and 16 clocks). The look at the name's first four characters takes 21 cycles less for a
+  capital `H` and 25 each for `S` and `T` (all eight ways measured), and ends early on another
+  name: 155, 105, 55 or 30 cycles less when the first, second, third or fourth character is
+  another (the first two may be one more: the clocks seen allow both). Only `hst.` (either
+  case) gives `SMP.<name>`: for `sdc.x` or `abc.x` the original asks for a file that is not
+  `SMP.x`, then for `SMP.set` (with only `SMP.x` there it fails; the port asks for `SMP.set`
+  alone). In the initialisation the companion's table costs what a raw module's own
+  costs and 67 cycles more, after one more call of the host (the stretch behind it: 199
+  cycles, 33 per entry, and the prefix patterns' cases). 242 built files (13 with other
+  directory and name lengths, 4 with `SMP.set`, 114 with the own table kept): start-up and
+  write times equal. A pitch program starting with `$E2` costs the check 21 cycles and 10 more
+  with a positive next byte in a raw module and in a COSO file of either table size (72 built
+  files).
+* Timing (6, the old command set with 16-bit tables and the MMME code): a step of the pitch
+  program below `$EB` costs 19 cycles more without samples than with them, as without the MMME
+  code (the real modules of this build have no samples, which hid the split); its `$E7` and
+  sample commands cost as without the MMME code (5 Ghost Battle tunes with the tag made
+  `MMME`: 7,495 ticks).

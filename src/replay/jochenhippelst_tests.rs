@@ -228,3 +228,32 @@ fn a_pitch_program_that_never_waits_stops_the_player() {
     // (the same module with a program that waits goes on writing)
     assert!(run(&small(), 300).unwrap().len() > run(&small(), 30).unwrap().len());
 }
+
+#[test]
+fn the_companion_load_takes_the_measured_clocks() {
+    // (directory string with its separator, file name) as measured on the reference
+    assert_eq!(companion_clocks(87, "hst.lsmp1", false), 1094);
+    assert_eq!(companion_clocks(86, "hst.lsmp-f16", false), 1117);
+    // the file of the module's name missing: `SMP.set`
+    assert_eq!(companion_clocks(86, "hst.sf16", true), 1993);
+    assert_eq!(companion_clocks(95, "hst.ssyn1013", true), 2189);
+    // capitals in the prefix, and another name
+    assert_eq!(companion_clocks(84, "HST.F16", false), 1012);
+    assert_eq!(companion_clocks(84, "Hst.f19", false), 1037);
+    assert_eq!(companion_clocks(84, "abc.f16", true), 1871);
+    assert_eq!(companion_clocks(85, "hsx.f25", true), 1939);
+    assert_eq!(companion("sdc.f16"), ["SMP.set"]);
+    assert_eq!(companion("HST.F16"), ["SMP.F16", "SMP.set"]);
+}
+
+#[test]
+fn the_sample_table_is_counted_from_its_second_entry() {
+    let mut t = vec![0u8; 0x80];
+    t[8..10].copy_from_slice(&[0, 0x90]);
+    t[16..18].copy_from_slice(&[0, 0xA0]);
+    // a zero first word (a companion file without the table word) counts all the same
+    assert_eq!(Dig { data: t.clone(), base: 0, valid: true }.count(), 3);
+    t[0..2].copy_from_slice(&[0, 0x80]);
+    assert_eq!(Dig { data: t, base: 0, valid: true }.count(), 3);
+    assert_eq!(Dig { data: Vec::new(), base: 0, valid: false }.count(), 0);
+}

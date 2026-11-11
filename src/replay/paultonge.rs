@@ -182,7 +182,6 @@ pub struct PaulTonge {
     marks: [bool; 4],
     songend: bool,
     t0: u64,
-    first_delay: u64,
     cy: u64,
 }
 
@@ -941,12 +940,6 @@ impl Replayer for PaulTonge {
         String::new()
     }
 
-    /// The reference host's first tick depends on its file loading (`first_tick_delay`); the
-    /// audio interrupt race of 5.11 depends on the phase within the raster line and the frame.
-    fn timer_delay(&self) -> u64 {
-        self.first_delay
-    }
-
     fn tick(&mut self, hw: &mut Hw) {
         self.play_tick(hw);
     }
@@ -976,6 +969,10 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if bank.len() < 12 {
         return None;
     }
+    // the reference's host spends the loading time before the song starts: the song starts
+    // (and its audio output with it) `first_delay` after the engine's origin, and the first tick
+    // follows one standard period later, as in the reference
+    m.bus.clock += first_tick_delay(d, dir_len, file.len(), own_bank);
     let bank_addr = m.alloc(bank.len() as u32 + 16);
     if bank_addr == 0 {
         return None;
@@ -1014,7 +1011,6 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         t0: 0,
         cy: 0,
-        first_delay: first_tick_delay(d, dir_len, file.len(), own_bank),
     }))
 }
 
@@ -1026,6 +1022,8 @@ fn first_tick_delay(d: &[u8], dir_len: usize, name_len: usize, own_bank: bool) -
     let (dl, nl) = (dir_len as i64 - DIR_REF_LEN, name_len as i64 - NAME_REF_LEN);
     // twice the colour clocks, so that the half clocks round up as the reference's do
     let half = if own_bank { 2 * FIRST_CALL_OWN_BANK + 34 * dl } else { 2 * FIRST_CALL_FALLBACK + 51 * dl } + 21 * nl;
+    // (a bank of the song's own name: a path of odd length takes one half clock off)
+    let half = if own_bank { half - (dir_len & 1) as i64 } else { half };
     let mut cc = (half + 1).div_euclid(2);
     // a list offset of 0 in the header (bits: lists 1, 2, 3) skips that list's check
     let off = |i: usize| if d.len() >= 8 { be16(d, 2 * i) as usize } else { 0 };

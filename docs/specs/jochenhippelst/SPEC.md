@@ -601,6 +601,14 @@ data; 330 modules):
   (+$1C) - (+$18) = 6 * (word at +$32, plus one), and leaves the others to the Amiga replayer.
   253 built files are of the first kind; the 14 Amiga files compared all have the 10-byte
   relation.
+* 2.1 (prefix): the address load must be among the first 127 words (index 0 to 126; a module
+  with it at index 127 is not recognised: 22 built files, index 120 to 130, and 2 real ones).
+  The tag itself may be further (played with the tag up to 168 words in, the start-up time as
+  for the others: the look through the prefix is by words up to the tag or the jump).
+* 2.5 (module end): the initialisation fails when the module ends past the file: the end is the
+  sample table's place (2.5), or with a table there the table's place plus the first word of
+  its last entry. 8 files (5 raw, 3 COSO) end 1 to 18 bytes past their size and fail; modules
+  ending exactly at the size play. The port does not recognise such a file.
 * Timing (start-up): the check finds a COSO image's pitch programs through its table: 124
   cycles per program with 16-bit entries, 118 with 32-bit ones (a raw module: 85); a program
   that starts with `$E2` adds 21, and 10 more when the next byte is positive.

@@ -209,13 +209,15 @@ fn tag_at(d: &[u8], o: usize) -> Option<[u8; 4]> {
 }
 
 /// The offset of the module's tag: 0, or the target of the first PC-relative address load of the
-/// first 128 words that points at one; with it the number of words looked at to find it.
+/// first 127 words that points at one (the original refuses a module whose load is the 128th
+/// word; the tag itself may be further: modules with it up to 168 words in play as the
+/// others); with it the number of words looked at to find it.
 fn find_tag(d: &[u8]) -> Option<(usize, usize)> {
     let is_tag = |o: usize| matches!(tag_at(d, o), Some(t) if &t == b"COSO" || &t == b"TFMX" || &t == b"MMME");
     if is_tag(0) {
         return Some((0, 0));
     }
-    for i in 0..128 {
+    for i in 0..127 {
         let w = be16(d, 2 * i);
         if w & 0xF1FF == 0x41FA {
             let t = 2 * i as i64 + 2 + be16(d, 2 * i + 2) as i16 as i64;
@@ -340,6 +342,9 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     }
     let short = be16(h, 0x40) != 0;
     let dpos = off(0x18) + 6 * (be16(h, 0x32) as usize + 1);
+    if module_end(h, dpos) > h.len() {
+        return None;
+    }
     let m = Module {
         b: h.to_vec(),
         in_file: Some(0),
@@ -381,6 +386,18 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         }
     }
     (n >= p).then_some(m)
+}
+
+/// Where the module ends: the sample table's place, or with a table there the start of its last
+/// entry (the end of the sample area). The original's initialisation fails when that is past
+/// the file's size (8 files, 5 raw and 3 COSO; none plays with it past the size, and two with
+/// it exactly at the size do).
+fn module_end(h: &[u8], table: usize) -> usize {
+    if !matches!(be16(h, table), 0x80 | 0x100) {
+        return table;
+    }
+    let last = (0..).map(|n| be16(h, table + 8 * n)).take_while(|&s| s != 0).last().unwrap_or(0);
+    table + last as usize
 }
 
 /// The empty instrument (and pitch program) the player starts from: it is the player's own data,
@@ -431,10 +448,10 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     let o_sub = o_pos + npos * 12;
     let o_ext = o_sub + (w16 + 1) * 6;
     let o_dig = o_ext + (w18 + 1) * 6;
-    if o_dig > h.len() || o_dig > MAX_IMAGE || pat_size == 0 {
+    let lsmp = &h[0x1C..0x20] == b"LSMP";
+    if o_dig > h.len() || o_dig > MAX_IMAGE || pat_size == 0 || (!lsmp && module_end(h, o_dig) > h.len()) {
         return None;
     }
-    let lsmp = &h[0x1C..0x20] == b"LSMP";
     let new_type = prefix.jump;
     // the image's tables hold 16-bit offsets, whatever the command set
     let es = 2;

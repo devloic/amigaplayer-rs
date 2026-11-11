@@ -70,6 +70,8 @@ impl Handle {
     }
 }
 
+/// The room behind an AllocVec of no bytes (see exec's AllocVec).
+const ALLOCVEC0_ROOM: u32 = 0x2000;
 /// The most the guest console keeps (what players print with PutStr and the like).
 const CONSOLE_MAX: usize = 1 << 20;
 /// The most interrupt servers one interrupt takes.
@@ -306,6 +308,11 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
             call_int_code(m, code, data, 0);
         }
         "AllocMem" | "AllocVec" => {
+            // AllocVec of no bytes still returns a block, and a player may write there: UADE's
+            // Octa-MED-Ss asks for 0 bytes and fills 76 a mixing channel (up to 64 channels,
+            // 4864 bytes; measured). Under UADE nothing it needs lies behind; here the next
+            // allocation would (its mixing tables), so such a block gets room behind it.
+            let d0 = if name == "AllocVec" && d0 == 0 { ALLOCVEC0_ROOM } else { d0 };
             let p = m.alloc(d0);
             m.set_d0(p);
         }

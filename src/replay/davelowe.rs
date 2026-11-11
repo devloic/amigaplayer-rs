@@ -2119,17 +2119,16 @@ enum F {
 }
 
 /// The pieces' costs for voices 0 to 3, and what layout B adds. Solved from the reference's write
-/// times in half colour clocks (all 41 corpus files over 120 s: 657,062 writes, no remainder, every
-/// cost a whole number). The pieces are only determined in sums along the paths taken, so of the
+/// times in half colour clocks (the 41 corpus files over 120 s and their 87 further subsongs over
+/// 60 s: no remainder, every cost a whole number). The pieces are only determined in sums along the paths taken, so of the
 /// solutions the one with the fewest differences between voices and layouts is kept: what a piece
 /// holds of the path before or after it is a convention, the sums are not. The differences
 /// between the voices follow the write routines (+31, +62, +70 after a write, +17, +24, +51
 /// before a volume write).
 /// Not in the corpus, so not measured: `Dead`, `Direct`, `DirectPost`, `Cmd13`, `Stop` (0);
-/// `PUpEnd` (as `PDownEnd`), `Cmd11` (as `Cmd12`), `Rest2Held` (as `NoteVolHeld`), `NoteNoLoc` of
-/// voices 0, 1, 3 (seen on voice 2, the others by the voices' pattern after a period write);
-/// single voices of `Last`, `PDown`, `PDownEnd`, `Both`, `Cmd6`, `Cmd7`, `Cmd14` take the value
-/// of the voices seen. `VolPost` of voice 3 ends the tick and shows in no write.
+/// `Cmd11` (as `Cmd12`), `Rest2Held` (as `NoteVolHeld`); the voices on which `PUpEnd`, `PDown`,
+/// `PDownEnd`, `Both`, `Cmd6`, `Cmd7` and `Cmd14` do not occur take the value of the voices on
+/// which they do. `VolPost` of voice 3 ends the tick and shows in no write.
 #[rustfmt::skip]
 const COST: [([u16; 4], i16); F::N as usize] = [
     /* Tick        */ ([738, 738, 738, 738], 130),
@@ -2145,7 +2144,7 @@ const COST: [([u16; 4], i16); F::N as usize] = [
     /* Filler      */ ([20, 20, 20, 20], 0),
     /* PDelay      */ ([49, 49, 49, 49], 0),
     /* PUp         */ ([0, 0, 0, 0], 0),
-    /* PUpEnd      */ ([30, 30, 30, 30], 0),
+    /* PUpEnd      */ ([20, 20, 20, 20], 0),
     /* PDown       */ ([0, 0, 0, 0], 0),
     /* PDownEnd    */ ([30, 30, 30, 30], 0),
     /* VDelay      */ ([49, 49, 49, 49], 0),

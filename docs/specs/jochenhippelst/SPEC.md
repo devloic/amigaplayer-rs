@@ -573,3 +573,8 @@ data; 330 modules):
   looks through the prefix, at the sample table, and converts a raw module block by block and row by
   row), and its waits for the beam make the write times depend on that time modulo a raster line.
   The figures are in `reference_start` of the port, with the cases not observed.
+* 8 (timing): the song-end callback is raised from inside the tick, in voice 0's sequencer step, and
+  the reference host goes on at a whole colour clock afterwards. When the callback comes at an odd
+  68000 cycle of the tick, the rest of that tick (the other voices' sequencer steps and all of its
+  Paula writes and beam reads) is one cycle early. Measured on 193 song ends: the callback is 2214
+  cycles before the end of the music code, less the cost of the paths taken after it.

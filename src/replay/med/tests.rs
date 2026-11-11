@@ -257,8 +257,7 @@ fn oss_module() -> Vec<u8> {
 }
 
 #[test]
-fn plays_an_octamed_soundstudio_module_on_the_amplifier() {
-    use crate::amplifier::LOG_BASE;
+fn plays_an_octamed_soundstudio_module_with_its_mixer() {
     let m = oss_module();
     assert!(!super::detect(&m), "the 4-channel replayer leaves MMD3 alone");
     assert!((super::OPEN_OSS.detect)(&m));
@@ -266,36 +265,41 @@ fn plays_an_octamed_soundstudio_module_on_the_amplifier() {
     e.open_replayers = true;
     e.m.bus.write_log = Some(Vec::new());
     e.play_data(Path::new("mod.test"), m).unwrap();
-    let mut out = vec![0f32; 2 * 24000];
+    let mut out = vec![0f32; 2 * 48000];
     e.render(&mut out);
     let log = e.m.bus.write_log.take().unwrap();
     assert_eq!(e.playing.as_ref().unwrap().format, "OctaMED SoundStudio");
     let base = e.m.deli.list.first().unwrap().0;
-    let reg = |v: u32, r: u32| log.iter().filter(|w| w.0 == LOG_BASE | v << 4 | r).map(|w| w.1).collect::<Vec<_>>();
-    let loc = |v: u32| {
-        let (hi, lo) = (reg(v, 0), reg(v, 2));
+    let reg = |r: u32| log.iter().filter(|w| w.0 == 0xdff000 + r).map(|w| w.1).collect::<Vec<_>>();
+    // Paula plays the mixer's buffers: 16384 words a channel at period 149 and full volume
+    for ch in 0..4 {
+        assert_eq!(reg(0xa4 + 16 * ch)[0], 0x2000);
+        assert_eq!(reg(0xa6 + 16 * ch)[0], 149);
+        assert_eq!(reg(0xa8 + 16 * ch)[0], 64);
+    }
+    assert!(reg(0x96).contains(&0x800f) && reg(0x9a).contains(&0x8080));
+    // the first interrupt points the channels at the second halves (0 and 3 one side, 1 and 2
+    // the other) and mixes the song's first 16384 samples into them
+    let loc = |ch: u32| {
+        let (hi, lo) = (reg(0xa0 + 16 * ch), reg(0xa2 + 16 * ch));
         hi.iter().zip(lo).map(|(&h, l)| (h as u32) << 16 | l as u32).collect::<Vec<_>>()
     };
-    // note 25 is index 24 of the frequency table (C-3, 4186 Hz): the period is
-    // counted in NTSC clocks, 3579545 / 4186 = 855, on both tracks
-    assert_eq!(super::mix::freq_table()[8][24], 4186);
-    assert!(reg(0, 6).contains(&855) && reg(4, 6).contains(&855));
-    // volume 32 of 64 on both, through the track and master volumes
-    assert!(reg(0, 8).contains(&32) && reg(4, 8).contains(&32));
-    // the 8-bit sample in place: from its start, then the loop of its second half
-    let l0 = loc(0);
-    // (the voices start on a word of silence)
-    assert_eq!(l0[1], base + O_SMP1 as u32 + 6);
-    assert_eq!(l0[2], base + O_SMP1 as u32 + 6 + 100);
-    assert_eq!(reg(0, 4)[1..3], [100, 50]);
-    // the 16-bit stereo sample became 8-bit mono where it lay: the mean of the
-    // channels' high bytes (frame k: k plus 2 and minus 2)
+    let (s0, s1) = (loc(0)[1], loc(1)[1]);
+    assert_eq!((loc(3)[1], loc(2)[1]), (s0, s1));
+    assert_eq!(s0, s1 + 16384);
+    // the first tick (480 samples at 50 Hz) is not heard
+    assert_eq!((e.m.bus.r8(s0 + 100), e.m.bus.r8(s1 + 100)), (0, 0));
+    // sample 500: note 25 steps 11400 / 65536 a sample, so both samples are at frame 86. The
+    // 8-bit one (value 86) at volume 32 of 64, volume adjust 100, 5 channels, no stereo flag:
+    // 86 * 32 * 100 * 256 / (6400 * 5) = 2201 on both sides. The 16-bit stereo one: level 32
+    // is a shift by 1, 5 channels one by 3: right (86 * 256 - 512) >> 4 = 1344 on side 0,
+    // left (86 * 256 + 512) >> 4 = 1408 on side 1. The high bytes of the sums:
+    assert_eq!(e.m.bus.r8(s0 + 500), ((2201 + 1344) >> 8) as u8);
+    assert_eq!(e.m.bus.r8(s1 + 500), ((2201 + 1408) >> 8) as u8);
+    // the 16-bit stereo sample is 8-bit mono where it lay, as for the older songs (the mixer
+    // plays its own data): the mean of the channels' high bytes (frame k: k plus 2 and minus 2)
     let at = base + O_SMP2 as u32 + 6;
     for k in [0u32, 1, 7, 99] {
         assert_eq!(e.m.bus.r8(at + k) as i8, k as i8, "frame {k}");
     }
-    assert_eq!(loc(4)[1], at);
-    assert_eq!(reg(4, 4)[1], O_FRAMES2 as u16 / 2);
-    // five voices on the amplifier
-    assert!(log.iter().all(|w| w.0 & !0xF != LOG_BASE | 5 << 4));
 }

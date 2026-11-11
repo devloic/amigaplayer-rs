@@ -6,17 +6,59 @@
 //! tick (rows, hold and decay, the effect commands, synth and hybrid sounds)
 //! and its frequency table.
 //!
-//! The original plays these songs by mixing in software (OctaMED SoundStudio's
-//! mix mode), which no Paula channel does, so the voices go to the host's
-//! amplifier (`Hw::voice_*`, as HivelyTracker's and the multichannel MODs' do):
-//! one voice a track, from the Amiga's LRRL sides, at most 32. A note is the
-//! voice's DMA off, the sample's start and length, its period (from the note's
-//! frequency in Hz), the volume, DMA on, and then the loop. What the amplifier
+//! # SoundStudio's songs (MMD3): the mixer
+//!
+//! The original (UADE's Octa-MED-Ss) mixes in software and plays the result on Paula, and so
+//! does this port (`Soft`). What it does was measured on the reference's Paula data (the bytes
+//! its DMA fetched) with built modules, one feature a module:
+//!
+//! - Paula: the four channels at period 149 and volume 64, each 16384 words long; channels 0
+//!   and 3 play one buffer, 1 and 2 the other, two halves of 16384 samples each. Paula's
+//!   interrupt at a half's start acknowledges, points the channels at the other half and mixes
+//!   the song's next 16384 samples into it, so the first half played is silent. The original
+//!   sets Paula up in its start, before the song's time runs.
+//! - The song's ticks are counted in mixed samples: 24023 / Hz of them a tick (a fraction
+//!   kept), a tick at the sample that count reaches. What the first tick's notes play before
+//!   the second tick is not heard (the samples advance).
+//! - A voice steps freq * 65536 / 24063 (rounded up) a sample, a 16.16 number, and plays the
+//!   sample's byte there (no interpolation). The original's step differs by a few units from
+//!   that for most notes; for the notes of the frequency table it is taken from the steps
+//!   measured on the reference (`STEPS`).
+//! - The levels: the volume V (0-64) and the pan (-16..16, w = 16 + pan) give side 0 (Paula's
+//!   channels 0 and 3) the level L(w) and side 1 L(32 - w), L(0) = 0, L(32) = V, else
+//!   1 + (V - 1) * w / 32. An 8-bit sample's term is s * L * voladj * 256 / (6400 * channels),
+//!   cut towards zero; L * voladj is a signed 16-bit product (it wraps). Without the stereo
+//!   flag both sides have L = V; with it but without free panning the term is doubled.
+//! - A 16-bit sample is shifted, not multiplied: its level, (V * w + 15) / 32 of 64 for a mono
+//!   one and L for a stereo one, goes down to a power of two, and the volume adjust (down to a
+//!   power of two of 100) over the channels (up to one) never raises it. A stereo sample's
+//!   left channel plays on side 1, its right on side 0.
+//! - The sides' sums are 16-bit words (they wrap), the high byte is played. The stereo
+//!   separation adds the other side's sum, shifted down by 5 - |sep|, negated for a positive
+//!   one. The echo adds what the side (crossed: the other side) put out floor(ms * 24023 /
+//!   1000) samples ago, shifted down by the depth, to the word.
+//!
+//! Not measured, so guessed: the 16-bit samples without free panning (half the measured cases
+//! differ), an odd volume after the track's and the master volume (halved, rounded down), the
+//! order of separation and echo, and the step of a frequency that is not a table note's (a
+//! slide, a vibrato, an arpeggio).
+//!
+//! The reference's CPU is not a 68000 for these songs (`needs_fast_reference_cpu`): the mixer
+//! takes longer than a buffer with a few tracks on one, and the original then plays halves
+//! twice.
+//!
+//! # The older songs: the amplifier
+//!
+//! OctaMED's 5-8 channel and mix mode songs go to the host's amplifier (`Hw::voice_*`, as
+//! HivelyTracker's and the multichannel MODs' do): one voice a track, from the Amiga's LRRL
+//! sides, at most 32. A note is the voice's DMA off, the sample's start and length, its period
+//! (from the note's frequency in Hz), the volume, DMA on, and then the loop. What the amplifier
 //! has no counterpart of is approximated or left out; see the README.
 //!
 //! - 16-bit and stereo samples are converted to 8-bit mono when the module is
 //!   loaded (a 16-bit sample keeps its high byte, a stereo one its two channels'
 //!   mean), in the module's own memory where that does not touch another sample.
+//!   (SoundStudio's mixer plays their own data.)
 //! - A ping-pong loop is unrolled into a loop of twice the length.
 //! - A synth or hybrid sound's waveforms are the voice's blocks: a new waveform
 //!   is the next block, taking effect where the current one ends, as on Paula;
@@ -30,8 +72,8 @@
 //! - Not played: stereo separation, the track pans (a voice has its Amiga side
 //!   only), "sample backwards" (command 20), MIDI instruments, the filter sweeps,
 //!   and the volume adjust.
-//!   The voices mix at the amplifier's rate, 31 kHz; the original's is not
-//!   known.
+//!   The mix mode songs' voices mix at 31 kHz; a 5-8 channel song's at the amplifier's own
+//!   rate, as the OctaMED Eagleplayer's do.
 //! - The timing is UADE's: a tick of 3579545 / Hz colour clocks, and periods
 //!   from that clock, as the 68k player counts them on a PAL Amiga.
 
@@ -239,6 +281,11 @@ struct SubSong {
     /// The global echo: crossed, depth (the shift of each repeat's level) and
     /// length in ms.
     echo: Option<(bool, u8, u32)>,
+    /// SoundStudio's mixer settings: the volume adjust (percent), flags3 (bit 0 stereo,
+    /// bit 1 free panning) and the stereo separation (-4..4).
+    vol_adj: u16,
+    flags3: u8,
+    sep: i8,
     name: String,
 }
 
@@ -289,7 +336,13 @@ struct Smp {
     /// buffer, its frames and the loop's start and length.
     pp: Vec<Option<(u32, u32, u32, u32)>>,
     syn: Option<Box<SynSnd>>,
+    /// A 16-bit or stereo sample's own data, per octave buffer (SoundStudio's mixer plays it).
+    wide: Vec<WideData>,
 }
+
+/// The data of a 16-bit or stereo sample as the file has it: 16-bit or not, the left (or only)
+/// channel and the right.
+type WideData = (bool, Vec<i16>, Option<Vec<i16>>);
 
 impl Smp {
     fn multi(&self) -> bool {
@@ -340,6 +393,7 @@ struct Dec {
     /// bytes in the file unchanged.
     raw_len: usize,
     plain: bool,
+    wide: Vec<WideData>,
 }
 
 fn decode(d: &[u8], pos: usize) -> Option<Dec> {
@@ -357,7 +411,7 @@ fn decode(d: &[u8], pos: usize) -> Option<Dec> {
     let dl = if b16 { 2u32 } else { 1 };
     let total = dl as u64 * frames as u64;
     if frames == 0 {
-        return Some(Dec { frames, stype, bufs: Vec::new(), raw_len: 0, plain: true });
+        return Some(Dec { frames, stype, bufs: Vec::new(), raw_len: 0, plain: true, wide: Vec::new() });
     }
     let sizes: Vec<u64> = if noct == 1 {
         vec![total]
@@ -372,9 +426,36 @@ fn decode(d: &[u8], pos: usize) -> Option<Dec> {
     }
     let mut p = pos + 6;
     let mut acc: Vec<Vec<i32>> = sizes.iter().map(|s| vec![0i32; (*s / dl as u64) as usize]).collect();
-    for _ in 0..chans {
+    let mut wide: Vec<WideData> = Vec::new();
+    for c in 0..chans {
         for (o, s) in sizes.iter().enumerate() {
             let fr = (*s / dl as u64) as usize;
+            if b16 || stereo {
+                let v: Vec<i16> = if b16 {
+                    let mut prev = 0i16;
+                    (0..fr)
+                        .map(|i| {
+                            let v = be16(d, p + 2 * i) as i16;
+                            prev = if delta && i > 0 { prev.wrapping_add(v) } else { v };
+                            prev
+                        })
+                        .collect()
+                } else {
+                    let mut prev = 0i8;
+                    (0..fr)
+                        .map(|i| {
+                            let v = d.get(p + i).copied().unwrap_or(0) as i8;
+                            prev = if delta && i > 0 { prev.wrapping_add(v) } else { v };
+                            prev as i16
+                        })
+                        .collect()
+                };
+                if c == 0 {
+                    wide.push((b16, v, None));
+                } else if let Some(w) = wide.get_mut(o) {
+                    w.2 = Some(v);
+                }
+            }
             let buf = &mut acc[o];
             if b16 {
                 let mut prev = 0i16;
@@ -396,7 +477,7 @@ fn decode(d: &[u8], pos: usize) -> Option<Dec> {
         }
     }
     let bufs = acc.into_iter().map(|b| b.into_iter().map(|v| (v / chans as i32) as i8).collect()).collect();
-    Some(Dec { frames, stype, bufs, raw_len, plain: !b16 && !stereo && !delta })
+    Some(Dec { frames, stype, bufs, raw_len, plain: !b16 && !stereo && !delta, wide })
 }
 
 fn r8(d: &[u8], o: usize) -> u8 {
@@ -506,6 +587,9 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
             track_pan: [0; MAX_TRACKS],
             master_vol: 64,
             echo: None,
+            vol_adj: 100,
+            flags3: 0,
+            sep: 0,
             name: String::new(),
         };
         // the instruments of the song structure
@@ -573,6 +657,9 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
                 ss.track_pan[t] = r8(d, tp + t) as i8;
             }
             ss.master_vol = (r8(d, s + 0x312) as i8 as i32).clamp(1, 64);
+            ss.flags3 = r8(d, s + 0x213);
+            ss.vol_adj = be16(d, s + 0x214);
+            ss.sep = (r8(d, s + 0x21c) as i8).clamp(-4, 4);
             let (et, ed, el) = (r8(d, s + 0x218), r8(d, s + 0x219), be16(d, s + 0x21a) as u32);
             if et != 0 && (1..=6).contains(&ed) && el > 0 {
                 ss.echo = Some((et == 2, ed, el));
@@ -867,6 +954,7 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
                         smp.frames = dec.frames;
                         smp.stype = dec.stype;
                         smp.octs = octs;
+                        smp.wide = dec.wide;
                         ok = true;
                     }
                 }
@@ -1181,7 +1269,316 @@ fn apply(hw: &mut Hw, v: usize, op: Op) {
     }
 }
 
+/// The buffer SoundStudio's mixer plays: two halves of this many samples a side.
+const SOFT_HALF: usize = 16384;
+/// Its Paula period: 24023 Hz as the player counts it (3579545 / 149).
+const SOFT_PERIOD: u16 = 149;
+/// The mixed samples a second the player's ticks are counted in, and the same as the 16.16
+/// number a BPM tempo's tick length comes from (24023 * 65536 + 256: the middle of what four
+/// measured tempos allow, 1574371500..1574371668).
+const SOFT_RATE: f64 = 24023.0;
+const SOFT_TICK: u64 = 24023 * 65536 + 256;
+/// The rate a frequency outside the frequency table is stepped at: f * 65536 / 24063 rounded up
+/// is within a few units of the measured steps of finetune 0 (`STEPS`).
+const SOFT_STEP_RATE: u64 = 24063;
+/// The steps of the frequency table's notes in SoundStudio's mixer, 16.16, by finetune (-8..7)
+/// and note: measured on the reference, the positions its output plays of a sample of noise
+/// (30000 mixed samples a note; one step fits each). Five were not settled by that: the top
+/// note of finetunes 6 and 7 (its lower bound, 2.75 exactly, is taken) and note 67 of finetune
+/// 2 and notes 69 and 71 of finetune 6 (the note below, a semitone up).
+#[rustfmt::skip]
+const STEPS: [[u32; 72]; 16] = [
+    [2684, 2842, 3011, 3191, 3382, 3581, 3794, 4018, 4258, 4512, 4779, 5063, 5366, 5685, 6023, 6380, 6760, 7161, 7589, 8039, 8516, 9024, 9561, 10129, 10732, 11370, 12047, 12761, 13522, 14325, 15178, 16079, 17033, 18046, 19120, 20255, 21458, 22735, 24085, 25518, 27034, 28641, 30344, 32150, 34062, 36086, 38233, 40506, 42914, 45468, 48171, 51036, 54069, 57286, 60690, 64300, 68124, 72176, 76467, 81014, 85832, 90936, 96343, 102072, 108142, 114572, 121387, 128603, 136252, 144354, 152937, 162032],
+    [2706, 2867, 3036, 3216, 3407, 3611, 3824, 4051, 4291, 4547, 4817, 5104, 5406, 5728, 6069, 6430, 6814, 7218, 7649, 8102, 8585, 9095, 9635, 10208, 10813, 11457, 12139, 12860, 13623, 14434, 15290, 16199, 17162, 18182, 19262, 20408, 21622, 22907, 24268, 25711, 27239, 28860, 30576, 32392, 34318, 36362, 38522, 40814, 43242, 45812, 48537, 51423, 54481, 57720, 61152, 64788, 68640, 72721, 77045, 81626, 86479, 91621, 97069, 102839, 108952, 115432, 122295, 129568, 137272, 145435, 154083, 163246],
+    [2725, 2889, 3060, 3240, 3431, 3636, 3852, 4081, 4323, 4583, 4855, 5142, 5450, 5772, 6116, 6481, 6866, 7275, 7706, 8165, 8650, 9166, 9711, 10287, 10901, 11547, 12235, 12963, 13733, 14551, 15416, 16332, 17304, 18332, 19423, 20577, 21802, 23098, 24473, 25927, 27468, 29102, 30832, 32665, 34608, 36665, 38844, 41155, 43602, 46194, 48941, 51852, 54934, 58202, 61664, 65331, 69216, 73330, 77692, 82310, 87204, 92388, 97882, 103704, 109869, 116403, 123324, 130660, 138429, 146660, 155381, 164621],
+    [2747, 2910, 3082, 3265, 3459, 3663, 3882, 4113, 4359, 4618, 4891, 5183, 5491, 5818, 6165, 6530, 6918, 7330, 7766, 8227, 8718, 9237, 9785, 10369, 10985, 11637, 12330, 13064, 13839, 14663, 15536, 16458, 17437, 18474, 19573, 20738, 21971, 23278, 24661, 26129, 27681, 29329, 31072, 32919, 34878, 36951, 39147, 41474, 43940, 46554, 49320, 52255, 55363, 58653, 62142, 65836, 69750, 73900, 78295, 82949, 87881, 93108, 98643, 104508, 110723, 117306, 124281, 131672, 139501, 147797, 156587, 165898],
+    [2768, 2932, 3107, 3292, 3489, 3696, 3914, 4146, 4392, 4654, 4932, 5224, 5535, 5865, 6211, 6580, 6970, 7384, 7824, 8290, 8784, 9305, 9859, 10445, 11067, 11725, 12423, 13160, 13943, 14772, 15650, 16581, 17565, 18610, 19718, 20888, 22132, 23447, 24841, 26320, 27883, 29539, 31296, 33156, 35126, 37216, 39428, 41774, 44257, 46889, 49677, 52632, 55761, 59078, 62589, 66313, 70255, 74432, 78857, 83546, 88514, 93776, 99352, 105261, 111520, 118149, 125176, 132618, 140505, 148861, 157711, 167090],
+    [2790, 2957, 3131, 3317, 3516, 3723, 3944, 4179, 4427, 4689, 4967, 5265, 5576, 5906, 6258, 6629, 7024, 7442, 7884, 8353, 8849, 9376, 9935, 10524, 11152, 11815, 12516, 13261, 14049, 14884, 15768, 16706, 17699, 18752, 19865, 21046, 22296, 23622, 25027, 26516, 28093, 29763, 31533, 33407, 35396, 37499, 39731, 42093, 44595, 47247, 50057, 53033, 56186, 59528, 63069, 66818, 70792, 75002, 79462, 84187, 89193, 94497, 100116, 106069, 112376, 119060, 126139, 133641, 141588, 150007, 158928, 168378],
+    [2809, 2979, 3156, 3344, 3541, 3753, 3974, 4209, 4460, 4724, 5005, 5303, 5619, 5955, 6307, 6683, 7082, 7502, 7949, 8421, 8920, 9452, 10014, 10609, 11242, 11910, 12617, 13367, 14164, 15007, 15899, 16842, 17844, 18905, 20032, 21221, 22484, 23821, 25237, 26737, 28328, 30014, 31798, 33688, 35691, 37813, 40064, 42445, 44969, 47642, 50477, 53478, 56658, 60028, 63596, 67380, 71384, 75629, 80128, 84894, 89941, 95288, 100954, 106956, 113315, 120053, 127192, 134757, 142769, 151259, 160253, 169783],
+    [2831, 3000, 3178, 3369, 3568, 3781, 4004, 4242, 4493, 4760, 5044, 5344, 5663, 5998, 6356, 6732, 7133, 7559, 8009, 8484, 8988, 9523, 10091, 10691, 11326, 12000, 12712, 13468, 14270, 15118, 16019, 16971, 17980, 19049, 20182, 21382, 22653, 24001, 25428, 26939, 28543, 30240, 32038, 33942, 35961, 38099, 40366, 42764, 45307, 48000, 50856, 53879, 57084, 60478, 64073, 67884, 71919, 76197, 80728, 85529, 90614, 96002, 101712, 107760, 114168, 120956, 128150, 135769, 143844, 152397, 161459, 171059],
+    [2853, 3022, 3202, 3393, 3595, 3808, 4034, 4272, 4525, 4793, 5079, 5382, 5701, 6039, 6400, 6779, 7180, 7608, 8061, 8538, 9048, 9586, 10156, 10759, 11400, 12077, 12797, 13558, 14363, 15217, 16122, 17080, 18097, 19172, 20313, 21521, 22801, 24156, 25594, 27116, 28729, 30436, 32245, 34163, 36195, 38348, 40628, 43043, 45602, 48313, 51186, 54230, 57455, 60871, 64491, 68326, 72388, 76693, 81255, 86086, 91204, 96627, 102372, 108461, 114911, 121744, 128982, 136650, 144777, 153384, 162507, 172170],
+    [2875, 3044, 3224, 3415, 3620, 3835, 4062, 4304, 4561, 4831, 5117, 5423, 5745, 6089, 6449, 6833, 7240, 7671, 8126, 8609, 9122, 9665, 10238, 10849, 11493, 12178, 12900, 13667, 14480, 15342, 16253, 17219, 18242, 19328, 20476, 21696, 22983, 24350, 25796, 27332, 28955, 30679, 32502, 34436, 36482, 38653, 40950, 43386, 45967, 48701, 51595, 54664, 57913, 61359, 65006, 68872, 72967, 77304, 81901, 86771, 91932, 97399, 103191, 109326, 115827, 122715, 130013, 137742, 145934, 154612, 163805, 173545],
+    [2897, 3069, 3251, 3445, 3650, 3865, 4094, 4337, 4594, 4869, 5158, 5464, 5788, 6135, 6498, 6885, 7294, 7728, 8189, 8675, 9190, 9739, 10317, 10931, 11580, 12270, 12999, 13771, 14592, 15459, 16379, 17353, 18384, 19478, 20634, 21862, 23163, 24541, 26001, 27545, 29184, 30919, 32758, 34706, 36771, 38956, 41272, 43727, 46327, 49083, 52002, 55093, 58369, 61842, 65519, 69415, 73542, 77915, 82548, 87458, 92658, 98168, 104004, 110188, 116738, 123681, 131035, 138827, 147082, 155829, 165096, 174911],
+    [2916, 3090, 3273, 3470, 3674, 3895, 4124, 4367, 4626, 4902, 5191, 5502, 5829, 6176, 6541, 6931, 7343, 7780, 8244, 8735, 9253, 9804, 10385, 11004, 11659, 12352, 13086, 13863, 14687, 15560, 16485, 17464, 18504, 19606, 20771, 22007, 23313, 24702, 26170, 27727, 29375, 31121, 32973, 34932, 37011, 39213, 41542, 44014, 46630, 49405, 52343, 55455, 58751, 62243, 65945, 69865, 74020, 78423, 83085, 88026, 93261, 98807, 104683, 110906, 117502, 124489, 131893, 139733, 148043, 156846, 166173, 176054],
+    [2938, 3112, 3298, 3494, 3701, 3922, 4154, 4400, 4662, 4940, 5232, 5546, 5873, 6225, 6593, 6986, 7401, 7843, 8309, 8803, 9327, 9881, 10467, 11092, 11749, 12450, 13190, 13973, 14802, 15683, 16616, 17604, 18651, 19759, 20935, 22179, 23499, 24896, 26377, 27946, 29607, 31367, 33233, 35208, 37303, 39521, 41870, 44360, 46998, 49792, 52755, 55892, 59215, 62737, 66466, 70419, 74606, 79042, 83743, 88724, 94000, 99590, 105510, 111784, 118432, 125474, 132935, 140841, 149216, 158087, 167488, 177448],
+    [2959, 3134, 3320, 3516, 3726, 3947, 4182, 4430, 4694, 4973, 5270, 5584, 5917, 6269, 6640, 7035, 7453, 7897, 8366, 8863, 9392, 9949, 10541, 11168, 11834, 12538, 13282, 14071, 14908, 15795, 16736, 17729, 18785, 19901, 21085, 22340, 23668, 25076, 26565, 28145, 29820, 31593, 33473, 35461, 37570, 39805, 42172, 44680, 47337, 50152, 53134, 56293, 59640, 63187, 66946, 70926, 75144, 79612, 84345, 89362, 94677, 100305, 106268, 112586, 119281, 126374, 133890, 141850, 150282, 159220, 168689, 178720],
+    [2981, 3159, 3347, 3546, 3756, 3980, 4217, 4465, 4733, 5014, 5311, 5627, 5963, 6318, 6694, 7092, 7513, 7960, 8435, 8934, 9466, 10031, 10625, 11258, 11927, 12636, 13389, 14185, 15028, 15920, 16867, 17868, 18932, 20056, 21248, 22511, 23851, 25267, 26767, 28360, 30046, 31833, 33726, 35732, 37857, 40107, 42492, 45021, 47697, 50534, 53538, 56721, 60096, 63667, 67451, 71464, 75711, 80215, 84984, 90039, 95391, 101063, 107073, 113440, 120187, 127334, 134904, 142928, 151427, 160431, 169971, 180224],
+    [3000, 3178, 3366, 3568, 3778, 4002, 4239, 4493, 4757, 5038, 5338, 5657, 5993, 6350, 6727, 7128, 7551, 8001, 8476, 8980, 9515, 10080, 10680, 11315, 11987, 12701, 13454, 14254, 15099, 15997, 16946, 17956, 19022, 20154, 21352, 22623, 23968, 25392, 26904, 28502, 30199, 31994, 33896, 35912, 38048, 40309, 42707, 45247, 47937, 50788, 53808, 57008, 60399, 63989, 67792, 71824, 76096, 80619, 85415, 90492, 95874, 101576, 107616, 114016, 120795, 127978, 135586, 143651, 152192, 161241, 170830, 180224],
+];
+
+/// When Paula is set up, and how long after that the buffer starts: colour clocks from the
+/// song's start. The original does both in its start, before the song's time runs, so the
+/// buffer's first fetch is a few colour clocks into the song.
+const SOFT_SETUP_AT: u64 = 1;
+const SOFT_START_AFTER: u64 = 24;
+
+/// One track's voice of SoundStudio's mixer: Paula's manners (a block plays to its end, then
+/// the one set meanwhile), at any rate.
+#[derive(Clone, Default)]
+struct SoftVoice {
+    on: bool,
+    /// Playing the silence after a sample's end: nothing, until another block is set.
+    idle: bool,
+    cur: (u32, u32),
+    next: (u32, u32),
+    /// The block lies in a 16-bit or stereo sample: which, and the offset.
+    wide: Option<(usize, usize)>,
+    /// The position in the block and the step a mixed sample, 32.32.
+    pos: u64,
+    step: u64,
+    /// The volume, 0-64.
+    level: u32,
+}
+
+struct Wide {
+    addr: u32,
+    frames: u32,
+    b16: bool,
+    l: Vec<i16>,
+    r: Option<Vec<i16>>,
+}
+
+/// A voice's levels for a run of samples: an 8-bit sample's factor on each side, and a 16-bit
+/// sample's shifts (None: silent), mono and stereo.
+#[derive(Clone, Copy, Default)]
+struct Lev {
+    l: [i64; 2],
+    sh: [Option<u32>; 2],
+    shc: [Option<u32>; 2],
+}
+
+/// OctaMED SoundStudio's mixer, as its player for the Amiga (UADE's Octa-MED-Ss) mixes: see the
+/// module's comment.
+struct Soft {
+    /// Guest memory: side 1's first half, side 0's, side 1's second half, side 0's.
+    buf: u32,
+    silence: u32,
+    v: Vec<SoftVoice>,
+    wides: Vec<Wide>,
+    /// 0: Paula is to be set up, 1: the buffer is to start, 2: playing.
+    stage: u8,
+    next_at: Option<u64>,
+    /// The half that plays.
+    half: usize,
+    /// Mixed samples to the next tick, 16.16.
+    left: u64,
+    ticks: u64,
+    /// The echo: crossed, the shift, the delay in samples; what each side put out a delay ago.
+    echo: Option<(bool, u8, usize)>,
+    ring: [Vec<i16>; 2],
+    ring_at: usize,
+    vol_adj: u16,
+    flags3: u8,
+    sep: i8,
+}
+
+impl Soft {
+    fn reset(&mut self, ss: &SubSong) {
+        for v in self.v.iter_mut() {
+            *v = SoftVoice::default();
+        }
+        self.stage = 0;
+        self.next_at = None;
+        self.half = 0;
+        self.left = 0;
+        self.ticks = 0;
+        self.vol_adj = ss.vol_adj;
+        self.flags3 = ss.flags3;
+        self.sep = ss.sep;
+        self.echo = ss.echo.map(|(cross, depth, ms)| (cross, depth, ((ms as u64 * SOFT_RATE as u64 / 1000) as usize).max(1)));
+        let n = self.echo.map_or(0, |e| e.2);
+        self.ring = [vec![0; n], vec![0; n]];
+        self.ring_at = 0;
+    }
+
+    fn enter(&mut self, t: usize, block: (u32, u32)) {
+        let v = &mut self.v[t];
+        v.cur = block;
+        v.idle = block.0 == self.silence || block.1 == 0;
+        v.wide = None;
+        if !v.idle {
+            if let Some(k) = self.wides.iter().position(|w| block.0 >= w.addr && block.0 < w.addr + w.frames) {
+                v.wide = Some((k, (block.0 - self.wides[k].addr) as usize));
+            }
+        }
+    }
+
+    fn op(&mut self, t: usize, op: Op) {
+        if t >= self.v.len() {
+            return;
+        }
+        match op {
+            Op::Dma(false) => self.v[t].on = false,
+            Op::Dma(true) => {
+                let b = self.v[t].next;
+                self.enter(t, b);
+                self.v[t].on = true;
+                // a new note starts at the sample's first byte, with the fraction the voice's
+                // position had (the original does not clear it)
+                self.v[t].pos &= 0xffff_ffff;
+            }
+            Op::Loc(a) => self.v[t].next.0 = a,
+            Op::LenB(n) => self.v[t].next.1 = n,
+            Op::Len(w) => self.v[t].next.1 = 2 * w as u32,
+            Op::Per(_) | Op::Vol(_) => {}
+        }
+    }
+
+    /// The levels of track `t` at `pan` (-16..16).
+    fn levels(&self, t: usize, pan: i8, channels: usize) -> Lev {
+        let v = self.v[t].level as i64;
+        let side0 = |w: i64| {
+            if w <= 0 || v == 0 {
+                0
+            } else if w >= 32 {
+                v
+            } else {
+                1 + (v - 1) * w / 32
+            }
+        };
+        let stereo = self.flags3 & 1 != 0;
+        let l = if stereo {
+            [side0(16 + pan as i64), side0(16 - pan as i64)]
+        } else {
+            [v, v]
+        };
+        // a 16-bit sample: every factor is taken down to a power of two, and the volume adjust
+        // and the channels together never raise it
+        let va = self.vol_adj as i64;
+        let adj = if va >= 100 { (va / 100).ilog2() as i32 } else if va > 0 { -((1..16).find(|n| (va << n) >= 100).unwrap_or(16)) } else { -64 };
+        let chs = (channels.max(1) as u64).next_power_of_two().ilog2() as i32;
+        let tot = (adj - chs).min(0);
+        // a level of 64 down to a power of two
+        let sh = |x: i64| -> Option<u32> {
+            if x <= 0 || tot < -40 {
+                return None;
+            }
+            let n = (0..7).find(|n| (64 >> n) <= x).unwrap_or(6);
+            Some((8 + n - tot) as u32)
+        };
+        // a mono 16-bit sample's level is the volume times the pan's weight (of 32), a half
+        // rounded down; a stereo one's is the 8-bit samples' level
+        let m = |w: i64| (v * w.clamp(0, 32) + 15) >> 5;
+        let (w0, w1) = if stereo { (16 + pan as i64, 16 - pan as i64) } else { (32, 32) };
+        Lev { l, sh: [sh(m(w0)), sh(m(w1))], shc: [sh(l[0]), sh(l[1])] }
+    }
+
+    /// Mixes `n` samples into `out` from `at`: the voices of the first `channels` tracks.
+    fn render(&mut self, ram: &[u8], pans: &[i8], channels: usize, out: &mut [Vec<i8>; 2], at: usize, n: usize) {
+        let nch = channels.min(self.v.len());
+        let lev: Vec<Lev> = (0..nch).map(|t| self.levels(t, pans[t], channels)).collect();
+        let muted = self.ticks <= 1;
+        let (stereo, free) = (self.flags3 & 1 != 0, self.flags3 & 2 != 0);
+        // a level times the volume adjust is the player's 16-bit product (it wraps: 64 * 800)
+        let g = if stereo && !free { 2 } else { 1 };
+        let va = self.vol_adj as i64;
+        let den = 6400 * channels.max(1) as i64;
+        // an 8-bit sample's term: the player's table entry, 8.8, cut towards zero
+        let k = |s: i64, l: i64| s * g * ((l * va) as u16 as i16 as i64) * 256 / den;
+        for i in at..at + n {
+            // the two sides' sums: 16-bit words, 8.8 (the high byte is what Paula plays)
+            let mut a = [0i64; 2];
+            for t in 0..nch {
+                if !self.v[t].on {
+                    continue;
+                }
+                if self.v[t].idle {
+                    if self.v[t].next == self.v[t].cur {
+                        continue;
+                    }
+                    let b = self.v[t].next;
+                    self.enter(t, b);
+                    self.v[t].pos &= 0xffff_ffff;
+                    if self.v[t].idle {
+                        continue;
+                    }
+                }
+                let mut guard = 0;
+                while (self.v[t].pos >> 32) as u32 >= self.v[t].cur.1 {
+                    let len = self.v[t].cur.1 as u64;
+                    self.v[t].pos -= len << 32;
+                    let b = self.v[t].next;
+                    self.enter(t, b);
+                    guard += 1;
+                    if self.v[t].idle || guard > 64 {
+                        self.v[t].pos &= 0xffff_ffff;
+                        break;
+                    }
+                }
+                let v = &mut self.v[t];
+                if v.idle {
+                    continue;
+                }
+                let idx = (v.pos >> 32) as usize;
+                v.pos += v.step;
+                if muted {
+                    continue;
+                }
+                let lv = &lev[t];
+                match v.wide {
+                    None => {
+                        let s = ram.get(v.cur.0 as usize + idx).copied().unwrap_or(0) as i8 as i64;
+                        a[0] += k(s, lv.l[0]);
+                        a[1] += k(s, lv.l[1]);
+                    }
+                    Some((wi, off)) => {
+                        let wd = &self.wides[wi];
+                        let l = wd.l.get(off + idx).copied().unwrap_or(0) as i64;
+                        let r = wd.r.as_ref().map(|r| r.get(off + idx).copied().unwrap_or(0) as i64);
+                        match (wd.b16, r) {
+                            (false, None) => {
+                                a[0] += k(l, lv.l[0]);
+                                a[1] += k(l, lv.l[1]);
+                            }
+                            (false, Some(r)) => {
+                                a[1] += k(l, lv.l[1]);
+                                a[0] += k(r, lv.l[0]);
+                            }
+                            (true, None) => {
+                                for s in 0..2 {
+                                    if let Some(sh) = lv.sh[s] {
+                                        a[s] += l >> (sh - 8).min(62);
+                                    }
+                                }
+                            }
+                            (true, Some(r)) => {
+                                if let Some(sh) = lv.shc[1] {
+                                    a[1] += l >> (sh - 8).min(62);
+                                }
+                                if let Some(sh) = lv.shc[0] {
+                                    a[0] += r >> (sh - 8).min(62);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut o = a;
+            if stereo && self.sep != 0 {
+                let n = 5 - self.sep.unsigned_abs() as u32;
+                let sg = -(self.sep.signum() as i64);
+                o = [o[0] + sg * (o[1] >> n), o[1] + sg * (o[0] >> n)];
+            }
+            let mut o = [o[0] as i16, o[1] as i16];
+            if let Some((cross, depth, d)) = self.echo {
+                let e = [self.ring[0][self.ring_at], self.ring[1][self.ring_at]];
+                for s in 0..2 {
+                    let src = if cross { e[s ^ 1] } else { e[s] };
+                    o[s] = o[s].wrapping_add(src >> depth.min(7));
+                }
+                self.ring[0][self.ring_at] = o[0];
+                self.ring[1][self.ring_at] = o[1];
+                self.ring_at = (self.ring_at + 1) % d;
+            }
+            out[0][i] = (o[0] >> 8) as i8;
+            out[1][i] = (o[1] >> 8) as i8;
+        }
+    }
+}
+
 pub struct OctaMed {
+    /// SoundStudio's mixer (an MMD3 song), in place of the amplifier's voices.
+    soft: Option<Box<Soft>>,
     name: &'static str,
     /// An MMD0-MMD2 song.
     old: bool,
@@ -1227,14 +1624,15 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
     if kind_of(d) != Some(kind) {
         return None;
     }
-    let song = load(d, base, m, kind)?;
-    let nvoices = song.subs.iter().map(|s| s.channels).max().unwrap_or(4).clamp(1, MAX_VOICES);
+    let mut song = load(d, base, m, kind)?;
+    let soft_mode = kind == Kind::Oss;
+    let nvoices = song.subs.iter().map(|s| s.channels).max().unwrap_or(4).clamp(1, if soft_mode { MAX_TRACKS } else { MAX_VOICES });
     let silence = m.alloc(4);
     // the echo's voices follow the tracks' (on the same sides: from a multiple
     // of 4), if they fit
     let echoes = song.subs.iter().any(|s| s.echo.is_some());
     let eb = (nvoices + 3) & !3;
-    let total = if echoes && eb + ((nvoices + 1) & !1) <= MAX_VOICES { eb + ((nvoices + 1) & !1) } else { nvoices };
+    let total = if !soft_mode && echoes && eb + ((nvoices + 1) & !1) <= MAX_VOICES { eb + ((nvoices + 1) & !1) } else { nvoices };
     // a 5-8 channel song's amplifier has a voice for every track of its widest block, as the
     // OctaMED Eagleplayer's has (8 voices for a song that splits one channel only)
     let amp_voices = if song.eight {
@@ -1242,7 +1640,38 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
     } else {
         total
     };
-    if silence == 0 || !start_amplifier(m, amp_voices) {
+    let mut soft = None;
+    if soft_mode {
+        let buf = m.alloc(4 * SOFT_HALF as u32);
+        if silence == 0 || buf == 0 {
+            return None;
+        }
+        let mut wides = Vec::new();
+        for smp in song.samp.iter_mut().flatten() {
+            for (k, (b16, l, r)) in std::mem::take(&mut smp.wide).into_iter().enumerate() {
+                if let Some(&(addr, frames)) = smp.octs.get(k) {
+                    wides.push(Wide { addr, frames, b16, l, r });
+                }
+            }
+        }
+        soft = Some(Box::new(Soft {
+            buf,
+            silence,
+            v: vec![SoftVoice::default(); nvoices],
+            wides,
+            stage: 0,
+            next_at: None,
+            half: 0,
+            left: 0,
+            ticks: 0,
+            echo: None,
+            ring: [Vec::new(), Vec::new()],
+            ring_at: 0,
+            vol_adj: 100,
+            flags3: 0,
+            sep: 0,
+        }));
+    } else if silence == 0 || !start_amplifier(m, amp_voices) {
         return None;
     }
     // the mix rate: the highest the emulated Paula plays one byte a channel at
@@ -1262,9 +1691,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
             a.boost = a.boost * total as u32 / nvoices as u32;
         }
     }
-    crate::amplifier::restart(&mut m.bus);
+    if !soft_mode {
+        crate::amplifier::restart(&mut m.bus);
+    }
     let eight = song.eight;
     let mut p = OctaMed {
+        soft,
         old: kind == Kind::Old,
         total,
         echo: None,
@@ -1346,6 +1778,9 @@ impl OctaMed {
             ss.blocks.len()
         );
         self.echo = None;
+        if let Some(s) = self.soft.as_mut() {
+            s.reset(ss);
+        }
         if self.total > self.nvoices {
             if let Some((cross, depth, ms)) = ss.echo {
                 self.echo = Some(EchoState {
@@ -1426,6 +1861,10 @@ impl OctaMed {
     /// 0.9% lower than the frequency: what UADE's render shows.
     /// A poke of track `t`'s voice, and of its echo's, a delay later.
     fn vp(&mut self, hw: &mut Hw, t: usize, op: Op) {
+        if let Some(s) = self.soft.as_mut() {
+            s.op(t, op);
+            return;
+        }
         apply(hw, t, op);
         if let Some(e) = self.echo.as_mut() {
             if t < self.channels {
@@ -1551,11 +1990,37 @@ impl OctaMed {
             self.mute(hw, t);
             return;
         }
+        if self.soft.is_some() {
+            let step = self.soft_step(t, freq);
+            if let Some(v) = self.soft.as_mut().and_then(|s| s.v.get_mut(t)) {
+                v.step = step << 16;
+            }
+        }
         let per = self.table_period(t, freq).unwrap_or_else(|| Self::per_of(freq));
         if self.ch[t].per != per {
             self.ch[t].per = per;
             self.vp(hw, t, Op::Per(per));
         }
+    }
+
+    /// The mixer's step (16.16) for a frequency: the measured one of a note of the track's
+    /// finetune, between two notes a line from one's to the next's (a guess: the original's
+    /// sum is not known), outside the table the rate's.
+    fn soft_step(&self, t: usize, freq: i32) -> u64 {
+        let ft = (self.td[t].fine_tune.clamp(-8, 7) + 8) as usize;
+        let (fr, st) = (&self.freqs[ft], &STEPS[ft]);
+        let f = freq.clamp(0, 65535) as u16;
+        if f >= fr[0] && f < 65535 {
+            let n = fr.partition_point(|&x| x <= f) - 1;
+            if fr[n] == f {
+                return st[n] as u64;
+            }
+            if n + 1 < fr.len() && fr[n + 1] > fr[n] {
+                let (a, b) = (st[n] as u64, st[n + 1] as u64);
+                return a + b.saturating_sub(a) * (f - fr[n]) as u64 / (fr[n + 1] - fr[n]) as u64;
+            }
+        }
+        ((freq.max(0) as u64) << 16).div_ceil(SOFT_STEP_RATE)
     }
 
     /// A 5-8 channel song's period for a frequency that is a note of the track's finetune: the
@@ -1573,6 +2038,9 @@ impl OctaMed {
     fn set_vol(&mut self, hw: &mut Hw, t: usize, vol: u32) {
         if t >= self.channels || t >= self.nvoices {
             return;
+        }
+        if let Some(sv) = self.soft.as_mut().and_then(|s| s.v.get_mut(t)) {
+            sv.level = vol.min(128) >> 1;
         }
         let v = (vol / 2).min(64) as u16;
         if self.ch[t].vol != v {
@@ -1823,6 +2291,97 @@ impl OctaMed {
         3579545.0 * slow / self.tempo.hz().max(0.1)
     }
 
+    /// SoundStudio's mixer: Paula's set-up, then the buffer's start (the two "ticks" of a song
+    /// that has no timer: the song's ticks are counted in mixed samples).
+    fn soft_tick(&mut self, hw: &mut Hw) {
+        let Some(s) = self.soft.as_mut() else { return };
+        let now = hw.bus.clock;
+        match s.stage {
+            0 => {
+                s.stage = 1;
+                s.next_at = Some(now + SOFT_START_AFTER);
+                hw.bus.write_word(0xdff09a, 0x0780);
+                hw.wait(1);
+                hw.bus.write_word(0xdff096, 0x000f);
+                hw.wait(12);
+                for (reg, val) in [(0xa4, 0x2000), (0xa6, SOFT_PERIOD), (0xa8, 64)] {
+                    for ch in 0..4 {
+                        hw.bus.write_word(0xdff000 + reg + 16 * ch, val);
+                        hw.wait(1);
+                    }
+                }
+            }
+            1 => {
+                s.stage = 2;
+                s.next_at = Some(now + (1 << 40));
+                s.half = 0;
+                let (buf, end) = (s.buf as usize, s.buf as usize + 4 * SOFT_HALF);
+                hw.bus.ram[buf..end].fill(0);
+                Self::soft_locs(hw, s.buf, 0);
+                hw.bus.write_word(0xdff09a, 0x8080);
+                hw.wait(1);
+                hw.bus.write_word(0xdff09c, 0x0080);
+                hw.wait(1);
+                hw.bus.write_word(0xdff096, 0x800f);
+            }
+            _ => s.next_at = Some(now + (1 << 40)),
+        }
+    }
+
+    /// Paula's pointers at half `h` of the buffer: channels 0 and 3 play side 0, 1 and 2 side 1.
+    fn soft_locs(hw: &mut Hw, buf: u32, h: usize) {
+        let b = buf + 2 * (h * SOFT_HALF) as u32;
+        for (ch, a) in [(0, b + SOFT_HALF as u32), (1, b), (2, b), (3, b + SOFT_HALF as u32)] {
+            hw.bus.write_word(0xdff0a0 + 16 * ch, (a >> 16) as u16);
+            hw.bus.write_word(0xdff0a2 + 16 * ch, a as u16);
+            hw.wait(1);
+        }
+    }
+
+    /// Paula started a half: the pointers go to the other, and the song's next 16384 samples
+    /// are mixed into it, its ticks where they fall.
+    fn soft_irq(&mut self, hw: &mut Hw) {
+        let Some(s) = self.soft.as_mut() else { return };
+        hw.wait(1);
+        hw.bus.write_word(0xdff09c, 0x0080);
+        hw.wait(6);
+        s.half ^= 1;
+        let (buf, h) = (s.buf, s.half);
+        Self::soft_locs(hw, buf, h);
+        let mut out = [vec![0i8; SOFT_HALF], vec![0i8; SOFT_HALF]];
+        let mut i = 0;
+        while i < SOFT_HALF {
+            if self.soft.as_ref().is_some_and(|s| s.left < 1 << 16) {
+                self.callback(hw);
+                // a tick's samples, 16.16: measured at four tempos as ten times the whole
+                // part of 24023.004 * 65536 / (tempo * lines a beat)
+                let t = self.tempo;
+                let len = if t.bpm {
+                    10 * (SOFT_TICK / (t.tempo.max(1) as u64 * t.lpb.max(1) as u64))
+                } else {
+                    (SOFT_RATE * 65536.0 / t.hz().max(0.1)) as u64
+                };
+                if let Some(s) = self.soft.as_mut() {
+                    s.ticks += 1;
+                    s.left += len.max(1 << 16);
+                }
+                continue;
+            }
+            let Some(s) = self.soft.as_mut() else { return };
+            let run = ((s.left >> 16) as usize).clamp(1, SOFT_HALF - i);
+            s.render(&hw.bus.ram, &self.track_pan, self.channels, &mut out, i, run);
+            s.left -= (run as u64) << 16;
+            i += run;
+        }
+        let base = buf as usize + 2 * h * SOFT_HALF;
+        for (side, o) in out.iter().enumerate() {
+            let a = base + if side == 0 { SOFT_HALF } else { 0 };
+            for (d, &v) in hw.bus.ram[a..a + SOFT_HALF].iter_mut().zip(o.iter()) {
+                *d = v as u8;
+            }
+        }
+    }
+
     fn mute_track(&mut self, hw: &mut Hw, t: usize) {
         self.td[t].sy.ty = 0;
         self.mute(hw, t);
@@ -1973,6 +2532,9 @@ impl OctaMed {
                     let dep = 7 - (data & 0xf) as i32;
                     if let (Some(e), true) = (self.echo.as_mut(), (1..=6).contains(&dep)) {
                         e.depth = dep as u8;
+                    }
+                    if let (Some(e), true) = (self.soft.as_mut().and_then(|s| s.echo.as_mut()), (1..=6).contains(&dep)) {
+                        e.1 = dep as u8;
                     }
                 }
             }
@@ -2704,7 +3266,28 @@ impl Replayer for OctaMed {
     }
 
     fn tick_clocks(&self) -> u64 {
+        if let Some(s) = &self.soft {
+            return if s.stage == 0 { SOFT_SETUP_AT } else { 1 << 40 };
+        }
         self.tick_clocks_f() as u64
+    }
+
+    fn next_tick_at(&self) -> Option<u64> {
+        self.soft.as_ref().and_then(|s| s.next_at)
+    }
+
+    fn audio_irq_ch(&mut self, ch: usize, hw: &mut Hw) -> bool {
+        if ch != 0 || !self.soft.as_ref().is_some_and(|s| s.stage == 2) {
+            return false;
+        }
+        self.soft_irq(hw);
+        true
+    }
+
+    /// The original's mixer does not fit a 68000's time with a few tracks (it then plays its
+    /// buffer late, with gaps); its reference is UADE, a 68020 at full speed.
+    fn needs_fast_reference_cpu(&self) -> bool {
+        self.soft.is_some()
     }
 
     fn songend(&self) -> bool {
@@ -2721,6 +3304,10 @@ impl Replayer for OctaMed {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        if self.soft.is_some() {
+            self.soft_tick(hw);
+            return;
+        }
         if self.first_tick {
             self.first_tick = false;
             hw.voice_dma(u32::MAX >> (32 - self.total), false);

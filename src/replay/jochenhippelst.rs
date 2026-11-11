@@ -28,11 +28,14 @@
 //! * the prefix's pointer to the module is found as the first PC-relative address load in the first
 //!   128 words whose target holds a module tag; failing that the module is not recognised;
 //! * a volume index past the 52 known values reads as 0;
-//! * a digital sample number past the sample table is ignored;
+//! * a digital sample number past the sample table reads the bytes that follow it in the module
+//!   (zero past the module's end), and the sample command plays what the bytes at the table's
+//!   place say when no table is there, as the original does;
 //! * a pitch or volume program is run for a bounded number of steps per tick (4096);
-//! * an unknown command in the volume program stops it; an instrument or pitch program number
-//!   past the table's count is taken as 0, and a table entry that points outside the image reads
-//!   as the empty stream;
+//! * a command of the pitch program's set in the volume program ends the voice's update for the
+//!   tick as the original's does (see `volume_program`); a byte from $E9 on, which the original
+//!   crashes on, stops the program; a table entry that points outside the image reads zeros
+//!   (the memory around the original's image);
 //! * the two-file (companion sample) module path follows the description but is not verified
 //!   against the reference.
 
@@ -91,6 +94,9 @@ fn digital_note(i: usize) -> u32 {
 struct Dig {
     data: Vec<u8>,
     base: u32,
+    /// A table is there (its first word says so). Without one the sample command still plays
+    /// what the bytes at the table's place say.
+    valid: bool,
 }
 
 impl Dig {
@@ -119,9 +125,8 @@ struct Prefix {
 
 /// A parsed module: the COSO image the player works on.
 struct Module {
-    /// The image, then the empty instrument and pattern.
+    /// The image. What is read outside it is zero, as the memory around the original's image is.
     b: Vec<u8>,
-    null_inst: usize,
     /// Offset of the image in the file, for a COSO image (its guest address is the module's plus
     /// this); None for an image built from a raw module.
     in_file: Option<usize>,
@@ -138,6 +143,8 @@ struct Module {
     n_sub: usize,
     /// Offset in the file of the digital sample table, if any (the samples are read from the module's own memory).
     dig_file: Option<usize>,
+    /// Offset in the file of a raw module's sample table place (whether a table is there or not).
+    raw_dig: Option<usize>,
     /// The sample table is in a companion file.
     lsmp: bool,
     prefix: Prefix,
@@ -238,12 +245,8 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     }
     let short = be16(h, 0x40) != 0;
     let dpos = off(0x18) + 6 * (be16(h, 0x32) as usize + 1);
-    let dig_at = matches!(be16(h, dpos), 0x80 | 0x100).then_some(dpos).filter(|&p| p < h.len());
-    let mut b = h.to_vec();
-    let (null_inst, _) = add_nulls(&mut b);
     let m = Module {
-        b,
-        null_inst,
+        b: h.to_vec(),
         in_file: Some(0),
         short,
         mmme,
@@ -256,7 +259,8 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         t_pos,
         t_sub,
         n_sub: be16(h, 0x30) as usize,
-        dig_file: dig_at.map(|p| tag + p),
+        dig_file: Some(tag + dpos),
+        raw_dig: None,
         lsmp: false,
         prefix,
     };
@@ -264,27 +268,24 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     // flavour has other uses for: more of those than the opposite shape and it is not ours
     let (mut p, mut n) = (0, 0);
     for i in 0..m.n_fs.min(0x400) {
-        if let Some(o) = m.entry(m.t_fs, i) {
-            if m.g(o as i64) == 0xE2 {
-                if m.g(o as i64 + 1) < 0x80 {
-                    p += 1;
-                } else {
-                    n += 1;
-                }
+        let o = m.entry(m.t_fs, i);
+        if m.g(o as i64) == 0xE2 {
+            if m.g(o as i64 + 1) < 0x80 {
+                p += 1;
+            } else {
+                n += 1;
             }
         }
     }
     (n >= p).then_some(m)
 }
 
-/// The empty instrument (and pitch program) and the empty pattern the player starts from.
-fn add_nulls(b: &mut Vec<u8>) -> (usize, usize) {
-    let ni = b.len();
-    b.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0xE1]);
-    let np = b.len();
-    b.extend_from_slice(&[0xFF, 0xFF]);
-    (ni, np)
-}
+/// The empty instrument (and pitch program) the player starts from: it is the player's own data,
+/// not part of the image, and is read at this offset.
+const NULL_AT: usize = 0x7000_0000;
+const NULL_STREAM: [u8; 8] = [1, 0, 0, 0, 0, 0, 0, 0xE1];
+/// Where a table entry that cannot be an offset into the image points: memory that reads as zero.
+const OUTSIDE: usize = 0x6000_0000;
 
 fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     if h.len() < 0x20 {
@@ -331,20 +332,14 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         return None;
     }
     let lsmp = &h[0x1C..0x20] == b"LSMP";
-    let dig_ok = !lsmp && matches!(be16(h, o_dig), 0x80 | 0x100);
     let new_type = prefix.jump;
-    let es = if new_type { 2 } else { 4 };
+    // the image's tables hold 16-bit offsets, whatever the command set
+    let es = 2;
     // the image: header, three tables, the trimmed blocks and compact patterns, then the lists
     let mut b = vec![0u8; 0x40];
     b[..4].copy_from_slice(b"COSO");
     b[0x20..0x40].copy_from_slice(&h[..0x20]);
-    let put_off = |b: &mut Vec<u8>, at: usize, v: usize| {
-        if new_type {
-            b[at..at + 2].copy_from_slice(&(v as u16).to_be_bytes());
-        } else {
-            b[at..at + 4].copy_from_slice(&(v as u32).to_be_bytes());
-        }
-    };
+    let put_off = |b: &mut Vec<u8>, at: usize, v: usize| b[at..at + 2].copy_from_slice(&(v as u16).to_be_bytes());
     // each table is followed by the data its entries point at
     let t_fs = b.len();
     b.resize(t_fs + es * nfs, 0);
@@ -388,17 +383,17 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     b.extend_from_slice(&h[o_sub..o_ext]);
     let t_ext = b.len();
     b.extend_from_slice(&h[o_ext..o_dig]);
-    let t_dig = b.len();
-    b.extend_from_slice(&h[o_dig..]);
-    for (o, v) in [(4, t_fs), (8, t_inst), (12, t_pat), (0x10, t_pos), (0x14, t_sub), (0x18, t_ext), (0x1C, t_dig)] {
+    // the image ends here: the sample table stays in the module (the seventh offset is the
+    // distance to it, which depends on where the image is in memory: `new` fills it in); without
+    // a sample table the seventh offset is the image's end
+    let t_end = b.len();
+    for (o, v) in [(4, t_fs), (8, t_inst), (12, t_pat), (0x10, t_pos), (0x14, t_sub), (0x18, t_ext), (0x1C, t_end)] {
         b[o..o + 4].copy_from_slice(&(v as u32).to_be_bytes());
     }
-    let (null_inst, _) = add_nulls(&mut b);
     Some(Module {
         b,
-        null_inst,
         in_file: None,
-        short: new_type,
+        short: true,
         mmme,
         new_type,
         n_fs: nfs,
@@ -409,7 +404,8 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
         t_pos,
         t_sub,
         n_sub: w16,
-        dig_file: dig_ok.then_some(tag + o_dig),
+        dig_file: (!lsmp).then_some(tag + o_dig),
+        raw_dig: matches!(be16(h, o_dig), 0x80 | 0x100).then_some(tag + o_dig),
         lsmp,
         prefix,
     })
@@ -430,10 +426,12 @@ fn compact_pattern(h: &[u8], start: usize, size: usize, out: &mut Vec<u8>) {
             }
         }
         Some(&r0) => {
+            // the leading wait sets the speed as well
+            let mut prev = None;
             if r0 > 0 {
                 out.extend_from_slice(&[0xFD, (r0 - 1) as u8]);
+                prev = Some((r0 - 1) as u8);
             }
-            let mut prev = None;
             for (k, &i) in real.iter().enumerate() {
                 let next = real.get(k + 1).copied().unwrap_or(end);
                 let d = (next - i - 1) as u8;
@@ -446,7 +444,9 @@ fn compact_pattern(h: &[u8], start: usize, size: usize, out: &mut Vec<u8>) {
                 out.push(note(i));
                 out.push(flags);
                 if flags & 0xE0 != 0 {
-                    out.push(byte(start as isize + 2 * i as isize - 1));
+                    // the byte before the row; the first row's is the pattern's last byte
+                    let before = if i == 0 { size - 1 } else { 2 * i - 1 };
+                    out.push(byte((start + before) as isize));
                 }
             }
         }
@@ -462,23 +462,26 @@ impl Module {
     fn g(&self, o: i64) -> u8 {
         if o < 0 {
             0
+        } else if o >= NULL_AT as i64 {
+            NULL_STREAM.get((o - NULL_AT as i64) as usize).copied().unwrap_or(0)
         } else {
             self.b.get(o as usize).copied().unwrap_or(0)
         }
     }
 
-    /// The offset a table entry points at, None if it is outside the image.
-    fn entry(&self, tab: usize, i: usize) -> Option<usize> {
+    /// The offset a table entry points at (`OUTSIDE` when it is not in the image: the memory
+    /// around the original's image is zero).
+    fn entry(&self, tab: usize, i: usize) -> usize {
         let o = if self.short {
-            let v = be16(&self.b, tab + 2 * i) as i16 as i64;
+            let v = be16(&self.b, tab + 2 * i) as i16;
             if v < 0 {
-                return None;
+                return OUTSIDE;
             }
             v as usize
         } else {
             be32(&self.b, tab + 4 * i) as usize
         };
-        (o < self.b.len()).then_some(o)
+        if o < self.b.len() { o } else { OUTSIDE }
     }
 }
 
@@ -520,6 +523,8 @@ struct Voice {
     pitch_end: u8,
     sid_src: u8,
     sid_par: u8,
+    /// The period as computed, before the pitch-end byte silences it: what the SID voice takes.
+    sid_per: u16,
     // the YM image of the voice
     ym_per: u16,
     ym_vol: u8,
@@ -576,7 +581,12 @@ impl JochenHippelSt {
         let e = self.m.t_sub + 6 * (n as usize).saturating_sub(1);
         let (mut start, mut end, mut speed) = (be16(&self.m.b, e), be16(&self.m.b, e + 2), be16(&self.m.b, e + 4));
         if speed == 0 {
+            // the default speed is written into the table (a voice whose positions run past the
+            // list reads it as a transpose)
             speed = 4;
+            if e + 6 <= self.m.b.len() {
+                self.m.b[e + 4..e + 6].copy_from_slice(&[0, 4]);
+            }
         }
         if (end as i16).wrapping_sub(start as i16) < 0 {
             // the table entry is patched to an empty song, in the module's memory
@@ -594,8 +604,8 @@ impl JochenHippelSt {
         self.songend = false;
         for i in 0..3 {
             let mut v = Voice::default();
-            v.inst = self.m.null_inst;
-            v.fs = self.m.null_inst;
+            v.inst = NULL_AT;
+            v.fs = NULL_AT;
             // the empty instrument's volume program is read from the stream's first byte
             v.vs_idx = -5;
             v.vs_wait = 1;
@@ -630,8 +640,7 @@ impl JochenHippelSt {
     }
 
     fn pattern(&self, n: usize) -> usize {
-        // a pattern number whose entry points outside the image reads the memory past it (zeros)
-        self.m.entry(self.m.t_pat, n).unwrap_or(self.m.b.len() + 64)
+        self.m.entry(self.m.t_pat, n)
     }
 
     // -------------------------------------------------------------- one tick's music
@@ -647,7 +656,12 @@ impl JochenHippelSt {
     fn voice(&mut self, i: usize) {
         self.v[i].noise = 0;
         self.pitch_program(i);
-        self.volume_program(i);
+        if let Some(c) = self.volume_program(i) {
+            self.v[i].ym_per = c as u16;
+            self.v[i].sid_per = c as u16;
+            self.v[i].ym_vol = 0;
+            return;
+        }
         self.period_mixer(i);
     }
 
@@ -657,7 +671,7 @@ impl JochenHippelSt {
             return;
         }
         let new = self.m.new_type;
-        let has_dig = self.dig.is_some();
+        let has_dig = self.dig.as_ref().is_some_and(|d| d.valid);
         for _ in 0..4096 {
             let v = self.v[i];
             let at = v.fs as i64 + v.fs_idx as i64;
@@ -683,6 +697,7 @@ impl JochenHippelSt {
                 }
                 0xE2 => {
                     v.vs_idx = 0;
+                    v.vs_wait = 1;
                     v.fs_idx += 1;
                 }
                 0xE3 => {
@@ -756,9 +771,6 @@ impl JochenHippelSt {
     /// The digital sample command: sample `n`, with a note argument for the converted kind.
     fn digital_command(&mut self, i: usize, n: usize, note_arg: u8) {
         let Some(dig) = &self.dig else { return };
-        if n >= dig.count() {
-            return;
-        }
         let start = dig.start(n) as u32;
         let mark = dig.mark(n);
         let addr = dig.base.wrapping_add(start);
@@ -768,9 +780,11 @@ impl JochenHippelSt {
             end => (((end as u32).wrapping_sub(start) / 2) as u16, self.silent, 1),
         };
         let mut per = self.period;
-        if self.note_args && note_arg & 0x80 == 0 {
+        if self.note_args {
             let v = &self.v[i];
-            let idx = (note_arg.wrapping_add(v.row_note).wrapping_add(v.ta) & 0x7F) as usize;
+            // a note with bit 7 set is absolute, as in the pitch program
+            let n = if note_arg & 0x80 == 0 { note_arg.wrapping_add(v.row_note).wrapping_add(v.ta) } else { note_arg };
+            let idx = (n & 0x7F) as usize;
             if idx < 96 {
                 let t = digital_note(idx);
                 let q = (self.period as u32 * 0x2000) / (t / 8).max(1);
@@ -780,16 +794,19 @@ impl JochenHippelSt {
         self.d = Digital { state: 1, start: addr, len1, lp, len2, per, vol: Some(64) };
     }
 
-    fn volume_program(&mut self, i: usize) {
+    /// Runs the volume program. Returns the command byte when the program holds one of the pitch
+    /// program's commands that the volume program has no use for ($E2 to $E7): the original then
+    /// leaves the voice's update, with that byte as the voice's period and a zero volume.
+    fn volume_program(&mut self, i: usize) -> Option<u8> {
         let new = self.m.new_type;
         let v = &mut self.v[i];
         if v.vs_hold != 0 {
             v.vs_hold -= 1;
-            return;
+            return None;
         }
         v.vs_wait = v.vs_wait.wrapping_sub(1);
         if v.vs_wait != 0 {
-            return;
+            return None;
         }
         v.vs_wait = v.vs_speed;
         for _ in 0..4096 {
@@ -799,7 +816,7 @@ impl JochenHippelSt {
                 0..=0xDF => {
                     v.volume = c;
                     v.vs_idx += 1;
-                    return;
+                    return None;
                 }
                 0xE0 => {
                     let n = self.m.g(at + 1);
@@ -810,19 +827,27 @@ impl JochenHippelSt {
                     if new {
                         v.volume = self.m.g(at - 1);
                     }
-                    return;
+                    return None;
                 }
                 0xE8 => {
                     v.vs_hold = self.m.g(at + 1);
                     v.vs_idx += 2;
                     if v.vs_hold != 0 {
                         v.vs_hold -= 1;
-                        return;
+                        return None;
                     }
+                    // a zero hold goes back to the speed counter (just reloaded)
+                    v.vs_wait = v.vs_wait.wrapping_sub(1);
+                    if v.vs_wait != 0 {
+                        return None;
+                    }
+                    v.vs_wait = v.vs_speed;
                 }
-                _ => return,
+                0xE2..=0xE7 => return Some(c),
+                _ => return None,
             }
         }
+        None
     }
 
     fn period_mixer(&mut self, i: usize) {
@@ -891,7 +916,7 @@ impl JochenHippelSt {
                 }
             } else {
                 pos += vm.vib_speed as i32;
-                if pos >= depth {
+                if pos > depth {
                     vm.vib_flag &= !0x20;
                     pos = depth;
                 }
@@ -908,10 +933,11 @@ impl JochenHippelSt {
             } else {
                 vm.porta = vm.porta.wrapping_add(sp) & 0xFFFF;
                 let acc = vm.porta as i16 as i32;
-                per = p0 as i32 + (per - p0 as i32) - ((acc * p0 as i32) >> 10);
+                per -= (acc * per) >> 10;
             }
         }
         let mut per = per as u16;
+        vm.sid_per = per;
         if mmme && vm.pitch_end & 2 != 0 {
             per = 0;
         }
@@ -928,9 +954,10 @@ impl JochenHippelSt {
         }
         let src = match mode {
             0 => None,
-            2 => Some(self.v[1].ym_per),
-            3 => Some(self.v[2].ym_per),
+            2 => Some(self.v[1].sid_per),
+            3 => Some(self.v[2].sid_per),
             4 => Some(0),
+            // voice 0's own is the period it plays (zero when its pitch-end byte silences it)
             _ => Some(self.v[0].ym_per),
         };
         let Some(p) = src else {
@@ -1040,14 +1067,14 @@ impl JochenHippelSt {
         if n >= self.m.n_inst {
             n = 0;
         }
-        let inst = self.m.entry(self.m.t_inst, n).unwrap_or(self.m.null_inst);
+        let inst = self.m.entry(self.m.t_inst, n);
         let g = |o: usize| self.m.g((inst + o) as i64);
         let (spd, pnum, vs, vd, vdl) = (g(0), g(1), g(2), g(3), g(4));
         let mut prog = if flags & 0x40 != 0 { self.v[i].row_param as usize } else { pnum as usize };
         if prog >= self.m.n_fs {
             prog = 0;
         }
-        let fs = self.m.entry(self.m.t_fs, prog).unwrap_or(self.m.null_inst);
+        let fs = self.m.entry(self.m.t_fs, prog);
         let v = &mut self.v[i];
         v.inst = inst;
         v.vs_speed = spd;
@@ -1203,7 +1230,9 @@ impl Replayer for JochenHippelSt {
 fn build_sounds(m: &mut Machine) -> Option<(u32, u32, u32, u32)> {
     // the noise buffer, the pulse, one word that carries the level byte of the SID trick, and
     // the silent word, in the order the original keeps them (one block of 1032 bytes)
+    let top = std::mem::replace(&mut m.alloc_top, true);
     let base = m.alloc(1024 + 16);
+    m.alloc_top = top;
     if base == 0 {
         return None;
     }
@@ -1214,21 +1243,23 @@ fn build_sounds(m: &mut Machine) -> Option<(u32, u32, u32, u32)> {
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
-    let md = parse(d)?;
-    let tag = find_tag(d)?;
+    let mut md = parse(d)?;
     let (noise, pulse, level_cell, silent) = build_sounds(m)?;
-    // where the image is in guest memory
-    let _guest = match md.in_file {
-        Some(o) => base + (tag + o) as u32,
-        None => {
-            let a = m.alloc(md.b.len() as u32);
-            if a == 0 {
-                return None;
-            }
-            m.bus.write_bytes(a, &md.b);
-            a
+    // a raw module's image is in guest memory as the original's is: allocated after the module,
+    // its seventh offset the distance from the image to the module's sample table
+    let mut image_end = 0;
+    if md.in_file.is_none() {
+        let a = m.alloc(md.b.len() as u32);
+        if a == 0 {
+            return None;
         }
-    };
+        image_end = a + md.b.len() as u32;
+        if let Some(o) = md.raw_dig {
+            // (a pitch program sent to the image's start plays these bytes as notes)
+            md.b[0x1C..0x20].copy_from_slice(&(base + o as u32).wrapping_sub(a).to_be_bytes());
+        }
+        m.bus.write_bytes(a, &md.b);
+    }
     let dig = if md.lsmp {
         let file = m.bus.read_cstr(m.deli.file_buf);
         let names = companion(&file);
@@ -1238,9 +1269,17 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             return None;
         }
         m.bus.write_bytes(a, &smp);
-        matches!(be16(&smp, 0), 0x80 | 0x100).then(|| Dig { data: smp, base: a })
+        matches!(be16(&smp, 0), 0x80 | 0x100).then(|| Dig { data: smp, base: a, valid: true })
     } else {
-        md.dig_file.filter(|&o| o < d.len()).map(|o| Dig { data: d[o..].to_vec(), base: base + o as u32 })
+        // the table's place: in the module, or (a raw module without one) where its image ends
+        md.dig_file.map(|o| {
+            let data = d.get(o..).unwrap_or(&[]).to_vec();
+            let valid = matches!(be16(&data, 0), 0x80 | 0x100);
+            match (md.in_file, valid) {
+                (None, false) => Dig { data: Vec::new(), base: image_end, valid },
+                _ => Dig { data, base: base + o as u32, valid },
+            }
+        })
     };
     let mut period = 0x248u16;
     if let Some(t) = md.prefix.timer.filter(|&t| t != 0) {
@@ -1253,11 +1292,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             period = (q as u16).wrapping_add(1);
         }
     }
-    let note_args = md.prefix.kind == 1 && dig.is_some();
-    if note_args {
+    let has_dig = dig.as_ref().is_some_and(|d| d.valid);
+    let note_args = md.prefix.kind != 0 && has_dig;
+    if md.prefix.kind == 2 && has_dig {
         if let Some(dg) = &dig {
             // the nibble-coded sample area becomes signed bytes in place, when its first long has
-            // no bit set in any high nibble
+            // no bit set in any high nibble (only with the first of the two prefix patterns alone)
             let end = (0..dg.count()).map(|n| dg.start(n) as usize).last().unwrap_or(0);
             let first = dg.start(0) as usize;
             if end > first && end <= dg.data.len() && be32(&dg.data, first) & 0xF0F0_F0F0 == 0 {

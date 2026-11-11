@@ -121,7 +121,7 @@ fn set_checks() {
 fn first_tick_clock_of_the_example() {
     // spec 5.5: a 202-byte module without padding, `QPA.basic` in a 90-character directory
     let len = [400, 300, 0, 120, 60, 51, 50, 30, 200, 100, 80, 90, 1000, 70, 64, 128];
-    let sum = start_clocks(&[], 0, &set_with(len), 49, 90, "QPA.basic");
+    let sum = start_clocks(&[], 0, &set_with(len), 49, 90, "QPA.basic", false);
     assert_eq!(100 + sum + TICK, 75_381);
 }
 

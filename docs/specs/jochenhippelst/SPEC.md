@@ -564,10 +564,11 @@ data; 330 modules):
   vibrato going up.
 * 6.2: the volume program's two type-dependent commands (`E0` with the index masked to 6 bits in the
   old set, `E1` storing the previous byte as the volume in the new) follow the prefix's word on the
-  type when the module has a prefix, and the table width (16-bit: new) when it has none. The port
-  keeps the type of section 2 for the pitch program's commands; the cycle counts suggest the
-  original uses the same word there too for a COSO file behind a prefix, which no module compared
-  shows in its values.
+  type when the module has a prefix, and the table width (16-bit: new) when it has none.
+* 6.1, 6.3: the pitch program's commands follow the same word. A COSO file with 16-bit tables
+  behind a prefix without the indirect jump has the old set: `$EA` is its sample command, `$E7`
+  clears the digital voice, bytes from `$EB` on are notes. Seen in the values of four real modules
+  (the `$EA` sample starts of the Ghost Battle tunes, from 10 s on; 30 s compared).
 * Timing: the original's start-up takes a time that depends on the module (the check looks at the
   words up to the address load and at every pitch program of a TFMX module; the initialisation
   looks through the prefix, at the sample table, and converts a raw module block by block and row by

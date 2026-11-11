@@ -578,3 +578,6 @@ data; 330 modules):
   68000 cycle of the tick, the rest of that tick (the other voices' sequencer steps and all of its
   Paula writes and beam reads) is one cycle early. Measured on 193 song ends: the callback is 2214
   cycles before the end of the music code, less the cost of the paths taken after it.
+* 6.6 (timing): the SID section's range test is two tests, the first a signed one: a source period
+  of `$8000` or more leaves where one of `$10` or less does, one above `$EEE` (and below `$8000`)
+  17 cycles later. The values are the same either way.

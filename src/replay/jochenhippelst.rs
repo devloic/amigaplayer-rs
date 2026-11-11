@@ -171,9 +171,10 @@ struct Prefix {
 struct Module {
     /// The image. What is read outside it is zero, as the memory around the original's image is.
     b: Vec<u8>,
-    /// Offset of the image in the file, for a COSO image (its guest address is the module's plus
-    /// this); None for an image built from a raw module.
+    /// Some for a COSO image in the file; None for an image built from a raw module.
     in_file: Option<usize>,
+    /// The offset of the module's tag in the file (the length of the prefix code).
+    tag: usize,
     short: bool,
     mmme: bool,
     /// Which row of `COST` the module's ticks take: the table width for a COSO file, the
@@ -303,6 +304,7 @@ fn parse(d: &[u8]) -> Option<Module> {
         t if &t == b"TFMX" || &t == b"MMME" => parse_raw(h, tag, prefix),
         _ => None,
     }?;
+    m.tag = tag;
     m.ext_new = if tag > 0 { prefix.jump } else { m.in_file.is_some() && m.short };
     // the original's check: the look for the tag, and for a TFMX module the first byte of
     // every pitch program
@@ -348,6 +350,7 @@ fn parse_coso(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     let m = Module {
         b: h.to_vec(),
         in_file: Some(0),
+        tag,
         short,
         mmme,
         new_type: short,
@@ -521,6 +524,7 @@ fn parse_raw(h: &[u8], tag: usize, prefix: Prefix) -> Option<Module> {
     Some(Module {
         b,
         in_file: None,
+        tag,
         short: true,
         mmme,
         new_type,
@@ -738,6 +742,8 @@ pub struct JochenHippelSt {
     /// What to add to the clock to have the reference's beam position.
     beam: u64,
     m: Module,
+    /// Where the image is in guest memory.
+    image_at: u32,
     dig: Option<Dig>,
     // guest memory the player allocated
     noise: u32,
@@ -769,7 +775,25 @@ pub struct JochenHippelSt {
 }
 
 impl JochenHippelSt {
-    fn init_sound(&mut self, n: u16) {
+    /// Writes into the image, as the original does into the module's memory: the port's copy,
+    /// guest memory, and the sample table when the place is in it (a subsong number past the
+    /// subsong table reads its entry from what follows, and the set-up writes there).
+    fn patch(&mut self, bus: &mut crate::bus::Bus, at: usize, bytes: &[u8]) {
+        if at + bytes.len() > self.m.b.len() {
+            return;
+        }
+        self.m.b[at..at + bytes.len()].copy_from_slice(bytes);
+        bus.write_bytes(self.image_at + at as u32, bytes);
+        if let (Some(dig), Some(table), true) = (&mut self.dig, self.m.dig_file, self.m.in_file.is_some()) {
+            for (i, &x) in bytes.iter().enumerate() {
+                if let Some(b) = (self.m.tag + at + i).checked_sub(table).and_then(|k| dig.data.get_mut(k)) {
+                    *b = x;
+                }
+            }
+        }
+    }
+
+    fn init_sound(&mut self, n: u16, bus: &mut crate::bus::Bus) {
         self.sub = n;
         let e = self.m.t_sub + 6 * (n as usize).saturating_sub(1);
         let (mut start, mut end, mut speed) = (be16(&self.m.b, e), be16(&self.m.b, e + 2), be16(&self.m.b, e + 4));
@@ -777,17 +801,13 @@ impl JochenHippelSt {
             // the default speed is written into the table (a voice whose positions run past the
             // list reads it as a transpose)
             speed = 4;
-            if e + 6 <= self.m.b.len() {
-                self.m.b[e + 4..e + 6].copy_from_slice(&[0, 4]);
-            }
+            self.patch(bus, e + 4, &[0, 4]);
         }
         if (end as i16).wrapping_sub(start as i16) < 0 {
             // the table entry is patched to an empty song, in the module's memory
             start = 0;
             end = 0;
-            if e + 4 <= self.m.b.len() {
-                self.m.b[e..e + 4].fill(0);
-            }
+            self.patch(bus, e, &[0; 4]);
         }
         self.sub_start = start;
         self.sub_end = end;
@@ -1662,8 +1682,35 @@ impl Replayer for JochenHippelSt {
         (1, self.m.n_sub.clamp(1, 0xFFFF) as u16, self.sub)
     }
 
-    fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
-        self.init_sound(n.max(1));
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        let n = n.max(1);
+        // the original's end of the sound (all DMA off, the four volumes zero; 157 colour
+        // clocks), its two calls for the volume and the balance (118 each) and the set-up of
+        // the subsong, each ending on a whole clock. The timer is not started again: a change
+        // while the song plays leaves the ticks where they were, and one before the first tick
+        // moves the song's start by this time
+        let t = hw.bus.clock;
+        hw.bus.clock = t + 123;
+        hw.dmacon(0x000F);
+        for (ch, at) in [(0, 131), (1, 137), (2, 143), (3, 149)] {
+            hw.bus.clock = t + at;
+            hw.vol(ch, 0);
+        }
+        let setup = setup_cycles(&self.m, n);
+        hw.bus.clock = t + 157 + 118 + 118 + setup / 2;
+        if self.first_tick_pending {
+            // (before the first tick: the reference's song start moves along)
+            self.ref_start += hw.bus.clock - t;
+        }
+        // the set-up leaves the voices' vibrato flags as they are (a voice that was going down
+        // when the song was changed starts the new one going down)
+        let flags = [self.v[0].vib_flag, self.v[1].vib_flag, self.v[2].vib_flag];
+        self.init_sound(n, hw.bus);
+        for (v, f) in self.v.iter_mut().zip(flags) {
+            v.vib_flag = f;
+        }
+        // no channel counts as running any more: the next note starts do not wait for them
+        self.running = [false; 4];
     }
 
     fn tick(&mut self, hw: &mut Hw) {
@@ -1753,15 +1800,23 @@ fn reference_start(m: &Module, table: Option<u16>, samples: usize, converted: Op
         init += 42 + 58 * bytes as u64 + 23 * high as u64;
     }
     let init_clocks = 145_479 + before / 2 + (init - 290_975 - before) / 2 + 8;
-    let e = m.t_sub;
+    let setup = setup_cycles(m, 1);
+    // the host's start, the check, four short calls and the two timer set-ups between
+    100 + m.check_cycles / 2 + 20 + init_clocks + 12 + 18 + 118 + 118 + setup / 2
+}
+
+/// The 68000 cycles of the original's set-up of subsong `n`, from the subsong table as it is
+/// before the set-up (which writes a default speed into it).
+fn setup_cycles(m: &Module, n: u16) -> u64 {
+    let e = m.t_sub + 6 * (n as usize).saturating_sub(1);
     let (mut start, end, speed) = (be16(&m.b, e), be16(&m.b, e + 2), be16(&m.b, e + 4));
-    if (end as i16).wrapping_sub(start as i16) < 0 {
+    // an end before the start: the entry is made an empty song
+    let empty = (end as i16).wrapping_sub(start as i16) < 0;
+    if empty {
         start = 0;
     }
     let volumes = (0..3).filter(|i| m.g((m.t_pos + start as usize * 12 + i * 4 + 3) as i64) >> 4 == 0xF).count() as u64;
-    let setup = 4169 - 54 * m.short as u64 + 18 * (speed == 0) as u64 + 16 * volumes;
-    // the host's start, the check, four short calls and the two timer set-ups between
-    100 + m.check_cycles / 2 + 20 + init_clocks + 12 + 18 + 118 + 118 + setup / 2
+    4169 - 54 * m.short as u64 + 18 * (speed == 0) as u64 + 30 * empty as u64 + 16 * volumes
 }
 
 fn build_sounds(m: &mut Machine) -> Option<(u32, u32, u32, u32)> {
@@ -1785,11 +1840,13 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // a raw module's image is in guest memory as the original's is: allocated after the module,
     // its seventh offset the distance from the image to the module's sample table
     let mut image_end = 0;
+    let mut image_at = base + md.tag as u32;
     if md.in_file.is_none() {
         let a = m.alloc(md.b.len() as u32);
         if a == 0 {
             return None;
         }
+        image_at = a;
         image_end = a + md.b.len() as u32;
         if let Some(o) = md.raw_dig {
             // (a pitch program sent to the image's start plays these bytes as notes)
@@ -1853,6 +1910,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let table = md.dig_file.filter(|&o| o < d.len() && !md.lsmp).map(|o| be16(d, o));
     let ref_start = reference_start(&md, table, dig.as_ref().filter(|d| d.valid).map_or(0, |d| d.count()), converted);
     let mut p = JochenHippelSt {
+        image_at,
         m: md,
         dig,
         noise,
@@ -1884,7 +1942,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         cy: 0,
         beam: 0,
     };
-    p.init_sound(1);
+    p.init_sound(1, &mut m.bus);
     Some(Box::new(p))
 }
 

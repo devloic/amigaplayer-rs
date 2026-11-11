@@ -198,3 +198,22 @@ fn a_module_that_ends_past_the_file_is_refused() {
     assert!(detect(&t));
     assert!(!detect(&t[..t.len() - 1]));
 }
+
+#[test]
+fn a_change_of_subsong_ends_the_sound_as_the_original_does() {
+    let mut e = Engine::new(48000.0);
+    e.open_replayers = true;
+    e.play_data(Path::new("test.hst"), small()).unwrap();
+    let mut buf = vec![0f32; 2 * 960];
+    for _ in 0..3 {
+        e.render(&mut buf);
+    }
+    e.m.bus.write_log = Some(Vec::new());
+    e.change_subsong(0).unwrap();
+    let w: Vec<_> = e.m.bus.write_log.clone().unwrap().into_iter().filter(|x| (0xDFF000..0xDFF200).contains(&x.0)).collect();
+    // all DMA off, then the four volumes zero, 8 and three times 6 colour clocks apart
+    let regs: Vec<_> = w.iter().map(|x| (x.0 & 0xFFF, x.1)).collect();
+    assert_eq!(regs, [(0x096, 0x000F), (0x0A8, 0), (0x0B8, 0), (0x0C8, 0), (0x0D8, 0)]);
+    let gaps: Vec<_> = w.windows(2).map(|p| p[1].2 - p[0].2).collect();
+    assert_eq!(gaps, [8, 6, 6, 6]);
+}

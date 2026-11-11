@@ -162,7 +162,8 @@ pub struct ProTracker {
     dmacon_temp: u16,
     visited: HashSet<(u8, u8)>,
     pub songend: bool,
-    /// The LED filter (E0x): on, as the Amiga starts and ProTracker leaves it.
+    /// The LED filter (E0x): off at the start, as the engine's 68k hosting and UADE leave it for
+    /// a player that never touches it (an Amiga itself powers on with the filter on).
     pub filter: bool,
 }
 
@@ -298,7 +299,7 @@ impl ProTracker {
             dmacon_temp: 0,
             visited: HashSet::new(),
             songend: false,
-            filter: true,
+            filter: false,
         };
         pt.restart_song();
         Some(pt)
@@ -1085,11 +1086,11 @@ mod tests {
     }
 
     #[test]
-    fn led_filter_starts_on() {
-        let d = module(100, 0, 1, 0, &[(0, 0, note(0, 0, 0xE01))]);
+    fn led_filter_starts_off() {
+        let d = module(100, 0, 1, 0, &[(0, 0, note(0, 0, 0xE00))]);
         let mut pt = ProTracker::new(&d, BASE).unwrap();
-        assert!(pt.filter);
-        run(&mut pt, &mut bus(), 6);
         assert!(!pt.filter);
+        run(&mut pt, &mut bus(), 6);
+        assert!(pt.filter);
     }
 }

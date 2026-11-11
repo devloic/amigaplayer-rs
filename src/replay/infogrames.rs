@@ -417,7 +417,10 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     let file = m.bus.read_cstr(m.deli.file_buf);
-    let bank = bank_names(&file).iter().find_map(|n| crate::deli::read_companion(m, n).1.ok())?;
+    let (bank, bank_try) = bank_names(&file)
+        .iter()
+        .enumerate()
+        .find_map(|(i, n)| crate::deli::read_companion(m, n).1.ok().map(|b| (b, i as u64)))?;
     let addr = m.alloc(bank.len() as u32 + 16);
     if addr == 0 {
         return None;
@@ -434,10 +437,19 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if let Some(i) = hit {
         init -= (11 - i as u64) * 333 / 11;
     }
-    // measured: the reference's run origin lies 681.5 cc plus 8.5 cc per character of the song's
-    // full path before the player's start-up (name and directory count alike)
+    // measured (half cycles, floor to a colour clock): the reference's run origin lies 644.5 cc
+    // plus 8.5 cc per character of the song's full path (directory and name alike) before the
+    // player's start-up; 12.5 cc more for every lower-case letter of a ".dum" extension (its
+    // case-folding), and 81 cc more when the first bank name (NAME.ins) was not found and the
+    // second (the name less its last character) was
     let path_len = m.bus.read_cstr(m.deli.dir_buf).len() + file.len();
-    let host = (1363 + 17 * path_len as u64).div_ceil(2);
+    let ext_lower = match file.len().checked_sub(4) {
+        Some(n) if file.is_char_boundary(n) && file[n..].eq_ignore_ascii_case(".dum") => {
+            file[n + 1..].bytes().filter(u8::is_ascii_lowercase).count() as u64
+        }
+        _ => 0,
+    };
+    let host = (1289 + 17 * path_len as u64 + 25 * ext_lower + 162 * bank_try) / 2;
     let t = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
     m.bus.clock = t + host + init;
     let speed = byte(d, h + 1);

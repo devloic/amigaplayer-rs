@@ -312,6 +312,8 @@ struct Song {
     samp: Vec<Option<Smp>>,
     subs: Vec<SubSong>,
     title: String,
+    /// A 5-8 channel song (the song flag), which the OctaMED Eagleplayer plays on the amplifier.
+    eight: bool,
 }
 
 fn kind_of(d: &[u8]) -> Option<Kind> {
@@ -990,9 +992,15 @@ fn load(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Song> {
             let old = ss.tempo.tempo;
             ss.tempo.tempo = if old >= 10 { 99 } else { BPM_VALS[(old.max(1) - 1) as usize] as u16 };
         }
+        // the 5-8 channel player starts every note at full volume: the instrument's own
+        // volume is not used (measured: a module's instrument volumes changed to 20 and 50
+        // play at 64; a note without command 0C after one with it plays at 64 again)
+        for ci in instr.iter_mut() {
+            ci.init_vol = 128;
+        }
     }
     let _ = kind;
-    Some(Song { instr, samp, subs, title })
+    Some(Song { instr, samp, subs, title, eight: eight_conv })
 }
 
 /// NostalgicPlayer's ScanSongConvertToMixMode: notes up two octaves for the
@@ -1183,6 +1191,9 @@ pub struct OctaMed {
     song: Arc<Song>,
     sub: usize,
     freqs: Vec<[u16; 72]>,
+    /// A 5-8 channel song: the period tables of the 4-channel player (`super::periods`), which
+    /// its notes are played from (empty otherwise).
+    periods: Vec<u16>,
     silence: u32,
     nvoices: usize,
     td: Vec<Track>,
@@ -1224,7 +1235,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
     let echoes = song.subs.iter().any(|s| s.echo.is_some());
     let eb = (nvoices + 3) & !3;
     let total = if echoes && eb + ((nvoices + 1) & !1) <= MAX_VOICES { eb + ((nvoices + 1) & !1) } else { nvoices };
-    if silence == 0 || !start_amplifier(m, total) {
+    // a 5-8 channel song's amplifier has a voice for every track of its widest block, as the
+    // OctaMED Eagleplayer's has (8 voices for a song that splits one channel only)
+    let amp_voices = if song.eight {
+        song.subs.iter().flat_map(|s| s.blocks.iter()).map(|b| b.tracks).max().unwrap_or(0).clamp(total, MAX_VOICES)
+    } else {
+        total
+    };
+    if silence == 0 || !start_amplifier(m, amp_voices) {
         return None;
     }
     // the mix rate: the highest the emulated Paula plays one byte a channel at
@@ -1234,13 +1252,18 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
     // within the 8-bit stage (some of these songs come near it, and the same
     // songs at twice the level, tried first, clipped); the echo's voices, which sound
     // less, are not to make it quieter.
+    // A 5-8 channel song keeps the amplifier's rate for its voices: its original is the OctaMED
+    // Eagleplayer on that amplifier.
     if let Some(a) = m.bus.amp.as_mut() {
-        a.period = MIX_PERIOD;
+        if !song.eight {
+            a.period = MIX_PERIOD;
+        }
         if total > nvoices {
             a.boost = a.boost * total as u32 / nvoices as u32;
         }
     }
     crate::amplifier::restart(&mut m.bus);
+    let eight = song.eight;
     let mut p = OctaMed {
         old: kind == Kind::Old,
         total,
@@ -1249,6 +1272,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
         song: Arc::new(song),
         sub: 0,
         freqs: freq_table(),
+        periods: if eight { super::periods() } else { Vec::new() },
         silence,
         nvoices,
         td: vec![Track::default(); MAX_TRACKS],
@@ -1527,11 +1551,23 @@ impl OctaMed {
             self.mute(hw, t);
             return;
         }
-        let per = Self::per_of(freq);
+        let per = self.table_period(t, freq).unwrap_or_else(|| Self::per_of(freq));
         if self.ch[t].per != per {
             self.ch[t].per = per;
             self.vp(hw, t, Op::Per(per));
         }
+    }
+
+    /// A 5-8 channel song's period for a frequency that is a note of the track's finetune: the
+    /// period table's entry (the Eagleplayer plays G-1 at 570, not at the 571 the frequency gives).
+    fn table_period(&self, t: usize, freq: i32) -> Option<u16> {
+        if self.periods.is_empty() {
+            return None;
+        }
+        let ft = self.td[t].fine_tune.clamp(-8, 7);
+        let n = self.freqs[(ft + 8) as usize].iter().position(|&f| f as i32 == freq)?;
+        let row = if ft >= 0 { ft } else { 16 + ft } as usize;
+        self.periods.get(row * super::TABLE + n).copied().filter(|&p| p != 0)
     }
 
     fn set_vol(&mut self, hw: &mut Hw, t: usize, vol: u32) {

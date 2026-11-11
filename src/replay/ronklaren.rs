@@ -42,19 +42,20 @@
 //!
 //! The writes come at the original's times as the emulator runs it, whose clock
 //! is half the cycles counted since its last call of the host (each patched
-//! write, the DMA wait): the Eagleplayer's start (the time to its first write
-//! fitted to its logs from the module's header size, its subsong range and the
-//! kind of replayer, within 250 colour clocks; the copies of the module,
-//! DTP_SubSongRange, InitSound), the interrupt's cycles to its first voice
-//! (counted on the code), and between writes the costs of the code points the
-//! replayer passes (`At`), fitted to the reference's write log for the older
-//! and newer replayers and for a newer one whose instrument sample the
-//! Eagleplayer patches as two calls. No code or data of the Eagleplayer is
-//! kept: the timer's value and the interrupt routine are found as
-//! NostalgicPlayer finds them (`timer_and_irq`), and the two forms of the
-//! replayer's code whose writes the Eagleplayer patches in another way (an
-//! InitVoice that writes directly, an instrument command split in two) are told
-//! by the replayer's own instructions (`code_forms`).
+//! write, the DMA wait): the Eagleplayer's start (its scan of the loaded module
+//! for the replayer's writes, counted here by doing the same search, `SCAN`;
+//! the copies of the module, DTP_SubSongRange, InitSound), the interrupt's
+//! cycles to its first voice (counted on the code), and between writes the
+//! costs of the code points the replayer passes (`At`), solved from the
+//! reference's write times in half colour clocks for each kind of replayer
+//! (older, older with the second stop command, newer, newer whose instrument
+//! sample the Eagleplayer patches as two calls). No code of the Eagleplayer
+//! is kept, and of its data only what its scan was seen to compare the
+//! modules' words with (`SCAN`): the timer's value and the interrupt routine
+//! are found as NostalgicPlayer finds them (`timer_and_irq`), and the two forms
+//! of the replayer's code whose writes the Eagleplayer patches in another way
+//! (an InitVoice that writes directly, an instrument command split in two) are
+//! told by the replayer's own instructions (`code_forms`).
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -125,8 +126,9 @@ struct Layout {
     timing: Timing,
     init_direct: bool,
     instr_split: bool,
-    /// The Eagleplayer's time from loading the module to starting its timer.
-    init_wait: u64,
+    /// The portamento starts with a `clr.w d0` (4 cycles more).
+    porta_clr: bool,
+    /// The module's size after its header (what the Eagleplayer copies).
     hdr: u32,
     /// DTP_SubSongRange's time (cycles).
     ssr_cycles: u64,
@@ -138,6 +140,8 @@ enum Timing {
     Newer,
     /// The newer replayer with its instrument command's writes split.
     Split,
+    /// The older replayer with the second stop command ($85).
+    Older85,
 }
 
 /// Finds the replayer's parts as NostalgicPlayer and the Eagleplayer find them.
@@ -223,7 +227,8 @@ fn layout(d: &[u8]) -> Option<Layout> {
         timing: Timing::Older,
         init_direct: false,
         instr_split: false,
-        init_wait: 0,
+        // tst.b $37(a0); beq; clr.w d0; move.b $37(a0),d0
+        porta_clr: r.find(0, &[0x4a28, 0x37, ANY, 0x4240, 0x1028, 0x37]).is_some(),
         hdr: r.l(4),
         ssr_cycles,
     };
@@ -249,31 +254,119 @@ fn code_forms(r: Rd) -> (bool, bool) {
 }
 
 impl Layout {
-    /// What the Eagleplayer's patching leaves of the code, and its time to the
-    /// timer's start: InitPlayer (its scan of the code for the replayer's
-    /// writes, the copy of the module), DTP_SubSongRange, InitSound (the copy
-    /// back, the subsong routine). The scan's time is not counted on the code:
-    /// it is about 6.54 million cycles in all of the modules, within 0.1%, and
-    /// the time to the first write is fitted to the Eagleplayer's logs by the
-    /// header's size (the copies, 29 cycles a byte each way, taken as one
-    /// colour clock for 2 cycles), the subsong range's cycles, and a constant
-    /// for each kind of replayer (the median of the corpus' modules: older,
-    /// newer, newer with the instrument command split); it is within 250
-    /// colour clocks of the reference's for all of them.
+    /// What the Eagleplayer's patching leaves of the code: the timing variant (the row of
+    /// `COSTS`) and the writes its scan does not find.
     fn start_up(&mut self, r: Rd) {
         (self.instr_split, self.init_direct) = code_forms(r);
         self.timing = match (self.newer, self.instr_split) {
+            (false, _) if self.stop85 => Timing::Older85,
             (false, _) => Timing::Older,
             (true, false) => Timing::Newer,
             (true, true) => Timing::Split,
         };
-        let base = match self.timing {
-            Timing::Older => 3_275_442,
-            Timing::Newer => 3_278_459,
-            Timing::Split => 3_276_983,
-        };
-        self.init_wait = base + 29 * self.hdr as u64 + self.ssr_cycles / 2;
     }
+
+    /// The Eagleplayer's time to the timer's start, in colour clocks, from the cycles of its
+    /// scan of the loaded module (`scan_cycles`): the scan runs up to a call of the host (an odd
+    /// cycle more makes its count even or odd there), then come the two copies of the module (29
+    /// cycles a byte each), DTP_SubSongRange (a call of its own, whose odd cycle is lost) and a
+    /// rest that is the same for the older replayers and for the newer ones (the 11 modules of
+    /// the corpus: the song start to the half colour clock).
+    fn init_wait(&self, scan: u64) -> u64 {
+        let base = if self.newer { 5506 } else { 5444 };
+        base + scan.div_ceil(2) + 29 * self.hdr as u64 + self.ssr_cycles / 2
+    }
+}
+
+/// In a word list of the scan: a word of the timer's set-up it takes whatever it is (the timer's
+/// high and low byte), a long it takes, and the list's end.
+const E0: u32 = 0x1_0000;
+const E1: u32 = 0x1_0001;
+const E2: u32 = 0x1_0002;
+const END: u32 = 0x2_0000;
+/// A word the scan has put a call or its fill over.
+const PATCHED: u32 = 0x3_0000;
+
+/// The word lists the Eagleplayer's InitPlayer looks for in the loaded module, in its order:
+/// the replayer's timer set-up, interrupt end and register writes. They are not read from the
+/// Eagleplayer: they are the words of the corpus' modules on which the tests of its scan passed
+/// (from the addresses it executed, followed along the module as loaded; 11 modules, no
+/// contradiction). So a list is known as far as some module took it: the second only to its
+/// ninth word, the 23rd not at all (its first word is none of the modules' first 3000), and of
+/// the words the scan goes on comparing after a list's end only the first list's first. What is
+/// not known never matches here.
+#[rustfmt::skip]
+static SCAN: [&[u32]; 25] = [
+    &[0x33fc, 0x4000, 0x00df, 0xf09a, 0x13fc, 0x0000, 0x00bf, 0xde00, 0x13fc, E1, 0x00bf, 0xd400, 0x13fc, E0, 0x00bf, 0xd500, 0x13fc, 0x0081, 0x00bf, 0xdd00, 0x13fc, 0x0011, 0x00bf, 0xde00, 0x23f9, 0x0000, 0x0078, E2, 0x23fc, E2, 0x0000, 0x0078, 0x33fc, 0xc000, 0x00df, 0xf09a, 0x33fc, 0x800f, 0x00df, 0xf096, END, 0x4e75],
+    &[0x33fc, 0x4000, 0x00df, 0xf09a, 0x13fc, 0x0001, 0x00bf, 0xdd00, 0x23f9],
+    &[0x1039, 0x00bf, 0xdd00, 0x33fc, 0x2000, 0x00df, 0xf09c, 0x4cdf, 0x3f1f, 0x4e73, END],
+    &[0x33e8, 0x002e, 0x00df, 0xf096, 0x2869, 0x0000, 0x276c, 0x0000, 0x0000, 0x376c, 0x0004, 0x0004, END],
+    &[0x4228, 0x003a, 0x377c, 0x0001, 0x0004, END],
+    &[0x3140, 0x0024, 0x4a28, 0x003d, 0x6604, 0x3740, 0x0006, END],
+    &[0xd468, 0x0024, 0x4a28, 0x003d, 0x6604, 0x3742, 0x0006, END],
+    &[0x2869, 0x0000, 0x276c, 0x0000, 0x0000, 0x376c, 0x0004, 0x0004, END],
+    &[0x4a28, 0x003d, 0x6608, 0x0243, 0x003f, 0x3743, 0x0008, END],
+    &[0x2569, 0x0000, 0x0000, 0x3569, 0x0004, 0x0004, 0x2168, 0x0008, 0x000c, END],
+    &[0x4a14, 0x6a08, 0x2868, 0x0008, 0x214c, 0x000c, END],
+    &[0x3140, 0x0028, 0x1143, 0x0039, 0x0243, 0x003f, 0x3743, 0x0008, END],
+    &[0x2171, 0x1000, 0x0000, 0x3171, 0x1004, 0x0004, 0x3171, 0x1006, 0x0006, 0x3171, 0x1008, 0x0008, END],
+    &[0x3142, 0x0024, 0x3742, 0x0006, END],
+    &[0x1229, 0x000c, 0xc5c1, 0xd468, 0x0024, 0x3742, 0x0006, END],
+    &[0x214a, 0x0010, 0x3768, 0x0024, 0x0006, END],
+    &[0x2851, 0x2694, 0x376c, 0x0004, 0x0004, END],
+    &[0x303c, 0x8000, 0x8068, 0x002e, 0x33c0, 0x00df, 0xf096, END],
+    &[0x33e8, 0x002e, 0x00df, 0xf096, END],
+    &[0x3140, 0x0024, 0x3740, 0x0006, END],
+    &[0x41f9, 0x00df, 0xf008, 0x4268, 0x00a0, 0x4268, 0x00b0, 0x4268, 0x00c0, 0x4268, 0x00d0, END],
+    &[0x33fc, 0x000f, 0x00df, 0xf096, END],
+    &[],
+    &[0x3142, 0x0024, 0x4a28, 0x003d, 0x663e, 0x3742, 0x0006, 0x6038, END],
+    &[0x4a28, 0x003d, 0x6606, 0x3768, 0x0024, 0x0006, END],
+];
+
+/// The cycles of the Eagleplayer's scan over the module as loaded (`w`: the code hunk's words
+/// from its start, relocated). Each list is tried at the first 3000 words: a word that
+/// compares equal moves on in the list and the module, one that does not starts the list again
+/// at the next word; a list found whole is replaced by a call (three words) and a fill, and the
+/// search goes on behind it without starting the list again. The costs are the cycles of the
+/// paths as the reference's trace counts them per executed address (the sum is the trace's for
+/// all of the corpus' modules).
+fn scan_cycles(mut w: Vec<u32>) -> u64 {
+    let mut cyc = 112;
+    for (p, pat) in SCAN.iter().enumerate() {
+        cyc += 123;
+        let (mut start, mut pos, mut j) = (0, 0, 0);
+        while start < 3000 {
+            let e = pat.get(j).copied().unwrap_or(PATCHED);
+            let ok = if (E0..=E2).contains(&e) {
+                cyc += [143, 109, 117][(e - E0) as usize];
+                pos += [1, 1, 2][(e - E0) as usize];
+                true
+            } else {
+                cyc += 42;
+                let ok = e != PATCHED && w.get(pos) == Some(&e);
+                pos += ok as usize;
+                ok
+            };
+            if !ok {
+                cyc += 45;
+                start += 1;
+                pos = start;
+                j = 0;
+                continue;
+            }
+            cyc += 33;
+            j += 1;
+            if pat.get(j) == Some(&END) {
+                // the patch: with the timer's set-up its values are kept too
+                cyc += 174 + 22 * (pos - start - 3) as u64 + if p == 0 { 124 } else { 0 };
+                w.iter_mut().take(pos).skip(start).for_each(|x| *x = PATCHED);
+                start = pos;
+                j += 1;
+            }
+        }
+    }
+    cyc
 }
 
 /// The timer's value and the interrupt routine, found as NostalgicPlayer finds
@@ -480,30 +573,61 @@ enum At {
     /// The portamento reaching its period going up or down.
     PortaClampUp,
     PortaClampDown,
+    /// The portamento going down.
+    PortaDown,
+    /// A track list starting again (the song end the Eagleplayer reports).
+    ListWrap,
+    /// The replayer's own writes of a length and a volume after `Direct`.
+    DirectLen,
+    DirectVol,
+    /// The portamento's `clr.w d0` in the replayers that have it.
+    PortaClr,
+    /// InitVoice's end after the replayer's own writes.
+    InitVoiceDirect,
+    /// The restore's own writes of a voice's period, sample and volume (the length as
+    /// `DirectLen`).
+    DirectRPer,
+    DirectRLoc,
+    DirectRVol,
+    /// The restore's DMA off of the voices after the first (after the replayer's own writes).
+    WDmaOffR,
+    /// A row that ends the song ($83).
+    End83,
+    /// The interrupt's end, to where a timer interrupt that is already due is taken.
+    TickEnd,
     Count,
 }
 
 const N_AT: usize = At::Count as usize;
 
-/// The costs in cycles, by timing variant (fitted to the reference's write times).
-const COSTS: [[i64; N_AT]; 3] = [
+/// The costs in cycles, by timing variant: solved from the reference's write times in half colour
+/// clocks (a segment runs from a call of the host, where the count starts again at a whole clock,
+/// to the next write). The code points are only determined in sums along the paths taken; a
+/// point no module of a variant passes keeps the value it had (the older's or the newer's).
+const COSTS: [[i64; N_AT]; 4] = [
     // older
     [
-        114, 95, 85, 77, 93, 48, 174, 42, 62, 62, 61, 8, -6, 41, 195, 44, 10, 155, 28, 35, 16, 20, 176, 104, 153, 32,
-        186, 55, 200, 35, 81, 16, 96, -136, 496, 110, 0, 96, 234, 223, 198, 136, 155, 6, -20, 32, 6, -14, 222, 32, 115,
-        117, 128, 32, 55, 11, 4, 14,
+        114, 95, 85, 76, 93, 48, 173, 42, 62, 62, 61, 8, -6, 41, 195, 44, 10, 155, 28, 35, 11, 20, 176, 108,
+        153, 28, 186, 47, 192, 35, 75, 16, 96, -137, 496, 110, 0, 95, 240, 222, 198, 137, 155, 6, -20, 32, 6,
+        -14, 222, 32, 114, 117, 128, 33, 57, 11, 0, 14, -4, 52, 20, 16, 4, 110, 10, 10, 10, 240, 0, 208,
     ],
     // newer
     [
-        123, 101, 84, 76, 107, 48, 174, 42, 72, 72, 71, 8, 1, 48, 196, 44, 12, 166, 29, 35, 70, 26, 176, 124, 176, 28,
-        191, 41, 187, 35, 77, 16, 102, 1837, 528, 110, 0, 102, 254, 222, 198, 153, 166, 10, -20, 32, 5, -14, 222, 36,
-        122, 123, 129, 35, 55, 10, 1, 11,
+        123, 101, 85, 76, 107, 47, 174, 42, 72, 72, 73, 8, 1, 48, 196, 44, 12, 166, 29, 35, 69, 26, 176, 124,
+        176, 28, 195, 38, 183, 32, 73, 16, 99, 1836, 528, 110, 1819, 101, 254, 222, 198, 149, 162, 88, -20, 32,
+        5, -14, 222, 36, 126, 127, 133, 39, 59, 10, 4, 14, 0, 52, 20, 16, 4, -18, 136, 60, 28, 164, 148, 208,
     ],
     // newer, split (the paths the modules did not take from the newer)
     [
-        126, 100, 84, 75, 43, 48, 166, 42, 72, 72, 87, 8, 2, 48, 139, 44, -2, 155, 29, 35, 98, 26, 169, 124, 156, 28,
-        159, 66, 187, 35, 90, 16, 99, 1842, 576, -14, 0, 99, 246, 222, 198, 186, 155, 20, -20, 32, 5, -14, 263, 39,
-        122, 142, 151, 39, 62, 10, 1, 11,
+        126, 100, 85, 76, 43, 47, 166, 42, 72, 72, 87, 8, 2, 49, 139, 44, -2, 155, 29, 35, 97, 26, 170, 96,
+        156, 28, 159, 66, 219, 35, 89, 16, 98, 1841, 576, 110, 0, 99, 246, 222, 198, 185, 155, 20, -20, 32, 5,
+        -14, 262, 39, 141, 142, 151, 40, 63, 10, 32, 14, 28, 52, 20, 16, 4, -14, 10, 10, 10, 246, 0, 208,
+    ],
+    // older, with the second stop command
+    [
+        114, 95, 85, 76, 93, 47, 174, 42, 62, 62, 63, 8, -6, 41, 195, 44, 10, 155, 29, 35, 11, 26, 176, 108,
+        153, 28, 190, 64, 209, 58, 76, 16, 93, -153, 496, 110, 0, 95, 256, 222, 198, 133, 151, 6, -20, 32, 5,
+        -14, 222, 32, 118, 121, 132, 36, 60, 10, 4, 14, 0, 52, 20, 16, 4, 110, 10, 10, 10, 256, 0, 208,
     ],
 ];
 
@@ -529,8 +653,9 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let (_seg, code) = crate::deli::load_seg(m, d).ok()?;
     let len = m.bus.r32(code + 4);
     let saved = (0..len).map(|i| m.bus.r8(code + 0x28 + i)).collect();
+    let scan = scan_cycles((0..3064).map(|i| m.bus.r16(code + 2 * i) as u32).collect());
     let mut hw = Hw { bus: &mut m.bus };
-    hw.wait(l.init_wait);
+    hw.wait(l.init_wait(scan));
     let mut rk = RonKlaren { l, code, saved, sub: 1, songend: false, d0: 0, pend: 0, tail: None };
     rk.init_sound(1, &mut hw);
     Some(Box::new(rk))
@@ -558,6 +683,9 @@ impl Replayer for RonKlaren {
     }
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        // the Eagleplayer's InitSound: the module copied back (29 cycles a byte) and 233 colour
+        // clocks more (measured on the two modules of the corpus with subsongs, both newer)
+        hw.wait(29 * self.l.hdr as u64 / 2 + 233);
         self.init_sound(n, hw);
     }
 
@@ -573,6 +701,13 @@ impl Replayer for RonKlaren {
         } else {
             self.play_older(hw);
         }
+        // the rest of the interrupt: a tick that is due by then starts there
+        if let Some(t) = self.tail.take() {
+            self.at(t);
+        }
+        self.at(At::TickEnd);
+        hw.wait((self.pend.max(0) / 2) as u64);
+        self.pend = 0;
     }
 }
 
@@ -639,7 +774,8 @@ impl RonKlaren {
         }
         self.at(e);
         hw.wait((self.pend.max(0) / 2) as u64);
-        self.pend = 0;
+        // (the replayer's own write is no call of the host: the count goes on)
+        self.pend = if matches!(e, At::Direct | At::DirectLen | At::DirectVol | At::DirectRPer | At::DirectRLoc | At::DirectRVol) { self.pend & 1 } else { 0 };
     }
 
     fn write(&mut self, hw: &mut Hw, e: At, a: u32, v: u16) {
@@ -713,13 +849,13 @@ impl RonKlaren {
             for i in 0..4 {
                 let v = self.a(self.l.voices[i]);
                 let hwb = hw.bus.r32(v + V_HW);
-                self.write(hw, At::WDmaOff, 0xdff096, hw.bus.r16(v + V_DMA));
-                self.write(hw, At::Direct, hwb + 6, hw.bus.r16(v + V_PERIOD));
+                self.write(hw, if i == 0 { At::WDmaOff } else { At::WDmaOffR }, 0xdff096, hw.bus.r16(v + V_DMA));
+                self.write(hw, At::DirectRPer, hwb + 6, hw.bus.r16(v + V_PERIOD));
                 let s = hw.bus.r32(hw.bus.r32(v + V_INSTR) + I_SAMPLE);
-                self.loc(hw, At::Direct, hwb, hw.bus.r32(s));
-                self.write(hw, At::Direct, hwb + 4, hw.bus.r16(s + 4));
+                self.loc(hw, At::DirectRLoc, hwb, hw.bus.r32(s));
+                self.write(hw, At::DirectLen, hwb + 4, hw.bus.r16(s + 4));
                 self.d0 = hw.bus.r8(v + V_VOLUME) as u16;
-                self.write(hw, At::Direct, hwb + 8, self.d0);
+                self.write(hw, At::DirectRVol, hwb + 8, self.d0);
             }
             hw.bus.w16(g + 0xa, 0);
             hw.bus.w16(g + 6, 0);
@@ -773,13 +909,13 @@ impl RonKlaren {
         let hwb = hw.bus.r32(v + V_HW);
         self.at(At::InitVoice);
         let (wloc, wlen, wvol) =
-            if self.l.init_direct { (At::Direct, At::Direct, At::Direct) } else { (At::WLoc, At::WLen, At::WVol) };
+            if self.l.init_direct { (At::Direct, At::DirectLen, At::DirectVol) } else { (At::WLoc, At::WLen, At::WVol) };
         self.loc(hw, wloc, hwb, hw.bus.r32(s));
         self.write(hw, wlen, hwb + 4, hw.bus.r16(s + 4));
         if self.l.init_volume {
             self.write(hw, wvol, hwb + 8, 0);
         }
-        self.at(At::InitVoiceLen);
+        self.at(if self.l.init_direct { At::InitVoiceDirect } else { At::InitVoiceLen });
         let list = hw.bus.r32(v + V_LIST);
         hw.bus.w32(v + V_POS, list);
         hw.bus.w32(v + V_TRACK, hw.bus.r32(list));
@@ -898,6 +1034,9 @@ impl RonKlaren {
         if step != 0 {
             // portamento towards its period
             self.at(At::Porta);
+            if self.l.porta_clr {
+                self.at(At::PortaClr);
+            }
             self.d0 = step as u16;
             let end = hw.bus.r16(v + V_PORTA_END);
             let mut p = hw.bus.r16(v + V_PERIOD);
@@ -909,6 +1048,7 @@ impl RonKlaren {
                     p = end;
                 }
             } else {
+                self.at(At::PortaDown);
                 p = p.wrapping_sub(step as u16);
                 if (end.wrapping_sub(p) as i16) < 0 {
                 } else {
@@ -1086,6 +1226,7 @@ impl RonKlaren {
                 a2 = a2.wrapping_add(2);
             }
             if hw.bus.r8(a2) == 0x83 {
+                self.at(At::End83);
                 hw.bus.w8(g, 1);
                 if newer {
                     hw.bus.w16(g + 8, 0);
@@ -1120,6 +1261,7 @@ impl RonKlaren {
                         p = hw.bus.r32(v + V_LIST);
                         hw.bus.w32(v + V_POS, p);
                         self.songend = true;
+                        self.at(At::ListWrap);
                     }
                     self.d0 = hw.bus.r16(p + 0xa).wrapping_sub(1);
                     hw.bus.w16(v + V_REPEAT, self.d0);

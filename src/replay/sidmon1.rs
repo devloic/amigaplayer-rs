@@ -56,21 +56,37 @@ const ID: &[u8; 34] = b" SID-MON BY R.v.VLIET  (c) 1988 \0\0";
 /// The song data's offset in the module, as the original's Check finds it: the
 /// ID at an even offset from $2C, or else the replayer's `lea ID(pc),a0` followed
 /// by `adda.l -$2C(a0),a0; lea x(pc),a1; move.l a0,(a1)` in its first 100 bytes.
-fn find(d: &[u8]) -> Option<usize> {
-    let id = (0x2c..d.len().saturating_sub(1)).step_by(2).find(|&o| d.get(o..o + ID.len()) == Some(&ID[..]));
-    let id = id.or_else(|| {
-        (0..100).step_by(2).find_map(|o| {
-            let w = |k: usize| super::be16(d, o + k);
-            (w(0) == 0x41fa && be32(d, o + 4) == 0xd1e8ffd4 && w(8) == 0x43fa && w(12) == 0x2288)
-                .then(|| (o as isize + 2 + w(2) as i16 as isize) as usize)
-        })
-    })?;
-    (id >= 0x2c && id <= d.len()).then_some(id)
+///
+/// With it, the original's clock (colour clocks) at InitSound's first register
+/// write, as measured on its runs: the Check's scan takes 27 clocks for each even
+/// offset it compares, so the time to the song's start, and with it the place of
+/// InitSound's writes in the raster line, follows from where the ID is (46
+/// modules, 11 ID offsets), or from the module's length when the scan finds
+/// nothing and the `lea` at the module's start gives the ID (4 modules; a `lea`
+/// further on was not seen and is taken to cost the same).
+fn find(d: &[u8]) -> Option<(usize, u64)> {
+    let scan = (0x2c..d.len().saturating_sub(1)).step_by(2).find(|&o| d.get(o..o + ID.len()) == Some(&ID[..]));
+    let (id, clock) = match scan {
+        Some(o) => (o, 6233 + 27 * (o as u64 - 0x2c) / 2),
+        None => (
+            (0..100).step_by(2).find_map(|o| {
+                let w = |k: usize| super::be16(d, o + k);
+                (w(0) == 0x41fa && be32(d, o + 4) == 0xd1e8ffd4 && w(8) == 0x43fa && w(12) == 0x2288)
+                    .then(|| (o as isize + 2 + w(2) as i16 as isize) as usize)
+            })?,
+            5425 + 27 * d.len() as u64 / 2,
+        ),
+    };
+    (id >= 0x2c && id <= d.len()).then_some((id, clock))
 }
 
 fn detect(d: &[u8]) -> bool {
     find(d).is_some()
 }
+
+/// From the end of InitSound's DMA wait (a raster line's start) to the song's
+/// start: the original's way back out of InitSound.
+const INIT_END: u64 = 105;
 
 /// One voice: the original's 32-byte voice structure, and its loop.
 #[derive(Default, Clone, Copy)]
@@ -159,7 +175,8 @@ struct Writes {
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
-    let id = base + find(d)? as u32;
+    let (id, first_write) = find(d)?;
+    let id = base + id as u32;
     // the Eagleplayer's InitSound points the voices at a 32-byte data hunk of zeros
     let zeros = m.alloc(32);
     if zeros == 0 {
@@ -191,6 +208,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     p.speed_counter = bus.r32(p.song + 0x20);
     let mut hw = Hw { bus };
+    // InitSound's writes fall where the original's do in the raster line, which the
+    // DMA wait's end and so the song's start count from
+    hw.wait((first_write % LINE + LINE - hw.bus.clock % LINE) % LINE);
     hw.dmacon(0x000f);
     hw.wait(800);
     for ch in 0..4 {
@@ -212,6 +232,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         hw.wait(if ch < 3 { 302 } else { 155 });
     }
     dma_on(&mut hw);
+    hw.wait(INIT_END);
     Some(Box::new(p))
 }
 
@@ -221,7 +242,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
 /// decides whether the note starts.
 ///
 /// From the timer interrupt to the first voice.
-const PLAY: u64 = 178;
+const PLAY: u64 = 73;
 /// ENPP_DMAMask turning a voice off.
 const DMA_OFF: u64 = 110;
 

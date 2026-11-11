@@ -674,8 +674,15 @@ def find_reference(ctx, mod, po, port_short=False):
     pn = po.get('player', '')
     names = [pn, pn.replace('_', ' '), pn.replace('_', '-')]
     if po.get('backend') == 'builtin-protracker':
-        # the built-in ProTracker's original: UADE's PTK-Prowiz replay, the Protracker4 Eagleplayer
-        names += ['PTK-Prowiz', 'Protracker4']
+        # The built-in ProTracker takes the module before any 68k player is asked (with or without
+        # --open-replayers), so an original only runs when it is named, and --player wants the name
+        # the player gives itself, not its file's. UADE's PTK-Prowiz (a ProTracker 3.0b replay behind
+        # a ProWizard converter; the README checks the built-in replayer against it) is "Protracker
+        # and family": it plays the ProWizard-packed and ChipTracker files itself. A plain module it
+        # takes only when UADE's front end names the type through uade.library, which the engine
+        # does not provide, so those stay NOREF. Mosh Packer files it refuses: UADE's "Mosh Packer"
+        # plays them. (The Protracker4 Eagleplayer plays the IFF MODL format and refuses all of these.)
+        names += ['Protracker and family', 'Mosh Packer']
     for variant in dict.fromkeys(names):
         tries += [(t + '+player', d, ('--player', variant)) for t, d in dirs]
     fallback = None

@@ -14,14 +14,12 @@ use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "Quadra Composer", detect, new };
 
-/// What the vibrato of effect 6 reads as its wave: the words of the original's 32 effect
-/// addresses, as the reference run has them in memory (the upper word, and each lower word).
+/// What the vibrato of effect 6 reads as its wave: the original's 32 effect addresses, where
+/// the reference run has the player ($A69B88 to $A6A238). An address's upper word, and one
+/// word that stands for the lower words (the table itself is the player's and is not kept
+/// here): with the depths the modules use (1 in the runs) every lower word gives the same step.
 const EFFECT_ADDR_HIGH: i16 = 0x00a6;
-const EFFECT_ADDR_LOW: [u16; 32] = [
-    0x9cce, 0x9d2a, 0x9d4c, 0x9d96, 0x9e40, 0x9ec8, 0x9ed8, 0x9ee0, 0x9b88, 0x9b88, 0x9fac, 0x9b88,
-    0x9b88, 0x9b88, 0x9cba, 0x9b88, 0x9b88, 0x9b88, 0x9b88, 0x9b88, 0x9b88, 0x9b88, 0x9b88, 0x9b88,
-    0x9b88, 0xa198, 0x9b88, 0x9b88, 0xa21c, 0xa238, 0x9b88, 0x9b88,
-];
+const EFFECT_ADDR_LOW: i16 = 0x9e00u16 as i16;
 
 #[derive(Clone, Default)]
 struct Sample {
@@ -821,11 +819,12 @@ impl QuadraComposer {
                     // addresses (measured: the wave address and the words there). An even place
                     // is an address's upper word, which the depth cannot bring to one step; an
                     // odd place is the lower word of the address as the reference run loads the
-                    // player, a step or more down.
+                    // player, a step or more down (two at depth 1; from depth 2 on the one word
+                    // taken here for all of them can be a step off the reference).
                     let ch = &mut self.ch[i];
                     ch.vib_pos = (ch.vib_pos + (ch.vib_cmd >> 4) as u16) & 0x3f;
                     let pos = ch.vib_pos as usize;
-                    let v = if pos & 1 == 0 { EFFECT_ADDR_HIGH } else { EFFECT_ADDR_LOW[pos >> 1] as i16 } as i32;
+                    let v = if pos & 1 == 0 { EFFECT_ADDR_HIGH } else { EFFECT_ADDR_LOW } as i32;
                     let np = (ch.period as i16 as i32 + (((ch.vib_cmd & 0x0f) as i32 * v) >> 14)) as i16;
                     let p = np.clamp(113, 856) as u16;
                     self.set_period(i, hw, p);

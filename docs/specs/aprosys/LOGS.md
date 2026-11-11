@@ -116,8 +116,14 @@ cycle. Each rule is a count per piece of work; none is per module.
   (see `synth_cost_h` in the port for the table: generator or mixer by mode and operation, source
   record types 4/5/1, comb 924 + 417 n, the two filter variants); a length code of 0 (128 bytes) costs
   8 more.
-- **Row.** DMACON `0x8200` 1 164 cycles after a LOC (2 less after a moving sample's), 1 182 after a
-  plain VOL, 903 after a silent voice's VOL. Then each voice costs, whatever its number: idle 433, note
+- **Row.** DMACON `0x8200` comes 420 cycles later than the call would have returned without the row
+  (see the call ends below): 1 164 cycles after a LOC (2 less after a moving sample's), 1 182 after a
+  plain VOL, 903 after a silent voice's VOL. The same holds for a row that follows a row in the same
+  call (ticks per row 0): its DMACON comes that row's call-end tail plus 420 after that row's last
+  write, e.g. 1 057 after channel 0's key-tail AUDxDAT, 1 170 plus the voices' work after a row with no
+  other write. Block-end, block-start and sequence costs in between add to it. The song end's INTENA
+  `0x0780` comes the same tail plus 857 cycles after the last write, plus the sequence entries met
+  on the way to the end entry, and the DMACON 20 cycles later. Then each voice costs, whatever its number: idle 433, note
   1 454, release 1 341 (instrument change +545, with the record-relative bit +10, counter zero -244),
   arpeggio bit +68, row byte 2 bit 7 +10, bit 6 +14, retrigger +905 (first row of a block +115, with
   the block's envelope-3 bit +174), block mute on a row with a note +39, channel-volume update: set 0,

@@ -581,7 +581,10 @@ def alone_dir(ctx, name):
     os.makedirs(d, exist_ok=True)
     link = os.path.join(d, name)
     if not os.path.lexists(link):
-        os.symlink(os.path.join(UADE_PLAYERS, name), link)
+        try:
+            os.symlink(os.path.join(UADE_PLAYERS, name), link)
+        except FileExistsError:   # another job of the same run made it first
+            pass
     return d
 
 
@@ -609,7 +612,10 @@ def retext_empty(ctx, mod):
     for n in os.listdir(src):
         link = os.path.join(dst, n)
         if n != os.path.basename(mod) and not os.path.lexists(link):
-            os.symlink(os.path.join(src, n), link)
+            try:
+                os.symlink(os.path.join(src, n), link)
+            except FileExistsError:
+                pass
     return out
 
 

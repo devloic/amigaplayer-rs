@@ -188,6 +188,12 @@ impl Paula {
         while self.next_line <= t {
             let h = self.next_line;
             if let Some(stop) = self.update(h, mem, stop_at_irq) {
+                if stop == h {
+                    // stopped on the line boundary: the line's DMA has happened, so
+                    // a DMACON write at this clock behaves as one just after it
+                    self.line_start(mem);
+                    self.next_line += LINE;
+                }
                 return stop;
             }
             self.line_start(mem);
@@ -455,6 +461,45 @@ mod tests {
         assert_eq!((p.ch[0].state, p.ch[0].current_sample), (2, 0x40));
         p.sync_with(2 * LINE + 124, &mut mem, false);
         assert_eq!(p.ch[0].current_sample, 0xC0u8 as i8 as i32);
+    }
+
+    /// A DMA enable on a line boundary reached by `sync_to_irq` plays word 0 first.
+    #[test]
+    fn boundary_enable_plays_word_zero_first() {
+        let ram = [0x11u8, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44];
+        let mut mem = |a: u32| u16::from_be_bytes([ram[(a & 7) as usize], ram[(a & 7 | 1) as usize]]);
+        let mut run = |boundary: bool| {
+            let mut p = Paula::new();
+            for ch in [0x00u32, 0x10] {
+                p.write_at(0, 0xA4 + ch, 4, &mut mem);
+                p.write_at(0, 0xA6 + ch, 124, &mut mem);
+                p.write_at(0, 0xA8 + ch, 64, &mut mem);
+            }
+            p.write_at(0, 0x9A, 0x8000 | 0x100, &mut mem);
+            // channel 1 starts DMA at clock 0: its interrupt comes exactly at LINE
+            p.write_at(0, 0x96, 0x8202, &mut mem);
+            let at = if boundary {
+                let s = p.sync_with(2 * LINE, &mut mem, true);
+                assert_eq!(s, LINE);
+                s
+            } else {
+                p.sync_with(LINE + 1, &mut mem, false);
+                LINE + 1
+            };
+            p.write_dmacon(0x8201);
+            let mut seen = vec![];
+            for k in 1..=4 * LINE {
+                p.sync_with(at + k, &mut mem, false);
+                let s = p.ch[0].current_sample;
+                if s != 0 && seen.last() != Some(&s) {
+                    seen.push(s);
+                }
+            }
+            seen
+        };
+        let a = run(true);
+        assert_eq!(a[0], 0x11, "word 0 first: {a:?}");
+        assert_eq!(a, run(false));
     }
 
     /// Without DMA a channel asks for its next word: the 4Voc NotePlayer genie

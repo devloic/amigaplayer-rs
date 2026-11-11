@@ -573,16 +573,20 @@ REFUSED_NO_FALLBACK = {'hippel7v'}
 # Formats whose Eagleplayer is pre-empted in the full player directory by another player's looser
 # check (UADE's Soundtracker IV takes MYST files before YM-2149 is asked): the original runs from a
 # directory holding that player alone.
-ALONE = {'ym2149': 'YM-2149'}
+# SoundMon 2.0 / 2.2 (EP206): a one-shot sample ends on the player's "empty" word with length 0,
+# so Paula plays 128 KB of memory from there on: the player's own variables, then whatever was
+# loaded after its hunk. In the full directory that is the next Eagleplayer's code, which no port
+# can hold; loaded alone, zeros follow and the original is one a port can equal.
+ALONE = {'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2')}
 
 
-def alone_dir(ctx, name):
+def alone_dir(ctx, src, name):
     d = os.path.join(ctx.cache, 'alone-' + re.sub(r'[^A-Za-z0-9]', '_', name))
     os.makedirs(d, exist_ok=True)
     link = os.path.join(d, name)
     if not os.path.lexists(link):
         try:
-            os.symlink(os.path.join(UADE_PLAYERS, name), link)
+            os.symlink(os.path.join(EP206 if src == 'ep206' else UADE_PLAYERS, name), link)
         except FileExistsError:   # another job of the same run made it first
             pass
     return d
@@ -655,7 +659,7 @@ def find_reference(ctx, mod, po, port_short=False):
     if want in UADE_FIRST:
         dirs = dirs[::-1]
     if want in ALONE:
-        dirs = (('uade', alone_dir(ctx, ALONE[want])),)
+        dirs = ((ALONE[want][0], alone_dir(ctx, *ALONE[want])),)
     if want == 'tfmxpro':
         mod = retext_empty(ctx, mod)
     # the player the port was verified against comes first, then the generic search

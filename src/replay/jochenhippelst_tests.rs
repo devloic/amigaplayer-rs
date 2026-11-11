@@ -168,3 +168,33 @@ fn the_amiga_shape_of_pitch_programs_refuses_the_tfmx_tag_only() {
     let d = build(b"MMME", &[0xE2, 0x01, 0x10, 0xE1], &[1, 0, 0, 0, 0, 0x10, 0xE1], &[0x10, 0x00, 0xFF], 3);
     assert!(detect(&d));
 }
+
+/// The image behind `words` words of prefix, the last of them the address load that points at it.
+fn prefixed(words: usize) -> Vec<u8> {
+    let mut d = vec![0x4Eu8, 0x71].repeat(words - 2);
+    d.extend_from_slice(&[0x41, 0xFA, 0x00, 0x02]);
+    d.extend_from_slice(&small());
+    d
+}
+
+#[test]
+fn the_address_load_is_looked_for_in_127_words() {
+    // the load at word index 126 is found, at 127 it is not
+    assert!(detect(&prefixed(128)));
+    assert!(!detect(&prefixed(129)));
+}
+
+#[test]
+fn a_module_that_ends_past_the_file_is_refused() {
+    // the sample table's place is the file's end: accepted; one byte short: refused
+    let d = small();
+    assert!(detect(&d));
+    assert!(!detect(&d[..d.len() - 1]));
+    // with a table, the start of its last entry is the end
+    let mut t = small();
+    let at = t.len();
+    t.extend_from_slice(&[0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 0, 0, 0]);
+    t.resize(at + 0x90, 0);
+    assert!(detect(&t));
+    assert!(!detect(&t[..t.len() - 1]));
+}

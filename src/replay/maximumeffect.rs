@@ -169,6 +169,8 @@ struct MaximumEffect {
     /// The name length (with `max.`) and directory length (with the slash) of the module path.
     name_len: usize,
     dir_len: usize,
+    /// The bank was found only as SMP.set, after the failed open of SMP.<name>.
+    fallback: bool,
     sub: usize,
     v: [Voice; 4],
     flags: u8,
@@ -196,7 +198,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the bank: the first three characters become SMP, else SMP.set (spec 1.1)
     let rest = &name[3..];
     let cands = [format!("SMP{rest}"), format!("smp{rest}"), "SMP.set".to_string(), "smp.set".to_string()];
-    let bank = cands.iter().find_map(|n| crate::deli::read_companion(m, n).1.ok())?;
+    let (bank, cand) = cands.iter().enumerate().find_map(|(i, n)| crate::deli::read_companion(m, n).1.ok().map(|b| (b, i)))?;
     let nsamp = (be16(&bank, 0) as usize) + 1;
     if bank.len() < 2 + 16 * nsamp {
         return None;
@@ -229,6 +231,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         title: name.clone(),
         name_len: name.len(),
         dir_len,
+        fallback: cand >= 2,
         sub: 0,
         v: [Voice::NEW; 4],
         flags: 0,
@@ -334,6 +337,8 @@ impl MaximumEffect {
         let c = (654 - 65 * z) / 2;
         // (half cycles, rounded up to a colour clock)
         let x = (2254 + 21 * (self.name_len as i64 - 6) + 17 * (self.dir_len as i64 - 96) + 1).div_euclid(2);
+        // (the failed open of SMP.<name> before the fallback: one more scan of the directory path)
+        let x = x + if self.fallback { (17 * self.dir_len as i64 + 374 + 1).div_euclid(2) } else { 0 };
         let mut entries = 0i64;
         for j in 0..self.nsongs {
             for vi in 0..4 {

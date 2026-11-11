@@ -46,10 +46,11 @@
 //! the samples' first long. Modules without a tempo play exactly as above, their
 //! effects 7 and up ignored.
 //!
-//! The writes are spaced by the original's code-path costs, fitted by
-//! non-negative least squares to the reference's write gaps (`Cost`), and the
-//! timer starts when the original's does, after its start's loops over the
-//! positions and samples (`start`).
+//! Every write falls at the reference's colour clock: the code paths between two
+//! writes cost whole 68000 cycles (`Cost`, solved from the reference's cycle
+//! counts between its calls of the host), every write is a call of the host, which
+//! goes on at a whole colour clock, and the song starts when the original's does,
+//! after its start's loops over the positions and samples (`start_clocks`).
 
 mod np;
 
@@ -68,11 +69,6 @@ const PERIODS: [u16; 48] = [
 ];
 /// Words of 113 after the table, up to the sample addresses.
 const PAD: usize = 30;
-/// Colour clocks from the end of the start's fitted time to the original's song start (the
-/// engine's, from which Paula's output and line grids run): the module's first tick comes
-/// that much before the end of its first period, in the write logs of every module (the
-/// fit of the start puts it within a colour clock).
-const START_SHIFT: u64 = 16;
 /// The mirror of the hunk from the period table on: the periods, the padding,
 /// the 31 sample addresses and the module pointer.
 const SAMPLES_OFF: u32 = 2 * (PERIODS.len() + PAD) as u32;
@@ -107,15 +103,10 @@ pub struct DigitalSoundStudio {
     jump: bool,
     next_position: u16,
     songend: bool,
-    /// Colour clocks the original spends since its last write (`Cost`).
-    spent: f64,
+    /// 68000 cycles the original spends since its last call of the host (`Cost`).
+    spent: i64,
     fit: Option<std::io::BufWriter<std::fs::File>>,
     counts: Vec<(u8, u32)>,
-    /// The start's code paths (`start`) and the colour clocks they took.
-    init: [(Cost, u32); 5],
-    init_wait: u64,
-    /// The first tick is still to come (its period is shortened by `START_SHIFT`).
-    first: std::cell::Cell<bool>,
     /// The newer Digital Sound Studio's player, for a module with a tempo.
     np: Option<np::Np>,
 }
@@ -139,10 +130,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // a module with a tempo byte is from a newer Digital Sound Studio than the
     // Eagleplayer's, and is played as NostalgicPlayer does (np.rs)
     let tempo = d[8] != 0;
-    let mem = m.alloc(MIRROR_SIZE + if tempo { 4 } else { 0 });
-    if mem == 0 {
-        return None;
-    }
+    // the mirror lies at the top of the free memory, away from the module: a sample that
+    // plays on past the module's end (a loop of 65536 words) finds the free memory's
+    // zeros there, as in the original's run, whose table is in the player's own hunk
+    let size = MIRROR_SIZE + if tempo { 4 } else { 0 };
+    let mem = m.heap.alloc_top(size)?;
+    m.bus.ram[mem as usize..(mem + size) as usize].fill(0);
     if tempo {
         m.bus.w32(mem + MIRROR_SIZE, 0);
     }
@@ -163,12 +156,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         jump: false,
         next_position: 0,
         songend: false,
-        spent: 0.0,
+        spent: 0,
         fit,
         counts: Vec::new(),
-        init: start(d),
-        init_wait: 0,
-        first: std::cell::Cell::new(true),
         np: None,
     };
     // DeliTracker's timer starts after the Eagleplayer's check, EP_Get_ModuleInfo
@@ -178,32 +168,30 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         r.np = Some(np::Np::new(d, base, mem, &mut m.bus));
         return Some(Box::new(r));
     }
-    let c: f64 = r.init.iter().map(|&(c, n)| COSTS[c as usize] * n as f64).sum();
-    r.init_wait = c.max(0.0).round() as u64;
-    m.bus.clock += r.init_wait;
-    r.init_sound(d, &mut m.bus, true);
     // the song starts (the engine aligns Paula's output and line grids there) when the
-    // original's does: START_SHIFT after what the fit took for the start, while the first
-    // tick keeps its time (its period is shorter by as much, see `tick_clocks`)
-    m.bus.clock += START_SHIFT;
+    // original's does; the first tick comes a period later
+    m.bus.clock += start_clocks(d);
+    r.init_sound(d, &mut m.bus, true);
     Some(Box::new(r))
 }
 
-/// What the start's loops count: once, every position, every position that
-/// raises the highest pattern so far, every sample with a length, and every one
-/// of those whose loop is not 1 word (each loop runs three times: the check,
-/// EP_Get_ModuleInfo and InitSound).
-fn start(d: &[u8]) -> [(Cost, u32); 5] {
-    let n = be16(d, 0x59c).wrapping_sub(1) as usize + 1;
-    let (mut max, mut raised) = (0u8, 0);
-    for k in 0..n {
+/// The colour clocks the original's start takes, from the reference's runs (the cycles of its
+/// five calls on 32 modules, each a whole-numbered sum): the check, a host call, the load
+/// (the same time for every module), EP_Get_ModuleInfo and InitSound. Three of them loop
+/// over the positions (`n`; `raised`: those that raise or equal the highest pattern so far) and
+/// two over the samples with a length (`samples`; `loops`: those whose loop is not 1 word).
+/// Each call starts at a whole colour clock.
+fn start_clocks(d: &[u8]) -> u64 {
+    let n = be16(d, 0x59c).wrapping_sub(1) as u64 + 1;
+    let (mut max, mut raised) = (0u8, 0u64);
+    for k in 0..n as usize {
         let p = d.get(0x59e + k).copied().unwrap_or(0);
         if p >= max {
             max = p;
             raised += 1;
         }
     }
-    let (mut samples, mut loops) = (0, 0);
+    let (mut samples, mut loops) = (0u64, 0u64);
     for k in 0..31 {
         let o = 0xa + 0x2e * k;
         if be16(d, o + 0x22) != 0 {
@@ -213,13 +201,11 @@ fn start(d: &[u8]) -> [(Cost, u32); 5] {
             }
         }
     }
-    [
-        (Cost::InitBase, 1),
-        (Cost::InitPos, n as u32),
-        (Cost::InitMax, raised),
-        (Cost::InitSample, samples),
-        (Cost::InitLoop, loops),
-    ]
+    let positions = 31 * n + 4 * raised;
+    let check = 160 + positions;
+    let info = 1600 + positions + 95 * samples + 20 * loops;
+    let init = 3542 + positions + 191 * samples + 20 * loops;
+    check / 2 + 56 / 2 + 56 / 2 + 67 / 2 + 8995 / 2 + info / 2 + init / 2
 }
 
 impl Replayer for DigitalSoundStudio {
@@ -236,9 +222,6 @@ impl Replayer for DigitalSoundStudio {
     }
 
     fn tick_clocks(&self) -> u64 {
-        if self.np.is_none() && self.first.replace(false) {
-            return super::DT_TICK - START_SHIFT;
-        }
         self.np.as_ref().map_or(super::DT_TICK, |n| n.tick_clocks())
     }
 
@@ -248,15 +231,10 @@ impl Replayer for DigitalSoundStudio {
         }
         if let Some(f) = &mut self.fit {
             use std::io::Write;
-            // the tick as if the start took no time, and the start's counts with
-            // the tick's first write (the fit's)
-            let _ = writeln!(f, "tick {}", hw.bus.clock - self.init_wait);
+            let _ = writeln!(f, "tick {}", hw.bus.clock);
         }
-        self.spent = 0.0;
+        self.spent = 0;
         self.counts.clear();
-        if self.fit.is_some() {
-            self.counts.extend(self.init.iter().map(|&(c, n)| (c as u8, n)));
-        }
         self.t(Cost::TickStart);
         self.counter = self.counter.wrapping_add(1);
         if self.counter == hw.bus.r16(self.base + 8) {
@@ -294,103 +272,101 @@ enum W {
 
 macro_rules! costs {
     ($($name:ident = $c:expr,)*) => {
-        /// The original's code paths, each with the colour clocks it takes: fitted
-        /// (non-negative least squares) to the gaps between the writes of the
-        /// Eagleplayer's write logs of 32 modules (rms 0.16 colour clocks over
-        /// 53193 gaps). A write waits what the paths since the last one took.
+        /// The original's code paths, each with the 68000 cycles it takes: solved from the
+        /// reference's cycle counts between its host calls (every write is one), 32 modules
+        /// over 300 s, 528,738 calls, each the whole-numbered sum of its paths. Only sums are
+        /// measured: of the costs that fit, these are ones of small magnitudes (a negative
+        /// one is a branch cheaper than its other side, or a part counted with a neighbour).
         #[derive(Clone, Copy)]
         #[allow(dead_code)]
         enum Cost { $($name,)* }
-        const COSTS: &[f64] = &[$($c as f64,)*];
+        const COSTS: &[i32] = &[$($c,)*];
         #[allow(dead_code)]
         const COST_NAMES: &[&str] = &[$(stringify!($name),)*];
     };
 }
 
-// The whole numbers are paths the modules never took before a write (estimated
-// from the code; those after a tick's last write cost nothing). TickStart and
-// InitBase are one sum to the fit; TickStart is taken as the interrupt's way to
-// the play routine, so that the ticks and the audio come when the original's do.
+// Not measured (no write of the corpus follows them in their tick): ArpNone, VolClamp, FxMaster
+// and FxMasterSet are estimates; RowEnd to Wrap come after a tick's last write and cost
+// nothing here. FxJumpBack is the way to the song end's host call, FxJumpBackEnd the way on.
 costs! {
-    InitBase = 7219.55,
-    InitPos = 46.51,
-    InitMax = 5.98,
-    InitSample = 143.08,
-    InitLoop = 19.81,
-    TickStart = 150,
-    FxStart = 0.00,
-    FxVoice = 42.68,
-    Fx7ff = 5,
-    FxNoArg = 0.00,
-    FxCall = 56.63,
-    FxArp = 1.43,
-    ArpCmp = 5.45,
-    ArpNone = 4,
-    ArpBase = 18,
-    ArpNibble = 0.00,
-    ArpStep = 15.54,
-    FxSlideUp = 0.00,
-    FxSlideDown = 7.23,
-    SlideClamp = 6,
-    FxOther = 10,
-    RowStart = 60.12,
-    VoiceRow = 67.78,
-    Sample = 215.81,
-    SampleCh0 = 0.00,
-    SampleCh1 = 15.48,
-    SampleCh2 = 31.12,
-    SampleCh3 = 35.00,
-    SampleUpsPer0 = 5.68,
-    SampleUpsShort = 0.00,
-    SampleAddr = 49.92,
-    SampleNoLoop = 4.11,
-    NotePer = 0.00,
-    Note7ff = 0.00,
-    Note7ffCh0 = 43,
-    Note7ffCh1 = 58.88,
-    Note7ffCh2 = 74.35,
-    Note7ffCh3 = 77.79,
-    NoteAddr = 13.00,
-    NoteNoAddr = 10,
-    NoteEnd = 0.00,
-    RowFx = 67.66,
-    VolArg = 0.52,
-    VolNote = 0.00,
-    VolSkip = 0.00,
-    VolClamp = 2,
-    VolCh0 = 0.00,
-    VolCh1 = 11.29,
-    VolCh2 = 23.02,
-    VolCh3 = 18.04,
-    VolUps = 142.73,
-    FxRow0 = 0.00,
-    FxMaster = 15,
-    FxMasterSet = 10,
-    FxSpeed = 43.56,
-    FxSpeedSet = 0.00,
-    FxJump = 70.37,
-    FxJumpFF = 0.00,
-    FxJumpBack = 46.42,
-    FxRowNone = 25.65,
-    VoiceReturn = 0.00,
-    AfterVoices = 0.00,
-    LoopVoice = 0.00,
-    RowEnd = 20,
-    RowNext = 20,
-    RowJump = 10,
-    NewPos = 20,
-    Wrap = 20,
-    LocPre = 110.00,
-    LocPost = 109.00,
-    LenPre = 0.00,
-    LenPost = 0.00,
-    LenShort = 2.00,
-    PerPre = 89.00,
-    PerPost = 0.53,
-    VolPre = 0.00,
-    VolPost = 12.88,
-    DmaPre = 138.33,
-    DmaPost = 7.00,
+    TickStart = 269,
+    FxStart = 0,
+    FxVoice = 84,
+    Fx7ff = -21,
+    FxNoArg = 0,
+    FxCall = 113,
+    FxArp = -4,
+    ArpCmp = 17,
+    ArpNone = 8,
+    ArpBase = -36,
+    ArpHigh = 6,
+    ArpLow = 0,
+    ArpStep = 31,
+    FxSlideUp = 0,
+    FxSlideDown = 17,
+    SlideClampUp = 26,
+    SlideClampDown = 16,
+    FxOther = -24,
+    RowStart = 2,
+    VoiceRow = 252,
+    Sample = 424,
+    SampleCh0 = 0,
+    SampleCh1 = 31,
+    SampleCh2 = 62,
+    SampleCh3 = 70,
+    SampleUpsPer0 = 12,
+    SampleUpsShort = 8,
+    SampleAddr = 107,
+    SampleNoLoop = 0,
+    NotePer = 0,
+    Note7ff = 0,
+    Note7ffCh0 = -31,
+    Note7ffCh1 = 0,
+    Note7ffCh2 = 31,
+    Note7ffCh3 = 39,
+    NoteAddr = 26,
+    NoteNoAddr = 30,
+    NoteEnd = 0,
+    RowFx = 136,
+    VolArg = 1,
+    VolNote = 0,
+    VolSkip = 0,
+    VolClamp = 4,
+    VolCh0 = 0,
+    VolCh1 = 23,
+    VolCh2 = 46,
+    VolCh3 = 36,
+    VolUps = 286,
+    FxRow0 = -87,
+    FxMaster = 30,
+    FxMasterSet = 20,
+    FxSpeed = 0,
+    FxSpeedSet = 0,
+    FxJump = 58,
+    FxJumpFF = -17,
+    FxJumpBack = 230,
+    FxJumpBackEnd = -142,
+    FxRowNone = -36,
+    VoiceReturn = -30,
+    AfterVoices = 116,
+    LoopVoice = 0,
+    RowEnd = 0,
+    RowNext = 0,
+    RowJump = 0,
+    NewPos = 0,
+    Wrap = 0,
+    LocPre = 220,
+    LocPost = 219,
+    LenPre = 0,
+    LenPost = 0,
+    LenShort = 4,
+    PerPre = 178,
+    PerPost = 0,
+    VolPre = 0,
+    VolPost = 26,
+    DmaPre = 278,
+    DmaPost = 14,
 }
 
 impl DigitalSoundStudio {
@@ -400,7 +376,7 @@ impl DigitalSoundStudio {
 
     fn tn(&mut self, c: Cost, n: u32) {
         let k = c as usize;
-        self.spent += COSTS[k] * n as f64;
+        self.spent += COSTS[k] as i64 * n as i64;
         if self.fit.is_some() && n != 0 {
             match self.counts.iter_mut().find(|e| e.0 as usize == k) {
                 Some(e) => e.1 += n,
@@ -423,14 +399,26 @@ impl DigitalSoundStudio {
         if let Some(f) = &mut self.fit {
             use std::io::Write;
             let s: Vec<String> = self.counts.iter().map(|(k, n)| format!("{}:{n}", COST_NAMES[*k as usize])).collect();
-            let _ = writeln!(f, "w {} {}", hw.bus.clock + self.spent.max(0.0).round() as u64, s.join(" "));
+            let _ = writeln!(f, "w {} {}", hw.bus.clock + self.spent.max(0) as u64 / 2, s.join(" "));
         }
-        // the fraction of a colour clock left over is carried to the next write
-        let c = self.spent.max(0.0).round();
-        hw.wait(c as u64);
-        self.spent -= c;
+        // the write is a call of the host, which goes on at a whole colour clock: an odd
+        // cycle is dropped
+        hw.wait(self.spent.max(0) as u64 / 2);
+        self.spent = 0;
         self.counts.clear();
         self.t(post);
+    }
+
+    /// A call of the host that writes nothing: the time up to it passes, an odd cycle is dropped.
+    fn host(&mut self, hw: &mut Hw) {
+        if let Some(f) = &mut self.fit {
+            use std::io::Write;
+            let s: Vec<String> = self.counts.iter().map(|(k, n)| format!("{}:{n}", COST_NAMES[*k as usize])).collect();
+            let _ = writeln!(f, "h {} {}", hw.bus.clock + self.spent.max(0) as u64 / 2, s.join(" "));
+        }
+        hw.wait(self.spent.max(0) as u64 / 2);
+        self.spent = 0;
+        self.counts.clear();
     }
 
     fn loc(&mut self, hw: &mut Hw, ch: usize, a: u32) {
@@ -523,8 +511,14 @@ impl DigitalSoundStudio {
                 self.tn(Cost::ArpCmp, (c.clamp(1, 5)) as u32);
                 let arg = v.note as u8;
                 let off = match c {
-                    1 | 5 => arg >> 4,
-                    2 | 4 => arg & 15,
+                    1 | 5 => {
+                        self.t(Cost::ArpHigh);
+                        arg >> 4
+                    }
+                    2 | 4 => {
+                        self.t(Cost::ArpLow);
+                        arg & 15
+                    }
                     3 => {
                         self.t(Cost::ArpBase);
                         return self.per(hw, i, v.note_per);
@@ -534,7 +528,6 @@ impl DigitalSoundStudio {
                         return;
                     }
                 };
-                self.t(Cost::ArpNibble);
                 // the first word equal to the note's period, and the one `off`
                 // words on, reading on past the table in guest memory
                 let mut a = self.mem;
@@ -556,7 +549,7 @@ impl DigitalSoundStudio {
                 vv.per = vv.per.wrapping_sub(v.note as u8 as u16);
                 if vv.per.wrapping_sub(0x71) & 0x8000 != 0 {
                     vv.per = 0x71;
-                    self.t(Cost::SlideClamp);
+                    self.t(Cost::SlideClampUp);
                 }
                 let p = self.voices[i].per;
                 self.per(hw, i, p);
@@ -567,7 +560,7 @@ impl DigitalSoundStudio {
                 vv.per = vv.per.wrapping_add(v.note as u8 as u16);
                 if vv.per.wrapping_sub(0x6b0) & 0x8000 == 0 {
                     vv.per = 0x6b0;
-                    self.t(Cost::SlideClamp);
+                    self.t(Cost::SlideClampDown);
                 }
                 let p = self.voices[i].per;
                 self.per(hw, i, p);
@@ -730,7 +723,11 @@ impl DigitalSoundStudio {
                     let p = arg.wrapping_sub(2) as i8 as i16;
                     self.next_position = p as u16;
                     if p < self.position as i16 {
+                        // the original tells the host that the song has ended: a call like a
+                        // write's, the host goes on at a whole colour clock
                         self.t(Cost::FxJumpBack);
+                        self.host(hw);
+                        self.t(Cost::FxJumpBackEnd);
                         self.songend = true;
                     }
                 }

@@ -9,14 +9,20 @@
 //! keeps its variables, the voices' synth buffers and its tables in guest
 //! memory in the layout of the original's data hunk, and plays from the module
 //! in guest memory: what the original reads past its tables, or from a voice's
-//! variables with the wrong register, it reads too. The hunk starts as zeros
-//! (the voices on, their buffer flags 1), not with the leftovers of an earlier
-//! session that the original's file holds, so an effect that reads past what
-//! a note copied into its buffer can take other times (never other writes:
-//! `Human Strength`'s Alising effect), and a voice that InitSound's location
-//! plays before its first note (the hunk's bytes after the pointers, which the
-//! original's file holds) is silent here (`Digital Man (embedded player)`,
-//! `Labyrinth Theme`, `Super Module 2`).
+//! variables with the wrong register, it reads too.
+//!
+//! Embedded data: `synthesis_hunk.bin` (540 bytes) is taken from the data hunk
+//! of the Synth 4.0 Eagleplayer file, on the project owner's decision (data
+//! only, no player code): the non-zero bytes of the voices' synth buffers, which
+//! are what an earlier session left there (an effect that reads past what a
+//! note copied into its buffer works on them: `Human Strength`'s Alising,
+//! `Labyrinth Theme`), and of the hunk after the pointers, which a voice plays
+//! from InitSound's location before its first note (`Digital Man`, `Super
+//! Module 2`, `Yohl`). They lie in guest memory where the original has them
+//! (`HUNK_SEGMENTS`). The rest of the hunk starts as zeros (the voices on, their
+//! buffer flags 1), not with the leftovers in the original's variables; and a
+//! voice that plays on past the hunk's end plays what follows the port's
+//! allocation, not what follows the original's hunk.
 //!
 //! Where NostalgicPlayer differs from what the original writes to Paula, this
 //! follows the original:
@@ -57,6 +63,22 @@ include!("synthesis_tables.rs");
 
 // The original's data hunk ($F4C bytes), mirrored in guest memory.
 const HUNK_SIZE: u32 = 0xf4c;
+/// The non-zero bytes of the original's data hunk in the voices' synth buffers
+/// ($148 to $948) and after the pointers ($AE6 to the end), 540 bytes, and where
+/// each run of them lies (offset, length). See the file header.
+static HUNK_BYTES: &[u8; 540] = include_bytes!("synthesis_hunk.bin");
+const HUNK_SEGMENTS: [(u32, usize); 10] = [
+    (0x148, 0x10),
+    (0x248, 0x40),
+    (0x348, 0x40),
+    (0x448, 0x40),
+    (0x548, 0x10),
+    (0x648, 0x40),
+    (0x748, 0x40),
+    (0x848, 0x40),
+    (0xae8, 0x7a),
+    (0xf4a, 2),
+];
 /// Each voice's synth effect position (a byte each).
 const SYN_POS: u32 = 0x000;
 const COUNTER: u32 = 0x005;
@@ -212,15 +234,28 @@ pub struct Synthesis {
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let off = module_offset(d)?;
+    // at the top, where the Eagleplayer's hunks lie: low memory stays as the
+    // reference has it for a sample whose address is the module's offset alone
+    // (`Super Module 2`)
+    let top = std::mem::replace(&mut m.alloc_top, true);
     let mem = m.alloc(HUNK_SIZE);
+    m.alloc_top = top;
     if mem == 0 {
         return None;
     }
-    // the rest starts as zeros (as NostalgicPlayer's variables do): the
-    // original's hunk holds what an earlier session left in the variables and
-    // buffers InitSound does not clear, which is not reproduced. The voices'
-    // buffer flags start at 1, as a synth note sets them: only voice 0's is
-    // ever set again (see `voice_row`), so the others keep their start value.
+    // the synth buffers and what follows the pointers start as the original's
+    // file has them (`HUNK_BYTES`); the rest starts as zeros (as
+    // NostalgicPlayer's variables do), not with what an earlier session left
+    // in the original's variables. The voices' buffer flags start at 1, as a
+    // synth note sets them: only voice 0's is ever set again (see
+    // `voice_row`), so the others keep their start value.
+    let mut at = 0;
+    for &(o, n) in &HUNK_SEGMENTS {
+        for (k, &b) in HUNK_BYTES[at..at + n].iter().enumerate() {
+            m.bus.w8(mem + o + k as u32, b);
+        }
+        at += n;
+    }
     for v in 0..4 {
         m.bus.w8(mem + VOICE_ON + v, 0xff);
         m.bus.w8(mem + USE_BUF + v, 1);

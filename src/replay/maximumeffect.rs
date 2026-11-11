@@ -332,7 +332,8 @@ impl MaximumEffect {
     fn first_raw(&self, s: usize) -> u64 {
         let z = [8usize, 12, 16].iter().filter(|&&o| self.rl(o) == 0).count() as i64;
         let c = (654 - 65 * z) / 2;
-        let x = (2254 + 22 * (self.name_len as i64 - 6) + 17 * (self.dir_len as i64 - 96)) / 2;
+        // (half cycles, rounded up to a colour clock)
+        let x = (2254 + 21 * (self.name_len as i64 - 6) + 17 * (self.dir_len as i64 - 96) + 1).div_euclid(2);
         let mut entries = 0i64;
         for j in 0..self.nsongs {
             for vi in 0..4 {

@@ -76,7 +76,12 @@ pub fn parse(d: &[u8]) -> Result<HunkFile> {
         if s & 0xC000_0000 == 0xC000_0000 {
             r.long()?; // extended memory attributes
         }
-        sizes.push(((s & 0x3FFF_FFFF) * 4) as usize);
+        let size = (s & 0x3FFF_FFFF) as usize * 4;
+        // (nothing larger fits the machine: a damaged header must not allocate gigabytes)
+        if size > crate::bus::RAM_SIZE {
+            bail!("hunk larger than the machine's memory");
+        }
+        sizes.push(size);
     }
     let mut hunks: Vec<Hunk> = Vec::new();
     while r.p + 4 <= d.len() {
@@ -86,6 +91,9 @@ pub fn parse(d: &[u8]) -> Result<HunkFile> {
                 let idx = hunks.len();
                 let alloc = *sizes.get(idx).context("more hunks than declared")?;
                 let n = r.long()? as usize * 4;
+                if n > crate::bus::RAM_SIZE {
+                    bail!("hunk larger than the machine's memory");
+                }
                 let mut data = vec![0u8; alloc.max(n)];
                 if t != HUNK_BSS {
                     data[..n].copy_from_slice(r.bytes(n)?);

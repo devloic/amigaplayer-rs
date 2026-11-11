@@ -32,9 +32,48 @@ pub struct Library {
 }
 
 struct OpenFile {
-    file: File,
+    file: Handle,
     path: PathBuf,
 }
+
+/// What a dos file handle reads: a file of the host, or (with `OsState::no_host_files`) one
+/// of the files held in memory, which cannot be written.
+enum Handle {
+    Disk(File),
+    Mem(std::io::Cursor<Vec<u8>>),
+}
+
+impl Read for Handle {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Handle::Disk(f) => f.read(buf),
+            Handle::Mem(c) => c.read(buf),
+        }
+    }
+}
+
+impl Seek for Handle {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Handle::Disk(f) => f.seek(to),
+            Handle::Mem(c) => c.seek(to),
+        }
+    }
+}
+
+impl Handle {
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            Handle::Disk(f) => f.write_all(data),
+            Handle::Mem(_) => Err(std::io::ErrorKind::PermissionDenied.into()),
+        }
+    }
+}
+
+/// The most the guest console keeps (what players print with PutStr and the like).
+const CONSOLE_MAX: usize = 1 << 20;
+/// The most interrupt servers one interrupt takes.
+const INT_SERVERS_MAX: usize = 256;
 
 #[derive(Default)]
 pub struct OsState {
@@ -67,6 +106,10 @@ pub struct OsState {
     /// Files held in memory, by host path, read before the disk: a host with no
     /// file system (the browser) hands a module's companions over this way.
     pub mem_files: HashMap<PathBuf, Vec<u8>>,
+    /// The guest sees `mem_files` and nothing else: no file or directory of the host is
+    /// read, looked up or created, whatever name guest code asks dos.library for. Set for
+    /// code that comes with the module (a custom module played by the library's `Song`).
+    pub no_host_files: bool,
     logged: HashSet<(usize, i32)>,
     pub console: String,
 }
@@ -175,6 +218,10 @@ pub fn lib_call(m: &mut Machine, lib: usize, lvo: i32) {
         }
         m.set_d0(0);
     }
+    // (a player that prints in a loop does not grow the host's memory)
+    if m.os.console.len() > CONSOLE_MAX {
+        m.os.console.clear();
+    }
 }
 
 // ---------------------------------------------------------------- exec ---
@@ -245,7 +292,7 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
         }
         "AddIntServer" => {
             let n = d0 as usize & 15;
-            if !m.os.int_servers[n].contains(&a1) {
+            if !m.os.int_servers[n].contains(&a1) && m.os.int_servers[n].len() < INT_SERVERS_MAX {
                 m.os.int_servers[n].push(a1);
             }
         }
@@ -1416,13 +1463,34 @@ impl OsState {
         if let Some((_, d)) = self.mem_files.iter().find(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case(&want)) {
             return Ok(d.clone());
         }
+        if self.no_host_files {
+            return Err(std::io::ErrorKind::NotFound.into());
+        }
         std::fs::read(p)
+    }
+
+    /// Whether `p` is one of `mem_files`, or a directory above one (names in any case).
+    fn mem_exists(&self, p: &Path) -> (bool, bool) {
+        let want = p.to_string_lossy().to_ascii_lowercase();
+        let mut dir = false;
+        for k in self.mem_files.keys() {
+            let k = k.to_string_lossy().to_ascii_lowercase();
+            if k == want {
+                return (true, false);
+            }
+            dir |= k.strip_prefix(want.trim_end_matches('/')).is_some_and(|r| r.starts_with('/'));
+        }
+        (dir, dir)
     }
 
     /// The host path of Amiga name `name` (relative names in `current`). As
     /// the Amiga's file systems ignore case, a path that does not exist as
     /// named is the one that does in another case, if any.
     pub fn host_path(&self, name: &str, current: Option<&Path>) -> PathBuf {
+        if self.no_host_files {
+            // (`mem_files` are found in any case by `read_file`; a `..` cannot leave them)
+            return self.host_path_as_named(name, current);
+        }
         any_case_path(self.host_path_as_named(name, current))
     }
 
@@ -1438,13 +1506,16 @@ impl OsState {
                 // as UADE maps it: the module's instruments folder (IFF-SMUS's
                 // instruments, Scott Johnston's samples), its names in any case as
                 // on the Amiga's file systems (songs name "BigBow" for BIGBOW.instr)
+                if self.no_host_files {
+                    return self.module_dir.join("Instruments").join(rest);
+                }
                 let mut d = any_case(&self.module_dir, "Instruments");
                 for part in rest.split('/').filter(|p| !p.is_empty()) {
                     d = any_case(&d, part);
                 }
                 return d;
             }
-            if (vol.eq_ignore_ascii_case("Env") || vol.eq_ignore_ascii_case("EnvArc")) && !self.env_dir.as_os_str().is_empty() {
+            if (vol.eq_ignore_ascii_case("Env") || vol.eq_ignore_ascii_case("EnvArc")) && !self.env_dir.as_os_str().is_empty() && !self.no_host_files {
                 let mut d = self.env_dir.clone();
                 for part in rest.split('/').filter(|p| !p.is_empty()) {
                     d = any_case(&d, part);
@@ -1565,9 +1636,17 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
                 return true;
             }
             let p = m.os.host_path(&n, cur.as_deref());
-            let f = match d2 {
-                1006 => File::create(&p), // MODE_NEWFILE
-                _ => File::open(&p),
+            let f = if m.os.no_host_files {
+                match d2 {
+                    1006 => Err(std::io::ErrorKind::PermissionDenied.into()),
+                    _ => m.os.read_file(&p).map(|d| Handle::Mem(std::io::Cursor::new(d))),
+                }
+            } else {
+                match d2 {
+                    1006 => File::create(&p), // MODE_NEWFILE
+                    _ => File::open(&p),
+                }
+                .map(Handle::Disk)
             };
             match f {
                 Ok(file) => {
@@ -1590,7 +1669,9 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
             m.set_d0(1);
         }
         "Read" | "FRead" => {
-            let (buf, len) = if name == "FRead" { (d2, d3 * m.d(4)) } else { (d2, d3) };
+            let (buf, len) = if name == "FRead" { (d2, d3.wrapping_mul(m.d(4))) } else { (d2, d3) };
+            // (no more than the machine's memory holds, whatever the guest asks for)
+            let len = len.min(crate::bus::RAM_SIZE as u32);
             let r = match m.os.files.get_mut(&d1) {
                 Some(f) => {
                     let mut v = vec![0u8; len as usize];
@@ -1615,7 +1696,8 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
             m.set_d0(r);
         }
         "Write" | "FWrite" => {
-            let len = if name == "FWrite" { d3 * m.d(4) } else { d3 };
+            let len = if name == "FWrite" { d3.wrapping_mul(m.d(4)) } else { d3 };
+            let len = len.min(crate::bus::RAM_SIZE as u32);
             let data: Vec<u8> = (0..len).map(|i| m.bus.r8(d2 + i)).collect();
             if d1 == CONSOLE_FH {
                 m.os.console.push_str(&String::from_utf8_lossy(&data));
@@ -1661,7 +1743,8 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
         "Lock" => {
             let n = m.bus.read_cstr(d1);
             let p = m.os.host_path(&n, cur.as_deref());
-            if p.exists() {
+            let exists = if m.os.no_host_files { m.os.mem_exists(&p).0 } else { p.exists() };
+            if exists {
                 let l = bptr_alloc(m, 20);
                 m.os.locks.insert(l, p);
                 m.set_d0(l);
@@ -1741,7 +1824,8 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
         "LoadSeg" => {
             let n = m.bus.read_cstr(d1);
             let p = m.os.host_path(&n, cur.as_deref());
-            let r = std::fs::read(&p).ok().and_then(|d| crate::deli::load_seg(m, &d).ok());
+            let d = if m.os.no_host_files { m.os.read_file(&p).ok() } else { std::fs::read(&p).ok() };
+            let r = d.and_then(|d| crate::deli::load_seg(m, &d).ok());
             m.set_d0(r.map(|(seg, _)| seg).unwrap_or(0));
         }
         "UnLoadSeg" => m.set_d0(1),
@@ -1760,9 +1844,12 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
 }
 
 fn fill_fib(m: &mut Machine, fib: u32, p: &Path) {
-    let md = std::fs::metadata(p).ok();
-    let is_dir = md.as_ref().map(|x| x.is_dir()).unwrap_or(false);
-    let size = md.as_ref().map(|x| x.len()).unwrap_or(0) as u32;
+    let (is_dir, size) = if m.os.no_host_files {
+        (m.os.mem_exists(p).1, m.os.read_file(p).map_or(0, |d| d.len() as u32))
+    } else {
+        let md = std::fs::metadata(p).ok();
+        (md.as_ref().map(|x| x.is_dir()).unwrap_or(false), md.as_ref().map(|x| x.len()).unwrap_or(0) as u32)
+    };
     let fname = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     m.bus.w32(fib + 4, if is_dir { 2 } else { -3i32 as u32 });
     let mut fnb = fname.into_bytes();

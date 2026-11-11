@@ -32,6 +32,11 @@ pub enum Error {
     /// WebAssembly build, nothing is caught and the panic aborts instead).
     /// The [`Song`] that raised it is unusable and renders silence.
     Internal(String),
+    /// The 68k code of a custom module failed while it played (see [`Options::allow_custom`]):
+    /// a CPU exception (illegal instruction, address error, ...), or a call that did not
+    /// return within its instruction budget. Reported by [`Song::error`]; the [`Song`] renders
+    /// silence from there on. The text says what happened and where.
+    Guest(String),
 }
 
 impl fmt::Display for Error {
@@ -44,6 +49,7 @@ impl fmt::Display for Error {
                 write!(f, "subsong {requested} is outside {first}..={last}")
             }
             Error::Internal(why) => write!(f, "internal error: {why}"),
+            Error::Guest(why) => write!(f, "the module's own code failed: {why}"),
         }
     }
 }
@@ -90,6 +96,62 @@ pub fn detect(data: &[u8]) -> Option<String> {
     catch_unwind(AssertUnwindSafe(|| open::detect(data))).ok().flatten()
 }
 
+/// Whether `data` is a custom module: an AmigaOS executable that carries its own replay
+/// routine behind a DeliTracker player header (`CUST.*` files, mostly game music ripped with
+/// its player). Packed files are unpacked for the check; nothing of the module is run.
+/// [`Song::open_opts`] plays one when [`Options::allow_custom`] is set, unless an open
+/// replayer claims the file first ([`detect`] says so).
+///
+/// ```
+/// assert!(amigaplayer_rs::detect_custom(&amigaplayer_rs::testdata::minimal_custom()));
+/// assert!(!amigaplayer_rs::detect_custom(&amigaplayer_rs::testdata::minimal_mod()));
+/// ```
+#[cfg(feature = "host-68k")]
+pub fn detect_custom(data: &[u8]) -> bool {
+    catch_unwind(AssertUnwindSafe(|| open::detect_custom(data))).unwrap_or(false)
+}
+
+/// Choices for [`Song::open_opts`]. `Options::default()` is what [`Song::open`] does.
+///
+/// ```
+/// # #[cfg(feature = "host-68k")] {
+/// use amigaplayer_rs::{Options, Song};
+/// let module = amigaplayer_rs::testdata::minimal_custom();
+/// let mut song = Song::open_opts("cust.tune", &module, &[], 44100, &Options::new().allow_custom(true))?;
+/// assert_eq!(song.format(), "Custom");
+/// let mut pcm = vec![0i16; 2 * 4410];
+/// song.render_i16(&mut pcm);
+/// assert!(song.error().is_none());
+/// # }
+/// # Ok::<(), amigaplayer_rs::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Options {
+    custom: bool,
+}
+
+impl Options {
+    /// The defaults: open replayers only.
+    pub fn new() -> Options {
+        Options::default()
+    }
+
+    /// Lets a custom module (see [`detect_custom`]) play: its own 68k code runs on the emulated
+    /// 68000, in the emulated machine's memory. Off by default, and only in builds with the
+    /// `host-68k` feature. No external DeliPlayer or Eagleplayer is ever loaded by a [`Song`].
+    ///
+    /// What bounds that code: it sees the companion files given to `open_opts` and no file of
+    /// the host; every call into it has an instruction budget, after which (as after a CPU
+    /// exception) the song stops, renders silence and reports [`Error::Guest`] through
+    /// [`Song::error`]. See `docs/LIBRARY.md`, "Custom modules".
+    #[cfg(feature = "host-68k")]
+    pub fn allow_custom(mut self, on: bool) -> Options {
+        self.custom = on;
+        self
+    }
+}
+
 /// The furthest [`Song::seek`] goes, in seconds.
 pub const MAX_SEEK_SECS: f64 = 86_400.0;
 
@@ -125,6 +187,12 @@ pub struct Song {
     files: Vec<(PathBuf, Vec<u8>)>,
     rate: u32,
     poisoned: bool,
+    opts: Options,
+    /// Why the song stopped by itself, if it did.
+    failed: Option<Error>,
+    /// Title, format and subsongs as last seen while the song played (a song whose 68k code
+    /// failed has none of its own any more).
+    meta: (String, String, Subsongs),
 }
 
 fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
@@ -152,6 +220,12 @@ impl Song {
     /// its path relative to the module (`"smpl.tune"` for a TFMX module, `"Instruments/Piano"`
     /// for an IFF-SMUS score). Nothing is read from the file system.
     pub fn open_with(name: &str, data: &[u8], companions: &[(&str, &[u8])], rate: u32) -> Result<Song> {
+        Song::open_opts(name, data, companions, rate, &Options::default())
+    }
+
+    /// As [`Song::open_with`], with [`Options`]: custom modules, when
+    /// `Options::allow_custom` is set (`host-68k` builds).
+    pub fn open_opts(name: &str, data: &[u8], companions: &[(&str, &[u8])], rate: u32, opts: &Options) -> Result<Song> {
         if !(MIN_RATE..=MAX_RATE).contains(&rate) {
             return Err(Error::InvalidRate(rate));
         }
@@ -167,7 +241,7 @@ impl Song {
             }
             let _restore = Restore(crate::replay::adpcmmono::current_name());
             crate::replay::adpcmmono::set_name(&name);
-            catch_unwind(AssertUnwindSafe(|| open::detect(data).is_some()))
+            catch_unwind(AssertUnwindSafe(|| open::detect(data).is_some() || Self::custom(data, opts)))
         };
         let known = known.map_err(|p| Error::Internal(panic_text(p)))?;
         if !known {
@@ -175,13 +249,51 @@ impl Song {
         }
         let files: Vec<(PathBuf, Vec<u8>)> =
             companions.iter().map(|(rel, d)| (PathBuf::from(DIR).join(clean_rel(rel)), d.to_vec())).collect();
-        let e = Self::start(&name, data, &files, rate)?;
-        Ok(Song { e, name, data: data.to_vec(), files, rate, poisoned: false })
+        let e = Self::start(&name, data, &files, rate, opts)?;
+        let meta = Self::meta_of(&e);
+        Ok(Song { e, name, data: data.to_vec(), files, rate, poisoned: false, opts: opts.clone(), failed: None, meta })
     }
 
-    fn start(name: &str, data: &[u8], files: &[(PathBuf, Vec<u8>)], rate: u32) -> Result<open::Song> {
+    #[cfg(feature = "host-68k")]
+    fn custom(data: &[u8], opts: &Options) -> bool {
+        opts.custom && open::detect_custom(data)
+    }
+
+    #[cfg(not(feature = "host-68k"))]
+    fn custom(_data: &[u8], _opts: &Options) -> bool {
+        false
+    }
+
+    fn meta_of(e: &open::Song) -> (String, String, Subsongs) {
+        let (first, last, current) = e.subsongs();
+        (e.title().to_string(), e.format().to_string(), Subsongs { first, last, current })
+    }
+
+    /// Notes a failure of the song's 68k code, and keeps what describes the song while it plays.
+    fn check(&mut self) {
+        if self.failed.is_some() {
+            return;
+        }
+        match self.e.failure() {
+            Some(why) => self.failed = Some(Error::Guest(why.to_string())),
+            None => {
+                let (first, last, current) = self.e.subsongs();
+                self.meta.2 = Subsongs { first, last, current };
+            }
+        }
+    }
+
+    fn start(name: &str, data: &[u8], files: &[(PathBuf, Vec<u8>)], rate: u32, opts: &Options) -> Result<open::Song> {
         let path = PathBuf::from(DIR).join(name);
-        match catch_unwind(AssertUnwindSafe(|| open::Song::open_with(&path, data.to_vec(), files.to_vec(), rate))) {
+        let open = || {
+            #[cfg(feature = "host-68k")]
+            if opts.custom {
+                return open::Song::open_custom(&path, data.to_vec(), files.to_vec(), rate);
+            }
+            let _ = opts;
+            open::Song::open_with(&path, data.to_vec(), files.to_vec(), rate)
+        };
+        match catch_unwind(AssertUnwindSafe(open)) {
             Ok(Ok(s)) => Ok(s),
             Ok(Err(e)) => Err(Error::Invalid(e.to_string())),
             Err(p) => Err(Error::Internal(panic_text(p))),
@@ -195,16 +307,27 @@ impl Song {
 
     /// The format that plays the module ("ProTracker", "Sonic Arranger", "Impulse Tracker"...).
     pub fn format(&self) -> &str {
-        self.e.format()
+        &self.meta.1
     }
 
     /// The module's own title, or its file name when it has none.
     pub fn title(&self) -> &str {
-        self.e.title()
+        &self.meta.0
+    }
+
+    /// Why the song has stopped by itself and renders silence, if it has: [`Error::Guest`]
+    /// when the 68k code of a custom module failed (a CPU exception, a call that did not
+    /// return), [`Error::Internal`] when a replayer panicked. `None` while all is well.
+    /// A host that streams checks this (as it checks [`Song::songend`]) after a render.
+    pub fn error(&self) -> Option<&Error> {
+        self.failed.as_ref()
     }
 
     /// The first, last and current subsong.
     pub fn subsongs(&self) -> Subsongs {
+        if self.failed.is_some() {
+            return self.meta.2;
+        }
         let (first, last, current) = self.e.subsongs();
         Subsongs { first, last, current }
     }
@@ -218,13 +341,23 @@ impl Song {
         if self.poisoned {
             return Err(Error::Internal("the song is unusable after an earlier panic".into()));
         }
-        match catch_unwind(AssertUnwindSafe(|| self.e.set_subsong(n))) {
+        if let Some(e) = &self.failed {
+            return Err(e.clone());
+        }
+        let r = match catch_unwind(AssertUnwindSafe(|| self.e.set_subsong(n))) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(Error::Invalid(e.to_string())),
             Err(p) => {
                 self.poisoned = true;
-                Err(Error::Internal(panic_text(p)))
+                let e = Error::Internal(panic_text(p));
+                self.failed = Some(e.clone());
+                return Err(e);
             }
+        };
+        self.check();
+        match (&self.failed, r) {
+            (Some(e), _) => Err(e.clone()),
+            (None, r) => r,
         }
     }
 
@@ -263,9 +396,13 @@ impl Song {
             return n / 2;
         }
         match catch_unwind(AssertUnwindSafe(|| self.e.render(&mut out[..n]))) {
-            Ok(()) => n / 2,
-            Err(_) => {
+            Ok(()) => {
+                self.check();
+                n / 2
+            }
+            Err(p) => {
                 self.poisoned = true;
+                self.failed = Some(Error::Internal(panic_text(p)));
                 out[..n].fill(0.0);
                 n / 2
             }
@@ -292,8 +429,10 @@ impl Song {
     /// the same samples as the first time (the emulation is deterministic).
     pub fn restart(&mut self) -> Result<()> {
         let sub = self.subsongs().current;
-        self.e = Self::start(&self.name, &self.data, &self.files, self.rate)?;
+        self.e = Self::start(&self.name, &self.data, &self.files, self.rate, &self.opts)?;
         self.poisoned = false;
+        self.failed = None;
+        self.meta = Self::meta_of(&self.e);
         if sub != self.subsongs().current {
             self.set_subsong(sub)?;
         }
@@ -314,7 +453,7 @@ impl Song {
         let target = (secs.min(MAX_SEEK_SECS) * self.rate as f64) as u64;
         let mut buf = [0f32; 4096];
         let mut done = 0u64;
-        while done < target && !self.songend() && !self.poisoned {
+        while done < target && !self.songend() && self.failed.is_none() {
             let k = ((target - done) as usize).min(buf.len() / 2);
             self.render_f32(&mut buf[..k * 2]);
             done += k as u64;

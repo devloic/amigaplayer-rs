@@ -31,6 +31,26 @@ pub fn detect(data: &[u8]) -> Option<String> {
     crate::xmp::load_module(&data).map(|c| c.m.module.type_)
 }
 
+/// Whether `data` (after decrunching) is a custom module: an AmigaOS executable with a
+/// DeliTracker player header whose tags say `DTP_CustomPlayer` (the module's own code plays
+/// it). Nothing of it is run. An open replayer may still claim such a file first (`detect`).
+#[cfg(feature = "host-68k")]
+pub fn detect_custom(data: &[u8]) -> bool {
+    let data = crate::decrunch::decrunch(data.to_vec());
+    if !crate::hunk::is_hunk_file(&data) || crate::hunk::parse(&data).is_err() {
+        return false;
+    }
+    let mut m = crate::machine::Machine::new(m68k::CpuType::M68020);
+    crate::deli::init_globals(&mut m);
+    crate::deli::load_player(&mut m, &data, Path::new("")).is_ok_and(|p| p.is_custom())
+}
+
+/// The instructions one call into a custom module's code may run when `Song` hosts it: a
+/// tenth of the engine's `machine::CALL_BUDGET`, minutes of a 68000's time still, so that
+/// a module that hangs costs the host a fraction of a second, not seconds.
+#[cfg(feature = "host-68k")]
+pub const CUSTOM_CALL_BUDGET: u64 = crate::machine::CALL_BUDGET / 10;
+
 pub struct Song {
     e: Engine,
 }
@@ -45,7 +65,25 @@ impl Song {
     /// As `open`, with the companion files given in memory (each at its host path,
     /// e.g. beside `path`) for a host with no file system.
     pub fn open_with(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32) -> Result<Song> {
+        Song::start(path, data, files, rate, false)
+    }
+
+    /// As `open_with`, and a custom module (see `detect_custom`) plays too, on the emulated
+    /// 68000, when no open replayer takes it. Its code sees the files given here and no
+    /// file of the host, and each call into it has an instruction budget. No external
+    /// player is loaded: only the module's own code runs.
+    #[cfg(feature = "host-68k")]
+    pub fn open_custom(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32) -> Result<Song> {
+        Song::start(path, data, files, rate, true)
+    }
+
+    fn start(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32, custom: bool) -> Result<Song> {
         let mut e = Engine::new(rate as f64);
+        #[cfg(feature = "host-68k")]
+        if custom {
+            e.m.os.no_host_files = true;
+            e.m.call_budget = CUSTOM_CALL_BUDGET;
+        }
         e.m.os.mem_files = files.into_iter().collect();
         // the module too: some players read it again by its name (IFF-SMUS)
         e.m.os.mem_files.insert(path.to_path_buf(), data.clone());
@@ -54,6 +92,7 @@ impl Song {
         match &e.playing {
             Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_) | Backend::Pcm(_), .. }) => {}
             Some(Playing { backend: Backend::Native(_), format, .. }) if format != "SoundTracker" => {}
+            Some(p @ Playing { backend: Backend::Deli(_), .. }) if custom && p.is_custom() => {}
             _ => bail!("no open replayer plays this module"),
         }
         Ok(Song { e })
@@ -89,6 +128,15 @@ impl Song {
 
     pub fn title(&self) -> &str {
         self.e.playing.as_ref().map_or("", |p| &p.module_name)
+    }
+
+    /// Why the song stopped, if its 68k code failed while it played (a CPU exception, a
+    /// call that did not return within its instruction budget): it renders silence since.
+    pub fn failure(&self) -> Option<&str> {
+        match self.e.playing {
+            None => self.e.last_error.as_deref(),
+            Some(_) => None,
+        }
     }
 
     pub(crate) fn engine(&self) -> &Engine {

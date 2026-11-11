@@ -41,10 +41,25 @@ enum {
     AP_ERR_RATE = 3,           /* sample rate outside 1000..768000 Hz */
     AP_ERR_SUBSONG = 4,        /* subsong out of range */
     AP_ERR_INTERNAL = 5,       /* a replayer failed internally; the song is unusable */
-    AP_ERR_ARGUMENT = 6        /* NULL or malformed argument */
+    AP_ERR_ARGUMENT = 6,       /* NULL or malformed argument */
+    AP_ERR_GUEST = 7,          /* the 68k code of a custom module failed; the song is silent */
+    AP_ERR_UNSUPPORTED = 8     /* the library was built without what was asked for */
 };
 
-/* The version of this API: major * 10000 + minor * 100 + patch (0.1.0 is 100). */
+/* Flags of ap_open_opts(). */
+enum {
+    /*
+     * Custom modules may play: executables that carry their own replay routine (CUST.*
+     * files), whose 68k code is run on the emulated 68000. That code sees the companion
+     * files handed to ap_open_opts() and no file of the host, and every call into it has an
+     * instruction budget: a module that hangs or faults stops, renders silence and reports
+     * through ap_error(). No external player is ever loaded. Needs a library built with the
+     * host-68k feature (the default), else AP_ERR_UNSUPPORTED.
+     */
+    AP_OPEN_CUSTOM = 1
+};
+
+/* The version of this API: major * 10000 + minor * 100 + patch (0.2.0 is 200). */
 int ap_version(void);
 
 /* The message of the last failed call on this thread (empty if none). */
@@ -75,6 +90,20 @@ ap_song *ap_open_with(const char *name, const uint8_t *data, size_t len, uint32_
                       size_t n, const char *const *paths, const uint8_t *const *datas,
                       const size_t *lens);
 
+/*
+ * As ap_open_with, with flags (AP_OPEN_*, or 0 for what ap_open_with does). New in 0.2.0.
+ */
+ap_song *ap_open_opts(const char *name, const uint8_t *data, size_t len, uint32_t rate,
+                      size_t n, const char *const *paths, const uint8_t *const *datas,
+                      const size_t *lens, uint32_t flags);
+
+/*
+ * 1 if data[0..len) is a custom module (which ap_open_opts plays with AP_OPEN_CUSTOM, unless
+ * ap_detect names a replayer for it: that one plays it then), else 0. Nothing of the module
+ * is run. New in 0.2.0.
+ */
+int ap_detect_custom(const uint8_t *data, size_t len);
+
 /* Closes a song and frees its memory. NULL is allowed. */
 void ap_close(ap_song *song);
 
@@ -102,6 +131,17 @@ double ap_elapsed_secs(ap_song *song);
 double ap_duration_hint(ap_song *song);
 /* The sample rate the song was opened at. */
 uint32_t ap_sample_rate(ap_song *song);
+
+/*
+ * Why the song has stopped by itself and renders silence, or NULL while all is well: the 68k
+ * code of a custom module failed (AP_ERR_GUEST: a CPU exception, a call that did not return
+ * within its instruction budget), or a replayer did (AP_ERR_INTERNAL). ap_songend() stays 0:
+ * check this after rendering, as you check ap_songend(). The string is valid until the next
+ * ap_error call on that song; ap_error_code gives the AP_ERR_* code, 0 for none.
+ * ap_restart() starts the song again. New in 0.2.0.
+ */
+const char *ap_error(ap_song *song);
+int ap_error_code(ap_song *song);
 
 /* Starts the current subsong again from its beginning. Returns 0 or -1. */
 int ap_restart(ap_song *song);

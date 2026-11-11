@@ -50,6 +50,13 @@ pub struct Playing {
     custom_player: bool,
 }
 
+impl Playing {
+    /// The module is a custom module: its own 68k code plays it.
+    pub fn is_custom(&self) -> bool {
+        self.custom_player
+    }
+}
+
 #[derive(Clone)]
 pub struct Settings {
     pub volume: f32,       // 0..1

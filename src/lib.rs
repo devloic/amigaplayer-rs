@@ -28,6 +28,9 @@
 //! * [`detect`] and [`formats`]: ask what would play some bytes, without starting it.
 //! * [`Song`]: [`open`](Song::open) / [`open_with`](Song::open_with) (companion files such as
 //!   TFMX `smpl.*`, Mark Cooksey `mcs.*` are passed in memory: nothing touches the file system),
+//!   [`open_opts`](Song::open_opts) with [`Options`] (custom modules, which carry their own
+//!   68k replay routine: `host-68k` builds, see `Options::allow_custom` and `detect_custom`),
+//!   [`error`](Song::error),
 //!   [`render_f32`](Song::render_f32) / [`render_i16`](Song::render_i16),
 //!   [`subsongs`](Song::subsongs) / [`set_subsong`](Song::set_subsong),
 //!   [`songend`](Song::songend), [`duration_hint`](Song::duration_hint),
@@ -44,11 +47,12 @@
 //!
 //! | feature    | default | what it adds |
 //! |------------|---------|--------------|
-//! | `host-68k` | yes     | loading and running the original 68k DeliPlayers, Eagleplayers and DeliGenies (the application's mode of operation); not needed by the library |
+//! | `host-68k` | yes     | loading and running the original 68k DeliPlayers, Eagleplayers and DeliGenies (the application's mode of operation); in the library, custom modules through `Song::open_opts` (`Options::allow_custom`), and nothing else |
 //! | `ui`       | yes     | the SDL3 player window and the `amigaplayer-rs` binary (implies `host-68k`) |
 //! | `native`   | yes     | the players recompiled to Rust, when generated from the user's own player files (implies `host-68k`) |
 //!
-//! A library user wants `default-features = false`:
+//! A library user wants `default-features = false` (plus `features = ["host-68k"]` to play
+//! custom modules):
 //!
 //! ```toml
 //! [dependencies]
@@ -85,7 +89,9 @@
 mod song;
 pub mod unpack;
 
-pub use song::{detect, formats, Error, Result, Song, Subsongs};
+pub use song::{detect, formats, Error, Options, Result, Song, Subsongs};
+#[cfg(feature = "host-68k")]
+pub use song::detect_custom;
 
 pub mod testdata;
 

@@ -1,10 +1,11 @@
 #!/bin/bash
 # Checks the library side of the repository, end to end (no network, no audio device):
-#   1. the open-replayer library with default features off: build, tests (unit, integration,
-#      doctests), examples
+#   1. the open-replayer library with default features off, and with `host-68k` (custom
+#      modules through `Song`): build, tests (unit, integration, doctests), examples
 #   2. the application (default features) still builds
-#   3. the C API: build the cdylib/staticlib, compile examples/c/play.c, link it both ways,
-#      render a synthetic module and compare the samples with the Rust example's
+#   3. the C API: its tests with and without its features, build the cdylib/staticlib,
+#      compile examples/c/play.c, link it both ways, render a synthetic module and compare
+#      the samples with the Rust example's
 #   4. the WebAssembly crate: wasm32-unknown-unknown build, wasm-strip when available, and a
 #      node run of the dp_* ABI (crates/amigaplayer-wasm/test/smoke.mjs) when node is available
 #
@@ -35,11 +36,15 @@ echo "== 1. library, default features off"
 cargo build --release --lib --no-default-features
 cargo test --release --no-default-features
 cargo build --release --no-default-features --examples
+echo "== 1b. library with host-68k (custom modules), and the headless renderer"
+cargo test --release --no-default-features --features host-68k
 
 echo "== 2. application"
 if [ -n "$APP" ]; then cargo build --release; else echo "(skipped)"; fi
 
 echo "== 3. C API"
+cargo test --release -p amigaplayer-capi --no-default-features
+cargo test --release -p amigaplayer-capi
 cargo build --release -p amigaplayer-capi
 "$T/examples/make_demo_mod" "$WORK/demo.mod"
 "$T/examples/play_to_wav" "$WORK/demo.mod" "$WORK/demo-rust.wav" 3

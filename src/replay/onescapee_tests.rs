@@ -105,12 +105,13 @@ fn init_and_interrupt_timing() {
     assert_eq!(writes(&r, 0x0A4)[0].0, 0x200);
     assert_eq!(writes(&r, 0x0A8)[0].0, 64);
     assert_eq!(writes(&r, 0x0C8)[0].0, 1);
-    // interrupt entries: the engine's Paula requests the first one 92 colour clocks after the
-    // DMA enable (a host that serves it at the next output sample, as the command line does,
-    // sees it at 160, and the others at 227271 + n * 227328); between the first two handlers
+    // interrupt entries: the DMA enable falls before the song start, so the engine's Paula moves
+    // its pending first line with the start (`align_to_start`): the first interrupt is requested
+    // 235 colour clocks after the DMA enable (before that change: 92, or 160 for a host that
+    // serves it at the next output sample); between the first two handlers
     // are 227111, then 227328 each
     let clears: Vec<u64> = writes(&r, 0x09A).iter().filter(|w| w.0 == 0x0080).map(|w| w.1).collect();
-    assert!(clears[0] == e + 92 || clears[0] == e + 160, "{}", clears[0] - e);
+    assert_eq!(clears[0] - e, 235);
     assert_eq!(clears[1] - clears[0], 227111);
     assert_eq!(clears[2] - clears[1], 227328);
     assert_eq!(clears[3] - clears[2], 227328);

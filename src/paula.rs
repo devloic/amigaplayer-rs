@@ -143,7 +143,15 @@ impl Paula {
     /// depends only on the time since the start and not on how long loading took.
     pub fn align_to_start(&mut self, t: u64) {
         self.out.restart();
-        self.next_line = t.max(self.last) + LINE;
+        let new = t.max(self.last) + LINE;
+        // a DMA start pending on the old grid moves with the line it waits for
+        let delta = new.wrapping_sub(self.next_line);
+        for c in &mut self.ch {
+            if c.state == 1 || c.state == 5 {
+                c.evtime = c.evtime.wrapping_add(delta);
+            }
+        }
+        self.next_line = new;
     }
 
     /// Plays volume 64 as 63 and periods below 16 as 16, as UADE does.
@@ -500,6 +508,49 @@ mod tests {
         let a = run(true);
         assert_eq!(a[0], 0x11, "word 0 first: {a:?}");
         assert_eq!(a, run(false));
+    }
+
+    /// DMA enabled shortly before the song start moves the grid gives the same onset
+    /// as enabling it after the start, whatever the offset.
+    #[test]
+    fn align_rebases_pending_dma_start() {
+        let ram = [0x40u8, 0xC0, 0x20, 0xE0];
+        let mut mem = |a: u32| u16::from_be_bytes([ram[(a & 3) as usize], ram[(a & 3 | 1) as usize]]);
+        let mut onset = |pre: u64, dma_first: bool| {
+            let mut p = Paula::new();
+            p.write_at(0, 0xA4, 2, &mut mem);
+            p.write_at(0, 0xA6, 124, &mut mem);
+            p.write_at(0, 0xA8, 64, &mut mem);
+            let t = 1000;
+            p.sync_with(t - pre, &mut mem, false);
+            if dma_first {
+                p.write_dmacon(0x8201);
+                p.sync_with(t, &mut mem, false);
+                p.align_to_start(t);
+            } else {
+                p.sync_with(t, &mut mem, false);
+                p.align_to_start(t);
+                p.write_dmacon(0x8201);
+            }
+            for k in 1..4 * LINE {
+                p.sync_with(t + k, &mut mem, false);
+                if p.ch[0].current_sample != 0 {
+                    return k;
+                }
+            }
+            0
+        };
+        let reference = onset(0, false);
+        assert_ne!(reference, 0);
+        // the line grid before the start has lines at 908 and 1135: DMA enabled after 908
+        // still waits for its first line (same as enabling after the start) ...
+        for pre in [1u64, 50, 91] {
+            assert_eq!(onset(pre, true), reference, "pre {pre}");
+        }
+        // ... enabled before it has had that line, one line is left, whatever the offset
+        for pre in [93u64, 150, 200, 226] {
+            assert_eq!(onset(pre, true), LINE, "pre {pre}");
+        }
     }
 
     /// Without DMA a channel asks for its next word: the 4Voc NotePlayer genie

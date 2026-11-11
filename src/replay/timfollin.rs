@@ -28,7 +28,8 @@
 //! does what it did in the original, and ends the song when the fade it starts runs
 //! out (the original crashes there).
 
-use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
+use super::{be16, be32, Hw, Open, Replayer};
+use crate::paula::LINE;
 use crate::machine::Machine;
 use m68k::AddressBus;
 
@@ -73,59 +74,38 @@ const PERIODS: [u16; 97] = [
     25, 24, 22, 21, 20, 19, 18, 17, 16, 8,
 ];
 
-/// Where the writes of a tick fall in the reference runs (ten files), by the previous write (see
-/// `WriteGaps`): the voice work between two writes. After the DMA is switched on the routine waits
-/// ten raster lines (see `play`).
-static GAPS: WriteGaps = WriteGaps::new(
-    &[
-        (0, 4, 25), // LOC0 -> LEN0 x690
-        (1, 5, 25), // LOC1 -> LEN1 x551
-        (2, 6, 25), // LOC2 -> LEN2 x757
-        (3, 7, 25), // LOC3 -> LEN3 x496
-        (4, 1, 60), // LEN0 -> LOC1 x296
-        (4, 2, 96), // LEN0 -> LOC2 x162
-        (4, 3, 131), // LEN0 -> LOC3 x5
-        (4, 12, 139), // LEN0 -> VOL0 x81
-        (5, 2, 60), // LEN1 -> LOC2 x192
-        (5, 3, 80), // LEN1 -> LOC3 x48
-        (5, 12, 111), // LEN1 -> VOL0 x131
-        (6, 3, 60), // LEN2 -> LOC3 x145
-        (6, 12, 84), // LEN2 -> VOL0 x118
-        (7, 12, 56), // LEN3 -> VOL0 x122
-        (8, 13, 50), // PER0 -> VOL1 x1226
-        (9, 14, 50), // PER1 -> VOL2 x915
-        (10, 15, 50), // PER2 -> VOL3 x703
-        (11, 0, 75), // PER3 -> LOC0 x131
-        (11, 1, 110), // PER3 -> LOC1 x8
-        (11, 2, 146), // PER3 -> LOC2 x90
-        (11, 3, 181), // PER3 -> LOC3 x229
-        (11, 20, 50), // PER3 -> DMA_ON x152
-        (12, 8, 37), // VOL0 -> PER0 x1226
-        (12, 13, 65), // VOL0 -> VOL1 x3734
-        (13, 9, 37), // VOL1 -> PER1 x915
-        (13, 14, 65), // VOL1 -> VOL2 x4045
-        (14, 10, 37), // VOL2 -> PER2 x703
-        (14, 15, 65), // VOL2 -> VOL3 x4257
-        (15, 0, 89), // VOL3 -> LOC0 x67
-        (15, 1, 125), // VOL3 -> LOC1 x55
-        (15, 2, 160), // VOL3 -> LOC2 x162
-        (15, 11, 37), // VOL3 -> PER3 x930
-        (15, 20, 65), // VOL3 -> DMA_ON x300
-        (16, 0, 55), // DMA_OFF -> LOC0 x218
-        (16, 1, 83), // DMA_OFF -> LOC1 x106
-        (16, 2, 110), // DMA_OFF -> LOC2 x92
-        (16, 3, 138), // DMA_OFF -> LOC3 x36
-        (20, 0, 0),
-        (20, 1, 0),
-        (20, 2, 0),
-        (20, 3, 0),
-    ],
-    &[(0, 75), (1, 60), (2, 110), (3, 181), (4, 25), (5, 25), (6, 25), (7, 25), (8, 37), (9, 37), (10, 37), (11, 37), (12, 84), (13, 65), (14, 65), (15, 65), (20, 65)],
-    &[(12, 985), (13, 985), (14, 985), (15, 985), (16, 2029)],
-);
+/// The code paths of a tick whose executions are counted (`TimFollin::f`), for the tick's time.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+#[rustfmt::skip]
+enum F {
+    Voice, Pwm, PwmUp, PwmUpEnd, PwmDown, PwmDownEnd, Env0, Env0Step, Env0Top, Env1, Env1Step, Env1Sus, Env1Neg, Env2,
+    Fade, FadeClamp, FadeRun, Glide0, GlideAt, GlideUp, GlideUpEnd, GlideDown, GlideDownEnd,
+    VibRun, VibBegin, VibWait, VibUp, VibDown, VibZero, VibTurn, TrillUp, TrillDown, TrillWait, NoTrill,
+    Last, LastArm, Parse, ParseArm, Odd, LoopBack, PwmReset,
+    Note, NoteRaw, NoteGlide, NoteTrig, NoteLoopIns, NoteFixDur, NoteVib, NoteEnv0, NoteEnv,
+    Cmd0, Cmd1, Cmd2, Cmd3, Cmd4, Cmd5, Cmd6, Cmd7, Cmd8, Cmd9, Cmd10, Cmd11, Cmd12, Cmd13, Cmd14, Cmd15, Cmd16, Cmd17, Cmd18,
+    N,
+}
 
-/// Colour clocks from a voice's end to its DMA off (the end-of-voice command).
-const T_OFFV: u64 = 54;
+/// 68000 cycles of each path of `F`, and (last) of every tick: the reference's cycles from a tick's
+/// start to its first write are their sum on all 18,771 ticks with a write of 22 runs of 20 s (the
+/// 13 corpus files and Puzznic's ten subsongs), solved from those and equal when solved from 14 of the
+/// runs alone. The paths are not independent (every voice takes one of each group), so a single
+/// figure means nothing by itself; a zero is a path the others cover or one no run takes
+/// (`PwmDownEnd`, `Env1Neg`, the fade's three, `VibZero`, `Cmd0`: not measured).
+#[rustfmt::skip]
+static COST: [i32; F::N as usize + 1] = [
+    643, 29, 158, 176, 148, 0, 0, 95, 147, 29, 145, 110, 0, 0,
+    0, 0, 0, -253, -200, -10, 4, -10, 14,
+    190, 219, 54, 10, 0, 0, 79, 0, 0, 29, 0,
+    0, 28, 214, 0, 8, 28, 168,
+    427, 128, 28, 60, 274, -8, 52, 101, 115,
+    0, 252, 203, 146, 132, 115, 276, 114, 150, 168, 114, 114, 114, 114, 245, 0, 114, 0, 151,
+    1470,
+];
+/// Cycles more to the first volume write when no sample restarts (the DMA-off write comes first otherwise).
+const C_VOL: u64 = 297;
 
 /// Bytes a parse may read before the port gives the voice up (a sequence of
 /// commands that never reaches a note).
@@ -133,13 +113,23 @@ const PARSE_LIMIT: usize = 1 << 16;
 
 // ---------------------------------------------------------------- recognition
 
-/// Where the data block is and how far the pointers are off (for `VIRT`); and the
-/// number of subsongs as the reference host offers them.
+/// Where the data block is and how far the pointers are off (for `VIRT`); the number of
+/// subsongs as the reference host offers them; and the 68000's colour clocks the original's
+/// start-up takes (`START`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Lay {
     base: usize,
     dx: u32,
     subs: u16,
+    start: u64,
+}
+
+/// The subsongs the original offers: the songs from 0 on whose instrument table is not the next
+/// song's (ten in Puzznic, whose songs 10 to 15 are song 1 again, and one in the eleven header-build
+/// files; the original's count loop runs that often, and the song table gives the same counts).
+fn subsongs(d: &[u8], base: usize) -> u16 {
+    let tab = |k: usize| be32(d, base + INSTABS as usize + 4 * k);
+    ((0..15).take_while(|&k| tab(k) != tab(k + 1)).count() as u16).max(1)
 }
 
 fn layout(d: &[u8]) -> Option<Lay> {
@@ -154,8 +144,7 @@ fn layout(d: &[u8]) -> Option<Lay> {
         if be32(d, 0x2C).wrapping_sub(be32(d, 2)) != 0xA0 || d.len() < JT_BASE + 0x194 {
             return None;
         }
-        let subs = (0..15).filter(|k| be16(d, 6 * k) == 0x4EF9).count() as u16;
-        return Some(Lay { base: JT_BASE, dx: VIRT.wrapping_sub(be32(d, 2)), subs });
+        return Some(Lay { base: JT_BASE, dx: VIRT.wrapping_sub(be32(d, 2)), subs: subsongs(d, JT_BASE), start: START_JT });
     }
     // the header build
     let at = if be16(d, 0) == 0x601A { 0x1C } else { 0 };
@@ -171,7 +160,9 @@ fn layout(d: &[u8]) -> Option<Lay> {
         return None;
     }
     let m = (b..d.len().saturating_sub(5)).step_by(2).find(|&o| d[o..o + 6] == ANCHOR)?;
-    Some(Lay { base: b, dx: (VIRT + m as u32).wrapping_sub(s0), subs: 1 })
+    // (the original looks for the anchor word by word and then goes back over the words: 27 clocks a word)
+    let start = START_HEADER + 27 * ((m - b) / 2 + 1) as u64;
+    Some(Lay { base: b, dx: (VIRT + m as u32).wrapping_sub(s0), subs: subsongs(d, b), start })
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -227,6 +218,8 @@ struct Voice {
     /// This tick's writes, buffered until the pass over the voices is done.
     /// The restart is armed: the tick before the note ends (duration counter 1), bit 7 of the flags was set.
     arm: bool,
+    /// The voice ended in this tick (the end-of-voice command).
+    ended: bool,
     o_vol: Option<u16>,
     o_per: Option<u16>,
     o_trig: Option<(u32, u16)>,
@@ -240,9 +233,6 @@ pub struct TimFollin {
     len: u32,
     sub: u16,
     started: bool,
-    /// The colour clock of the first tick, and how many have run.
-    t_first: u64,
-    n_ticks: u32,
     /// The fade ran out: the original crashes here; the port stops.
     dead: bool,
     songend: bool,
@@ -250,6 +240,8 @@ pub struct TimFollin {
     v: [Voice; 4],
     /// The voices whose sample restarts this tick (DMA off and on in one batch).
     mask: u8,
+    /// How often this tick took each code path (`F`).
+    f: [u16; F::N as usize],
     #[cfg(test)]
     ticks: u32,
 }
@@ -317,19 +309,6 @@ impl TimFollin {
         self.ww(W_PERIODS + ((2 * n as usize) & 0xFF))
     }
 
-    // the registers, at the addresses of the work area's table
-    fn reg(&self, hw: &mut Hw, k: usize, ch: usize, v: u16) {
-        hw.bus.write_word(self.wl(W_REGS + 16 * k + 4 * ch), v);
-    }
-
-    fn per(&self, hw: &mut Hw, ch: usize, v: u16) {
-        self.reg(hw, 0, ch, v);
-    }
-
-    fn vol(&self, hw: &mut Hw, ch: usize, v: u16) {
-        self.reg(hw, 3, ch, v);
-    }
-
     /// The sample address and length (words) of instrument record `r`.
     fn sample_of(&self, hw: &Hw, r: u32) -> (u32, u16) {
         let lc = self.guest(r.wrapping_add(SAMPLE)).unwrap_or_else(|| r.wrapping_add(SAMPLE));
@@ -337,13 +316,12 @@ impl TimFollin {
     }
 
     /// LC and LEN of channel `ch`.
-    fn put_sample(&self, hw: &mut Hw, ch: usize, (lc, len): (u32, u16)) {
+    fn put_sample(&self, hw: &mut Hw, w: &mut Writer, ch: usize, (lc, len): (u32, u16)) {
         let a = self.wl(W_REGS + 32 + 4 * ch);
-        hw.space(WriteGaps::LOC, ch);
-        hw.bus.write_word(a, (lc >> 16) as u16);
+        w.put(hw, a, (lc >> 16) as u16);
         hw.bus.write_word(a.wrapping_add(2), lc as u16);
-        hw.space(WriteGaps::LEN, ch);
-        self.reg(hw, 1, ch, len);
+        w.cy += 50;
+        w.put(hw, self.wl(W_REGS + 16 + 4 * ch), len);
     }
 
     fn song(&self) -> u32 {
@@ -391,33 +369,44 @@ impl TimFollin {
         self.wl(self.v[ch].sp as usize)
     }
 
+    /// Counts a code path of this tick (see `COST`).
+    fn c(&mut self, k: F) {
+        self.f[k as usize] += 1;
+    }
+
     /// PWM, envelope and volume (specification, 5.3).
     fn pwm_env(&mut self, hw: &mut Hw, ch: usize) -> u16 {
         let v = self.v[ch];
         if (v.insno as i8) < 4 {
+            self.c(F::Pwm);
             let v = &mut self.v[ch];
             v.pwm_cnt = v.pwm_cnt.wrapping_sub(1);
             if v.pwm_cnt == 0 {
                 v.pwm_cnt = v.pwm_speed;
-                let x = if v.pwm_dir == 0 {
+                let (x, k) = if v.pwm_dir == 0 {
                     v.pwm_pos = v.pwm_pos.wrapping_add(1);
                     if v.pwm_pos == 0x1E {
                         v.pwm_dir = 0xFF;
+                        (0x80, F::PwmUpEnd)
+                    } else {
+                        (0x80, F::PwmUp)
                     }
-                    0x80
                 } else {
                     v.pwm_pos = v.pwm_pos.wrapping_sub(1);
                     if v.pwm_pos == 4 {
                         v.pwm_dir = 0;
+                        (0, F::PwmDownEnd)
+                    } else {
+                        (0, F::PwmDown)
                     }
-                    0
                 };
                 let a = v.ins.wrapping_add(SAMPLE).wrapping_add(v.pwm_pos as u32);
+                self.c(k);
                 self.store(hw, a, x);
             }
         }
         let v = &mut self.v[ch];
-        match v.env_phase {
+        let k = match v.env_phase {
             0 => {
                 v.env_cnt = v.env_cnt.wrapping_sub(1);
                 if v.env_cnt & 0x80 != 0 {
@@ -426,7 +415,12 @@ impl TimFollin {
                     if v.vol == 0x3F {
                         v.env_phase = 1;
                         v.env_cnt = v.env_dec;
+                        F::Env0Top
+                    } else {
+                        F::Env0Step
                     }
+                } else {
+                    F::Env0
                 }
             }
             1 => {
@@ -435,89 +429,123 @@ impl TimFollin {
                     v.env_cnt = v.env_dec;
                     if v.vol == v.env_sus {
                         v.env_phase = 2;
+                        F::Env1Sus
                     } else {
                         v.vol = v.vol.wrapping_sub(v.env_step);
                         if v.vol & 0x80 != 0 {
                             v.env_phase = 2;
+                            F::Env1Neg
+                        } else {
+                            F::Env1Step
                         }
                     }
+                } else {
+                    F::Env1
                 }
             }
-            _ => {}
-        }
+            _ => F::Env2,
+        };
         let mut out = v.vol;
+        self.c(k);
         let fade = self.work[W_FADE];
-        if fade != 0 && (out as i8) >= ((fade >> 2) as i8) {
-            out = fade >> 2;
+        if fade != 0 {
+            self.c(F::Fade);
+            if (out as i8) >= ((fade >> 2) as i8) {
+                self.c(F::FadeClamp);
+                out = fade >> 2;
+            }
         }
         out as u16
     }
 
-    fn set_note(&mut self, _hw: &mut Hw, ch: usize, n: u8) {
+    fn set_note(&mut self, ch: usize, n: u8) {
         self.v[ch].note = n;
         self.v[ch].period = self.period(n & 0x7F);
         self.v[ch].o_per = Some(self.v[ch].period);
     }
 
-    fn glide(&mut self, hw: &mut Hw, ch: usize) {
+    fn glide(&mut self, ch: usize) {
         let v = self.v[ch];
-        if v.glide_spd == 0 || v.note == v.glide_tgt {
-            return;
+        if v.glide_spd == 0 {
+            return self.c(F::Glide0);
         }
-        let n = if v.note < v.glide_tgt {
+        if v.note == v.glide_tgt {
+            return self.c(F::GlideAt);
+        }
+        let (n, k) = if v.note < v.glide_tgt {
             let n = v.note.wrapping_add(v.glide_spd);
             if n < v.glide_tgt {
-                n
+                (n, F::GlideUp)
             } else {
-                v.glide_tgt
+                (v.glide_tgt, F::GlideUpEnd)
             }
         } else {
             let n = v.note.wrapping_sub(v.glide_spd);
             if n >= v.glide_tgt {
-                n
+                (n, F::GlideDown)
             } else {
-                v.glide_tgt
+                (v.glide_tgt, F::GlideDownEnd)
             }
         };
-        self.set_note(hw, ch, n);
+        self.c(k);
+        self.set_note(ch, n);
     }
 
     /// The pitch effects (specification, 5.4).
-    fn pitch(&mut self, hw: &mut Hw, ch: usize) {
+    fn pitch(&mut self, ch: usize) {
         let v = &mut self.v[ch];
-        let vib = v.vib_delay != 0
-            && (v.vib_dcnt == 0 || {
+        let mut ks = [None; 3];
+        let vib = v.vib_delay != 0 && {
+            if v.vib_dcnt == 0 {
+                ks[0] = Some(F::VibRun);
+                true
+            } else {
                 v.vib_dcnt = v.vib_dcnt.wrapping_sub(1);
+                ks[0] = Some(if v.vib_dcnt == 0 { F::VibBegin } else { F::VibWait });
                 v.vib_dcnt == 0
-            });
+            }
+        };
         if vib {
             let s = v.vib_step as u16;
+            ks[1] = Some(if v.dir != 0 { F::VibUp } else { F::VibDown });
             v.period = if v.dir != 0 { v.period.wrapping_add(s) } else { v.period.wrapping_sub(s) };
             let p = v.period;
             v.vib_cnt = v.vib_cnt.wrapping_sub(1);
-            if v.vib_cnt == 0 && v.vib_len != 0 {
-                v.vib_cnt = v.vib_len.wrapping_mul(2);
-                v.dir ^= 1;
+            if v.vib_cnt == 0 {
+                ks[2] = Some(F::VibZero);
+                if v.vib_len != 0 {
+                    ks[2] = Some(F::VibTurn);
+                    v.vib_cnt = v.vib_len.wrapping_mul(2);
+                    v.dir ^= 1;
+                }
             }
             self.v[ch].o_per = Some(p);
-            self.glide(hw, ch);
+            ks.into_iter().flatten().for_each(|k| self.c(k));
+            self.glide(ch);
         } else if v.tr_cnt != 0 {
             v.tr_cnt -= 1;
             if v.tr_cnt == 0 {
                 v.dir ^= 1;
                 let n = if v.dir != 0 {
+                    ks[1] = Some(F::TrillUp);
                     v.tr_cnt = v.tr_ta;
                     v.note.wrapping_add(v.tr_int)
                 } else {
+                    ks[1] = Some(F::TrillDown);
                     v.tr_cnt = v.tr_tb;
                     v.note.wrapping_sub(v.tr_int)
                 };
-                self.set_note(hw, ch, n);
+                ks.into_iter().flatten().for_each(|k| self.c(k));
+                self.set_note(ch, n);
             } else {
-                self.glide(hw, ch);
+                ks[1] = Some(F::TrillWait);
+                ks.into_iter().flatten().for_each(|k| self.c(k));
+                self.glide(ch);
             }
         } else {
-            self.glide(hw, ch);
+            ks[1] = Some(F::NoTrill);
+            ks.into_iter().flatten().for_each(|k| self.c(k));
+            self.glide(ch);
         }
     }
 
@@ -532,8 +560,12 @@ impl TimFollin {
                 self.note(hw, ch, c, p);
                 return;
             }
+            let cmd = c & 0x7F;
+            if (cmd as usize) < 19 {
+                self.f[F::Cmd0 as usize + cmd as usize] += 1;
+            }
             let op = |k: u32| self.b(hw, p.wrapping_add(k));
-            match c & 0x7F {
+            match cmd {
                 0 => {}
                 1 => {
                     let i = op(0);
@@ -544,6 +576,9 @@ impl TimFollin {
                     v.ins = r;
                 }
                 2 => {
+                    if p & 1 != 0 {
+                        self.c(F::Odd);
+                    }
                     p = p.wrapping_add(p & 1);
                     let t = self.l(hw, p);
                     p = p.wrapping_add(4);
@@ -561,6 +596,7 @@ impl TimFollin {
                     v.loopcnt = v.loopcnt.wrapping_sub(1);
                     if v.loopcnt != 0 {
                         p = v.lp;
+                        self.c(F::LoopBack);
                     }
                 }
                 6 => {
@@ -611,6 +647,7 @@ impl TimFollin {
                     v.pwm_pos = 7;
                     let ins = v.ins;
                     if ins != 0 {
+                        self.c(F::PwmReset);
                         // the record header, not the sample (the original's quirk)
                         for k in 2..0x22 {
                             self.store(hw, ins.wrapping_add(k), if k < 0x0A { 0x80 } else { 0 });
@@ -618,14 +655,16 @@ impl TimFollin {
                     }
                 }
                 15 => {
+                    // the end of the voice: its volume of this tick is 0, and nothing is written for it afterwards
                     self.v[ch].active = 0;
-                    hw.wait(T_OFFV);
-                    hw.dmacon(self.ww(W_OFF + 2 * ch));
-                    self.vol(hw, ch, 0);
+                    self.v[ch].ended = true;
                     return;
                 }
                 17 => self.v[ch].skiptr = 0xFF,
                 18 => {
+                    if p & 1 != 0 {
+                        self.c(F::Odd);
+                    }
                     p = p.wrapping_add(p & 1);
                     p = self.l(hw, p).wrapping_add(dx);
                 }
@@ -641,14 +680,17 @@ impl TimFollin {
 
     /// A note (specification, 6.1); `p` is the position after its byte.
     fn note(&mut self, hw: &mut Hw, ch: usize, c: u8, mut p: u32) {
+        self.c(F::Note);
         let v = &mut self.v[ch];
         let mut n = if v.skiptr != 0 {
             v.skiptr = 0;
+            self.f[F::NoteRaw as usize] += 1;
             c
         } else {
             c.wrapping_add(v.transp)
         };
         if v.glide_spd != 0 {
+            self.f[F::NoteGlide as usize] += 1;
             v.glide_tgt = n;
             n = v.note;
         }
@@ -658,15 +700,20 @@ impl TimFollin {
         // a voice flagged to restart (bit 7 when the note begins) starts the note's sample; every
         // note then sets the loop pointer: bit 6 names the instrument (low six bits), else the note's own
         if self.mask & 1 << ch != 0 {
+            self.c(F::NoteTrig);
             let t = self.sample_of(hw, self.v[ch].ins);
             self.v[ch].o_trig = Some(t);
         }
         let fl = self.v[ch].flags;
+        if fl & 0x40 != 0 {
+            self.c(F::NoteLoopIns);
+        }
         let lr = if fl & 0x40 != 0 { self.instrument(hw, fl & 0x3F) } else { self.v[ch].ins };
         let lp = self.sample_of(hw, lr);
         self.v[ch].o_loop = Some(lp);
         self.v[ch].o_per = Some(period);
         let d = if self.v[ch].fixdur != 0 {
+            self.c(F::NoteFixDur);
             self.v[ch].fixdur
         } else {
             let d = self.b(hw, p);
@@ -677,7 +724,9 @@ impl TimFollin {
         v.dur = d;
         v.seq = p;
         v.tr_cnt = v.tr_ta;
+        let mut ks = [None; 2];
         if v.vib_delay != 0 {
+            ks[0] = Some(F::NoteVib);
             v.vib_dcnt = v.vib_delay;
             v.vib_cnt = v.vib_len;
             v.dir = v.vib_dir0;
@@ -686,9 +735,11 @@ impl TimFollin {
         }
         if v.env_on != 0 {
             v.env_phase = v.env_phase0;
+            ks[1] = Some(if v.env_phase == 0 { F::NoteEnv0 } else { F::NoteEnv });
             v.env_cnt = if v.env_phase == 0 { v.env_att } else { v.env_dec };
             v.vol = v.env_vol0;
         }
+        ks.into_iter().flatten().for_each(|k| self.c(k));
     }
 
     /// The fade check (specification, 7.3): true when it ran out.
@@ -706,73 +757,117 @@ impl TimFollin {
     }
 
     fn play(&mut self, hw: &mut Hw) {
-        hw.gaps(&GAPS);
+        self.f = [0; F::N as usize];
+        let fade0 = self.work[W_FADE];
         if self.fade() {
             self.dead = true;
             self.songend = true;
             return;
         }
-        // the voices whose note begins this tick and whose current flags say "restart": their DMA
-        // goes off first and on again after everything is written
+        if fade0 != 0 {
+            self.c(F::FadeRun);
+        }
+        // the voices whose note begins this tick and whose current flags say "restart"
         self.mask = 0;
         for ch in 0..4 {
             let v = &mut self.v[ch];
             (v.o_vol, v.o_per, v.o_trig, v.o_loop) = (None, None, None, None);
+            v.ended = false;
             if v.active & 0x80 != 0 && v.dur.wrapping_sub(1) == 0 && v.arm {
                 self.mask |= 1 << ch;
             }
-        }
-        let mask = self.mask;
-        if mask != 0 {
-            let m = (0..4).filter(|ch| mask & 1 << ch != 0).fold(0, |a, ch| a | self.ww(W_OFF + 2 * ch));
-            hw.dmacon(m);
         }
         for ch in 0..4 {
             if self.v[ch].active & 0x80 == 0 {
                 continue;
             }
+            self.c(F::Voice);
             let vol = self.pwm_env(hw, ch);
             self.v[ch].o_vol = Some(vol);
-            self.pitch(hw, ch);
+            self.pitch(ch);
             let v = &mut self.v[ch];
             v.dur = v.dur.wrapping_sub(1);
-            if v.dur == 1 && v.flags & 0x80 != 0 {
-                v.arm = true;
+            if v.dur == 1 {
+                let k = if v.flags & 0x80 != 0 { F::LastArm } else { F::Last };
+                if v.flags & 0x80 != 0 {
+                    v.arm = true;
+                }
+                self.c(k);
             }
-            if v.dur == 0 {
+            if self.v[ch].dur == 0 {
+                self.c(F::Parse);
+                if self.v[ch].arm {
+                    self.c(F::ParseArm);
+                }
                 self.parse(hw, ch);
                 self.v[ch].arm = false;
+                if self.v[ch].ended {
+                    self.v[ch].o_vol = Some(0);
+                }
             }
         }
-        // the sample starts of the restarted voices, then the volumes and periods (a note's loop
-        // pointer follows its period), then the DMA back on
-        for ch in 0..4 {
-            if let Some(t) = self.v[ch].o_trig {
-                self.put_sample(hw, ch, t);
+        if self.f[F::Voice as usize] == 0 {
+            // nothing is written
+            if self.v.iter().all(|v| v.active & 0x80 == 0) {
+                self.songend = true;
             }
+            return;
         }
-        for ch in 0..4 {
-            if let Some(x) = self.v[ch].o_vol {
-                hw.space(WriteGaps::VOL, ch);
-                self.vol(hw, ch, x);
+        // Everything is written after the pass over the voices, each write at a whole colour clock
+        // (the host is called after each): the DMA of the voices whose sample restarts goes off,
+        // their sample starts, then the volumes and periods, then the DMA back on and, ten raster
+        // lines later, the loop pointers of the notes. The cycles between two writes are the
+        // reference's (22 runs, every sequence of writes equal).
+        let off = (0..4).filter(|&ch| self.v[ch].o_trig.is_some()).fold(0, |a, ch| a | self.ww(W_OFF + 2 * ch));
+        let mut w = Writer { cy: self.cycles() };
+        let mut first = C_VOL;
+        if off != 0 {
+            w.put(hw, 0xDFF096, off);
+            let mut gap = 111;
+            for ch in 0..4 {
+                let Some(t) = self.v[ch].o_trig else {
+                    gap += 55;
+                    continue;
+                };
+                w.cy += gap;
+                self.put_sample(hw, &mut w, ch, t);
+                gap = 105;
             }
+            // (to the first volume)
+            first = gap + 8;
+        }
+        let mut gap = first;
+        for ch in 0..4 {
+            let Some(x) = self.v[ch].o_vol else {
+                gap += 84;
+                continue;
+            };
+            w.cy += gap;
+            w.put(hw, self.wl(W_REGS + 48 + 4 * ch), x);
+            gap = 130;
             if let Some(x) = self.v[ch].o_per {
-                hw.space(WriteGaps::PER, ch);
-                self.per(hw, ch, x);
+                w.cy += 75;
+                w.put(hw, self.wl(W_REGS + 4 * ch), x);
+                gap = 101;
             }
         }
-        if self.v.iter().any(|v| v.o_trig.is_some()) {
-            let m = (0..4).filter(|&ch| self.v[ch].o_trig.is_some()).fold(0, |a, ch| a | self.ww(W_OFF + 2 * ch));
-            hw.dmacon(m | 0x8000);
-            // ten raster lines; the loop writes then start at a fixed place in the line, by the
-            // voice that comes first
-            let first = (0..4).find(|&ch| self.v[ch].o_loop.is_some()).unwrap_or(0);
-            hw.wait_lines(10, [45, 81, 116, 152][first]);
+        if off != 0 {
+            w.cy += gap;
+            w.put(hw, 0xDFF096, off | 0x8000);
+            // the host waits for the DMA: to the tenth raster line's start
+            hw.bus.clock = (hw.bus.clock / LINE + 10) * LINE;
+            gap = 91;
+        } else {
+            gap += 49;
         }
         for ch in 0..4 {
-            if let Some(t) = self.v[ch].o_loop {
-                self.put_sample(hw, ch, t);
-            }
+            let Some(t) = self.v[ch].o_loop else {
+                gap += 71;
+                continue;
+            };
+            w.cy += gap;
+            self.put_sample(hw, &mut w, ch, t);
+            gap = 121;
         }
         // the original never reports an end; when every voice has ended the output stays
         // silent, and the port ends the song there
@@ -780,16 +875,40 @@ impl TimFollin {
             self.songend = true;
         }
     }
+
+    /// The 68000 cycles from the tick's start to its first write but for the write's own part: the
+    /// sum of the costs of the code paths the tick took.
+    fn cycles(&self) -> u64 {
+        let c: i64 = COST[F::N as usize] as i64 + self.f.iter().zip(COST).map(|(n, c)| *n as i64 * c as i64).sum::<i64>();
+        c.max(0) as u64
+    }
 }
 
-/// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
-/// in the reference runs): the first tick's writes follow 76 623 clocks after the song start in the
-/// reference, whatever the module.
-const TIMER_DELAY: u64 = 3654;
-/// The second tick follows the first by this much less than a period: the reference's first music
-/// tick comes 67 979 clocks after the first (the writes of the second tick of all ten corpus files).
-const FIRST_GAP: u64 = 2961;
-const _: () = assert!(super::DT_TICK > FIRST_GAP);
+/// The writes of a tick: each falls a number of 68000 cycles (two a colour clock) after the last,
+/// and the host call that follows it goes on at the whole colour clock.
+struct Writer {
+    cy: u64,
+}
+
+impl Writer {
+    fn put(&mut self, hw: &mut Hw, a: u32, v: u16) {
+        hw.bus.clock += self.cy / 2;
+        self.cy = 0;
+        hw.bus.write_word(a, v);
+    }
+}
+
+/// The colour clocks of the original's start-up in the reference host, from the clock the host
+/// starts a player at to the song's start (the host's timer then runs one period to the first tick):
+/// the check, the initialisation, and three more calls of 4530, 16 and 3558 clocks (the last sets
+/// the song up). They put the song's start where the reference has it in the raster line, which the
+/// host's wait for the DMA goes by. Measured on the 13 corpus files: the header build's check takes
+/// 110 clocks and its initialisation 1561 and 27 for every word up to the anchor (`layout`); the
+/// jump-table build's (Puzznic alone) 106 and 2895.
+const START_HEADER: u64 = 110 + 1561 + 4530 + 16 + 3558;
+const START_JT: u64 = 106 + 2895 + 4530 + 16 + 3558;
+/// A change of subsong before the first tick: two calls of 8 and 3558 clocks (the song's set-up).
+const SUBSONG: u64 = 8 + 3558;
 
 impl Replayer for TimFollin {
     fn format(&self) -> &'static str {
@@ -800,14 +919,6 @@ impl Replayer for TimFollin {
         String::new()
     }
 
-    fn timer_delay(&self) -> u64 {
-        TIMER_DELAY
-    }
-
-    fn next_tick_at(&self) -> Option<u64> {
-        (self.n_ticks == 1).then(|| self.t_first + super::DT_TICK - FIRST_GAP)
-    }
-
     fn songend(&self) -> bool {
         self.songend
     }
@@ -816,18 +927,15 @@ impl Replayer for TimFollin {
         (1, self.lay.subs, self.sub)
     }
 
-    fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
         if (1..=self.lay.subs).contains(&n) {
             self.sub = n;
             self.started = false;
+            hw.bus.clock += SUBSONG;
         }
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        if self.n_ticks == 0 {
-            self.t_first = hw.bus.clock;
-        }
-        self.n_ticks = self.n_ticks.saturating_add(1);
         if !self.started {
             // song 0 first, then the requested one, as the original's InitSound
             self.started = true;
@@ -862,25 +970,20 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     #[cfg(test)]
     STORES.lock().unwrap().clear();
-    // the original's init routine runs before the host starts its timer. In the reference runs the
-    // first music tick of a header-build module (Ghouls'n'Ghosts, Sly Spy) comes 153,000 colour
-    // clocks plus 12.9 a byte of the file after the port's clock (nine files, within 2 %: the routine
-    // goes over the module), and the jump-table build's (Puzznic, one file) 155,000 after it
-    let init = if lay.subs > 1 || be16(d, 0) == 0x4EF9 { 11_200 } else { 9_350 + d.len() as u64 * 129 / 10 };
-    m.bus.clock += init;
+    // the original's start-up runs before the song starts (`START_HEADER`)
+    m.bus.clock += lay.start;
     Some(Box::new(TimFollin {
         lay,
         gbase: base,
         len: d.len() as u32,
         sub: 1,
         started: false,
-        t_first: 0,
-        n_ticks: 0,
         dead: false,
         songend: false,
         work: work_area(),
         v: Default::default(),
         mask: 0,
+        f: [0; F::N as usize],
         #[cfg(test)]
         ticks: 0,
     }))
@@ -963,7 +1066,8 @@ mod tests {
     fn recognises_both_builds() {
         let d = module(&[0x8F], &[]);
         let lay = layout(&d).unwrap();
-        assert_eq!(lay, Lay { base: B, dx: (VIRT + SEQ0 as u32).wrapping_sub(G + SEQ0 as u32), subs: 1 });
+        let start = START_HEADER + 27 * ((SEQ0 - B) / 2 + 1) as u64;
+        assert_eq!(lay, Lay { base: B, dx: (VIRT + SEQ0 as u32).wrapping_sub(G + SEQ0 as u32), subs: 1, start });
         // the voices of song 0 must share their sequence, and the anchor must be there
         let mut e = d.clone();
         p32(&mut e, B + 0x10, G);
@@ -978,7 +1082,11 @@ mod tests {
         }
         p32(&mut j, 2, 0xFF00);
         p32(&mut j, 0x2C, 0xFFA0);
-        assert_eq!(layout(&j), Some(Lay { base: JT_BASE, dx: 0x100, subs: 8 }));
+        // (three songs with an instrument table of their own, the rest the last one's)
+        for k in 0..16 {
+            p32(&mut j, JT_BASE + 0x104 + 4 * k, 0x1_0000 + 0x100 * k.min(3) as u32);
+        }
+        assert_eq!(layout(&j), Some(Lay { base: JT_BASE, dx: 0x100, subs: 3, start: START_JT }));
         p32(&mut j, 0x2C, 0xFFA2);
         assert!(!detect(&j));
         assert!(!detect(b"FORM\0\0\0\0EMODEMIC"));
@@ -997,9 +1105,9 @@ mod tests {
         assert_eq!(a.iter().filter(|w| **w == (0xDFF096, 0x800F)).count(), 1);
         assert_eq!(reg(&log, 0xDFF0A6)[0], PERIODS[0x10]);
         assert_eq!(reg(&log, 0xDFF0A6), [PERIODS[0x10], PERIODS[0x20]]);
-        // the end of the voice: DMA off, VOL 0
+        // the end of the voice: VOL 0 and no DMA write (the last one is a note's DMA on)
         let dma = reg(&log, 0xDFF096);
-        assert!(dma.contains(&0x0001));
+        assert!(dma.last().unwrap() & 0x8000 != 0);
         assert_eq!(*reg(&log, 0xDFF0A8).last().unwrap(), 0);
     }
 

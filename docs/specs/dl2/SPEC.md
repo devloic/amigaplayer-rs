@@ -143,3 +143,66 @@ and the writes in place (timer delay reduced by 100). Tested with the +100 adjus
 best lag 1 or 2 -> 0 everywhere; equal-sample % jumps to 100 for Bangkok Knights, GB2 jingle, GB2 title,
 Midwinter 2; others 41-92% (After Burner 85.8, LoF 51). Remaining mismatch is write spacing (s1):
 Darius, SF2, Raffles. older_F1 unrelated (11%). logs/lag_adj_all.txt, lag_adj_older.txt.
+
+## 9. Dave Lowe New (`dln`, layouts A and B): the tick as a cycle ledger
+
+Scope: UADE's Dave Lowe New Eagleplayer (the module is data, the replayer is the player's) in the repo's
+68k engine. Black box: the reference's register writes logged in half colour clocks, compared with the
+port's; no player code read. Data: the 41 corpus files (24 layout A, 17 layout B) and their 87 further
+subsongs.
+
+Clock model. The first tick starts exactly 70940 cc after the song start (the return of the last start-up
+call, or of a subsong change), every further tick 70940 cc later; a tick makes no host call except at the
+song's end. A write therefore comes at tick start + floor(C / 2) cc, C = the 68000 cycles the tick has run.
+C is a sum of the costs of the path pieces walked; the pieces and their costs (cycles, voices 0..3) are:
+
+| piece | cost | layout B adds |
+|---|---|---|
+| tick entry up to voice 0 | 738 | +130 |
+| voice reads its stream (before its commands) | 13 | |
+| voice counts down, up to its slides | 242 | |
+| last tick of a note without / with a sample (DMA-off write at the end of the piece) | 252 / 0, then 268 | |
+| loop reload: to LOC 8, LOC to LEN 20, then 284 | | |
+| layout B: DMACON 87E0 after every channel DMA write | 20 | |
+| portamento: delay count 49; step 0; step reaching its target, down 30, up 20 | | |
+| vibrato: delay count 49, rate count 72, step down 42, up 59, the step closing the cycle 75 | | |
+| portamento and vibrato stepping in one tick | +113 | |
+| after a slide's PER write | 262 / 293 / 324 / 332 | |
+| to the VOL write: held value | 157 / 174 / 181 / 208 | |
+| to the VOL write: envelope step | 139 / 156 / 163 / 190 | |
+| VOL write to the next voice | 507 / 538 / 569 / - | +59 |
+| command 1 (sample) 305, 3 (envelope) 168, 4 (portamento) 140, 5 (vibrato) 180, 6 108, 7 108, 12 116, 14 (jump) 128 | | command 1: -2 |
+| command 2, next sequence | 228 (+54 for the first voice with the longest order list) | -2 |
+| command 2 at the list's end (wrap) | 434 / 465 / 488 / 501; 412 / 439 / 462 / 485 when the voice's counter is already 0 | -2 |
+| a rest carrying the list flag | 177 / 208 / 231 / 244 | |
+| the wrap or flagged rest that ends the song | +104, see below | |
+| note: PER write at once; with a vibrato running +16 | | |
+| note: PER to LOC | 293 / 324 / 355 / 363 | |
+| note without a loop pair: PER to DMA-on | 259 / 290 / 321 / 329 | |
+| note: LOC to LEN 20, LEN to DMA-on | 294 / 356 / 418 / 434 | |
+| note: DMA-on to VOL, held / step | 304 / 321 / 328 / 355; 286 / 303 / 310 / 337 | |
+| rest: to the VOL 0 write 132, to the envelope's VOL write | 286 / 303 / 310 / 337 | |
+
+The pieces are only determined in sums along paths (what a piece holds of the path before or after it is
+a convention; the sums are measured). Solved exactly (whole cycles, no remainder) from 1,211,013 writes.
+The voice dependence is the write routines' (+31, +62, +70 after a write; +17, +24, +51 before a VOL write).
+
+Rules found on the way:
+- A rest's silent envelope steps for eight ticks before it holds, in both layouts (a step is 18 cycles
+  cheaper than the held value; the values written are 0 either way).
+- The +54 of the next-sequence command for the first voice with the longest order list applies to layout A
+  as to layout B.
+- Song end: the player calls its host inside the piece, and the host call resumes at a whole colour clock, so
+  an odd cycle is dropped there. After a wrap the ledger is odd behind the piece ((C - 1) | 1), after a
+  flagged rest even (C & ~1) (one rest case in the corpus).
+- A subsong change needs no model of its own: the song start moves to the change's return, the tick
+  follows 70940 cc later.
+
+Result: 41 files x 120 s (700,630 writes) and x 600 s (914,084), 128 runs (all subsongs) x 60 s (1,274,532
+writes): every write at the reference's colour clock; the 18 refcmp rows IDENTICAL. Split-half check (20 s,
+before the song-end rule): costs solved from every second file leave 0 of 116,605 writes of the other files
+off, the other way round 10 of 111,320 (one file, a piece the half has only in a sum); 456 and 326 writes
+contain a piece their half does not have.
+Not in the corpus (costs assumed): a stopped voice, a direct sample (record type 0), commands 11 and 13, the
+stop commands, a held value right after a rest's first write.
+

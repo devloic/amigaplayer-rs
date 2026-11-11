@@ -378,8 +378,8 @@ bus as the 68k routine does, in its order:
 * the writes spaced as the 68000 takes from one to the next (estimated from
   the cycle counts of the 2.3 code paths, not measured);
 * periods from ProTracker's tables (16 finetunes, and what an arpeggio on
-  finetune -1 reads past them), the LED filter on at the start (as an Amiga
-  starts and ProTracker leaves it; E0x switches it), a new tempo from the next
+  finetune -1 reads past them), the LED filter off at the start (as the 68k
+  hosting and UADE leave it; an Amiga powers on with it on; E0x switches it), a new tempo from the next
   tick (the CIA latch), and 2.3D's quirks: 9xx added twice, B after D on one
   row clearing the break row, E6x and EEx on delayed rows, the tremolo ramp
   testing the vibrato position, the 12-bit wrap of portamentos, EFx inverting

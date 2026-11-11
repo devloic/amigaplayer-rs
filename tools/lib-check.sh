@@ -1,7 +1,8 @@
 #!/bin/bash
 # Checks the library side of the repository, end to end (no network, no audio device):
-#   1. the open-replayer library with default features off, and with `host-68k` (custom
-#      modules through `Song`): build, tests (unit, integration, doctests), examples
+#   1. the open-replayer library with default features off, with `host-68k` (custom
+#      modules through `Song`) and with `songdb` (the song database reader, on a synthetic
+#      database): build, tests (unit, integration, doctests), examples
 #   2. the application (default features) still builds
 #   3. the C API: its tests with and without its features, build the cdylib/staticlib,
 #      compile examples/c/play.c, link it both ways, render a synthetic module and compare
@@ -38,6 +39,17 @@ cargo test --release --no-default-features
 cargo build --release --no-default-features --examples
 echo "== 1b. library with host-68k (custom modules), and the headless renderer"
 cargo test --release --no-default-features --features host-68k
+echo "== 1c. song database: the crate, the library with songdb, the renderer's --songdb"
+cargo test --release -p amigaplayer-songdb
+cargo test --release --no-default-features --features "host-68k songdb"
+cargo build --release --no-default-features --features "host-68k songdb" --examples --bin amigaplayer-render
+"$T/examples/make_demo_mod" "$WORK/demo.mod"
+rm -rf "$WORK/demo-songdb"
+"$T/examples/make_demo_songdb" "$WORK/demo-songdb" "$WORK/demo.mod" > "$WORK/demo-songdb.keys"
+"$T/amigaplayer-render" --info --songdb "$WORK/demo-songdb" "$WORK/demo.mod" > "$WORK/demo-songdb.json"
+grep -q '"songdb":{"key":"'"$(cut -d' ' -f1 "$WORK/demo-songdb.keys")"'","duration_ms":2000,"songend":"player","author":"Author 0"' "$WORK/demo-songdb.json" \
+  || { echo "--songdb: unexpected JSON: $(cat "$WORK/demo-songdb.json")" >&2; exit 1; }
+echo "render --songdb finds the synthetic entry"
 
 echo "== 2. application"
 if [ -n "$APP" ]; then cargo build --release; else echo "(skipped)"; fi
@@ -45,6 +57,8 @@ if [ -n "$APP" ]; then cargo build --release; else echo "(skipped)"; fi
 echo "== 3. C API"
 cargo test --release -p amigaplayer-capi --no-default-features
 cargo test --release -p amigaplayer-capi
+cargo test --release -p amigaplayer-capi --features songdb
+cargo build --release -p amigaplayer-capi --features songdb
 cargo build --release -p amigaplayer-capi
 "$T/examples/make_demo_mod" "$WORK/demo.mod"
 "$T/examples/play_to_wav" "$WORK/demo.mod" "$WORK/demo-rust.wav" 3

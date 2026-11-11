@@ -1,0 +1,15 @@
+[package]
+name = "amigaplayer-songdb"
+description = "Reader of audacious-uade's song database (lengths per subsong, format, author, album, publisher, year of some 476,000 Amiga and tracker modules), vendored from the audacious-uade-rust port for amigaplayer-rs. The data files are not included."
+version = "0.1.0"
+edition = "2021"
+# As the crate this is vendored from (au-songdb of audacious-uade-rust), and as upstream
+# audacious-uade offers its src/songdb/ and src/common/: see README.md.
+license = "LGPL-2.1-or-later OR GPL-2.0-or-later"
+repository = "https://fg.lolo.asia/adminlolo/amigaplayer-rs.git"
+readme = "README.md"
+keywords = ["amiga", "tracker", "metadata", "uade"]
+categories = ["multimedia::audio"]
+
+# No dependencies: the XXH32 the keys are made of is src/xxh32.rs.
+[dependencies]

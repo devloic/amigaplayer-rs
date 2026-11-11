@@ -155,6 +155,86 @@ int ap_seek(ap_song *song, double secs);
 const char *ap_title(ap_song *song);
 const char *ap_format(ap_song *song);
 
+/*
+ * The song database of audacious-uade: for some 476,000 module files, the length of each
+ * subsong, the format, and author, album, publisher and year. New in 0.2.0.
+ *
+ * Only in a library built with the songdb feature
+ *     cargo build --release -p amigaplayer-capi --features songdb
+ * (without it the functions are there, and ap_songdb_open fails with AP_ERR_UNSUPPORTED).
+ * The database is NOT part of the library: it is the directory conf/songdb of
+ * https://github.com/mvtiaine/audacious-uade (xxh32idx.tsv, songlengths.tsv, modinfos.tsv,
+ * metadata.tsv; installed by its packages as share/audacious-uade/songdb), licensed
+ * CC BY-NC-SA 4.0, and is read from the directory you name. The reader's code is a port of
+ * audacious-uade's (Matti Tiainen), LGPL-2.1-or-later OR GPL-2.0-or-later: crates/songdb.
+ *
+ * A file is found by its bytes (as they are on disk, not unpacked): the key is the XXH32 of
+ * the first 256 KiB and the low 16 bits of the length, 12 hex digits. The lengths were
+ * measured with other replayers: good for a progress bar, approximate as a place to cut.
+ */
+typedef struct ApSongDb ap_songdb;
+
+/* How a song ended when its length was measured (ap_songdb_subsong.status). */
+enum {
+    AP_SONGEND_ERROR = -1,
+    AP_SONGEND_NONE = 0,
+    AP_SONGEND_PLAYER = 1,               /* the player reported the end */
+    AP_SONGEND_TIMEOUT = 2,
+    AP_SONGEND_SILENCE = 3,
+    AP_SONGEND_LOOP = 4,                 /* a loop was detected */
+    AP_SONGEND_VOLUME = 5,
+    AP_SONGEND_REPEAT = 6,
+    AP_SONGEND_PLAYER_PLUS_SILENCE = 7,
+    AP_SONGEND_PLAYER_PLUS_VOLUME = 8,
+    AP_SONGEND_LOOP_PLUS_SILENCE = 9,
+    AP_SONGEND_LOOP_PLUS_VOLUME = 10,
+    AP_SONGEND_NOSOUND = 11
+};
+
+typedef struct {
+    uint8_t subsong;      /* its number, as ap_subsongs() counts */
+    uint8_t is_duplicate; /* 1: the same audio as an earlier subsong */
+    int8_t status;        /* AP_SONGEND_* */
+    uint32_t length_ms;   /* in steps of 20 ms */
+} ap_songdb_subsong;
+
+/* Strings are never NULL: "" where the database knows nothing. year and channels: 0 then. */
+typedef struct {
+    const char *key;
+    const char *format; /* as the database names it ("AHX v2"), not ap_format()'s name */
+    const char *author;
+    const char *album;
+    const char *publisher;
+    uint16_t year;
+    uint8_t channels;
+    size_t subsong_count;
+    const ap_songdb_subsong *subsongs; /* subsong_count entries, ascending */
+} ap_songdb_info;
+
+/*
+ * Loads the database from directory dir into memory (about 19 MB and 0.2 s for the real
+ * one). NULL on failure (AP_ERR_INVALID: a file is missing or does not parse). Lookups on one
+ * handle must not run at the same time: use a handle per thread, or a lock.
+ */
+ap_songdb *ap_songdb_open(const char *dir);
+/* Frees a database. NULL is allowed. */
+void ap_songdb_free(ap_songdb *db);
+/* The number of files the database knows. */
+size_t ap_songdb_count(ap_songdb *db);
+
+/*
+ * Looks up the file data[0..len). Returns 1 and fills *out if the database knows it, 0 if
+ * not (*out is left alone), -1 for a NULL argument. The strings and the subsong array of
+ * *out belong to db: they are valid until the next lookup on db, or ap_songdb_free(db).
+ */
+int ap_songdb_lookup(ap_songdb *db, const uint8_t *data, size_t len, ap_songdb_info *out);
+/* As ap_songdb_lookup, by key: 12 hex digits. Any other string is not found (0). */
+int ap_songdb_lookup_key(ap_songdb *db, const char *key, ap_songdb_info *out);
+/* Writes the key of data[0..len) into out: 12 hex digits and a NUL, 13 bytes. 0 or -1. */
+int ap_songdb_key(const uint8_t *data, size_t len, char *out);
+/* The database's name of a status: "player", "loop+silence", ...; "unknown" otherwise. */
+const char *ap_songdb_status_name(int status);
+
 #ifdef __cplusplus
 }
 #endif

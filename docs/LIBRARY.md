@@ -26,6 +26,12 @@ GPL-compatible, and the texts have to travel with the code). **Linking the libra
 or dynamically), or shipping the `.wasm`, makes your program a combined work that has to be
 offered under GPL-2.0-or-later compatible terms.** GPL-2.0-only programs cannot link it.
 
+The optional song database reader (`crates/songdb`, feature `songdb`) is a port of
+audacious-uade's (Matti Tiainen) and keeps its terms, LGPL-2.1-or-later OR GPL-2.0-or-later,
+with the credit in each file. The **database itself is not in this repository** and is under
+another licence, CC BY-NC-SA 4.0 (attribution, non-commercial, share-alike): see
+[Song database](#song-database).
+
 ## Rust
 
 ```toml
@@ -161,6 +167,62 @@ for playing music, tested with damaged and random code (`tests/custom.rs`), not 
 boundary audited against hostile code. For files from untrusted uploads, render in a child
 process (`amigaplayer-render`) with the operating system's limits.
 
+### Song database
+
+With the `songdb` feature (off by default) `amigaplayer::songdb` answers, for a module file:
+how long each subsong is, how that length was found, the format, and author, album, publisher
+and year where known. The answers come from the song database of
+[audacious-uade](https://github.com/mvtiaine/audacious-uade) (some 476,000 files of the
+Modland, AMP, UnExoticA, ... collections).
+
+```toml
+amigaplayer = { git = "...", package = "amigaplayer-rs", default-features = false, features = ["songdb"] }
+```
+
+```rust
+use amigaplayer::songdb::{key, SongDb};
+
+let db = SongDb::open("/usr/share/audacious-uade/songdb")?;   // std::io::Result
+if let Some(info) = db.lookup(&bytes) {                        // or db.lookup_key(&key(&bytes))
+    println!("{} / {} / {} ({})", info.author, info.album, info.publisher, info.year);
+    if let Some(s) = info.subsong(song.subsongs().current) {
+        println!("{} ms, ended by {}", s.length_ms, s.status);  // "94760 ms, ended by player+volume"
+    }
+}
+```
+
+| item | |
+|------|--|
+| `SongDb::open(dir) -> io::Result<SongDb>` | loads the four files of `dir` into memory: about 19 MB and 0.2 s for the real database. A missing file is `NotFound`, one that does not parse `InvalidData`; never a panic |
+| `lookup(&[u8]) -> Option<Info>` / `lookup_key(&str)` | by the file's bytes, or by its key. `&self`: one database serves all threads (`Send + Sync`) |
+| `key(&[u8]) -> String` | the key: XXH32 of the first 256 KiB and the low 16 bits of the length, 12 hex digits. Of the file as it is on disk (packed files are not unpacked first) |
+| `Info` | `key`, `subsongs: Vec<SubSongInfo>`, `format`, `channels`, `author`, `album`, `publisher`, `year`; empty strings and 0 where the database knows nothing; `subsong(n)` |
+| `SubSongInfo` | `subsong`, `length_ms` (steps of 20 ms), `status: SongEndStatus`, `is_duplicate` (the same audio as an earlier subsong) |
+| `SongEndStatus` | how the measured song ended: `Player`, `DetectSilence`, `DetectLoop`, `PlayerPlusVolume`, ...; `as_str()` / `Display` give the database tools' names ("player", "silence", "loop", "player+volume", ...) |
+
+**The data.** The database is the directory `conf/songdb` of audacious-uade (`xxh32idx.tsv`,
+`songlengths.tsv`, `modinfos.tsv`, `metadata.tsv`, about 10 MB; its packages install it as
+`share/audacious-uade/songdb`). It is licensed CC BY-NC-SA 4.0, which is why it is not
+committed here, not compiled in and not downloaded by any build step: you obtain it, you name
+its directory at run time, and its terms (attribution, non-commercial use, share-alike) are
+yours to meet. The tests use a synthetic database written by
+`testdata::write_songdb` (and the example `make_demo_songdb`); nothing in the repository
+comes from the real one.
+
+**What a length means.** The lengths were measured by audacious-uade's tools with *their*
+replayers (UADE, libopenmpt, ...), as the time to the song end, or to a detected loop, silence
+or volume fade. This library's replayers are different programs: its own song end is usually
+within a fraction of a second of the database's, not equal to it. A length is right for a
+progress bar or a play list; as a place to cut the audio, cut at silence near it (what
+`amigaplayer-render --stop-at songdb` does). A subsong whose status is `Error`, `None` or
+`NoSound` was not measured usefully. The database's subsong numbers are the format's own, as
+`Song::subsongs()` counts for the same replayer; where a replayer here numbers a format
+differently the entry is simply not found by `Info::subsong`.
+
+The reader is the crate `crates/songdb` (`amigaplayer-songdb`, no dependencies): a port of
+audacious-uade's `src/songdb`, kept under its dual licence, usable by itself. Not built into
+the WebAssembly crate.
+
 ### Environment variables
 
 The emulation reads a few `DELI_*` variables for debugging and for comparing with the original
@@ -180,7 +242,8 @@ in place, because the open replayers load their modules and companion files thro
 ```text
 cargo build --release --no-default-features --features host-68k --bin amigaplayer-render
 amigaplayer-render [--out FILE|-] [--format wav|raw] [--rate HZ] [--subsong N|first|default]
-                   [--seconds S] [--silence S] [--no-songend] [--volume V] [--info] MODULE
+                   [--seconds S] [--silence S] [--no-songend] [--volume V] [--info]
+                   [--songdb DIR] [--stop-at songdb|default] MODULE
 ```
 
 A module to 16-bit stereo WAV or raw PCM, on a file or on standard output (the default), for
@@ -196,6 +259,28 @@ error. Exit status 0 played, 1 not playable (missing, not recognised, no such su
 is written to standard output), 2 wrong usage. A WAV on standard output carries the largest
 length in its header, as streams do.
 
+Built with the `songdb` feature as well (`--features "host-68k songdb"`), `--songdb DIR` looks
+the file up in the [song database](#song-database) in `DIR` and adds a member to the JSON
+(`null` if the database does not know the file; strings and numbers it does not have are
+`null`):
+
+```json
+"songdb":{"key":"503a5ac60f27","duration_ms":94760,"songend":"player+volume","author":"Pink",
+  "album":"Cruisin'","publisher":"Abyss","year":1997,"format":"AHX v2","channels":null,
+  "subsongs":[{"subsong":0,"duration_ms":94760,"songend":"player+volume","duplicate":false}]}
+```
+
+`duration_ms` and `songend` are those of the subsong being rendered (`null` if the database
+has no entry for it). `--stop-at songdb` uses that length as a place to stop: once it has
+passed, the render ends where the output falls digitally silent for half a second, and none
+of that silence is written (the output ends at the length, or where the silence began if that
+is later). It never stops earlier than the length, and it does not cut a song that keeps
+sounding: the other stops (song end, `--silence`, `--seconds`) apply as before. A length of 0
+or with the status `error`, `none` or `nosound` is not used. For example `AHX.Cruisin` (the
+entry above) renders 94.92 s by the player's own song end and 94.76 s with `--stop-at songdb`.
+Loading the database costs each run about 0.2 s and 19 MB. A directory that is not a database
+is exit status 1; `--songdb` in a build without the feature is exit status 2 with the reason.
+
 ## C and other languages
 
 ```sh
@@ -209,7 +294,8 @@ The header is `crates/amigaplayer-capi/include/amigaplayer.h` (hand-written, doc
 `ap_open` / `ap_open_with` / `ap_open_opts`, `ap_render_s16` / `ap_render_f32`, `ap_subsongs`,
 `ap_set_subsong`, `ap_songend`, `ap_error` / `ap_error_code`, `ap_elapsed_secs`,
 `ap_duration_hint`, `ap_restart`, `ap_seek`, `ap_title`, `ap_format`, `ap_detect`,
-`ap_detect_custom`, `ap_close`, `ap_last_error` / `ap_last_error_code`, `ap_version`.
+`ap_detect_custom`, `ap_close`, `ap_last_error` / `ap_last_error_code`, `ap_version`, and the
+`ap_songdb_*` functions.
 An `ap_song *` is an opaque handle; failures return NULL or a negative number and set a
 per-thread error. Custom modules play through `ap_open_opts(..., AP_OPEN_CUSTOM)` (see
 [Custom modules](#custom-modules); `ap_error` reports a module whose code failed); the
@@ -218,6 +304,28 @@ hosting out (the flag then fails with `AP_ERR_UNSUPPORTED`). API 0.2.0 (`ap_vers
 added `ap_open_opts`, `ap_detect_custom`, `ap_error` and `ap_error_code`; nothing changed in
 the functions of 0.1.0. Linking statically needs `-lpthread -ldl -lm`. Other languages bind to it with
 their FFI (Python `ctypes`/`cffi`, C#, Go `cgo`, Zig, ...).
+
+The [song database](#song-database) is in a library built with the `songdb` feature (off by
+default; without it the functions exist and `ap_songdb_open` fails with `AP_ERR_UNSUPPORTED`):
+
+```sh
+cargo build --release -p amigaplayer-capi --features songdb
+```
+
+```c
+ap_songdb *db = ap_songdb_open("/usr/share/audacious-uade/songdb");
+ap_songdb_info info;
+if (db && ap_songdb_lookup(db, data, len, &info) == 1 && info.subsong_count > 0)
+    printf("%s, %u ms (%s)\n", info.author, info.subsongs[0].length_ms,
+           ap_songdb_status_name(info.subsongs[0].status));
+ap_songdb_free(db);
+```
+
+`ap_songdb_open` / `ap_songdb_free`, `ap_songdb_count`, `ap_songdb_lookup` /
+`ap_songdb_lookup_key` (1 found, 0 not found, -1 bad argument), `ap_songdb_key`,
+`ap_songdb_status_name`. The strings and the subsong array of an `ap_songdb_info` belong to
+the database handle and are valid until the next lookup on it; lookups on one handle must not
+run concurrently. The data is not part of the library (CC BY-NC-SA 4.0, see above).
 
 ## WebAssembly
 
@@ -228,7 +336,8 @@ a deployed web app and does not change.
 
 ## Checking it all
 
-`tools/lib-check.sh` builds and tests the library with default features off and with
-`host-68k`, builds the application, builds and tests the C API (with and without its
-features) and compares a C-rendered file with the Rust example's, builds the wasm and runs
-the node smoke test.
+`tools/lib-check.sh` builds and tests the library with default features off, with `host-68k`
+and with `host-68k songdb` (and the song database crate by itself, and the renderer's
+`--songdb` on a synthetic database), builds the application, builds and tests the C API (with
+and without its features) and compares a C-rendered file with the Rust example's, builds the
+wasm and runs the node smoke test.

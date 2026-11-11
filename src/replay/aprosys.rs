@@ -73,11 +73,17 @@ const PRE_FEAT_H: [u64; 7] = [81, 73, 69, 435, 222, 549, 208];
 /// and reached) or already there; an arpeggio voice adds a little.
 const PRE_PM_H: [u64; 7] = [0, 0, 123, 120, 123, 173, 56];
 const PRE_ARP_H: u64 = 9;
-/// The base cost of the work of a voice whose update aborts (an envelope or arpeggio ran out of jumps).
-const SKIP_BASE_H: u64 = 469;
-/// A silent voice's VOL write after the previous voice's last write (half clocks): by what that was
-/// (a sample start, a plain VOL, a silent voice's VOL), per voice.
-const MUTED_AFTER: [[u64; 4]; 3] = [[673, 607, 660, 681], [672, 695, 718, 708], [673, 416, 439, 429]];
+/// A voice whose update aborts makes no write: its work until an envelope ran out of jumps (envelope
+/// 0; 29 more for each envelope after it), besides the portamento, arpeggio and envelope work counted
+/// as for the PER write; measured on the reference's call ends and the next voice's write (envelopes
+/// 0, 1 and 2). The next voice follows as after a plain VOL.
+const SKIP_ENV_H: i64 = 500;
+const SKIP_ENV_NEXT_H: i64 = 29;
+/// ... and until the arpeggio ran out of jumps (the rest of the tick's voices are left out).
+const SKIP_ARP_H: i64 = 469;
+/// A silent voice's VOL write (half clocks), per voice, when the previous voice ended with a plain
+/// VOL (or the tick starts); after another kind of end the lead differs as it does for the PER write.
+const MUTED_VOL_H: [i64; 4] = [672, 695, 718, 708];
 /// The gap before a row's work (DMACON 0x8200).
 const ROW_PRE: u64 = 580;
 /// ... after a plain volume write, and after a silent voice's.
@@ -778,14 +784,8 @@ impl Aps {
         for v in 0..4 {
             match self.voice(hw, v) {
                 Ok(()) => {}
-                Err(skip) => {
-                    // the work done before the abort takes its time (no write follows it)
-                    let h = SKIP_BASE_H + self.feat_cost();
-                    self.wh(hw, h);
-                    if let Skip::All = skip {
-                        break;
-                    }
-                }
+                Err(Skip::Voice) => {}
+                Err(Skip::All) => break,
             }
         }
         if self.ended {
@@ -827,6 +827,16 @@ impl Aps {
             + PRE_FEAT_H[4] * (f[4] - f[6]) as u64
             + PRE_FEAT_H[5] * f[5] as u64
             + PRE_FEAT_H[6] * f[6] as u64
+    }
+
+    /// The work of a voice whose update aborts passes (`h` half clocks and the work counted in
+    /// `feat`); what follows comes as after a plain VOL.
+    fn skipped(&mut self, hw: &mut Hw, h: i64) {
+        let h = h + self.feat_cost() as i64;
+        self.wh(hw, h.max(0) as u64);
+        self.last_kind = 1;
+        self.last_mov = false;
+        self.tail_h = TAIL_VOL_H;
     }
 
     fn env_step(&mut self, hw: &Hw, v: usize, k: usize, scale: u32, e1: bool) -> Result<(), Skip> {
@@ -879,14 +889,15 @@ impl Aps {
         self.feat = [0; 7];
         self.pm = 0;
         let inst = self.v[v].inst;
+        // what the previous voice's end leaves before this voice's work, against a plain VOL
+        let lead = match self.last_kind {
+            0 => PRE_LOC_H[v] - if self.last_mov { 2 } else { 0 },
+            1 => PRE_VOL_H,
+            _ => PRE_MUTED_H[v],
+        } as i64
+            - PRE_VOL_H as i64;
         if self.v[v].chvol == 0 {
-            let mut h = MUTED_AFTER[self.last_kind as usize][v];
-            if self.last_kind == 0 && v >= 2 {
-                h = h + 1 - if self.last_mov { 2 } else { 0 };
-            } else if self.last_kind == 0 && self.last_mov {
-                h -= 2;
-            }
-            self.wh(hw, h);
+            self.wh(hw, (lead + MUTED_VOL_H[v]).max(0) as u64);
             hw.vol(v, 0);
             self.tail_h = TAIL_MUTED_H;
             self.last_kind = 2;
@@ -910,12 +921,14 @@ impl Aps {
                 self.budget = self.budget.wrapping_sub(1);
                 if self.budget == 0 {
                     self.v[v].arp = a;
+                    self.skipped(hw, lead + SKIP_ARP_H);
                     return Err(Skip::All);
                 }
                 let off = (((b & 0x7F) << 1) as i8 >> 1) as i32;
                 a = a.wrapping_add(off as u32);
             }
             if !found {
+                self.skipped(hw, lead + SKIP_ARP_H);
                 return Err(Skip::All);
             }
             self.v[v].arp = a.wrapping_add(1);
@@ -947,20 +960,17 @@ impl Aps {
             }
         }
         // envelopes
-        let s0 = rd8(hw, inst.wrapping_add(3)) as u32;
-        if s0 != 0 {
-            self.env_step(hw, v, 0, s0, false)?;
-        }
-        if rd8(hw, inst.wrapping_add(16)) != 0 {
-            self.env_step(hw, v, 1, 0, true)?;
-        }
-        let s2 = rd8(hw, inst.wrapping_add(4)) as u32;
-        if s2 != 0 {
-            self.env_step(hw, v, 2, s2, false)?;
-        }
-        let s3 = rd8(hw, inst.wrapping_add(5)) as u32;
-        if s3 != 0 {
-            self.env_step(hw, v, 3, s3, false)?;
+        let scales = [rd8(hw, inst.wrapping_add(3)), rd8(hw, inst.wrapping_add(16)), rd8(hw, inst.wrapping_add(4)), rd8(hw, inst.wrapping_add(5))];
+        for (k, &sc) in scales.iter().enumerate() {
+            if sc != 0 && self.env_step(hw, v, k, sc as u32, k == 1).is_err() {
+                let h = lead
+                    + SKIP_ENV_H
+                    + SKIP_ENV_NEXT_H * k as i64
+                    + PRE_PM_H[self.pm as usize] as i64
+                    + if r0 & 0x40 != 0 { PRE_ARP_H as i64 } else { 0 };
+                self.skipped(hw, h);
+                return Err(Skip::Voice);
+            }
         }
         // pitch
         let pr = rd8(hw, inst.wrapping_add(24)) as u32;
@@ -977,16 +987,9 @@ impl Aps {
         a += 16 * s8(rd8(hw, inst.wrapping_add(21)));
         let b = (s16(a) * self.v[v].nvol as i32) >> 12;
         let vol = (b & 127) as u16;
-        let base = match self.last_kind {
-            0 => PRE_LOC_H[v] - if self.last_mov { 2 } else { 0 },
-            1 => PRE_VOL_H,
-            _ => PRE_MUTED_H[v],
-        };
-        let h = base
-            + PRE_PM_H[self.pm as usize]
-            + if r0 & 0x40 != 0 { PRE_ARP_H } else { 0 }
-            + self.feat_cost();
-        self.wh(hw, h);
+        let h = lead
+            + (PRE_VOL_H + PRE_PM_H[self.pm as usize] + if r0 & 0x40 != 0 { PRE_ARP_H } else { 0 } + self.feat_cost()) as i64;
+        self.wh(hw, h.max(0) as u64);
         hw.per(v, per);
         self.wc(hw, PER_VOL[v]);
         hw.vol(v, vol);

@@ -3036,7 +3036,7 @@ impl Musicline {
     fn slide_volume(&mut self, v: usize) {
         let x = &mut self.voices[v];
         let first = x.play & P_FIRST_ROW_TICK != 0;
-        let vol;
+        let mut vol;
         self.cyc += 25 * (x.volume_slide != FX_VOLUME_UP) as u64;
         if x.volume_slide == FX_SLIDE_TO_VOLUME {
             if x.volume_slide_off {
@@ -3066,7 +3066,11 @@ impl Musicline {
         } else if x.volume_slide == FX_VOLUME_DOWN || (x.volume_slide == FX_PT_VOLUME_DOWN && !first) {
             self.cyc += 85;
             self.cyc += 50 * (x.volume_slide != FX_VOLUME_DOWN) as u64;
-            vol = (x.volume1 as i16).wrapping_sub(x.volume_slide_speed as i16).max(0);
+            vol = (x.volume1 as i16).wrapping_sub(x.volume_slide_speed as i16);
+            if vol < 0 {
+                self.cyc += 4;
+                vol = 0;
+            }
         } else {
             self.cyc += 71;
             return;
@@ -3306,7 +3310,7 @@ impl Musicline {
         let inst = self.voices[v].instrument;
         {
             let x = &mut self.voices[v];
-            self.cyc += 27 * (x.arp & A_ENABLED != 0 || x.arp & A_USE_TABLE == 0) as u64;
+            self.cyc += 27 * (x.arp & A_USE_TABLE == 0) as u64;
             if x.arp & (A_USE_TABLE | A_ENABLED) == 0 {
                 return;
             }
@@ -3566,7 +3570,10 @@ impl Musicline {
         let mut vol = x.volume1 as i32;
         if x.volume1 != 0 {
             self.cyc += 34;
-            vol = (vol + t as i32).clamp(0, 1024);
+            vol += t as i32;
+            // (measured: the volume held at its top)
+            self.cyc += 8 * (vol > 1024) as u64;
+            vol = vol.clamp(0, 1024);
         }
         x.volume2 = vol as u16;
         x.volume3 = vol as u16;
@@ -3707,6 +3714,8 @@ impl Musicline {
                     }
                 }
                 if go {
+                    // (measured: the step's sign and a counter already at its end)
+                    self.cyc = self.cyc + 4 * (x.loop_step < 0) as u64 + 4 * (x.loop_counter_save == x.loop_counter_max) as u64 - 4;
                     let st = x.loop_step.abs();
                     let c = x.loop_counter_save as i32 + (x.loop_speed as i8 as i32) * st;
                     if (x.loop_speed as i8) < 0 {

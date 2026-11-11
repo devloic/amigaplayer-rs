@@ -544,7 +544,7 @@ fn stream_counts(d: &[u8], start: usize) -> (u64, u64) {
 }
 
 /// Cycles of the start-up calls (spec 5.3), each halved and rounded down.
-fn start_clocks(d: &[u8], set: &Set, streams: &[usize; 4], j: u64, dir: usize, name: &str, samp: &[Samp; 20]) -> u64 {
+fn start_clocks(d: &[u8], set: &Set, streams: &[usize; 4], j: u64, dir: usize, name: &str, samp: &[Samp; 20], fallback: bool) -> u64 {
     let wt = &d[12..14] == b"WT";
     let speed = rd16(d, 14);
     let b = name.as_bytes();
@@ -622,7 +622,10 @@ fn start_clocks(d: &[u8], set: &Set, streams: &[usize; 4], j: u64, dir: usize, n
         236,
         2634 + v + r + p,
     ];
-    calls.iter().map(|c| c / 2).sum()
+    // (measured: a bank found only as SMP.set, after the failed open of SMP.<name>, costs one
+    // more host call, which scans the directory path again: 17 cycles per character)
+    let fb = if fallback { (17 * dd + 351) / 2 } else { 0 };
+    fb + calls.iter().map(|c| c / 2).sum::<u64>()
 }
 
 fn resolve(set: &Set, base: u32, empty: u32) -> [Samp; 20] {
@@ -689,11 +692,13 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     cands.push("SMP.set".to_string());
     cands.push("smp.set".to_string());
-    let (zdata, set) = cands.iter().find_map(|n| {
+    let (zdata, set, bank) = cands.iter().find_map(|n| {
         let z = crate::deli::read_companion(m, n).1.ok()?;
         let s = load_set(&z, wt)?;
-        Some((z, s))
+        Some((z, s, n.as_str()))
     })?;
+    // (the failed open of SMP.<name> that precedes it: only for a QTS. name)
+    let fallback = bank.eq_ignore_ascii_case("smp.set") && cands.len() > 2;
     let _ = zdata;
     let set_addr = m.alloc(set.data.len() as u32 + 16);
     let empty = m.alloc(16);
@@ -719,7 +724,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         }
         n => n,
     };
-    let sum = start_clocks(d, &set, &starts, j, dir, &name, &samp);
+    let sum = start_clocks(d, &set, &starts, j, dir, &name, &samp, fallback);
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
     m.bus.clock = (origin + 100 + sum).max(m.bus.clock);
     let _ = set.samples;

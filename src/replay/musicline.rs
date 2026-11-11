@@ -97,6 +97,31 @@
 //! does under the engine (it touches no register meanwhile). UADE has none of this
 //! (a faster CPU: its ticks stay on the timer's period).
 //!
+//! Inside a 4-voice tick (all of it measured on the Eagleplayer's runs with half-cycle write times,
+//! 192 four-voice corpus modules): the tick's fixed work (`PLAY_TIME`) is not all before the voices'
+//! effects: a voice's loop location and length writes come at the end of its effects, `LOOP_PRE` after
+//! the row and `VOICE_GAP` more for each voice after the first, and the rest of the fixed work comes
+//! after the last voice, before the first period write, which does not move. An idle tick costs `VOICE_PLAY`
+//! for each voice plus `VOICE_PLAYING` for each voice that plays an instrument, except a sample with
+//! the sample-loop flag (E1 bit 7; a wave with it pays); the volume slides measured (`SLIDE_*`) add
+//! theirs; the instrument start is priced by the voice that starts (`INST_START_BY_VOICE`); the time
+//! that the last voice's tail takes off its effects (`TAIL`, which depends on which voices write) is
+//! not carried to the next tick if it was not used up. What is still off, by module and not
+//! by what the tick's counts say (a regression on those counts does not hold on modules left out):
+//! the first write after the effect passes of the filter, mix and phase types (errors from 5 to 100
+//! colour clocks, constant in a module and tick class), the other slides, tremolo and ProTracker
+//! slides, the start ticks (the error is a step of about 33 or 42 colour clocks, by voice), the
+//! first tick's total, and the voice's play cost where the instrument is blank or its sample
+//! is long.
+//! 8 voices (the CPU of the reference eight times as fast, `DELI_CPU_SPEED`): InitSound's writes come
+//! `EIGHT_FIRST_WRITE` after the loading, the first tick's acknowledge `EIGHT_ROW_BASE` + the pre-roll
+//! row's price / 8 after the last of them, the song starts `EIGHT_ACK_TO_START` after the first tick's
+//! four volume writes, and each tick's handler writes the four mix buffer locations (`EIGHT_LOC_AT`)
+//! after its acknowledge (the first tick also the four volumes, `EIGHT_FIRST_VOL_AT`). Of an 8-voice
+//! module only the writes of the start-up and the tick's handler are exact in time (seven writes);
+//! the gap from the last InitSound write to the first acknowledge varies by +-30 colour clocks with
+//! the tune, and nine tunes start 8 colour clocks later than the rest.
+//!
 //! The time before the first tick (4 voices) is exact except for the first row. The original's
 //! loader runs on the engine's 68000 clock, which counts floor(cycles / 2) of each stretch of
 //! code between two host-library calls, so the loading time is the sum of the stretches of each
@@ -269,6 +294,10 @@ const FX_PT_VIBRATO: u8 = 0xea;
 const ECLOCK: u64 = 5;
 /// The tick's fixed work before the effects.
 const PLAY_TIME: u64 = 2669;
+/// ... of which this long passes before the end of the first voice's effects (its loop writes) with none to
+/// price, and this long more before the end of each next voice's (measured on the loop writes of 3 modules).
+const LOOP_PRE: u64 = 650;
+const VOICE_GAP: u64 = 375;
 /// The first tick's (the volume writes instead of the tune's reading).
 const FIRST_PLAY_TIME: u64 = 2683;
 /// EndSound's writes of a 4-voice tune that ends in its first row, before the timer starts.
@@ -327,8 +356,16 @@ const INST_RESONANCE: f64 = 164.0;
 /// (An idle tick takes 4411.25 + 7.5 per voice that plays an instrument to the first period write: 4418, 4426,
 /// 4433 with one, two, three; 15 cycles of the 68000 for each; 814 idle ticks of 3 modules.)
 const VOICE_PLAY: f64 = 453.8125;
+/// (not for a sample with the sample-loop flag, which takes 7.5 less)
 const VOICE_PLAYING: f64 = 7.5;
 const SLIDE_NOTE: f64 = 51.8;
+/// The volume slides that were measured (the others take what the idle tick does): a volume slide down
+/// (FX $12) and its ProTracker form ($E7), a channel volume slide up and down. Each is constant to a
+/// colour clock on its tick (151, 87, 180, 109, 223, 160 of the corpus: 23, 47, 16.5, 22.5 per voice).
+const SLIDE_VOLUME_DOWN: f64 = 23.0;
+const SLIDE_PT_VOLUME_DOWN: f64 = 47.0;
+const SLIDE_CHANNEL_UP: f64 = 16.5;
+const SLIDE_CHANNEL_DOWN: f64 = 22.5;
 const ARP_WAIT: f64 = 25.6;
 const ARP_STEP: f64 = 313.1;
 const ARP_LINE: f64 = 170.4;
@@ -1511,6 +1548,8 @@ impl Musicline {
         }
         let mut spent = 0;
         self.inst_started = false;
+        // what the last tick took off its time (the tail) does not come off the next one's
+        self.owed = self.owed.max(0.0);
         let first = self.first;
         if self.first {
             self.first = false;
@@ -1526,10 +1565,20 @@ impl Musicline {
             self.play_tune(hw);
             self.pay(hw);
         }
-        hw.wait(if first { FIRST_PLAY_TIME } else { PLAY_TIME } - spent);
+        // 4 voices, not the first tick: the tick's fixed work is spread over the voices' loop (a voice's
+        // location and length writes come at the end of its effects), `LOOP_PRE` before the first voice's
+        // and `VOICE_GAP` more before each next; the rest comes after the last voice
+        let spread = !first && !self.eight;
+        hw.wait(if first { FIRST_PLAY_TIME } else if spread { LOOP_PRE } else { PLAY_TIME } - spent);
         for v in 0..self.voice_count() {
+            if spread && v > 0 {
+                hw.wait(VOICE_GAP);
+            }
             self.play_effects(hw, v);
             self.pay(hw);
+        }
+        if spread {
+            hw.wait(PLAY_TIME - LOOP_PRE - 3 * VOICE_GAP);
         }
         for v in 0..self.voice_count() {
             self.period(v);
@@ -2818,7 +2867,7 @@ impl Musicline {
         }
         if self.voices[v].play & P_RETRIGGER == 0 {
             self.owed += VOICE_PLAY;
-            if self.voices[v].instrument != 0 {
+            if self.voices[v].instrument != 0 && !(self.voices[v].effect1 & E1_WAVE_SAMPLE_LOOP != 0 && self.voices[v].wave_or_sample == SAMPLE) {
                 self.owed += VOICE_PLAYING;
             }
             self.slide_volume(v);
@@ -2885,6 +2934,7 @@ impl Musicline {
         let x = &mut self.voices[v];
         let first = x.play & P_FIRST_ROW_TICK != 0;
         let vol;
+        let mut cost = 0.0;
         if x.volume_slide == FX_SLIDE_TO_VOLUME {
             if x.volume_slide_off {
                 return;
@@ -2908,17 +2958,20 @@ impl Musicline {
             vol = (x.volume1 as i16).wrapping_add(x.volume_slide_speed as i16).min(1024);
         } else if x.volume_slide == FX_VOLUME_DOWN || (x.volume_slide == FX_PT_VOLUME_DOWN && !first) {
             vol = (x.volume1 as i16).wrapping_sub(x.volume_slide_speed as i16).max(0);
+            cost = if x.volume_slide == FX_VOLUME_DOWN { SLIDE_VOLUME_DOWN } else { SLIDE_PT_VOLUME_DOWN };
         } else {
             return;
         }
         x.volume1 = vol as u16;
         x.volume2 = vol as u16;
         x.volume3 = vol as u16;
+        self.owed += cost;
     }
 
     fn slide_channel_volume(&mut self, v: usize) {
         let x = &mut self.voices[v];
         let vol;
+        let mut cost = 0.0;
         if x.channel_volume_slide == FX_SLIDE_TO_CHANNEL {
             if x.channel_volume_slide_off {
                 return;
@@ -2940,12 +2993,15 @@ impl Musicline {
             vol = n;
         } else if x.channel_volume_slide == FX_CHANNEL_UP {
             vol = (x.channel_volume as i16).wrapping_add(x.channel_volume_slide_speed as i16).min(1024);
+            cost = SLIDE_CHANNEL_UP;
         } else if x.channel_volume_slide == FX_CHANNEL_DOWN {
             vol = (x.channel_volume as i16).wrapping_sub(x.channel_volume_slide_speed as i16).max(0);
+            cost = SLIDE_CHANNEL_DOWN;
         } else {
             return;
         }
         x.channel_volume = vol as u16;
+        self.owed += cost;
     }
 
     fn slide_master_volume(&mut self, v: usize) {

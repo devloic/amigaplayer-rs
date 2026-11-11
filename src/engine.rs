@@ -656,6 +656,12 @@ impl Engine {
                 self.m.bus.paula.reset();
                 // (what the replayer allocates is freed again at stop, or here if it declines)
                 let mark = self.m.heap.mark();
+                // the module's path in the host's path buffer, as the host of a 68k player leaves
+                // it before the player starts (start_deli): it lies in low memory, below the
+                // module, where a voice that runs on past a one-shot sample (LOC 0, LEN 0) or a
+                // sample start moved out of the module plays it
+                let full = self.m.bus.read_cstr(self.m.deli.dir_buf) + &self.m.bus.read_cstr(self.m.deli.file_buf);
+                self.m.bus.write_cstr(self.m.deli.path_buf, &full);
                 if let Some(r) = (o.new)(&data, addr, &mut self.m) {
                     self.replay_mark = Some(mark);
                     return self.start_replay(r, path);

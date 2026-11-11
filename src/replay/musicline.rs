@@ -113,14 +113,17 @@
 //! slides, the start ticks (the error is a step of about 33 or 42 colour clocks, by voice), the
 //! first tick's total, and the voice's play cost where the instrument is blank or its sample
 //! is long.
-//! 8 voices (the CPU of the reference eight times as fast, `DELI_CPU_SPEED`): InitSound's writes come
-//! `EIGHT_FIRST_WRITE` after the loading, the first tick's acknowledge `EIGHT_ROW_BASE` + the pre-roll
-//! row's price / 8 after the last of them, the song starts `EIGHT_ACK_TO_START` after the first tick's
-//! four volume writes, and each tick's handler writes the four mix buffer locations (`EIGHT_LOC_AT`)
-//! after its acknowledge (the first tick also the four volumes, `EIGHT_FIRST_VOL_AT`). Of an 8-voice
-//! module only the writes of the start-up and the tick's handler are exact in time (seven writes);
-//! the gap from the last InitSound write to the first acknowledge varies by +-30 colour clocks with
-//! the tune, and nine tunes start 8 colour clocks later than the rest.
+//! 8 voices (the CPU of the reference eight times as fast, `DELI_CPU_SPEED`, so a colour clock is 16
+//! cycles): InitSound's writes come `EIGHT_FIRST_WRITE` after the loading (8 colour clocks later when
+//! the tune has a groove), StartInt's acknowledge after the pre-roll row, whose time is counted in
+//! 68000 cycles from what the row does (`eight_row_cycles`: measured on the Eagleplayer with rows made
+//! for the purpose, one change at a time; it equals the reference's stretch on all 147 8-voice modules
+//! compared), the song starts `EIGHT_ACK_TO_START` after StartInt's four volume writes, and each tick's
+//! handler acknowledges `EIGHT_CALL_TO_ACK` after the audio interrupt is taken and writes the four mix
+//! buffer locations (`EIGHT_LOC_AT`) after that (the first tick also the four volumes,
+//! `EIGHT_FIRST_VOL_AT`). The row's exact time matters to what is heard: StartInt's DMA-on write falls
+//! on a raster line of the grid that runs before the song start, and when that line's end comes before
+//! the start (the write in its last 26 colour clocks) the first buffer starts a line earlier.
 //!
 //! The time before the first tick (4 voices) is exact except for the first row. The original's
 //! loader runs on the engine's 68000 clock, which counts floor(cycles / 2) of each stretch of
@@ -304,23 +307,25 @@ const FIRST_PLAY_TIME: u64 = 2683;
 const END_BEFORE_START: u64 = 579;
 /// 8 voices (the reference's CPU running eight times as fast as the 68000's: it counts floor(cycles / 16) of
 /// each stretch between two host calls, `Cost::clk8`): the first write of InitSound comes this many
-/// colour clocks after the loading (the fixed init stretches), on 120 of 129 tunes; nine others (12, 75, 125, 234,
-/// 237, 263, 274, 289, 9 of the corpus) 8 later, for a reason not found.
+/// colour clocks after the loading (the fixed init stretches: 373,919 cycles from the last host call),
+/// and `EIGHT_GROOVE_INIT` later when the tune has a groove (16 cycles more for each of the 8 voices).
 const EIGHT_FIRST_WRITE: u64 = 27_617;
-/// 8 voices: the time from InitSound's last write to the first tick's acknowledge is, in colour
-/// clocks, a fit on 129 tunes (standard deviation 37, at most 200) of the pre-roll row's price:
-/// the price (in 68000 colour clocks) over 8, as the reference's CPU is 8 times as fast, and a constant.
-const EIGHT_ROW_DIV: f64 = 8.0;
-const EIGHT_ROW_BASE: f64 = 130.2;
+const EIGHT_GROOVE_INIT: u64 = 8;
 /// 8 voices (the reference's CPU running eight times as fast): InitSound's writes of a channel
 /// (location, length, period) come 0, 1 and 2 colour clocks after the first, the next channel's 4
-/// after; the first tick's acknowledge is `EIGHT_ROW_BASE` + the row's price / 8 after the last, the interrupt
-/// enable, DMA-on and the four volumes 1 colour clock apart after it, and the song starts 22
-/// after the last volume write (the writes before it are the engine's time before the start).
+/// after. The last one comes `EIGHT_LAST_WRITE_CYCLE` sixteenths of a colour clock (68000 cycles) into
+/// its colour clock; the pre-roll row (`eight_row_cycles`) ends the stretch at a host call, which drops
+/// the fraction, and StartInt's acknowledge comes `EIGHT_ROW_TO_ACK` colour clocks later (five more host
+/// calls, 92, 160, 14, 132 and 228 cycles apart, and 156 cycles: each floored to colour clocks); the
+/// interrupt enable, DMA-on and the four volumes come 1 colour clock apart after it, and the song starts
+/// 22 after the last volume write (the writes before it are the engine's time before the start).
+const EIGHT_LAST_WRITE_CYCLE: u64 = 3;
+const EIGHT_ROW_TO_ACK: u64 = 46;
 const EIGHT_ACK_TO_START: u64 = 22;
-/// 8 voices: a tick's four location writes come these colour clocks after its acknowledge
-/// (each channel's location and length words in one move) and the four volumes of the first
-/// tick after the last location.
+/// 8 voices: the handler's acknowledge comes this many colour clocks after the interrupt is taken, a
+/// tick's four location writes these colour clocks after its acknowledge (each channel's location and
+/// length words in one move) and the four volumes of the first tick after the last location.
+const EIGHT_CALL_TO_ACK: u64 = 6;
 const EIGHT_LOC_AT: [u64; 4] = [9, 11, 12, 14];
 const EIGHT_FIRST_VOL_AT: [u64; 4] = [19, 20, 22, 23];
 /// 4 voices: the first tick's four volume writes (0) come these colour clocks after its acknowledge;
@@ -763,6 +768,10 @@ pub struct Musicline {
     subsong: u16,
     tune: u32,
     eight: bool,
+    /// 8 voices: the clock of StartInt's acknowledge, set by InitSound (`eight_row_times`), and those of
+    /// EndSound's three writes when the tune ends in its pre-roll row.
+    eight_ack_at: u64,
+    eight_end_at: Option<[u64; 3]>,
     first: bool,
     /// Colour clocks from the start's DMA-on write to the first tick.
     used: std::cell::Cell<u64>,
@@ -875,6 +884,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         subsong: 0,
         tune: 0,
         eight: false,
+        eight_ack_at: 0,
+        eight_end_at: None,
         first: true,
         used: std::cell::Cell::new(0),
         master: 64 << 4,
@@ -903,7 +914,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // timer starts then (4 voices), or the first write is made (8 voices, at the
     // engine's start phase after it; InitSound's first writes)
     if hw.bus.r8(hw.bus.r32(tab + T_TUNES) + TU_PLAY_MODE) != 0 {
-        hw.wait((cost.base + cost.clk8 + EIGHT_FIRST_WRITE).saturating_sub(hw.bus.clock));
+        let groove = if hw.bus.r8(hw.bus.r32(tab + T_TUNES) + TU_GROOVE) != 0 { EIGHT_GROOVE_INIT } else { 0 };
+        hw.wait((cost.base + cost.clk8 + EIGHT_FIRST_WRITE + groove).saturating_sub(hw.bus.clock));
         ml.init_sound(&mut hw, 0, false);
     } else {
         ml.init_sound(&mut hw, 0, true);
@@ -1389,6 +1401,7 @@ impl Replayer for Musicline {
 
     fn audio_irq(&mut self, hw: &mut Hw) -> bool {
         if self.eight {
+            hw.wait(EIGHT_CALL_TO_ACK);
             self.handler(hw);
         } else {
             hw.bus.write_word(0xdff09c, 0x0080);
@@ -1453,10 +1466,14 @@ impl Musicline {
                 hw.per(ch, 0x7e);
                 hw.wait(2);
             }
+            // the pre-roll row's time, and EndSound's writes at theirs when the tune ends in it
+            self.eight_row_times(hw, hw.bus.clock - 2);
         }
         // the pre-roll: one row
         self.play_tune(hw);
-        if self.voices[0].ended && !defer_end {
+        if self.eight {
+            self.eight_end_sound(hw);
+        } else if self.voices[0].ended && !defer_end {
             self.end_sound(hw);
         }
     }
@@ -1501,9 +1518,9 @@ impl Musicline {
             self.tb = TimerB::default();
             self.isr_step = 1;
         } else {
-            // the pre-roll row's work, from the last period write (2 colour clocks ago)
-            let row = std::mem::take(&mut self.owed);
-            hw.wait(((EIGHT_ROW_BASE + row / EIGHT_ROW_DIV) as u64).saturating_sub(2));
+            // the pre-roll row's work and the calls up to StartInt
+            self.owed = 0.0;
+            hw.wait(self.eight_ack_at.saturating_sub(hw.bus.clock));
             hw.bus.write_word(0xdff09c, 0x0080);
             hw.wait(1);
             hw.bus.write_word(0xdff09a, 0x8080);
@@ -4177,6 +4194,572 @@ fn wave_table(w: u8) -> &'static [i8; 128] {
     }
 }
 
+// ---- 8 voices: the time of the pre-roll row ----
+//
+// The 68000 cycles the original's InitSound runs from its last register write to the host call that
+// ends its stretch: the row of an untouched player (every voice's first sequence entries and first
+// part line). All of it was measured on the Eagleplayer with rows made for the purpose, one change at
+// a time (the cycle count of the stretch is exact, a colour clock being 16 cycles there): the costs
+// add up, do not depend on the voice except where said, and are given as the difference from a voice
+// that reads an empty line.
+
+/// A row of eight empty lines; less for each voice when the tune has a groove.
+const ROW_EMPTY: i64 = 15_188;
+const ROW_GROOVE_VOICE: i64 = -21;
+/// Sequence entries: the voice is switched off; it waits (a count, and a new speed with it); a wait of
+/// zero and a jump not taken go on to the next entry, as a jump taken does (to entry 0, or 20 cycles
+/// less to another; the first time, and each time its counter is not used up); an entry with the
+/// command bit and no command plays its part; and the voice's last entry is 8 cycles cheaper when a
+/// jump's counter is still running.
+const SEQ_OFF: i64 = -1361;
+const SEQ_WAIT: i64 = -1174;
+const SEQ_WAIT_SPEED: i64 = 34;
+const SEQ_WAIT_NONE: i64 = 278;
+const SEQ_JUMP_PAST: i64 = 253;
+const SEQ_JUMP_FIRST: i64 = 302;
+const SEQ_JUMP_AGAIN: i64 = 281;
+const SEQ_JUMP_ELSEWHERE: i64 = -20;
+const SEQ_FLAGGED: i64 = 81;
+const SEQ_JUMP_RUNNING: i64 = -8;
+/// Jumps that never reach a part: the voice gives up after 256 entries (when the last one jumped to
+/// entry 0, without the 20 cycles of that).
+const SEQ_NO_PART: i64 = -1552;
+/// Part lines: a jump line that does not jump, the part's end on its first line (EndSound's writes),
+/// a note without an instrument, an instrument without a note, both (a sample without a loop and
+/// with no effects), both where the instrument has no sample.
+const LINE_JUMP: i64 = 295;
+const LINE_END: i64 = -566;
+const LINE_NOTE: i64 = 79;
+const LINE_INSTRUMENT: i64 = 474;
+const LINE_INSTRUMENT_SLIDE: i64 = 25;
+const LINE_START: i64 = 1873;
+const LINE_NO_SAMPLE: i64 = 502;
+/// A note with a portamento ($03, $E3) starts nothing: the line costs this besides the effect; and what
+/// the line's one portamento adds to a note without an instrument, or to an instrument without a note
+/// (lines with two portamentos were not measured).
+const LINE_PORTAMENTO: i64 = 462;
+const LINE_PT_PORTAMENTO: i64 = 669;
+const LINE_NOTE_PORTAMENTO: i64 = 7;
+const LINE_NOTE_PT_PORTAMENTO: i64 = 214;
+const LINE_INSTRUMENT_PT_PORTAMENTO: i64 = -98;
+/// Part effects with a fixed cost: the code, with a zero argument, with another.
+const ROW_FX: [(u8, i64, i64); 47] = [
+    (0x01, 65, 77), (0x02, 65, 77), (0x03, 123, 135), (0x04, 16, 16), (0x05, 21, 37), (0x06, 21, 37), (0x07, 21, 33),
+    (0x08, 88, 122), (0x09, 78, 112), (0x10, 50, 50), (0x11, 33, 45), (0x12, 33, 45), (0x13, 38, 38), (0x14, 98, 110),
+    (0x15, 33, 59), (0x16, 33, 63), (0x17, 21, 33), (0x18, 88, 122), (0x19, 78, 112), (0x20, 38, 38), (0x21, 33, 45),
+    (0x22, 33, 45), (0x23, 38, 38), (0x24, 114, 126), (0x27, 239, 239), (0x30, 38, 38),
+    (0x31, 33, 45), (0x32, 33, 45), (0x33, 38, 38), (0x34, 102, 114), (0x44, 36, 36),
+    (0x45, 36, 36), (0x46, 57, 77), (0x47, 41, 41), (0x48, 33, 45), (0x49, 37, 37), (0x4a, 21, 112), (0x4b, 96, 96),
+    (0xe1, 65, 77), (0xe2, 65, 77), (0xe3, 318, 330), (0xe4, 17, 41), (0xe5, 17, 41), (0xe6, 43, 55), (0xe7, 43, 55),
+    (0xe9, 28, 28), (0xeb, 28, 28),
+];
+/// The channel's and the master volume ($25, $35 up, $26, $36 down, by the voice's last number when the
+/// effect has none; both start at 64, $20, $27 and $30 set them, and the master volume is one for all
+/// the voices): no argument, an argument, and the clamping at 64 or at zero; and what the slide to a
+/// volume ($24, $34) costs less when it is there already (as the port's effects decide it).
+const ROW_VOLUME_UP: (i64, i64) = (74, 100);
+const ROW_VOLUME_DOWN: (i64, i64) = (58, 84);
+const ROW_VOLUME_CLAMP: i64 = 16;
+const ROW_VOLUME_SLIDE_THERE: i64 = -16;
+/// What a line with a note adds to a vibrato or tremolo effect ($08, $09, $18, $19), what an instrument
+/// takes off the restart effect ($49), and a note with an instrument off the fine tune effect ($0B).
+const FX_NOTE_VIBRATO: i64 = 92;
+const FX_RESTART_INSTRUMENT: i64 = -16;
+const FX_FINE_TUNE_START: i64 = -20;
+/// The instrument's start: not transposable; the hold-sustain effect ($46); the sample offset effect
+/// ($48) on a sample, inside it or past its end; the volume effect ($10); a volume added ($15, $16),
+/// and clamped at the top or at zero; a slide speed.
+const START_FIXED_NOTE: i64 = 16;
+const START_HOLD: i64 = 40;
+const START_OFFSET: i64 = 69;
+const START_OFFSET_PAST: i64 = 63;
+const START_VOLUME: i64 = 12;
+const START_VOLUME_ADD: i64 = 38;
+const START_VOLUME_TOP: i64 = 8;
+const START_VOLUME_ZERO: i64 = 4;
+const START_SLIDE: i64 = 148;
+/// ... a sample with the loop flag, the wave types 1 to 4 and the others, and the played length when it
+/// is one a wave effect works on (8, 16, 32, 64, 128 words; the others pay the clearing of the effects).
+const START_SAMPLE_LOOP: i64 = -16;
+const START_WAVE: [i64; 4] = [-14, 1, 16, 31];
+const START_WAVE_OTHER: i64 = -3;
+const START_LENGTH: [(u16, i64); 5] = [(8, -80), (16, -67), (32, -50), (64, -33), (128, -16)];
+/// ... the envelope; the vibrato or tremolo (and what a part effect that set one takes off instead);
+/// the loop effect: of a wave, of a sample with no loop length, and its set-up.
+const START_ENVELOPE: i64 = 152;
+const START_VIBRATO: i64 = 172;
+const START_VIBRATO_SET: i64 = -25;
+const START_LOOP_WAVE: i64 = 51;
+const START_LOOP_NONE: i64 = 72;
+const START_LOOP: i64 = 609;
+const START_LOOP_DOWN: i64 = 24;
+/// ... the wave effects' counters, in the order phase, resonance, filter, mix, transform; a counter in
+/// step mode, one with its init flag, and one that starts above its repeat value cost more.
+const START_COUNTER: [i64; 5] = [261, 277, 277, 261, 329];
+const COUNTER_STEP: i64 = 38;
+const COUNTER_INIT: i64 = 37;
+const LOOP_INIT: i64 = 39;
+const COUNTER_DOWN: i64 = 16;
+/// The arpeggio's start: through the instrument, or (less) through the table effects ($44, $45); a
+/// skipped line; its first line empty (the note waits: the instrument does not start); the table's end;
+/// an absolute note; a wave sample (one measurement); the line's two effects: slides (1, 2), volume (3),
+/// volume slides (4, 5), with a zero argument and another, and any other code; both of them the volume.
+const ARP_START_ROW: i64 = 763;
+const ARP_BY_TABLE: i64 = -68;
+const ARP_SKIP: i64 = 201;
+const ARP_WAITS: i64 = -1129;
+const ARP_ENDS: i64 = 389;
+const ARP_ABSOLUTE: i64 = 10;
+const ARP_SAMPLE: i64 = 91;
+const ARP_FX: [(i64, i64); 6] = [(0, 0), (49, 77), (49, 77), (44, 44), (33, 45), (33, 45)];
+const ARP_FX_OTHER: i64 = -68;
+const ARP_VOLUME_TWICE: i64 = 38;
+/// A tune that ends in its first row (voice 0 switched off): EndSound's DMA-off write comes this many
+/// cycles before the row's end, the interrupt disable and the acknowledge 20 cycles apart after it, and
+/// the stretch ends `ROW_END_SOUND` after the row.
+const ROW_END_WRITE: i64 = -53;
+const ROW_END_STEP: i64 = 20;
+const ROW_END_SOUND: i64 = 518;
+
+/// What the row's effects have set so far, as far as the time depends on it.
+struct RowState {
+    groove: [u8; 8],
+    speed_part: [bool; 8],
+    groove_part: [bool; 8],
+    part_groove: [bool; 8],
+    volume: [u16; 8],
+    master: u16,
+    add_number: [[i16; 8]; 2],
+    slide_to: [[u16; 8]; 2],
+}
+
+impl Musicline {
+    /// 8 voices, InitSound: the clock of StartInt's acknowledge (`last` is the last period write's),
+    /// and EndSound's writes when the tune ends in its first row. Called before the row is played.
+    fn eight_row_times(&mut self, hw: &Hw, last: u64) {
+        let (row, ended) = self.eight_row_cycles(hw);
+        let at = |cycles: i64| last + (EIGHT_LAST_WRITE_CYCLE as i64 + cycles).max(0) as u64 / 16;
+        self.eight_end_at = ended.then(|| [0, 1, 2].map(|k| at(row + ROW_END_WRITE + k * ROW_END_STEP)));
+        self.eight_ack_at = at(row + if ended { ROW_END_SOUND } else { 0 }) + EIGHT_ROW_TO_ACK;
+    }
+
+    /// 8 voices: EndSound's writes of a tune that ended in its pre-roll row, at their times.
+    fn eight_end_sound(&mut self, hw: &mut Hw) {
+        let Some(at) = self.eight_end_at.take() else { return };
+        if !self.voices[0].ended {
+            return;
+        }
+        for (k, (reg, v)) in [(0xdff096, 0x000f), (0xdff09a, 0x0080), (0xdff09c, 0x0080)].into_iter().enumerate() {
+            hw.wait(at[k].saturating_sub(hw.bus.clock));
+            hw.bus.write_word(reg, v);
+        }
+        for v in self.voices.iter_mut() {
+            v.wave_number_old = 0;
+        }
+    }
+
+    /// The cycles of the pre-roll row of an untouched player, and whether the tune ends in it.
+    fn eight_row_cycles(&self, hw: &Hw) -> (i64, bool) {
+        let g = self.tune_groove;
+        let mut st = RowState {
+            groove: [g; 8],
+            speed_part: [false; 8],
+            groove_part: [false; 8],
+            part_groove: [g != 0; 8],
+            volume: [1024; 8],
+            master: 1024,
+            add_number: [[0; 8]; 2],
+            slide_to: [[0; 8]; 2],
+        };
+        let mut total = ROW_EMPTY + if g != 0 { 8 * ROW_GROOVE_VOICE } else { 0 };
+        let mut ended = false;
+        for v in 0..8 {
+            st.part_groove[v] = !st.part_groove[v];
+            let (cycles, off) = self.eight_voice_cycles(hw, v, &mut st);
+            total += cycles;
+            ended |= v == 0 && off;
+        }
+        (total, ended)
+    }
+
+    /// One voice's row: its cycles more than an empty line's, and whether it was switched off.
+    fn eight_voice_cycles(&self, hw: &Hw, v: usize, st: &mut RowState) -> (i64, bool) {
+        let seq = rl(hw, self.tune + TU_SEQ + 4 * v as u32);
+        let mut d = 0;
+        let (mut pos, mut jumps) = (0u8, 0u8);
+        let mut entry = None;
+        let mut to_first = false;
+        for _ in 0..256 {
+            let data = rw(hw, seq + 2 * pos as u32);
+            let (arg, target) = ((data & 0x1f) as u8, (data >> 8) as u8);
+            to_first = false;
+            if data & 0x20 != 0 {
+                match (data & 0xc0) >> 6 {
+                    1 => return (d + SEQ_OFF + if jumps != 0 { SEQ_JUMP_RUNNING } else { 0 }, true),
+                    2 => {
+                        let elsewhere = if target != 0 { SEQ_JUMP_ELSEWHERE } else { 0 };
+                        if jumps != 0 {
+                            jumps -= 1;
+                            if jumps != 0 {
+                                d += SEQ_JUMP_AGAIN + elsewhere;
+                                pos = target;
+                                to_first = target == 0;
+                            } else {
+                                d += SEQ_JUMP_PAST;
+                                pos = pos.wrapping_add(1);
+                            }
+                        } else if pos > target {
+                            d += SEQ_JUMP_FIRST + elsewhere;
+                            jumps = arg;
+                            pos = target;
+                            to_first = target == 0;
+                        } else {
+                            d += SEQ_JUMP_PAST;
+                            pos = pos.wrapping_add(1);
+                        }
+                        continue;
+                    }
+                    3 => {
+                        if target != 0 {
+                            let running = if jumps != 0 { SEQ_JUMP_RUNNING } else { 0 };
+                            return (d + SEQ_WAIT + if arg != 0 { SEQ_WAIT_SPEED } else { 0 } + running, false);
+                        }
+                        d += SEQ_WAIT_NONE;
+                        pos = pos.wrapping_add(1);
+                        continue;
+                    }
+                    _ => d += SEQ_FLAGGED,
+                }
+            }
+            entry = Some(data);
+            break;
+        }
+        let Some(data) = entry else {
+            // 256 entries and no part: the voice plays nothing
+            let running = if jumps != 0 { SEQ_JUMP_RUNNING } else { 0 };
+            return (d + SEQ_NO_PART + running + if to_first { SEQ_JUMP_ELSEWHERE } else { 0 }, false);
+        };
+        if jumps != 0 {
+            d += SEQ_JUMP_RUNNING;
+        }
+        let part = rl(hw, self.tab + T_PARTS + 4 * (((data << 2) & 0x300) | (data >> 8)) as u32);
+        let mut line = part;
+        for _ in 0..128 {
+            let note = rb(hw, line);
+            if note == 61 {
+                return (d + LINE_END, false);
+            }
+            if note & 0x80 == 0 {
+                break;
+            }
+            d += LINE_JUMP;
+            line += 12;
+        }
+        (d + self.eight_line_cycles(hw, v, line, st), false)
+    }
+
+    /// A part line's cycles more than an empty line's.
+    fn eight_line_cycles(&self, hw: &Hw, v: usize, line: u32, st: &mut RowState) -> i64 {
+        let (note, pi) = (rb(hw, line), rb(hw, line + 1));
+        let mut d = 0;
+        // what the effects leave for the instrument's start
+        let (mut vibrato, mut tremolo, mut hold, mut keep_fine_tune) = (false, false, false, false);
+        let (mut volume, mut add, mut add_number) = (None, false, 0i16);
+        let (mut offset, mut offset_by) = (false, 0u8);
+        let (mut table, mut portamento, mut portamentos) = (None, 0, 0);
+        for k in 0..5 {
+            let (e, a) = (rb(hw, line + 2 + 2 * k), rb(hw, line + 3 + 2 * k));
+            d += Self::eight_fx_cycles(e, a, v, st);
+            let a16 = (a as u16) << 4;
+            if matches!(e, 0x03 | 0xe3) {
+                portamentos += 1;
+            }
+            match e {
+                0x03 | 0xe3 if portamento == 0 => portamento = e,
+                0x08 | 0x09 | 0xea => vibrato = true,
+                0x18 | 0x19 | 0xe8 => tremolo = true,
+                0x0b => keep_fine_tune = true,
+                0x10 => volume = Some(a16),
+                0x15 | 0x16 => {
+                    add = true;
+                    if a != 0 {
+                        add_number = if e == 0x15 { a16 as i16 } else { -(a16 as i16) };
+                    }
+                }
+                0x44 | 0x45 => table = Some(a),
+                0x46 => hold = true,
+                0x48 => {
+                    offset = true;
+                    if a != 0 {
+                        offset_by = a;
+                    }
+                }
+                _ => {}
+            }
+            if note != 0 && matches!(e, 0x08 | 0x09 | 0x18 | 0x19) {
+                d += FX_NOTE_VIBRATO;
+            }
+            if pi != 0 && e == 0x49 {
+                d += FX_RESTART_INSTRUMENT;
+            }
+        }
+        // the line's one portamento
+        let one = if portamentos == 1 { portamento } else { 0 };
+        if pi == 0 {
+            return d + match (note != 0, one) {
+                (false, _) => 0,
+                (true, 0x03) => LINE_NOTE + LINE_NOTE_PORTAMENTO,
+                (true, 0xe3) => LINE_NOTE + LINE_NOTE_PT_PORTAMENTO,
+                (true, _) => LINE_NOTE,
+            };
+        }
+        let inst = rl(hw, self.tab + T_INSTS + 4 * pi as u32);
+        let w = |o: u32| rw(hw, inst + o);
+        // the volume's path, from the instrument's or the one a line effect set
+        let volume_cycles = |from: u16| {
+            let mut c = if volume.is_some() { START_VOLUME } else { 0 };
+            if add {
+                let vol = (volume.unwrap_or(from) as i16).wrapping_add(add_number);
+                c += START_VOLUME_ADD + if vol > 1024 { START_VOLUME_TOP } else if vol < 0 { START_VOLUME_ZERO } else { 0 };
+            }
+            c
+        };
+        let inst_volume = w(I_VOLUME).wrapping_mul(16);
+        if note == 0 {
+            return d
+                + LINE_INSTRUMENT
+                + volume_cycles(inst_volume)
+                + if rb(hw, inst + I_SLIDE_SPEED) != 0 { LINE_INSTRUMENT_SLIDE } else { 0 }
+                + if one == 0xe3 { LINE_INSTRUMENT_PT_PORTAMENTO } else { 0 };
+        }
+        if portamento != 0 {
+            return d + if portamento == 0x03 { LINE_PORTAMENTO } else { LINE_PT_PORTAMENTO };
+        }
+        let e1 = rb(hw, inst + I_EFFECT1);
+        let mut start_volume = inst_volume;
+        // the arpeggio's first line
+        if table.is_some() || e1 & E1_ARPEGGIO != 0 {
+            let num = table.map_or(w(I_ARP_TABLE) as u32, |t| t as u32);
+            let arp = rl(hw, self.tab + T_ARPS + 4 * (num & 0xff));
+            if table.is_some() {
+                d += ARP_BY_TABLE;
+            }
+            let mut at = arp;
+            for _ in 0..128 {
+                if rb(hw, at) != 62 {
+                    break;
+                }
+                d += ARP_SKIP;
+                at += 6;
+            }
+            let tr = rb(hw, at) as i8;
+            if tr == 0 {
+                return d + LINE_START + ARP_WAITS;
+            }
+            if tr == 61 {
+                d += ARP_ENDS;
+            } else {
+                d += ARP_START_ROW + if tr > 0 { ARP_ABSOLUTE } else { 0 };
+                if rb(hw, at + 1) != 0 {
+                    d += ARP_SAMPLE;
+                }
+                for k in 0..2 {
+                    let (e, a) = (rb(hw, at + 2 + 2 * k), rb(hw, at + 3 + 2 * k));
+                    d += match ARP_FX.get(e as usize) {
+                        Some(&(zero, other)) => if a == 0 { zero } else { other },
+                        None => ARP_FX_OTHER,
+                    };
+                    if e == AE_SET_VOLUME {
+                        start_volume = (a as u16) << 4;
+                    }
+                }
+                if rb(hw, at + 2) == AE_SET_VOLUME && rb(hw, at + 4) == AE_SET_VOLUME {
+                    d += ARP_VOLUME_TWICE;
+                }
+            }
+        }
+        if rl(hw, inst + IS_POINTER) == 0 {
+            return d + LINE_NO_SAMPLE;
+        }
+        d += LINE_START + volume_cycles(start_volume);
+        if keep_fine_tune {
+            d += FX_FINE_TUNE_START;
+        }
+        let st_ = rb(hw, inst + IS_TYPE);
+        if rb(hw, inst + I_TRANSPOSABLE) == 0 {
+            d += START_FIXED_NOTE;
+        }
+        if hold {
+            d += START_HOLD;
+        }
+        if offset && st_ == SAMPLE {
+            d += if ((offset_by as u16) << 7) < w(IS_LENGTH) { START_OFFSET } else { START_OFFSET_PAST };
+        }
+        if rb(hw, inst + I_SLIDE_SPEED) != 0 {
+            d += START_SLIDE;
+        }
+        // the played length: the sample's loop or none, or the wave's
+        let mut length = match st_ {
+            SAMPLE => {
+                if e1 & E1_WAVE_SAMPLE_LOOP != 0 {
+                    d += START_SAMPLE_LOOP;
+                }
+                if e1 & E1_WAVE_SAMPLE_LOOP != 0 && w(IS_REPEAT_LENGTH) != 0 { w(IS_REPEAT_LENGTH) } else { 1 }
+            }
+            WAVE16..=WAVE128 => {
+                d += START_WAVE[st_ as usize - 1];
+                w(IS_LENGTH) >> (5 - st_)
+            }
+            _ => {
+                d += START_WAVE_OTHER;
+                w(IS_LENGTH)
+            }
+        };
+        if e1 & E1_ENVELOPE != 0 {
+            d += START_ENVELOPE;
+        }
+        for (set, flag) in [(vibrato, E1_VIBRATO), (tremolo, E1_TREMOLO)] {
+            d += if set { START_VIBRATO_SET } else if e1 & flag != 0 { START_VIBRATO } else { 0 };
+        }
+        let (e2, arg1, arg2) = (rb(hw, inst + I_EFFECT2), rb(hw, inst + I_ETPF_BITS), rb(hw, inst + I_MRL_BITS));
+        let counters = [
+            (E2_PHASE, I_PHASE, arg1 & F_PHASE_STEP, arg1 & F_PHASE_INIT),
+            (E2_RESONANCE, I_RESONANCE, arg2 & M_RESONANCE_STEP, arg2 & M_RESONANCE_INIT),
+            (E2_FILTER, I_FILTER, arg1 & F_FILTER_STEP, arg1 & F_FILTER_INIT),
+            (E2_MIX, I_MIX, arg2 & M_MIX_STEP, arg2 & M_MIX_INIT),
+            (E2_TRANSFORM, I_TRANSFORM, arg1 & F_TRANSFORM_STEP, arg1 & F_TRANSFORM_INIT),
+        ];
+        for (k, (flag, o, step, init)) in counters.into_iter().enumerate() {
+            if e2 & flag != 0 {
+                d += START_COUNTER[k] + if step != 0 { COUNTER_STEP } else if init != 0 { COUNTER_INIT } else { 0 };
+                if w(o) > w(o + 2) {
+                    d += COUNTER_DOWN;
+                }
+            }
+        }
+        if e1 & E1_LOOP != 0 {
+            let ll = w(I_LOOP + 6);
+            if st_ != SAMPLE {
+                d += START_LOOP_WAVE;
+            } else if ll == 0 {
+                d += START_LOOP_NONE;
+            } else {
+                d += START_LOOP + if arg2 & M_LOOP_STEP != 0 { COUNTER_STEP } else if arg2 & M_LOOP_INIT != 0 { LOOP_INIT } else { 0 };
+                if w(I_LOOP) > w(I_LOOP + 2) {
+                    d += START_LOOP_DOWN;
+                }
+                length = ll;
+            }
+        }
+        d + START_LENGTH.iter().find(|(n, _)| *n == length).map_or(0, |(_, c)| *c)
+    }
+
+    /// What a speed effect costs more on a voice with a groove: its counter set, or not.
+    fn eight_groove_cycles(k: usize, st: &RowState, set: i64, kept: i64) -> i64 {
+        match (st.groove[k] != 0, st.part_groove[k]) {
+            (false, _) => 0,
+            (true, false) => set,
+            (true, true) => kept,
+        }
+    }
+
+    /// A part effect's cycles.
+    fn eight_fx_cycles(e: u8, a: u8, v: usize, st: &mut RowState) -> i64 {
+        // the channel's volume (index 0) and the master volume (1), as `part_effects` keeps them
+        let a16 = (a as u16) << 4;
+        let m = (e >= 0x30) as usize;
+        match e {
+            0x20 => st.volume[v] = a16,
+            0x27 => st.volume = [a16; 8],
+            0x30 => st.master = a16,
+            0x23 | 0x33 => st.slide_to[m][v] = a16,
+            0x25 | 0x26 | 0x35 | 0x36 => {
+                if a != 0 {
+                    st.add_number[m][v] = a16 as i16;
+                }
+                let (up, cost) = if e & 15 == 5 { (true, ROW_VOLUME_UP) } else { (false, ROW_VOLUME_DOWN) };
+                let volume = if m == 0 { &mut st.volume[v] } else { &mut st.master };
+                let n = if up { (*volume as i16).wrapping_add(st.add_number[m][v]) } else { (*volume as i16).wrapping_sub(st.add_number[m][v]) };
+                let clamp = if up { n > 1024 } else { n < 0 };
+                *volume = if up { n.min(1024) } else { n.max(0) } as u16;
+                return if a == 0 { cost.0 } else { cost.1 } + if clamp { ROW_VOLUME_CLAMP } else { 0 };
+            }
+            _ => {}
+        }
+        if let Some(&(_, zero, other)) = ROW_FX.iter().find(|(code, _, _)| *code == e) {
+            let there = match e {
+                0x24 => st.slide_to[0][v] == st.volume[v],
+                0x34 => st.slide_to[1][v] == 0x34 * 4,
+                _ => false,
+            };
+            return if a == 0 { zero } else { other } + if there { ROW_VOLUME_SLIDE_THERE } else { 0 };
+        }
+        match e {
+            // the vibrato and tremolo waves: 0 to 3, or not one
+            0x0a | 0x1a => if a <= 3 { 49 } else { 25 },
+            // the fine tune, clamped above 31 or below -31
+            0x0b => match a as i8 {
+                32.. => 88,
+                ..=-32 => 78,
+                _ => 74,
+            },
+            // ProTracker tremolo and vibrato: each nibble given
+            0xe8 | 0xea => if a == 0 { 29 } else { 95 + 12 * ((a & 15 != 0) as i64 + (a & 0xf0 != 0) as i64) },
+            // the voice's speed (above 31: clamped; with a groove its counter is set on the ticks
+            // the groove is not used)
+            0x40 if a != 0 => {
+                st.speed_part[v] = true;
+                95 + if a > 31 { 8 } else { 0 } + Self::eight_groove_cycles(v, st, 21, 9)
+            }
+            // the voice's groove (its counter is set on the tick the groove is used)
+            0x41 if a != 0 => {
+                st.groove_part[v] = true;
+                st.groove[v] = a.min(31);
+                (if st.part_groove[v] { 104 } else { 92 }) + if a > 31 { 8 } else { 0 }
+            }
+            0x40 | 0x41 => 17,
+            // the tune's speed: each voice up to this one takes it (unless a part effect set its own;
+            // more with a groove), the others only store it; from 32 on it is the tempo
+            0x42 => match a {
+                0 => 23,
+                32.. => 250,
+                _ => 387 + (0..=v).map(|k| 64 + if st.speed_part[k] { -55 } else { Self::eight_groove_cycles(k, st, 21, -1) }).sum::<i64>(),
+            },
+            // the tune's groove, likewise: the voices up to this one (less where a part effect set the
+            // voice's own groove), and 6 cycles less for each later voice that is on its groove tick
+            // and gets a groove, or is not and had one
+            0x43 => {
+                let g = a & 0x1f;
+                let later = |k: usize| if st.part_groove[k] { g != 0 } else { st.groove[k] != 0 };
+                let c = if a == 0 {
+                    19
+                } else {
+                    (if g == 0 { 374 } else { 422 })
+                        + (0..8)
+                            .map(|k| match (k <= v, g != 0, st.groove_part[k], st.part_groove[k]) {
+                                (true, false, true, _) => 9,
+                                (true, false, false, _) => 30,
+                                (true, true, true, _) => 3,
+                                (true, true, false, true) => 45,
+                                (true, true, false, false) => 67,
+                                (false, ..) => if later(k) { -6 } else { 0 },
+                            })
+                            .sum::<i64>()
+                };
+                if a != 0 {
+                    for k in 0..8 {
+                        if k > v || !st.groove_part[k] {
+                            st.groove[k] = g;
+                        }
+                    }
+                }
+                c
+            }
+            _ => 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PITCH;
@@ -4251,5 +4834,97 @@ mod tests {
         // voices 1 to 3 have no sequence: the zero channel's entries ($0010)
         // are part 0 too, so they play the same note
         assert!((1..4).all(|ch| reg(0xDFF0A4 + 16 * ch).first() == Some(&32)));
+    }
+
+    /// One 8-voice tune (tempo 125, speed 6, the groove given): every voice plays part 0, an empty
+    /// line, but `voice`, whose sequence is `seq`; part 1's first line is `line` (note, instrument,
+    /// effects); instrument 1 is a 64-byte sample without a loop.
+    fn module8(groove: u8, voice: usize, seq: &[u16], line: (u8, u8, &[(u8, u8)])) -> Vec<u8> {
+        let mut d = b"MLEDMODL".to_vec();
+        d.extend(0x18u32.to_be_bytes());
+        d.extend([0u8; 0x18]);
+        chunk(&mut d, b"VERS", &[1, 0x14, 0x31, 0x2e, 0x31, 0x34]);
+        let mut t = vec![0u8; 0x28];
+        t[..4].copy_from_slice(b"PROB");
+        t[0x20..0x22].copy_from_slice(&125u16.to_be_bytes());
+        t[0x22] = 6;
+        t[0x23] = groove;
+        t[0x24..0x26].copy_from_slice(&64u16.to_be_bytes());
+        t[0x26] = 1; // play mode: 8 voices
+        t[0x27] = 8;
+        let seqs: Vec<&[u16]> = (0..8).map(|v| if v == voice { seq } else { &[0x0010][..] }).collect();
+        for s in &seqs {
+            t.extend((2 * s.len() as u32).to_be_bytes());
+        }
+        for s in &seqs {
+            t.extend(s.iter().flat_map(|x| x.to_be_bytes()));
+        }
+        chunk(&mut d, b"TUNE", &t);
+        chunk(&mut d, b"PART", &[0, 0, 0, 0x80]);
+        // part 1: the line's pairs that are not empty, behind their flags
+        let mut p = vec![0u8, 1, 0];
+        let pairs = std::iter::once((line.0, line.1)).chain(line.2.iter().copied());
+        for (k, (x, y)) in pairs.enumerate() {
+            if x != 0 || y != 0 {
+                p[2] |= 1 << k;
+                p.extend([x, y]);
+            }
+        }
+        p.push(0x80);
+        chunk(&mut d, b"PART", &p);
+        let mut i = vec![0u8; 0xce];
+        i[..4].copy_from_slice(b"INST");
+        i[0x20] = 1;
+        i[0x26..0x28].copy_from_slice(&32u16.to_be_bytes());
+        i[0x3a..0x3c].copy_from_slice(&64u16.to_be_bytes());
+        i[0x3c] = 1; // transposable
+        chunk(&mut d, b"INST", &i);
+        d.extend(b"SMPL");
+        d.extend((0x32u32 + 64).to_be_bytes());
+        d.extend(64u32.to_be_bytes());
+        d.extend([0, 0]);
+        let mut h = vec![0u8; 0x32];
+        h[..4].copy_from_slice(b"SMPL");
+        h[0x26..0x28].copy_from_slice(&32u16.to_be_bytes());
+        d.extend(h);
+        d.extend((0..64u32).map(|k| ((k * 7) & 0x7f) as u8));
+        d
+    }
+
+    /// The start of an 8-voice module: the clock of InitSound's first write, the colour clocks from
+    /// its last period write to StartInt's acknowledge, and the custom chip writes between the two
+    /// (register, colour clocks after the period write).
+    fn start8(data: Vec<u8>) -> (u64, u64, Vec<(u32, u64)>) {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new("ml.test"), data).unwrap();
+        let mut out = vec![0f32; 2 * 4800];
+        e.render(&mut out);
+        let log: Vec<_> = e.m.bus.write_log.take().unwrap().into_iter().filter(|w| w.0 >> 12 == 0xdff).collect();
+        let first = log.iter().position(|w| w.0 == 0xDFF0A0).unwrap();
+        let last = log[first + 15];
+        assert_eq!(last.0, 0xDFF0D6);
+        let rest = &log[first + 16..];
+        let ack = (0..rest.len() - 1).find(|&k| rest[k].0 == 0xDFF09C && (rest[k + 1].0, rest[k + 1].1) == (0xDFF09A, 0x8080)).unwrap();
+        (log[first].2, rest[ack].2 - last.2, rest[..ack].iter().map(|w| (w.0, w.2 - last.2)).collect())
+    }
+
+    /// 8 voices: the pre-roll row's time is the Eagleplayer's (its CPU eight times as fast), measured
+    /// on these very modules: an empty row, a tune with a groove (which also starts 8 colour clocks
+    /// later), a note, sequence jumps with effects that depend on what the row did before, and a tune
+    /// that ends in its first row (EndSound's three writes at their times).
+    #[test]
+    fn eight_voice_start_times() {
+        let empty: (u8, u8, &[(u8, u8)]) = (0, 0, &[]);
+        let (first, gap, between) = start8(module8(0, 2, &[0x0110], empty));
+        assert_eq!((gap, between.len()), (995, 0));
+        let (first_groove, gap, _) = start8(module8(3, 2, &[0x0110], empty));
+        assert_eq!((first_groove - first, gap), (8, 984));
+        assert_eq!(start8(module8(0, 2, &[0x0110], (25, 1, &[(0x10, 0x20)]))).1, 1116);
+        assert_eq!(start8(module8(0, 2, &[0x03a1, 0x00e0, 0x00a2, 0x0110], (0, 0, &[(0x26, 0x50), (0x43, 5)]))).1, 1104);
+        let (_, gap, between) = start8(module8(0, 0, &[0x0060], empty));
+        assert_eq!(gap, 942);
+        assert_eq!(between, [(0xDFF096, 861), (0xDFF09A, 862), (0xDFF09C, 863)]);
     }
 }

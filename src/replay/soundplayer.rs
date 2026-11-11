@@ -13,6 +13,10 @@
 //! whose positions (in steps of four bytes) number the instrument slots. The
 //! timer sets the tick; every sixth tick is a row tick. A note stops a voice's DMA
 //! on the row tick and starts the sample on the next tick.
+//!
+//! Every write falls at the reference's colour clock: the tick is a ledger of the
+//! cycles its passes take (the constants below). The voices the mask leaves out
+//! walk their column like the others (holds, LED commands, the restart).
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -193,6 +197,9 @@ impl Sjs {
         self.v = Default::default();
         self.ticks = 0;
         self.songend = false;
+        for ch in 0..8 {
+            hw.vol(ch & 3, 0);
+        }
         for ch in 0..4 {
             hw.dmacon(1 << ch);
             hw.loc(ch, self.silence);
@@ -212,21 +219,36 @@ impl Sjs {
         g
     }
 
-    fn command(&mut self, ch: usize, c: u8, hw: &mut Hw) {
+    /// Runs a row's command at its place in the tick; returns what it costs.
+    fn command(&mut self, ch: usize, c: u8, hw: &mut Hw, clk: &mut Clk) -> u64 {
         let v = &mut self.v[ch];
         match c {
             // bset / bclr #1,$bfe001: the LED filter off, on
-            0x01 => hw.bus.ciaa.pra |= 2,
-            0x02 => hw.bus.ciaa.pra &= !2,
+            0x01 | 0x02 => {
+                clk.at(hw, CMD_LED_AT);
+                if c == 1 {
+                    hw.bus.ciaa.pra |= 2;
+                } else {
+                    hw.bus.ciaa.pra &= !2;
+                }
+                return CMD_LED;
+            }
             0x03..=0x42 => {
                 v.vol = c - 3;
+                clk.at(hw, CMD_VOL_AT + CMD_VOICE * ch as u64);
                 hw.vol(ch, v.vol as u16);
+                return CMD_VOL[ch];
             }
-            0x43 => hw.dmacon(1 << ch),
+            0x43 => {
+                clk.at(hw, CMD_STOP_AT + CMD_VOICE * ch as u64);
+                hw.dmacon(1 << ch);
+                return CMD_STOP;
+            }
             0x57..=0x88 => {
                 if v.hold == 0 {
                     v.hold = c - 0x56;
                 }
+                return CMD_HOLD;
             }
             0xA7..=0xB0 => {
                 v.env_up = true;
@@ -258,34 +280,85 @@ impl Sjs {
             0xDE => {
                 v.row = 0;
                 self.songend = true;
+                // the original tells the host that the song has ended: the host goes on at a
+                // whole colour clock, so a call at an odd cycle drops that cycle for the rest
+                // of the tick
+                clk.h = (clk.h + CMD_RESTART_CALL) & !1;
+                return CMD_RESTART - CMD_RESTART_CALL;
             }
             0xDF..=0xE4 => hw.bus.write_word(0xDFF09E, [0x8001, 0x8002, 0x8004, 0x8010, 0x8020, 0x8040][(c - 0xDF) as usize]),
             0xF9..=0xFD => hw.bus.write_word(0xDFF09E, [0x0001, 0x0002, 0x0004, 0x0010, 0x0020][(c - 0xF9) as usize]),
             // sync flags and the unused values change no Paula register
             _ => {}
         }
+        // (the cost of the commands no corpus file has is not known: that of no command)
+        CMD_NONE
     }
 }
 
-// The tick's times in 68000 cycles (half colour clocks), measured in the reference's runs.
-/// From the previous voice's length to the next voice's location in the loop pass.
-const LOOP_NEXT: u64 = 163;
-/// From the loop pass to the first start of a sample, to the next start (after the DMA on),
-/// and for each voice in between that starts none.
-const PEND_FIRST: u64 = 178;
-const PEND_NEXT: u64 = 155;
-const PEND_SKIP: u64 = 79;
-/// From the period to the volume, by voice.
-const PEND_VOL: [u64; 4] = [391, 445, 499, 553];
-/// A row tick: from the loop pass to the first stop of DMA (the modal time: it varies in
-/// steps of 37 cycles with the data, as with the voices that fetch no note); from one stop to
-/// the next.
-const ROW_START: u64 = 1650;
-const ROW_NOTE: u64 = 319;
-/// For each voice between two stops of DMA that stops none.
-const ROW_SKIP: u64 = 276;
-/// A row tick's volume commands: from the loop pass to each voice's volume write.
-const ROW_VOL: [u64; 4] = [2422, 2874, 3349, 3847];
+// The tick's times in 68000 cycles (half colour clocks) from the timer interrupt's call, as the
+// reference's runs give them (register writes with half-cycle times and the cycles of the code
+// the tick runs; 31 modules). The tick is a run of passes over the four voices: the loops, the
+// starts of the samples and, on a row tick, the hold counters, the rows' groups, the notes
+// (DMA off) and the commands. Each pass costs a fixed time to reach, a fixed time between two
+// voices and, per voice, the cost of what the voice does in it; a write falls a fixed time
+// into its voice's part. Nothing else enters: a tick's writes follow from the song alone.
+/// To the first voice's loop; between two voices of the pass.
+const TO_LOOP: u64 = 458;
+const LOOP_GAP: u64 = 34;
+/// The loop pass of a voice with the empty word / with a loop: location, length, cost.
+const LOOP_LOC: [u64; 2] = [76, 88];
+const LOOP_LEN: [u64; 2] = [92, 108];
+const LOOP_COST: [u64; 2] = [145, 161];
+/// To the pass of the samples' starts; between two voices; a voice that starts none.
+const TO_START: u64 = 76;
+const START_GAP: u64 = 34;
+const START_NONE: u64 = 45;
+/// A start: location, length, period; the volume, the DMA on and the cost, by voice.
+const START_LOC: u64 = 49;
+const START_LEN: u64 = 69;
+const START_PER: u64 = 89;
+const START_VOL: [u64; 4] = [480, 534, 588, 619];
+const START_DMA: [u64; 4] = [570, 624, 678, 699];
+const START_COST: [u64; 4] = [642, 696, 750, 771];
+/// A row tick: to the pass of the hold counters; between two voices; a voice not on hold, a
+/// voice that stays on hold, a voice whose hold ends.
+const TO_HOLD: u64 = 152;
+const HOLD_GAP: u64 = 26;
+const HOLD_FREE: u64 = 85;
+const HOLD_STAYS: u64 = 90;
+const HOLD_ENDS: u64 = 122;
+/// To the pass that reads the rows' groups; between two voices; a voice on hold, a voice that
+/// reads its group.
+const TO_FETCH: u64 = 64;
+const FETCH_GAP: u64 = 30;
+const FETCH_NONE: u64 = 53;
+const FETCH: u64 = 135;
+/// To the pass of the notes; between two voices; a voice without a note; a note: its DMA off
+/// and its cost.
+const TO_NOTE: u64 = 84;
+const NOTE_GAP: u64 = 26;
+const NOTE_NONE: u64 = 45;
+const NOTE_DMA: u64 = 45;
+const NOTE_COST: u64 = 293;
+/// To the pass of the commands; between two voices; no command.
+const TO_CMD: u64 = 76;
+const CMD_GAP: u64 = 34;
+const CMD_NONE: u64 = 96;
+/// The LED commands (the CIA write and the cost), a hold, a stop (DMA off of voice 0 and the cost),
+/// a volume (the write of voice 0 and the cost by voice); a voice's write is this much after the
+/// voice before's.
+const CMD_LED_AT: u64 = 114;
+const CMD_LED: u64 = 130;
+const CMD_HOLD: u64 = 147;
+const CMD_STOP_AT: u64 = 129;
+const CMD_STOP: u64 = 214;
+const CMD_VOL_AT: u64 = 329;
+const CMD_VOL: [u64; 4] = [395, 418, 441, 454];
+const CMD_VOICE: u64 = 23;
+/// The restart: the host call (song end) and the cost.
+const CMD_RESTART_CALL: u64 = 208;
+const CMD_RESTART: u64 = 284;
 
 impl Replayer for Sjs {
     fn format(&self) -> &'static str {
@@ -304,34 +377,30 @@ impl Replayer for Sjs {
         (self.timer as u64 + 1) * 5
     }
 
-    /// The first tick follows the song start by a period and this much.
-    fn timer_delay(&self) -> u64 {
-        267
-    }
-
     fn tick(&mut self, hw: &mut Hw) {
         self.ticks += 1;
-        let mut clk = Clk { base: hw.bus.clock, h: 0 };
+        let mut clk = Clk { base: hw.bus.clock, h: TO_LOOP };
+        let silence = self.silence;
         // the loops of the four voices (the sample or the empty one)
         for ch in 0..4 {
-            let v = &mut self.v[ch];
-            let looped = v.loop_len != 0;
-            if !v.hold_loop {
-                clk.step(hw, if looped { 6 * 2 } else { 0 } + if ch > 0 { LOOP_NEXT } else { 0 });
-                if looped {
-                    hw.loc(ch, v.loop_addr);
-                    clk.step(hw, 20);
-                    hw.len(ch, v.loop_len);
-                } else {
-                    hw.loc(ch, self.silence);
-                    clk.step(hw, 16);
-                    hw.len(ch, 1);
-                }
+            if ch > 0 {
+                clk.h += LOOP_GAP;
             }
+            let v = &mut self.v[ch];
+            let l = (v.loop_len != 0) as usize;
+            if !v.hold_loop {
+                clk.at(hw, LOOP_LOC[l]);
+                hw.loc(ch, if l == 1 { v.loop_addr } else { silence });
+                clk.at(hw, LOOP_LEN[l]);
+                hw.len(ch, if l == 1 { v.loop_len } else { 1 });
+            }
+            clk.h += LOOP_COST[l];
+            // (no corpus file has a fade or a held loop: their times are not known)
             if v.env_speed != 0 {
                 v.env_cnt = v.env_cnt.wrapping_sub(1);
                 if v.env_cnt == 0 {
                     v.env_cnt = v.env_speed;
+                    clk.at(hw, 0);
                     if v.env_up {
                         if v.vol == 63 {
                             v.env_speed = 0;
@@ -348,101 +417,118 @@ impl Replayer for Sjs {
                 }
             }
         }
-        let mut last: Option<usize> = None;
+        // the samples the last row tick's notes start
+        clk.h += TO_START;
         for ch in 0..4 {
-            let v = &mut self.v[ch];
-            if v.pend_len != 0 {
-                let skipped = ch - last.map_or(0, |l| l + 1);
-                clk.step(hw, if last.is_none() { PEND_FIRST } else { PEND_NEXT } + PEND_SKIP * skipped as u64);
-                last = Some(ch);
-                hw.loc(ch, v.pend_start);
-                clk.step(hw, 20);
-                hw.len(ch, v.pend_len);
-                clk.step(hw, 20);
-                hw.per(ch, v.per);
-                clk.step(hw, PEND_VOL[ch]);
-                hw.vol(ch, v.vol as u16);
-                clk.step(hw, 90);
-                hw.dmacon(0x8000 | 1 << ch);
-                v.pend_len = 0;
+            if ch > 0 {
+                clk.h += START_GAP;
             }
+            let v = &mut self.v[ch];
+            if v.pend_len == 0 {
+                clk.h += START_NONE;
+                continue;
+            }
+            clk.at(hw, START_LOC);
+            hw.loc(ch, v.pend_start);
+            clk.at(hw, START_LEN);
+            hw.len(ch, v.pend_len);
+            clk.at(hw, START_PER);
+            hw.per(ch, v.per);
+            clk.at(hw, START_VOL[ch]);
+            hw.vol(ch, v.vol as u16);
+            clk.at(hw, START_DMA[ch]);
+            hw.dmacon(0x8000 | 1 << ch);
+            v.pend_len = 0;
+            clk.h += START_COST[ch];
         }
         if self.ticks % 6 != 0 {
             return;
         }
-        let row0 = clk.h;
+        // the row: every voice walks its column, the voices the mask leaves out too (their
+        // holds and commands run; the corpus has no note in them, none is played here)
+        clk.h += TO_HOLD;
+        let mut fetch = [false; 4];
         for ch in 0..4 {
-            self.v[ch].fetched = None;
-            if self.mask & (1 << ch) == 0 {
-                // a voice that is off still runs the LED command of its first row (the
-                // original's log: a command in row 1 of the fourth voice switches the LED
-                // at the first row, those of its later rows do not)
-                if self.v[ch].row == 0 {
-                    self.v[ch].row = 1;
-                    let g = self.group(1, ch);
-                    if g[2] == 1 || g[2] == 2 {
-                        self.command(ch, g[2], hw);
-                    }
-                }
-                continue;
+            if ch > 0 {
+                clk.h += HOLD_GAP;
             }
             let v = &mut self.v[ch];
-            if v.hold != 0 {
+            fetch[ch] = true;
+            clk.h += if v.hold == 0 {
+                HOLD_FREE
+            } else {
                 v.hold -= 1;
-                if v.hold != 0 {
+                fetch[ch] = v.hold == 0;
+                if fetch[ch] {
+                    HOLD_ENDS
+                } else {
+                    HOLD_STAYS
+                }
+            };
+        }
+        clk.h += TO_FETCH;
+        for ch in 0..4 {
+            if ch > 0 {
+                clk.h += FETCH_GAP;
+            }
+            self.v[ch].fetched = None;
+            if fetch[ch] {
+                self.v[ch].row += 1;
+                let row = self.v[ch].row;
+                self.v[ch].fetched = Some(self.group(row, ch));
+                clk.h += FETCH;
+            } else {
+                clk.h += FETCH_NONE;
+            }
+        }
+        clk.h += TO_NOTE;
+        for ch in 0..4 {
+            if ch > 0 {
+                clk.h += NOTE_GAP;
+            }
+            let (note, ins) = match self.v[ch].fetched {
+                Some([note, ins, _]) if note != 0 && self.mask & (1 << ch) != 0 => (note, ins),
+                _ => {
+                    clk.h += NOTE_NONE;
                     continue;
                 }
-            }
-            v.row += 1;
-            let row = v.row;
-            self.v[ch].fetched = Some(self.group(row, ch));
+            };
+            clk.at(hw, NOTE_DMA);
+            hw.dmacon(1 << ch);
+            let s = if (1..=38).contains(&ins) { self.slots[ins as usize] } else { Slot::default() };
+            let v = &mut self.v[ch];
+            // notes above the table have no period (unexercised)
+            v.per = PERIODS.get(note as usize - 1).copied().unwrap_or(0);
+            v.pend_start = s.start;
+            v.pend_len = s.len;
+            v.loop_addr = s.loop_start;
+            v.loop_len = s.loop_len;
+            clk.h += NOTE_COST;
         }
-        let mut last: Option<usize> = None;
+        clk.h += TO_CMD;
         for ch in 0..4 {
-            let Some([note, ins, _]) = self.v[ch].fetched else { continue };
-            if note != 0 {
-                match last {
-                    None => clk.to(hw, row0 + ROW_START),
-                    Some(l) => clk.step(hw, ROW_NOTE + ROW_SKIP * (ch - l - 1) as u64),
-                }
-                last = Some(ch);
-                hw.dmacon(1 << ch);
-                let s = if (1..=38).contains(&ins) { self.slots[ins as usize] } else { Slot::default() };
-                let v = &mut self.v[ch];
-                // notes above the table have no period (unexercised)
-                v.per = PERIODS.get(note as usize - 1).copied().unwrap_or(0);
-                v.pend_start = s.start;
-                v.pend_len = s.len;
-                v.loop_addr = s.loop_start;
-                v.loop_len = s.loop_len;
+            if ch > 0 {
+                clk.h += CMD_GAP;
             }
-        }
-        for ch in 0..4 {
-            if let Some([_, _, c]) = self.v[ch].fetched {
-                if (0x03..=0x42).contains(&c) {
-                    clk.to(hw, row0 + ROW_VOL[ch]);
-                }
-                self.command(ch, c, hw);
-            }
+            let cost = match self.v[ch].fetched {
+                Some([_, _, c]) if c != 0 => self.command(ch, c, hw, &mut clk),
+                _ => CMD_NONE,
+            };
+            clk.h += cost;
         }
     }
 }
 
-/// The tick's time in half colour clocks (68000 cycles) from its start.
+/// The tick's time in 68000 cycles (half colour clocks) from its start.
 struct Clk {
     base: u64,
     h: u64,
 }
 
 impl Clk {
-    fn to(&mut self, hw: &mut Hw, h: u64) {
-        self.h = self.h.max(h);
-        hw.bus.clock = self.base + self.h / 2;
-    }
-
-    fn step(&mut self, hw: &mut Hw, cycles: u64) {
-        self.h += cycles;
-        hw.bus.clock = self.base + self.h / 2;
+    /// The next write falls `off` cycles into the current part of the tick.
+    fn at(&mut self, hw: &mut Hw, off: u64) {
+        hw.bus.clock = self.base + (self.h + off) / 2;
     }
 }
 
@@ -531,8 +617,8 @@ mod tests {
         let mut out = vec![0f32; 2 * 800 * 40];
         e.render(&mut out);
         let log: Vec<(u32, u16)> = e.m.bus.write_log.take().unwrap().iter().map(|w| (w.0, w.1)).collect();
-        // volume 0x1B at the first row tick, then the note's start with it
-        assert_eq!(reg(&log, 0xDFF0A8)[..2], [0x1B, 0x1B]);
+        // the set-up's two zeros, volume 0x1B at the first row tick, then the note's start with it
+        assert_eq!(reg(&log, 0xDFF0A8)[..4], [0, 0, 0x1B, 0x1B]);
         assert_eq!(reg(&log, 0xDFF0A6)[0], 0x153);
         assert!(reg(&log, 0xDFF0A4).contains(&8));
         assert!(reg(&log, 0xDFF096).contains(&0x8001));

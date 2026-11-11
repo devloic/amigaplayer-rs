@@ -51,3 +51,10 @@ path = "src/lib.rs"
 name = "amigaplayer-rs"
 path = "src/main.rs"
 required-features = ["ui"]
+
+# Headless renderer (module to WAV / raw PCM on a file or standard output), no SDL:
+#   cargo build --release --no-default-features --features host-68k --bin amigaplayer-render
+[[bin]]
+name = "amigaplayer-render"
+path = "src/bin/render.rs"
+required-features = ["host-68k"]

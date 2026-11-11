@@ -411,7 +411,7 @@ fn song_scan(d: &[u8]) -> (u64, usize) {
 }
 
 /// Cycles of the first-tick calls, each halved and rounded down as the host does (spec 5.5).
-fn start_clocks(d: &[u8], z: usize, set: &Set, l: u64, dir: usize, name: &str) -> u64 {
+fn start_clocks(d: &[u8], z: usize, set: &Set, l: u64, dir: usize, name: &str, fallback: bool) -> u64 {
     let b = name.as_bytes();
     // the cost of each lower-case letter of the prefix (an upper-case one costs nothing here)
     let x = [(b'q', 21u64), (b'p', 25), (b'a', 25)]
@@ -442,7 +442,10 @@ fn start_clocks(d: &[u8], z: usize, set: &Set, l: u64, dir: usize, name: &str) -
         236,
         1338,
     ];
-    calls.iter().map(|c| c / 2).sum()
+    // (measured: a bank found only as SMP.set, after the failed open of SMP.<name>, costs one
+    // more host call, which scans the directory path again: 17 cycles per character)
+    let fb = if fallback { (17 * dd + 351) / 2 } else { 0 };
+    fb + calls.iter().map(|c| c / 2).sum::<u64>()
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -456,10 +459,10 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the companion: the first three characters become SMP, else SMP.set (spec 1.3)
     let rest = &name[3..];
     let cands = [format!("SMP{rest}"), format!("smp{rest}"), "SMP.set".to_string(), "smp.set".to_string()];
-    let (zdata, set) = cands.iter().find_map(|n| {
+    let (zdata, set, cand) = cands.iter().enumerate().find_map(|(i, n)| {
         let z = crate::deli::read_companion(m, n).1.ok()?;
         let s = parse_set(&z)?;
-        Some((z, s))
+        Some((z, s, i))
     })?;
     let set_addr = m.alloc((zdata.len() as u32 + 8).max(8));
     let zero = m.alloc(16);
@@ -489,7 +492,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         }
         n => n,
     };
-    let sum = start_clocks(d, z, &set, l, dir, &name);
+    let sum = start_clocks(d, z, &set, l, dir, &name, cand >= 2);
     // the reference's start-up counts from the run's origin, START_PHASE colour clocks before the
     // engine's aligned start; the first tick follows one period after the clock left here
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);

@@ -172,6 +172,10 @@ struct Writes {
     len: u16,
     /// A sample was set up this tick (a waveform does not replace it).
     sample: bool,
+    /// Half colour clocks from the voice's start to its first write, and where
+    /// in them the voice's DMA is turned off (zero: it is not).
+    time: i64,
+    off: i64,
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -236,15 +240,74 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     Some(Box::new(p))
 }
 
-/// The original's timing, measured on the Eagleplayer's write logs (colour
-/// clocks). Paula stops a playing voice only at the end of its word and restarts
-/// it only once stopped, so the time from a note's DMA off to the voice's DMA on
-/// decides whether the note starts.
+/// The original's timing, measured on the Eagleplayer's write logs with exact
+/// CPU cycles. Paula stops a playing voice only at the end of its word and
+/// restarts it only once stopped, so the time from a note's DMA off to the
+/// voice's DMA on decides whether the note starts.
+///
+/// A voice's time from its start (the timer interrupt for the first voice, the
+/// end of the DMA wait of the voice before for the others) to its first register
+/// write is a sum of one cost for each piece of code the voice runs through, in
+/// half colour clocks (a 68000's cycles; a register write is a call of the
+/// host, which goes on at a whole colour clock, so the sum is halved rounding
+/// down). The costs are fitted on the 199,800 voice starts of 50 modules' first
+/// 20 seconds and equal every one of them.
 ///
 /// From the timer interrupt to the first voice.
-const PLAY: u64 = 73;
-/// ENPP_DMAMask turning a voice off.
-const DMA_OFF: u64 = 110;
+const LEAD: i64 = 148;
+/// A voice that neither plays a row nor changes anything: a tick on which the
+/// rows move on (`ROW_TICK` less on the others), the envelope decaying, the
+/// waveform list waiting, a location written first.
+const VOICE: i64 = 1269;
+/// The compare chains for the voice's registers, by channel.
+const VOICE_CH: [i64; 4] = [0, 31, 62, 70];
+const ROW_TICK: i64 = 76;
+/// A row with a note only, and with an instrument; a new track's first row on top.
+const ROW_NOTE: i64 = -215;
+const ROW_INSTRUMENT: i64 = 196;
+const ROW_NEW_TRACK: i64 = 215;
+/// The note: note off, no effect, a new attack, the speed, the rows, a bend.
+const NOTE_OFF: i64 = 434;
+const NOTE: i64 = 778;
+const NOTE_ATTACK: i64 = 900;
+const NOTE_SPEED: i64 = 896;
+const NOTE_ROWS: i64 = 913;
+const NOTE_BEND: i64 = 853;
+/// A sample's setup: with an instrument row, on a note of a sample voice, the
+/// compare chain for the voice's bit by channel, a loop, and what is left out
+/// when the setup returns past the instrument's.
+const SAMPLE_INSTRUMENT: i64 = 964;
+const SAMPLE_NOTE: i64 = 998;
+const SAMPLE_CH: [i64; 4] = [0, 21, 42, 32];
+const SAMPLE_LOOP: i64 = -4;
+const SAMPLE_SKIP: i64 = -327;
+/// Where a voice's DMA is turned off: before an instrument row's setup, and in a
+/// note's sample setup (after the compare chain); the call costs `DMA_OFF`.
+const OFF_INSTRUMENT: i64 = 651;
+const OFF_NOTE: i64 = 872;
+const DMA_OFF: i64 = 192;
+/// The envelope: attack (and its end), decay ending at its level or below zero,
+/// sustain (and its end), release (and its two ends), nothing.
+const ENV_ATTACK: [i64; 2] = [-50, -4];
+const ENV_DECAY_END: [i64; 2] = [39, 56];
+const ENV_SUSTAIN: [i64; 2] = [-12, 14];
+const ENV_RELEASE: i64 = 52;
+const ENV_RELEASE_END: [i64; 2] = [61, 78];
+const ENV_DONE: i64 = -34;
+/// A bend, and one reaching its note from above and from below.
+const BEND: i64 = 222;
+const BEND_END: [i64; 2] = [304, 294];
+/// The phase shift stepping and waiting.
+const PHASE: [i64; 2] = [223, 37];
+/// The waveform list: a sample (no list), at its end, a jump, a new waveform.
+const WAVE_SAMPLE: i64 = -37;
+const WAVE_END: i64 = 19;
+const WAVE_JUMP: i64 = 198;
+const WAVE_SET: i64 = 278;
+/// The first write: the period, the volume (by channel), none but the DMA.
+const FIRST_PER: i64 = 33;
+const FIRST_VOL: [i64; 4] = [121, 144, 167, 157];
+const FIRST_DMA: i64 = 77;
 
 #[derive(Clone, Copy)]
 enum Reg {
@@ -256,38 +319,14 @@ enum Reg {
     Dma,
 }
 
-/// From the voice's effects to its first write, by the code they run.
-fn effects_time(ch: usize, v: &Voice, phase_shift: u8) -> u64 {
-    // the scope pointer's compare chain is longer for the later voices
-    let mut t = 623 + [0, 15, 30, 34][ch];
-    t += [-2i64, 0, -6, 26, -17].get(v.envelope as usize / 2).copied().unwrap_or(-17);
-    if v.bend_speed != 0 {
-        t += 111;
-    }
-    if phase_shift != 0 {
-        t += if v.phase_speed == 0 { 111 } else { 18 };
-    }
-    t += if v.sample != 0 {
-        -28
-    } else if v.wave_speed != 0 {
-        -10
-    } else if v.wave_index != 0x10 {
-        90
-    } else {
-        0
-    };
-    t as u64
-}
-
-/// From one of a voice's writes to the next.
+/// From one of a voice's writes to the next (colour clocks).
 fn gap(last: Reg, next: Reg, ch: usize) -> u64 {
     use Reg::*;
     match (last, next) {
-        (None, Dma) => 22,
         (None, _) => 0,
         (Loc, Per) => 135,
-        (Loc, Vol) => 197,
-        (Loc, Len) => 105,
+        (Loc, Vol) => [179, 191, 202, 197][ch],
+        (Loc, Len) => 164,
         (Loc, Dma) => 157,
         (Per, Vol) => [163, 174, 186, 181][ch],
         (Per, Len) => 148,
@@ -336,7 +375,6 @@ impl Replayer for SidMon1 {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        hw.wait(PLAY);
         // the voices play in the order of their bits 1, 2, 8, 4
         for ch in [0, 1, 3, 2] {
             self.play_voice(ch, hw);
@@ -400,10 +438,6 @@ impl SidMon1 {
 
     /// Starts sample `n` (16 and up) on the voice.
     fn play_sample(&mut self, ch: usize, n: u16, hw: &mut Hw, w: &mut Writes) {
-        if self.voices[ch].sample != 0 {
-            hw.dmacon(1 << ch);
-            hw.wait(DMA_OFF);
-        }
         let bus = &*hw.bus;
         let v = &mut self.voices[ch];
         let info = self.samples.wrapping_add(4).wrapping_add((n.wrapping_sub(0x10) << 5) as i16 as i32 as u32);
@@ -417,12 +451,15 @@ impl SidMon1 {
         v.loop_len = (data.wrapping_add(end).wrapping_sub(v.loop_addr) as i32 >> 1) as u32;
         w.len = (end.wrapping_sub(start) as i32 >> 1) as u16;
         v.sample = 1;
+        w.time += SAMPLE_CH[ch] + if v.loop_addr != 0xffff_ffff { SAMPLE_LOOP } else { 0 };
     }
 
     fn play_voice(&mut self, ch: usize, hw: &mut Hw) {
-        let mut w = Writes::default();
+        let mut w = Writes { time: VOICE + VOICE_CH[ch], ..Default::default() };
         let d1_one = std::mem::take(&mut self.d1_one);
-        if self.speed_counter == 0 {
+        if self.speed_counter != 0 {
+            w.time -= ROW_TICK;
+        } else {
             if self.new_track {
                 let v = &mut self.voices[ch];
                 v.row_count = 0;
@@ -439,13 +476,27 @@ impl SidMon1 {
                 self.play_row(ch, hw, &mut w, d1_one);
             }
         }
-        let v = self.voices[ch];
-        let shift = hw.bus.r8(v.instrument + 0x1c);
-        let time = effects_time(ch, &v, shift);
         self.effects(ch, hw, &mut w);
 
-        // each write waits the time the original takes from the one before
-        hw.wait(time);
+        // the first write, after the DMA off if there is one
+        w.time += if w.loc != 0 {
+            0
+        } else if w.per != 0 {
+            FIRST_PER
+        } else if w.vol != 0 {
+            FIRST_VOL[ch]
+        } else {
+            FIRST_DMA
+        };
+        let lead = if ch == 0 { LEAD } else { 0 };
+        if w.off != 0 {
+            hw.wait(((lead + w.off) / 2) as u64);
+            hw.dmacon(1 << ch);
+            hw.wait(((w.time - w.off + DMA_OFF) / 2) as u64);
+        } else {
+            hw.wait(((lead + w.time) / 2) as u64);
+        }
+        // each further write waits the time the original takes from the one before
         let mut last = Reg::None;
         let mut write = |hw: &mut Hw, r: Reg| {
             hw.wait(gap(last, r, ch));
@@ -475,22 +526,22 @@ impl SidMon1 {
         let row = self.voices[ch].row;
         let r = |k: u32| hw.bus.r8(row + k);
         let (note, instr, effect, param, duration) = (r(0), r(1), r(2), r(3), r(4));
+        let new_track = if self.new_track { ROW_NEW_TRACK } else { 0 };
+        w.time += new_track;
         if instr != 0 {
             let inst = entry(self.instruments, instr as u16, 5);
             w.len = 0x10;
-            // a new track's first row takes longer to get here
-            hw.wait(if self.new_track { 325 + 108 } else { 325 });
+            w.time += ROW_INSTRUMENT;
             if self.voices[ch].sample != 0 {
-                hw.dmacon(1 << ch);
-                hw.wait(DMA_OFF);
+                w.off = OFF_INSTRUMENT + new_track;
             }
             self.voices[ch].sample = 0;
             let wf = hw.bus.r32(inst);
             // the sample's setup returns past the instrument's when d1 is 1
             if wf as u8 >= 0x10 {
                 self.play_sample(ch, wf as u16, hw, w);
+                w.time += SAMPLE_INSTRUMENT + if d1_one { SAMPLE_SKIP } else { 0 };
             }
-            hw.wait(if w.sample { 645 } else { 165 });
             if !(wf as u8 >= 0x10 && d1_one) {
                 let v = &mut self.voices[ch];
                 v.wave_index = 0;
@@ -510,22 +561,18 @@ impl SidMon1 {
                 v.pitch = 0;
                 v.row_count = duration;
             }
-        } else if note != 0 {
-            self.voices[ch].row_count = duration;
-            if self.voices[ch].sample != 0 {
-                // the sample's DMA off comes later on the later voices (a longer
-                // compare chain for the voice's bit)
-                let chain = [0, 11, 22, 17][ch];
-                hw.wait(435 + chain);
-                let n = self.voices[ch].waveform as u16;
-                self.play_sample(ch, n, hw, w);
-                hw.wait(440 - DMA_OFF);
-            } else {
-                // a new track's first row and a note off take shorter ways
-                hw.wait(if self.new_track { 296 - 41 } else if note == 0xff { 296 - 125 } else { 296 });
-            }
         } else {
-            hw.wait(60);
+            // (a row with neither a note nor an instrument was not seen: taken as a note's)
+            w.time += ROW_NOTE;
+            if note != 0 {
+                self.voices[ch].row_count = duration;
+                if self.voices[ch].sample != 0 {
+                    w.off = OFF_NOTE + SAMPLE_CH[ch] + new_track;
+                    let n = self.voices[ch].waveform as u16;
+                    self.play_sample(ch, n, hw, w);
+                    w.time += SAMPLE_NOTE;
+                }
+            }
         }
 
         let module = self.module;
@@ -534,6 +581,7 @@ impl SidMon1 {
         let inst = v.instrument;
         if note == 0xff {
             v.row_count = duration;
+            w.time += NOTE_OFF;
         } else if note != 0 {
             v.row_count = duration;
             let transpose = hw.bus.r8(v.seq + 5);
@@ -552,7 +600,9 @@ impl SidMon1 {
                 // a new attack (NostalgicPlayer also clears the waveform delay
                 // without one)
                 0 => {
+                    w.time += NOTE;
                     if param != 0 {
+                        w.time += NOTE_ATTACK - NOTE;
                         module.w8(hw.bus, inst + 0x15, param);
                         module.w8(hw.bus, inst + 0x14, param);
                         v.wave_speed = 0;
@@ -560,11 +610,13 @@ impl SidMon1 {
                 }
                 // the speed's and the rows' low bytes in the song data
                 2 | 3 => {
+                    w.time += if effect == 2 { NOTE_SPEED } else { NOTE_ROWS };
                     let a = song + if effect == 2 { 0x23 } else { 0x1b };
                     module.w8(hw.bus, a, param);
                     v.wave_speed = 0;
                 }
                 _ => {
+                    w.time += NOTE_BEND;
                     v.bend_to = effect.wrapping_add(transpose);
                     v.bend_speed = param;
                 }
@@ -586,6 +638,7 @@ impl SidMon1 {
             0 => {
                 let (speed, max) = (r(0x14), r(0x15));
                 w.vol = vol + speed;
+                w.time += ENV_ATTACK[(w.vol > max) as usize];
                 if w.vol > max {
                     v.envelope += 2;
                     w.vol = max;
@@ -597,7 +650,14 @@ impl SidMon1 {
                 let (speed, min) = (r(k), r(k + 1));
                 w.vol = vol.wrapping_sub(speed);
                 // decay ends at $FF00 and up, release above it (the same here)
-                if w.vol <= min || w.vol >= 0xff00 {
+                let ended = w.vol <= min || w.vol >= 0xff00;
+                w.time += match (k == 0x16, ended) {
+                    (true, false) => 0,
+                    (true, true) => ENV_DECAY_END[(w.vol >= 0xff00) as usize],
+                    (false, false) => ENV_RELEASE,
+                    (false, true) => ENV_RELEASE_END[(w.vol >= 0xff00) as usize],
+                };
+                if ended {
                     v.envelope += 2;
                     w.vol = min;
                     if k == 0x16 {
@@ -609,11 +669,12 @@ impl SidMon1 {
             4 => {
                 w.vol = vol;
                 v.sustain = v.sustain.wrapping_sub(1);
+                w.time += ENV_SUSTAIN[(v.sustain == 0) as usize];
                 if v.sustain == 0 {
                     v.envelope += 2;
                 }
             }
-            _ => {}
+            _ => w.time += ENV_DONE,
         }
 
         // the arpeggio
@@ -629,7 +690,9 @@ impl SidMon1 {
             let to = period(ft, 2 * v.bend_to as u16);
             v.pitch = v.pitch.wrapping_add(speed as u16);
             v.period = v.period.wrapping_add(v.pitch);
-            if (speed < 0 && to >= v.period) || (speed >= 0 && to <= v.period) {
+            let ended = (speed < 0 && to >= v.period) || (speed >= 0 && to <= v.period);
+            w.time += if ended { BEND_END[(speed >= 0) as usize] } else { BEND };
+            if ended {
                 v.note = v.bend_to.wrapping_mul(2);
                 v.period = to;
                 v.pitch = 0;
@@ -640,6 +703,7 @@ impl SidMon1 {
         // the phase shift, by a waveform (rounding down)
         let shift = r(0x1c) as u8;
         if shift != 0 {
+            w.time += PHASE[(v.phase_speed != 0) as usize];
             if v.phase_speed == 0 {
                 let wave = self.waveforms.wrapping_add(((shift - 1) as u32) << 5);
                 v.phase_index = (v.phase_index + 1) & 0x1f;
@@ -657,6 +721,11 @@ impl SidMon1 {
         v.period = v.period.wrapping_add(v.pitch_fall);
 
         // the waveform list, for a waveform
+        if v.sample != 0 {
+            w.time += WAVE_SAMPLE;
+        } else if v.wave_index == 0x10 && v.wave_speed == 0 {
+            w.time += WAVE_END;
+        }
         if v.sample == 0 {
             if v.wave_speed != 0 {
                 v.wave_speed -= 1;
@@ -665,6 +734,7 @@ impl SidMon1 {
                     .wrapping_add((v.waveform.wrapping_sub(1) as u32) << 4)
                     .wrapping_add(v.wave_index as u32);
                 let b = bus.r8(list);
+                w.time += if b == 0xff { WAVE_JUMP } else { WAVE_SET };
                 if b == 0xff {
                     v.wave_index = bus.r8(list + 1) & 0xfe;
                 } else {

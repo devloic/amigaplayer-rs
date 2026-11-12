@@ -9,7 +9,7 @@
 //! build with a DMA gap of 110 colour clocks (a voice at a period like 538 keeps its old
 //! sample) and loop registers of 0 / length 0 after a one-shot sample (Paula then plays
 //! 128 KB from address 0), and the DeliPlayer QuadraComposer (V1.4) ticks every 71050
-//! colour clocks at tempo 125 instead of 71595: neither is followed.
+//! colour clocks at tempo 125 instead of 70940: not followed.
 //!
 //! The samples are played from the module in guest memory (the 8SMP chunk). A row's DMA
 //! goes off and on once for all its notes, after the writes of the voices' new samples
@@ -587,15 +587,17 @@ fn cost_fx(c: Cell, f: Feat, v: usize) -> Cost {
 
 impl QuadraComposer {
     fn timer_for(tempo: u16) -> u32 {
-        if tempo == 0 { crate::deli::DEFAULT_TIMER as u32 } else { 1789773 / tempo as u32 }
+        if tempo == 0 { crate::deli::DEFAULT_TIMER as u32 } else { 1773447 / tempo as u32 }
     }
 
     fn change_tempo(&mut self) {
         if self.set_tempo {
             self.set_tempo = false;
-            // the CIA timer of a tempo: 1789773 / tempo E-clock ticks (the constant the engine's
-            // run of the original gives; UADE's own run, on a PAL machine, gives 1773447 / tempo
-            // = 70940 colour clocks a tick at tempo 125, measured at tempos 125 and 160)
+            // the CIA timer of a tempo: 1773447 / tempo E-clock ticks, a PAL machine's constant
+            // (UADE's own run: 70940 colour clocks a tick at tempo 125, measured at tempos 125 and
+            // 160). The engine's run of the original uses the NTSC 1789773 / tempo (71595 at tempo
+            // 125, 0.9 % slower) whatever the host sets, so the port is a TEMPO row in refcmp
+            // against it, though equal in every write otherwise.
             self.timer = Self::timer_for(self.tempo);
         }
     }

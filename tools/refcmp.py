@@ -553,7 +553,7 @@ VERIFIED = verified_players()
 # the bank to a ProTracker module and plays that, so it is no reference): normalised format -> player
 # Rob Hubbard 2: the DeliPlayer RobHubbard_2 (with the 4Voices NotePlayer genie) is the original;
 # EP206's Rob Hubbard 2 asks for other bank names and returns silent with an unbalanced stack
-DELI_REF = {'amosmusicbank': 'AmosMusicBank', 'robhubbard2': 'RobHubbard_2'}
+DELI_REF = {'amosmusicbank': 'AmosMusicBank', 'robhubbard2': 'RobHubbard_2', 'powertracker': 'PowerTracker'}
 
 
 # Formats whose modules play past their sample data's end (the port plays silence there): the

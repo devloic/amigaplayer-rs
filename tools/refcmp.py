@@ -611,6 +611,7 @@ REFUSED_NO_FALLBACK = {'hippel7v'}
 # not zero); loaded alone, zeros follow.
 SOAMC = SCRATCH + '/soamc/x'
 ALONE = {'gtgamesystems': ('soamc', 'G&T_Game_Systems/1.0_(08.Aug.2008)/G&T Game Systems'),
+         'digitalsoundcreations': ('soamc', 'Digital_Sound_Creations/1.0_(29.Dec.2005)/Digital Sound Creations'),
          'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2'),
          # SidMon 1.0 (EP206): a finetuned period read past the table lands in the next player's hunk
          'sidmon10': ('ep206', 'SIDMon 1.0'),

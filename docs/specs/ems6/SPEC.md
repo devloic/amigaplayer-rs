@@ -86,7 +86,7 @@ A pattern is a byte stream; a row is commands up to a note or a hold. Bytes belo
 | F6 | | hold: the voice plays on (re-enabled if it had ended, from where it is) for a duration |
 | F5 | n s | release: in the note's last `n` ticks the volume falls by `s` more each tick |
 | F4 | k n | note `n`, `k` times (the command is read again `k` times) |
-| F3 | e k | retrigger: the next note's sample restarts every `e` ticks, `k - 1` times |
+| F3 | e k | retrigger: the next note's sample restarts every `e` ticks, `k - 1` times (`k` is a byte: 0 is 255 times). Each restart also steps the note's arpeggio table once (that tick takes two entries). With `e` = 0 all the restarts happen at once in the note's own tick (so `k - 1` extra entries are taken before its own step) |
 | F2 | lo hi w d | synthetic wave sweep: start wave `w`, `d` waves a tick between `lo` and `hi` |
 | F0 / F1 | | legato on / off: notes do not / do restart the sample |
 | EF | x | fine tune `x & 0x0F` (ProTracker's fine tunes, 0..7, -8..-1) |
@@ -116,14 +116,26 @@ reaches up to 0xFF.
 ### 5.3 Effects
 
 * Slide: delta `(target period - period) / c` (truncated) a tick after the delay; on the last step
-  the note becomes the target. No vibrato while a slide runs.
+  the note becomes the target (a slide whose delta is 0 ends at its first step). No vibrato and no
+  arpeggio while a slide runs, the delay included: the table starts (at its first entry) on the tick
+  after the slide has ended (Robocop 3 at 163 s).
 * Arpeggio: each tick the next table byte `x`; `FF` restarts the table, `FE` repeats the last one.
   When `x` is not 0, or the note byte (with transpose) has bit 7 set, the note
   `(raw + x) & 0xFF` plays, keeping the slide's offset from the base period. Indexes 0x60 and up use
   the table of section 5.2 with the track's fine tune.
 * Vibrato (not while an arpeggio steps or a slide runs): after the delay, a value going +1 a tick up
   to `b`, -2 a tick down to `-b`, +1 back to 0, one tick rest; the period gets
-  `value * floor((period(n-1) - period(n)) / a)`.
+  `value * floor((period(n-1) - period(n)) / a)`. Note 0 has no note below it: its step is
+  `16 * VIB0[ft]` (`ems6_hi::VIB0`: 800 for the fine tunes 0 to 4, 768 for 5 to 7, then 848, 864, 864,
+  848, 848, 816, 832, 832), divided by `a` the same way. Notes 0x60 and up vibrate in the period
+  domain: the table entries are `floor(3579264 / P)` of integer periods P; the vibrato period is
+  `P(i) + value * floor((P(i-1) - P(i)) / a)` with `i = 97 * fine tune + n - 0x60` (the contiguous index
+  of section 5.2) and the step is then computed from it as for the other notes. The periods are
+  ProTracker's fine-tune rows scaled per octave (exact values measured for fine tune 0, notes up to
+  0x7E: 0x6C = 7200, 0x6D = 6800, 0x6E = 6416, 0x6F = 6056, 0x70 = 5720, 0x7E = 2548), the rest
+  modelled and clamped into what their table entry allows (`hi_periods` in `ems6.rs`).
+* The period is a 16-bit word: a vibrato taking it below 0 wraps to a long period, and a period of 0
+  is a step of 0.
 
 ## 6. Volume
 
@@ -133,7 +145,10 @@ the track's remaining wait is below the release length `n` (the note's last tick
 and the voice plays `max(0, vfrozen - relsub)`, where `vfrozen` is the volume of the last tick
 before the release (F7 also sets it); otherwise `relsub = 0` and `vfrozen` is the volume. (Probe
 modules with a constant raw instrument, F5 and F7 with delays 6 and 0, match the reference
-exactly; Galaxy Man at 325 s needs it.) With a speed of 0 (FC 00) the whole note is in the release.
+exactly; Galaxy Man at 325 s needs it.) With a speed of 0 (FC 00) the whole note is in the release. A new note sets `vfrozen` to the envelope's
+volume as it stands (it matters only where the release never ends: a note that starts at speed 0
+after its envelope has run down is silent, not at the volume the envelope started with; Stormlord
+(synth) at 390 s).
 
 The master volume `M` of section 4 (FA) scales every voice: the effective volume is
 `(vol * M) >> 6` and a voice adds `(s * eff) >> 6` to its side. A volume over 64 is a
@@ -206,5 +221,5 @@ INTENA C080 (audio 0 interrupt enabled) is written but no audio interrupt change
   samples; voice positions and source bytes are equal, shrinking every voice's volume by 1 helps but
   does not cure it, so the reference's volume scaling differs somewhere), A Sporting Chance from
   254.1 s of 277.6 s (alike). Later first differences also in Stormlord (359.2 s), Stormlord (synth)
-  (318.6 s), Galaxy Man (327.2 s) and Robocop 3 (98.3 s), not analysed.
+  (318.6 s) and Galaxy Man (327.2 s), not analysed (these were found identical in the later full-length runs).
 * Volumes above 64 (section 6).

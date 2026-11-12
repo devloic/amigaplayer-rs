@@ -127,3 +127,10 @@ pub const HI_F: [u32; 15 * 97] = [
     24856, 26318, 27963, 29580, 31397, 33141, 35438, 37284, 39769, 42108, 44740, 47095, 49712, 52636, 55926, 59654,
     62794,
 ];
+
+/// The vibrato of note 0 (SPEC 5.3): its step is `16 * VIB0[ft]` period units for fine tune `ft`
+/// (where the other notes take the period of the note below less their own), measured the same way
+/// as `HI_F`: probes with a vibrato on note 0 and a ramp sample, the delta fitted to the exact
+/// step positions of the reference's output for the 16 fine tunes (all multiples of 16, and the
+/// depth divisor divides it as it does the other notes' deltas).
+pub const VIB0: [i32; 16] = [50, 50, 50, 50, 50, 48, 48, 48, 53, 54, 54, 53, 53, 51, 52, 52];

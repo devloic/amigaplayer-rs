@@ -22,6 +22,12 @@
 //!   by arpeggios) use the 1455 values of `ems6_hi`, bytes of the original player taken, with the
 //!   owner's permission, by black-box measurement (see that file's header); a fine tune picks the
 //!   row, and an index past the table plays a step of 0 (silent);
+//!   A vibrato on those notes works on the periods behind the table's entries (`hi_periods`: exact
+//!   for the fine tune 0 notes measured, ProTracker's rows scaled per octave for the rest), and on
+//!   note 0 it uses the original's step `16 * VIB0[ft]` (`ems6_hi`); the period is a 16-bit word;
+//! * a retrigger (F3) also steps the arpeggio at each restart, all `k - 1` restarts of an `e` of 0
+//!   come at once in the note's tick, and an arpeggio waits for a slide (delay included) to end;
+//!   a note takes the envelope's volume as it stands even where the release never ends (speed 0);
 //! * a volume above 64 is used as a factor as it is (the original reads memory past its volume
 //!   table there; not reproduced);
 //! * reads outside the file give zeros; a pattern past the file ends; a sequence word past the
@@ -116,6 +122,46 @@ fn period_rows() -> Vec<[u16; 96]> {
         .collect()
 }
 
+/// The periods behind the table of the notes 0x60 and up (`ems6_hi`: its entries are
+/// `floor(PCLOCK / period)`), which a vibrato needs: the note's period and the one below it. The
+/// periods themselves were measured only for a few notes (vibrato probes: SPEC 5.3); the rest are
+/// ProTracker's fine-tune rows (-7..-1 for the fine tunes 0..6, halved per octave, rounded) and, for
+/// the rows 8 to 14, the row 8 less, a note lower, each kept within what its table entry allows.
+fn hi_periods() -> Vec<i32> {
+    let pt = &crate::protracker::PERIODS;
+    let n = ems6_hi::HI_F.len();
+    let mut p = vec![0i32; n];
+    for idx in 0..n {
+        let (k, j) = (idx / 97, idx % 97);
+        let f = ems6_hi::HI_F[idx].max(1);
+        let (lo, hi) = ((PCLOCK / (f + 1) + 1) as i32, (PCLOCK / f) as i32);
+        let model = if k < 7 && j < 96 {
+            // the same octave rows as the notes below (SPEC 5.1) of ProTracker's fine tune row k + 9
+            // (the fine tune 0 has 674 and 637 where ProTracker's table has 675 and 636: measured)
+            let r = &pt[(k + 9) * 37..(k + 9) * 37 + 36];
+            let at = |i: usize| match (k, i) {
+                (0, 5) => 674,
+                (0, 6) => 637,
+                _ => r[i] as i32,
+            };
+            let i = j % 12;
+            Some(match j / 12 {
+                o @ 0..=3 => at(i) * (16 >> o),
+                4 => at(i),
+                5 => r[12 + i] as i32,
+                6 => r[24 + i] as i32,
+                _ => r[24 + i] as i32 / 2,
+            })
+        } else if k >= 8 && j >= 1 {
+            Some(p[(k - 8) * 97 + j - 1])
+        } else {
+            None
+        };
+        p[idx] = model.map_or((lo + hi) / 2, |m| m.clamp(lo, hi));
+    }
+    p
+}
+
 fn s8(x: u8) -> i32 {
     x as i8 as i32
 }
@@ -124,7 +170,11 @@ fn s8(x: u8) -> i32 {
 /// `ems6_hi`, of fine tune `ft`'s row and the rows after it).
 fn step_of(q: Option<i32>, n: usize, ft: usize) -> u32 {
     match q {
-        Some(q) => ((PCLOCK / q.max(1) as u32) as u64 * 65536 / RATE_DIV as u64) as u32,
+        // the period is a 16-bit word (a vibrato can take it below 0, to a long period); 0 stops the voice
+        Some(q) => match q as u16 as u32 {
+            0 => 0,
+            q => ((PCLOCK / q) as u64 * 65536 / RATE_DIV as u64) as u32,
+        },
         None if n >= 0x60 => {
             let f = ems6_hi::HI_F.get(ft * 97 + n - 0x60).copied().unwrap_or(0);
             (f as u64 * 65536 / RATE_DIV as u64) as u32
@@ -288,6 +338,7 @@ pub struct Ems6 {
     tables: Vec<Pat>,
     insts: Vec<Inst>,
     qrows: Vec<[u16; 96]>,
+    hip: Vec<i32>,
     tracks: Vec<Track>,
     speed: i32,
     /// The speed as the tick began: the rows of waits under way are counted with it (a speed change
@@ -360,6 +411,7 @@ impl Ems6 {
             tables,
             insts,
             qrows: period_rows(),
+            hip: hi_periods(),
             tracks: Vec::new(),
             speed: 6,
             tick_speed: 6,
@@ -495,10 +547,12 @@ impl Ems6 {
         }
         t.retrig = None;
         t.relsub = 0;
+        // a note takes the envelope's volume as it stands (matters where the release never ends, at speed 0)
+        t.vfrozen = t.vol;
         t.arp_i = 0;
         t.arp_last = 0;
         if let Some((a, b)) = t.f3.take() {
-            t.retrig = Some(Retrig { every: a as i32, left: a as i32, times: b as i32 - 1 });
+            t.retrig = Some(Retrig { every: a as i32, left: a as i32, times: (b as i32 - 1).rem_euclid(256) });
         }
         t.vib_v = 0;
         t.vib_ph = 0;
@@ -652,6 +706,25 @@ impl Ems6 {
         if p.start + i < p.end { self.byte(p.start + i) } else { 0xFE }
     }
 
+    /// One step of arpeggio table `k`: the offset and whether the table advanced.
+    fn arp_step(&self, t: &mut Track, k: usize) -> (u8, bool) {
+        let mut x = self.arp_byte(k, t.arp_i);
+        if x == 0xFF {
+            t.arp_i = 0;
+            let p = self.tables[k];
+            x = if p.end > p.start { self.byte(p.start) } else { 0 };
+        }
+        let mut st = false;
+        if x == 0xFE {
+            x = t.arp_last;
+        } else {
+            t.arp_i += 1;
+            st = true;
+        }
+        t.arp_last = x;
+        (x, st)
+    }
+
     /// The track's tick: wave sweep, row, retrigger, volume, pitch (SPEC section 7.2).
     fn track_tick(&mut self, t: &mut Track) {
         if t.pat.is_none() {
@@ -689,13 +762,29 @@ impl Ems6 {
             self.parse(t);
             just = true;
         }
+        // F3 with a period of 0: all its restarts happen at once, in the note's own tick
+        if just && t.retrig.as_ref().is_some_and(|rt| rt.every == 0) {
+            while t.retrig.as_ref().is_some_and(|rt| rt.times > 0) {
+                if let Some(rt) = t.retrig.as_mut() {
+                    rt.times -= 1;
+                }
+                self.restart(t);
+                if let Some(k) = t.arp {
+                    self.arp_step(t, k);
+                }
+            }
+        }
         if let Some(rt) = t.retrig.as_mut() {
-            if rt.times > 0 && !just {
+            if rt.times > 0 && rt.every > 0 && !just {
                 rt.left -= 1;
-                if rt.left == 0 {
+                if rt.left <= 0 {
                     rt.left = rt.every;
                     rt.times -= 1;
                     self.restart(t);
+                    // the retrigger also steps the arpeggio once (measured: two table entries that tick)
+                    if let Some(k) = t.arp {
+                        self.arp_step(t, k);
+                    }
                 }
             }
         }
@@ -729,7 +818,8 @@ impl Ems6 {
                 sl.delay -= 1;
             } else {
                 sl.count -= 1;
-                if sl.count <= 0 {
+                // (a slide that is not moving ends at its first step)
+                if sl.count <= 0 || sl.delta == 0 {
                     t.q = Some(sl.target);
                     t.n = sl.note;
                     t.raw = sl.note;
@@ -742,20 +832,9 @@ impl Ems6 {
         let mut q = t.q;
         let mut n = t.n;
         let mut arping = false;
-        if let Some(k) = t.arp {
-            let mut x = self.arp_byte(k, t.arp_i);
-            if x == 0xFF {
-                t.arp_i = 0;
-                let p = self.tables[k];
-                x = if p.end > p.start { self.byte(p.start) } else { 0 };
-            }
-            if x == 0xFE {
-                x = t.arp_last;
-            } else {
-                t.arp_i += 1;
-                arping = true;
-            }
-            t.arp_last = x;
+        if let Some(k) = t.arp.filter(|_| !sliding) {
+            let (x, st) = self.arp_step(t, k);
+            arping = st;
             if x != 0 || t.raw >= 0x80 {
                 // 0x60..0xFF: the original's table of `ems6_hi` (rows of fine tunes, one after another)
                 let m = (t.raw + x as usize) & 0xFF;
@@ -802,8 +881,23 @@ impl Ems6 {
             if let Some(qq) = q {
                 if t.vib_v != 0 {
                     let row = self.qrow(t);
-                    let d = if n > 0 && n < 0x60 { row[n - 1] as i32 - row[n] as i32 } else { 0 };
+                    let d = if n > 0 && n < 0x60 {
+                        row[n - 1] as i32 - row[n] as i32
+                    } else if n == 0 {
+                        // the note below note 0 is not in the table: the original's value (`ems6_hi`)
+                        16 * ems6_hi::VIB0[t.ft & 15]
+                    } else {
+                        0
+                    };
                     q = Some(qq + t.vib_v * d.div_euclid(a as i32));
+                }
+            } else if t.vib_v != 0 && n >= 0x60 {
+                // a note of the original's table: its period and the one before it (the table's
+                // entries run on from one fine tune's row into the next)
+                let i = t.ft * 97 + n - 0x60;
+                if i >= 1 && i < self.hip.len() && ems6_hi::HI_F[i] != 0 {
+                    let d = self.hip[i - 1] - self.hip[i];
+                    q = Some(self.hip[i] + t.vib_v * d.div_euclid(a as i32));
                 }
             }
         }

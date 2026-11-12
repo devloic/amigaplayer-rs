@@ -343,3 +343,112 @@ fn a_speed_of_zero_is_256_ticks_a_row() {
     r.tick_tracks();
     assert_eq!(r.tracks[0].wait, 255);
 }
+
+#[test]
+fn the_vibrato_of_note_0_has_the_originals_step() {
+    // F8 depth-divisor 2, speed, ...: note 0 has no note below it; the step is 16 * VIB0[ft] / divisor
+    let pat = [0xFE, 0x00, 0xF7, 0x40, 0x40, 0x00, 0x00, 0xF8, 0x02, 0x04, 0x01, 0xFD, 0x40, 0x00, 0xFF];
+    let d = module(1, &[&[0, 0xFFFF, 0]], &[&pat], &[ramp(0x800), ramp(4)], &[&[0, 0xFE]]);
+    let mut r = Ems6::build(&d, 0x20000).unwrap();
+    let mut seen = false;
+    for _ in 0..40 {
+        r.tick_tracks();
+        let t = &r.tracks[0];
+        let q = t.q.unwrap();
+        let want = q + t.vib_v * (16 * ems6_hi::VIB0[0] / 2);
+        assert_eq!(t.v.step, step_of(Some(want), 0, 0));
+        seen |= t.vib_v != 0;
+    }
+    assert!(seen);
+}
+
+#[test]
+fn the_period_is_a_16_bit_word() {
+    assert_eq!(step_of(Some(-100), 0, 0), step_of(Some(65436), 0, 0));
+    assert_eq!(step_of(Some(0), 0, 0), 0);
+    assert_eq!(step_of(Some(65536), 0, 0), 0);
+}
+
+#[test]
+fn periods_of_the_hi_notes_match_the_measured_ones() {
+    let p = hi_periods();
+    // fine tune 0, notes 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x7e (vibrato probes)
+    for (n, want) in [(0x6c, 7200), (0x6d, 6800), (0x6e, 6416), (0x6f, 6056), (0x70, 5720), (0x7e, 2548)] {
+        assert_eq!(p[n - 0x60], want, "note {n:#x}");
+    }
+}
+
+/// The arpeggio offset a track plays on its first ticks with `F9 0, F3 e k` before the note
+/// (table 0 counts 1, 2, ... 20 then holds).
+fn arp_offsets(e: u8, k: u8, ticks: usize) -> Vec<u8> {
+    let pat = [0xFE, 0x00, 0xF7, 0x40, 0x40, 0x00, 0x00, 0xF9, 0x00, 0xF3, e, k, 0xFD, 0x40, 0x30, 0xFF];
+    let table: Vec<u8> = (1..=20).chain([0xFE, 0]).collect();
+    let d = module(1, &[&[0, 0xFFFF, 0]], &[&pat], &[ramp(0x800), ramp(4)], &[&table]);
+    let mut r = Ems6::build(&d, 0x20000).unwrap();
+    (0..ticks)
+        .map(|_| {
+            r.tick_tracks();
+            r.tracks[0].arp_last
+        })
+        .collect()
+}
+
+#[test]
+fn a_retrigger_steps_the_arpeggio_once_more() {
+    // no retrigger: one table entry a tick
+    assert_eq!(arp_offsets(1, 1, 4), [1, 2, 3, 4]);
+    // every tick, endless (k = 0 is 256 times): two entries a tick from the second
+    assert_eq!(arp_offsets(1, 0, 4), [1, 3, 5, 7]);
+    // every 3rd tick (ticks 3 and 6), twice: the retrigger tick takes two entries
+    assert_eq!(arp_offsets(3, 3, 8), [1, 2, 3, 5, 6, 7, 9, 10]);
+}
+
+/// The arpeggio table index (entries taken) after each of `ticks` ticks of `F9 0` and then the
+/// slide row `FB 30 count delay 3C` (table 0: 1, 2, 3, then holds).
+fn arp_i_with_slide(count: u8, delay: u8, target: u8, ticks: usize) -> Vec<usize> {
+    let pat = [0xFE, 0x00, 0xF7, 0x40, 0x40, 0x00, 0x00, 0xF9, 0x00, 0xFD, 0x40, 0xFB, 0x30, count, delay, target, 0xFF];
+    let d = module(1, &[&[0, 0xFFFF, 0]], &[&pat], &[ramp(0x800), ramp(4)], &[&[1, 2, 3, 0xFE, 0]]);
+    let mut r = Ems6::build(&d, 0x20000).unwrap();
+    (0..ticks)
+        .map(|_| {
+            r.tick_tracks();
+            r.tracks[0].arp_i
+        })
+        .collect()
+}
+
+#[test]
+fn the_arpeggio_waits_while_a_slide_runs() {
+    // delay 1, 4 steps (ticks 1 to 4): the arpeggio starts on the tick after the slide ends
+    assert_eq!(arp_i_with_slide(4, 1, 0x3C, 8), [0, 0, 0, 0, 0, 1, 2, 3]);
+    // a slide that does not move (target = note) ends at its first step, after the delay
+    assert_eq!(arp_i_with_slide(16, 2, 0x30, 6), [0, 0, 0, 1, 2, 3]);
+}
+
+#[test]
+fn a_note_takes_the_envelopes_volume_at_speed_0() {
+    // F7 64 -> 0 by 4 a tick, speed 0 (256 ticks a row), a hold row, then a note: at speed 0 the
+    // release never ends, but the note's volume is the envelope's (0 by then), not the 64 it started
+    let pat = [0xFE, 0x00, 0xFC, 0x00, 0xF7, 0x40, 0x00, 0x04, 0x00, 0xFD, 0x01, 0xF6, 0x30, 0xFF];
+    let d = module(1, &[&[0, 0xFFFF, 0]], &[&pat], &[vec![0x40; 0x4000], ramp(4)], &[&[0, 0xFE]]);
+    let mut r = Ems6::build(&d, 0x20000).unwrap();
+    for _ in 0..300 {
+        r.tick_tracks();
+        if r.tracks[0].v.inst.is_some() {
+            break;
+        }
+    }
+    assert!(r.tracks[0].v.inst.is_some());
+    assert_eq!(r.tracks[0].vol, 0);
+    assert_eq!(r.tracks[0].v.vol, 0);
+}
+
+#[test]
+fn a_retrigger_every_0_ticks_happens_all_at_once() {
+    // k - 1 restarts, each with an arpeggio step, in the note's own tick, then the tick's own step
+    assert_eq!(arp_offsets(0, 1, 3), [1, 2, 3]);
+    assert_eq!(arp_offsets(0, 3, 3), [3, 4, 5]);
+    assert_eq!(arp_offsets(0, 5, 3), [5, 6, 7]);
+    // k = 0 is 255 restarts: the table is through at once and holds its last entry
+    assert_eq!(arp_offsets(0, 0, 3), [20, 20, 20]);
+}

@@ -287,7 +287,8 @@ fn find_disk_library(os: &OsState, name: &str) -> Option<(PathBuf, Vec<u8>)> {
     for dir in lib_dirs(os) {
         for r in [rel, file] {
             let p = os.host_path(r, Some(&dir));
-            if !os.no_host_files && !std::fs::metadata(&p).is_ok_and(|md| md.is_file() && md.len() <= DISK_LIB_MAX) {
+            // (a directory or an outsize file is not read; one of `mem_files` is never on disk)
+            if !os.no_host_files && std::fs::metadata(&p).is_ok_and(|md| !md.is_file() || md.len() > DISK_LIB_MAX) {
                 continue;
             }
             if let Ok(d) = os.read_file(&p) {

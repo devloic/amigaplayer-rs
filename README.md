@@ -133,6 +133,7 @@ amigaplayer-rs --genies DIR ...                    # other DeliGenies dir
 amigaplayer-rs --noteplayer 8Voices-NotePlayer ... # another genie plays _note players
 amigaplayer-rs --noteplayer builtin ...            # the built-in renderer plays them
 amigaplayer-rs --genie NAME ...                    # run any other genie
+amigaplayer-rs --libs DIR ...                      # LIBS: for the players' disk libraries
 ```
 
 Players are looked up in `--players DIR`, `$DELIPLAYERS`,
@@ -155,6 +156,32 @@ by default players with more go to the built-in renderer; `--noteplayer
 which takes seconds to start and a lot of emulated CPU time. The 4Voices, 8Voices, 14Bit,
 32Voices and Headphone NotePlayers work. A genie that fails is dropped, and the
 built-in renderer takes over.
+
+### Disk libraries
+
+A library a player opens that the host does not emulate is loaded from disk when a
+file of that name is found, and run on the emulated 68000 as AmigaOS would: LoadSeg,
+the RomTag in its segments, InitResident (with `RTF_AUTOINIT`: MakeLibrary from its
+vector table, InitStruct table and init routine; otherwise its own init routine),
+then its Open vector on each OpenLibrary (CloseLibrary calls its Close). The name
+is looked for as given (any volume such as `LIBS:` dropped, so
+`replayers/x.library` keeps its folder), then as its file name alone, names in any
+case, in:
+
+1. the module's directory,
+2. `libs/` in the module's directory,
+3. `libs/` in the directory above it (an archive's `modules/` beside its `libs/`),
+4. LIBS: `--libs DIR`, else `$AMIGAPLAYER_LIBS`, `~/.config/amigaplayer-rs/Libs`,
+   `~/.config/deliplayer/Libs`, `./Libs` (amigaplayer-render: `--libs DIR` only).
+
+The libraries the host emulates (exec, dos, graphics, utility, intuition, the CIA
+resources, audio and timer devices) and the system libraries players already work
+with as stubs (reqtools, asl, gadtools, icon, diskfont, the math libraries,
+identify and the like) are never loaded, nor are decrunchers (refused, so players
+fall back to plain data). When no file is found the library is the stub it always
+was: its calls answer 0 (stonepacker.library's LVO -30 a handle). A library that
+opens another goes through the same path. The libraries are the user's own files,
+loaded at run time; none ship with this program.
 
 You can drop files or folders onto the window, or use **Add** / **Dir**.
 
@@ -199,6 +226,26 @@ install their own CIA or audio interrupts instead of using DeliTracker's timer.
 
 Eagleplayer 2.06: 112 of its 118 player files load (the four `AYPlayers` are
 Z80 emulators for PlayAY, and BFB Master and Datatype have no module check).
+A player without a check would take every module, so it is loaded only when chosen
+with `--player` (or with `DELI_CHECKLESS=1`).
+
+BFB Master (`--player BFB`, "BFBPlayMaster.Library 1.0" front end) plays through
+`bfbplaymaster.library` and its `replayers/bfbplay*.library`, loaded from disk (see
+Disk libraries; the BFB archive's `modules/` beside its `libs/` and
+`libs/replayers/` finds them). With the archive's 1996 libraries: Oktalyzer
+(bfbplayOKTA), ProTracker M.K. (bfbplayPT20), DigiBooster (bfbplayDIGI) and the
+THX module in the AHX 1 format (`THX\0`, bfbplayTHXS) play, their 20 s renders' level
+envelopes correlating at 0.69 (8 voices on the host amplifier against 8 mixed
+by the library), 0.997, 0.94 and 0.999 with the built-in replayers'. The
+`THX\1` (AHX 2) modules stop with a divide by zero in bfbplayTHXS's interrupt
+code a few ticks in: it takes entry 51 of a 64-long pointer table of its own that
+it never wrote (in its first setup nor in the second), and divides by a word read
+through that null pointer. Observed black-box (memory watched, no OS call or
+answer involved), and the one `THX\0` module plays, so the likely reason is that
+the library predates the AHX 2 format; not a host gap. Game Music Creator
+files and David Whittaker modules are refused by the master library itself
+("InitPlayer of BFB failed"): it compares the module's first long and the word
+at 12 with its format signatures (`GMOD`, ...) and these have none.
 Rendered over the test modules with no DeliPlayers loaded, 46 play audible
 music, and where a DeliPlayer covers the same format most renders correlate at
 0.9 or better with the DeliPlayer's. Those that ask for the Eagleplayer

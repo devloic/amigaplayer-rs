@@ -665,6 +665,11 @@ def special_reference(mod, fmt):
     """A per-module original where one player does not cover the format: Digital Sound
     Studio modules with a tempo byte play on UADE's DSS 1.0-3.0 player (V1.2), as the
     V1.71 Eagleplayer the port follows for the others reads the tempo as part of the speed."""
+    if fmt.startswith('delusiondigitalmusicformat'):
+        # X-Tracker (DDMF): the port follows libopenmpt, which libxmp's oracle cannot load; the
+        # Amiga original is the DeliPlayer "XTracker" (SOAMC's V0.8, alone in its directory)
+        return [('deli', ('deli', SOAMC + '/DDMF_(Delusion_Digital_Music Format-XTracker)/0.8_(26.Aug.1996)'),
+                 ('--player', 'XTracker'))]
     if fmt in DELI_REF and os.path.isdir(DELI_STORE):
         return [('deli', ('deli', DELI_STORE), ('--player', DELI_REF[fmt]))]
     if fmt == 'digitalsoundstudio':
@@ -682,7 +687,7 @@ def find_reference(ctx, mod, po, port_short=False):
     """The original's render for a file whose port output line parses to `po`:
     dict(kind 'engine'|'libxmp'|'none', wav (path), data ((rate, samples)), out, led, player, o, note, noref)."""
     none = dict(kind='none', note='', noref=True)
-    if po.get('backend') == 'libxmp-port':
+    if po.get('backend') == 'libxmp-port' and not _norm(po.get('format', '')).startswith('delusiondigitalmusicformat'):
         if not os.path.exists(ctx.oracle):
             return dict(none, note='no libxmp oracle')
         raw, info = render_oracle(ctx, mod)

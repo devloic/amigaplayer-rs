@@ -377,7 +377,7 @@ impl Song {
     /// do not know how long they will play.
     pub fn duration_hint(&self) -> Option<f64> {
         match &self.e.engine().playing {
-            Some(Playing { backend: Backend::Pcm(x), .. }) => Some(x.duration_secs()),
+            Some(Playing { backend: Backend::Pcm(x), .. }) => x.duration_hint(),
             Some(Playing { backend: Backend::Mix(x), .. }) => {
                 let ms = x.duration_ms(x.subsong());
                 (ms > 0).then(|| ms as f64 / 1000.0)

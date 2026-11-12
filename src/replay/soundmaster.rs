@@ -18,6 +18,13 @@
 //! portamento, ties and master-volume fades. Build A (Doofus) has its tables behind
 //! an offset table; builds B (Future Shock) and C (an unused Doofus song) at fixed
 //! places, C with a sample sweep.
+//!
+//! Build A has relatives, told by the init's table setup: A-8 and A+8 (the header
+//! fields 8 bytes earlier or later, voice records of 0x32 and 0x36 bytes) and D,
+//! version 3 (a longer header, 0x3C-byte voice records, B/C's tick over A's tables with
+//! a global fade; its loop and end steps are variables, and a second song is named by
+//! three of them). Songs: D and A-8 offer two when their module holds a second.
+//! The LED follows a flag byte of the init. See `docs/specs/soundmaster/SPEC.md`.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;

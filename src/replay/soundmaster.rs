@@ -377,6 +377,9 @@ impl Sm {
                 if f & 0x80 == 0 {
                     self.fctl = 0;
                     self.master = f;
+                    if self.build == Build::D {
+                        self.fcnt = 0;
+                    }
                 } else {
                     let mut x = self.master;
                     if f & 0x40 != 0 {
@@ -396,10 +399,6 @@ impl Sm {
                 }
             }
             self.lastarp = 0xFF;
-            if self.build == Build::D {
-                // the first step of a fade comes one tick earlier than the others' count
-                self.fcnt = self.fcnt.saturating_sub(1);
-            }
         }
         self.pos = self.pos0;
     }
@@ -856,7 +855,11 @@ impl Sm {
                 self.speed0 = self.r8(self.hf(0xD1));
                 self.patlen = self.r8(self.hf(0xD2));
                 self.loopstep = self.r8(self.hf(0xD3));
-                self.endstep = self.r8(self.hf(0xD4));
+                // the loop and end steps the routine uses are those of two variables, which a module
+                // may hold other than the header's (x-out-loader: 1 and 2 where the header says 2
+                // and 3)
+                self.loopstep = self.r8(self.hf(0xF5));
+                self.endstep = self.r8(self.hf(0xF6));
                 self.step = 0;
                 if self.sub != 0 {
                     // the second song: its first, loop and end steps follow the header's
@@ -878,8 +881,15 @@ impl Sm {
     }
 
     fn tick_bc(&mut self, hw: &mut Hw) {
-        if self.build == Build::D {
-            self.fade();
+        if self.build == Build::D && self.fcnt == 1 {
+            // build D steps the master volume as build A does its voices': when the count is 1
+            if self.fctl & 0x80 != 0 {
+                if self.master != 0x40 {
+                    self.master += 1;
+                }
+            } else if self.master != 0 {
+                self.master -= 1;
+            }
         }
         hw.dmacon(self.pend);
         self.dmaon = 0;
@@ -910,7 +920,13 @@ impl Sm {
         self.advance();
         hw.dmacon(self.dmaon | self.pend);
         self.pend = self.pendn;
-        if self.build != Build::D {
+        if self.build == Build::D {
+            if self.fcnt != 0 {
+                self.fcnt -= 1;
+            } else {
+                self.fcnt = self.fctl & 0x7F;
+            }
+        } else {
             self.fade();
         }
     }

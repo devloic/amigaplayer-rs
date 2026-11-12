@@ -32,6 +32,10 @@ with the credit in each file. The **database itself is not in this repository** 
 another licence, CC BY-NC-SA 4.0 (attribution, non-commercial, share-alike): see
 [Song database](#song-database).
 
+The optional C64 SID player (feature `sid`, off by default) is ported from code under the GNU
+GPL **version 2 only**: a build with it is GPL-2.0-only as a whole. See
+[C64 SID tunes](#c64-sid-tunes).
+
 ## Rust
 
 ```toml
@@ -222,6 +226,25 @@ differently the entry is simply not found by `Info::subsong`.
 The reader is the crate `crates/songdb` (`amigaplayer-songdb`, no dependencies): a port of
 audacious-uade's `src/songdb`, kept under its dual licence, usable by itself. Not built into
 the WebAssembly crate.
+
+### C64 SID tunes
+
+With the `sid` feature (off by default) `detect` and `Song` also take C64 SID tunes (`PSID` and
+`RSID` files, `.sid`), played on an emulated C64 with a real SID chip model: a port of
+NostalgicPlayer's C# ports of libsidplayfp and reSIDfp (`src/sid/`). **Those ports are under
+the GNU GPL version 2 and do not say "or any later version": a program built with `sid` is a
+GPL-2.0-only work as a whole** (`LICENSE-LibSidPlayFp`, `LICENSE-LibReSidFp`), which is why
+the feature is off by default.
+
+```toml
+amigaplayer = { git = "...", package = "amigaplayer-rs", default-features = false, features = ["sid"] }
+```
+
+`format()` is `"PSID"` or `"RSID"`; the subsongs are the file's songs (0-based, starting at its
+start song); a SID tune has no end, so `songend()` stays false (unless the emulated CPU stops on
+a halt instruction) and the caller decides how long to play. Stereo at the song's rate, the
+same samples on every run and platform. No Commodore ROM is included: an RSID tune that needs
+the BASIC ROM is refused (`Error::Invalid`). Not in the C API or WebAssembly builds.
 
 ### Environment variables
 

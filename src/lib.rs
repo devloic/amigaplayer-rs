@@ -98,6 +98,7 @@
 mod song;
 #[cfg(feature = "songdb")]
 pub mod songdb;
+pub mod songlengths;
 pub mod unpack;
 
 pub use song::{detect, detect_with, formats, Error, Options, Result, Song, Subsongs};

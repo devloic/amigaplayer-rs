@@ -157,6 +157,7 @@ pub mod sonix;
 pub mod specialfx;
 pub mod steveturner;
 pub mod stp3;
+pub mod stonetracker;
 pub mod soundmaster;
 pub mod soundmon;
 pub mod soundtracker;
@@ -351,6 +352,8 @@ pub const REPLAYERS: &[Open] = &[
     tme::OPEN,
     agi::OPEN,
     ptm::OPEN,
+    // strict: `SPM\x02`, the block offsets and every song block in the file
+    stonetracker::OPEN,
     richardjoseph::OPEN,
     richardjosephrj::OPEN,
     sonix::OPEN,

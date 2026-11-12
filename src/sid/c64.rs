@@ -165,25 +165,25 @@ struct DataBit {
     data_set: u8,
 }
 
-/// $01 bits 6 and 7 fall-off cycles (1->0), average is about 350 msec for a 6510
-/// and about 1500 msec for a 8500.
-///
-/// NOTE: fall-off cycles are heavily chip- and temperature dependent. As a
-///       consequence it is very hard to find suitable realistic values that
-///       always work and we can only tweak them based on test cases. (unless we
-///       want to make it configurable or emulate temperature over time =))
-///
-///       It probably makes sense to tweak the values for a warmed up CPU, since
-///       this is likely how (old) programs were coded and tested :)
-///
-/// NOTE: the unused bits of the 6510 seem to be much more temperature dependent
-///       and the fall-off time decreases quicker and more drastically than on a
-///       8500
-///
-/// cpuports.prg from the lorenz test suite will fail when the falloff takes more
-/// than 1373 cycles. This suggests that he tested on a well warmed up c64 :)
-/// He explicitly delays by ~1280 cycles and mentions capacitance, so he probably
-/// even was aware of what happens.
+// $01 bits 6 and 7 fall-off cycles (1->0), average is about 350 msec for a 6510
+// and about 1500 msec for a 8500.
+//
+// NOTE: fall-off cycles are heavily chip- and temperature dependent. As a
+//       consequence it is very hard to find suitable realistic values that
+//       always work and we can only tweak them based on test cases. (unless we
+//       want to make it configurable or emulate temperature over time =))
+//
+//       It probably makes sense to tweak the values for a warmed up CPU, since
+//       this is likely how (old) programs were coded and tested :)
+//
+// NOTE: the unused bits of the 6510 seem to be much more temperature dependent
+//       and the fall-off time decreases quicker and more drastically than on a
+//       8500
+//
+// cpuports.prg from the lorenz test suite will fail when the falloff takes more
+// than 1373 cycles. This suggests that he tested on a well warmed up c64 :)
+// He explicitly delays by ~1280 cycles and mentions capacitance, so he probably
+// even was aware of what happens.
 const C64_CPU6510_DATA_PORT_FALL_OFF_CYCLES: EventClock = 350000;
 
 impl DataBit {

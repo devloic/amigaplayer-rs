@@ -396,6 +396,26 @@ def _fallback_stage(path, cache):
     return mod
 
 
+# companions of a fixed name (not the module's stem) that a player loads from the module's directory:
+# Rob Hubbard 2's sample bank rh.ins (the DeliPlayer asks for that name only)
+FIXED_COMPANIONS = ('rh.ins',)
+
+
+def stage_fixed_companions(path, mod):
+    src = os.path.dirname(path)
+    dst = os.path.dirname(mod)
+    for c in FIXED_COMPANIONS:
+        for n in (c, c + '.xz'):
+            s = os.path.join(src, n)
+            t = os.path.join(dst, c)
+            if os.path.exists(s) and not os.path.exists(t):
+                b = open(s, 'rb').read()
+                if b[:6] == b'\xfd7zXZ\x00':
+                    b = lzma.decompress(b)
+                open(t + '.tmp', 'wb').write(b)
+                os.replace(t + '.tmp', t)
+
+
 ALIAS_ROOT = '/dev/shm/refcmp'   # 16 characters
 ALIAS_LEN = 76                   # characters of a cache alias path
 
@@ -466,7 +486,7 @@ def _run_cached(ctx, key, cmd, env, cwd, wav):
 
 
 def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None, fast_cpu=False):
-    deli = ctx.empty
+    deli, given = ctx.empty, eagle
     if isinstance(eagle, tuple):   # ('deli', DeliPlayer directory)
         deli, eagle = eagle[1], None
     env = dict(os.environ, SDL_AUDIO_DRIVER='dummy', RUST_LOG='error', DELIPLAYERS=deli,
@@ -488,7 +508,7 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None, fast_c
         # a `_note` player the engine played through its own NotePlayer renderer: the original
         # plays it through DeliTracker's NotePlayer genie (the engine picks the cheapest that
         # has enough voices), so give it the genies
-        return render_engine(ctx, mod, open_replayers, eagle, extra, NOTE_GENIES, fast_cpu)
+        return render_engine(ctx, mod, open_replayers, given, extra, NOTE_GENIES, fast_cpu)
     return wav, play, out, led, lines
 
 
@@ -531,7 +551,9 @@ VERIFIED = verified_players()
 
 # ports whose original is a PlayerStore DeliPlayer (UADE's Eagleplayer of the format converts
 # the bank to a ProTracker module and plays that, so it is no reference): normalised format -> player
-DELI_REF = {'amosmusicbank': 'AmosMusicBank'}
+# Rob Hubbard 2: the DeliPlayer RobHubbard_2 (with the 4Voices NotePlayer genie) is the original;
+# EP206's Rob Hubbard 2 asks for other bank names and returns silent with an unbalanced stack
+DELI_REF = {'amosmusicbank': 'AmosMusicBank', 'robhubbard2': 'RobHubbard_2'}
 
 
 # Formats whose modules play past their sample data's end (the port plays silence there): the
@@ -546,7 +568,11 @@ FORCED_PLAYER = {'sidmon20': 'SIDMon 2.0', 'scumm': 'SCUMM_Player', 'sonicarrang
                  # EP206's "Tronic" is another build; UADE's names itself TronicTracker(?)
                  'tronic': 'TronicTracker(?)',
                  # UADE's generic detection takes the .vss files for Soundtracker IV
-                 'voodoosupremesynthesizer': 'VSS'}
+                 'voodoosupremesynthesizer': 'VSS',
+                 # the UADE players these ports follow (README); the generic search finds them today,
+                 # naming them keeps another player from winning (verify-covered, option A)
+                 'soundimages': 'Sound Images', 'jeroentel': 'Jeroen Tel',
+                 'steveturner': 'Steve Turner', 'richardjosephplayer': 'Richard Joseph Player'}
 
 
 # Formats no Amiga player plays (README: HVL is checked against the C replayer only): whatever
@@ -558,10 +584,11 @@ NO_AMIGA_PLAYER = {'hivelytracker'}
 # Formats whose original never reports a song end (UADE's PreTracker and SCUMM players are bare replay
 # routines: they play on; so does the Jesper Olsen Eagleplayer: 25 modules looped for 120 s each without
 # one, and the port's write log equals the original's over 30-40 s once the CLI ignores its song end;
-# AProSys never tells the host, the original then goes on silently past the song end)
+# AProSys never tells the host, the original then goes on silently past the song end; the Rob Hubbard 2
+# DeliPlayer never reports a song end)
 # while the port signals one at the song's end (README), which stops
 # the CLI render there. The original is compared over the port's length.
-ORIGINAL_PLAYS_ON = {'pretracker', 'scumm', 'jesperolsen', 'aprosys'}
+ORIGINAL_PLAYS_ON = {'pretracker', 'scumm', 'jesperolsen', 'aprosys', 'robhubbard2'}
 
 
 # Formats whose original refuses some modules the port plays (Hippel 7V: the five COSO modules, README):
@@ -702,7 +729,7 @@ def find_reference(ctx, mod, po, port_short=False):
         if not (rw and rplay and o.get('backend') == '68k'):
             # a preferred try whose player exists in its directory but did not run (crash, refusal) is
             # worth reporting if a generic search then finds another original
-            if i < first and not (extra and extra[0] == '--player' and not os.path.exists(os.path.join(eagle, extra[1]))):
+            if i < first and not (extra and extra[0] == '--player' and not os.path.exists(os.path.join(eagle[1] if isinstance(eagle, tuple) else eagle, extra[1]))):
                 refused.append(f'{tag}: ' + (rlines[-1] if rlines else 'no output')[:90])
             continue
         got = re.sub(r'[^a-z0-9]', '', o.get('format', '').lower())
@@ -747,6 +774,7 @@ def process(ctx, f):
     try:
         path = f['path']
         mod = ctx.stage(path) if ctx.stage else _fallback_stage(path, ctx.cache)
+        stage_fixed_companions(path, mod)
         pw, pplay, pout, pled, plines = render_engine(ctx, mod, True, None)
         row['out_port'] = pout or ''
         row['led_port'] = pled or ''

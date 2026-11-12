@@ -616,7 +616,12 @@ ALONE = {'emsv6': ('uade', 'EMS-6'),   # with all of UADE's players loaded the o
          'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2'),
          # SidMon 1.0 (EP206): a finetuned period read past the table lands in the next player's hunk
          'sidmon10': ('ep206', 'SIDMon 1.0'),
-         'pretracker': ('uade', 'PreTracker')}
+         'pretracker': ('uade', 'PreTracker'),
+         # Quadra Composer: UADE's QuadraComposer file (V1.01, 24 Jul 1994; it names itself "IFF EMOD")
+         # is the original; EP206's "IFF EMOD" (V1.02) is another build whose DMA gap is 110 colour
+         # clocks (a voice at a period like 538 keeps its old sample), and whose one-shot samples
+         # end on loop registers 0 / length 0 (Paula plays 128 KB from address 0: beeps and cracks)
+         'quadracomposer': ('uade', 'QuadraComposer')}
 
 
 def alone_dir(ctx, src, name):

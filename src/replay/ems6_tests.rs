@@ -287,3 +287,59 @@ fn notes_past_0x60_read_the_table_of_their_fine_tune_row() {
     assert_eq!(step_of(None, 0x60, 15), 0);
     assert_eq!(step_of(None, 0xFF, 14), 0);
 }
+
+#[test]
+fn sequence_word_fa_sets_the_master_volume_and_fades_it() {
+    // FA20 with the fade word 0x2000 (target 0x20): the master is 0x20 and stays
+    let d = module(1, &[&[0xFA20, 0x2000, 0, 0xFFFF, 0]], &[PAT], &[ramp(0x800), ramp(4)], &[&[0, 0xFE]]);
+    let mut r = Ems6::build(&d, 0x20000).unwrap();
+    assert_eq!(r.master, 0x20);
+    for _ in 0..10 {
+        r.tick_tracks();
+    }
+    assert_eq!(r.master, 0x20);
+    // FA40 with 0x0001: down to 0 by 1 every 2 ticks, counting from the second tick
+    let d = module(1, &[&[0xFA40, 0x0001, 0, 0xFFFF, 0]], &[PAT], &[ramp(0x800), ramp(4)], &[&[0, 0xFE]]);
+    let mut r = Ems6::build(&d, 0x20000).unwrap();
+    let mut m = Vec::new();
+    for _ in 0..6 {
+        r.tick_tracks();
+        m.push(r.master);
+    }
+    assert_eq!(m, [64, 64, 63, 63, 62, 62]);
+}
+
+#[test]
+fn the_master_volume_scales_each_voice() {
+    // constant 0x40 instrument at volume 64 and master 32: half of 0x40
+    let pat = [0xFE, 0x00, 0xF7, 0x40, 0x40, 0x00, 0x00, 0xFD, 0x10, 0x30, 0xFF];
+    let d = module(1, &[&[0xFA20, 0x2000, 0, 0xFFFF, 0]], &[&pat], &[vec![0x40; 0x4000], ramp(4)], &[&[0, 0xFE]]);
+    let (l, _, _) = streams(&d, 4);
+    assert!(l.iter().any(|&x| x == 0x20));
+    assert!(l.iter().all(|&x| x == 0 || x == 0x20));
+}
+
+#[test]
+fn the_release_plays_the_last_volume_less_its_steps_while_the_envelope_runs() {
+    // F7 64 -> 0 by 1 every tick, F5 release 4 ticks by 8 a tick, a note of 4 rows at speed 6
+    let pat = [0xFE, 0x00, 0xF5, 0x04, 0x08, 0xF7, 0x40, 0x00, 0x01, 0x00, 0xFD, 0x04, 0x30, 0xFF];
+    let d = module(1, &[&[0, 0xFFFF, 0]], &[&pat], &[vec![0x40; 0x4000], ramp(4)], &[&[0, 0xFE]]);
+    let mut r = Ems6::build(&d, 0x20000).unwrap();
+    let mut vols = Vec::new();
+    for _ in 0..24 {
+        r.tick_tracks();
+        vols.push(r.tracks[0].v.vol);
+    }
+    // the volume falls by 1 a tick; the last 4 ticks play the volume of tick 20 less 8, 16, 24, 32
+    let v20 = vols[19];
+    assert_eq!(&vols[20..24], &[v20 - 8, v20 - 16, (v20 - 24).max(0), (v20 - 32).max(0)]);
+}
+
+#[test]
+fn a_speed_of_zero_is_256_ticks_a_row() {
+    let pat = [0xFE, 0x00, 0xFC, 0x00, 0xFD, 0x01, 0x30, 0xFF];
+    let d = module(1, &[&[0, 0xFFFF, 0]], &[&pat], &[ramp(0x800), ramp(4)], &[&[0, 0xFE]]);
+    let mut r = Ems6::build(&d, 0x20000).unwrap();
+    r.tick_tracks();
+    assert_eq!(r.tracks[0].wait, 255);
+}

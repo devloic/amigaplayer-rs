@@ -67,7 +67,7 @@ Each track reads its sequence word by word when its pattern ends:
 | FBxx | play the next pattern `xx` times in all |
 | FDxx | transpose: `xx` signed, added to every note |
 | FCxx | instrument offset: `xx` added to the instrument number of notes |
-| FAxx | skips the following word |
+| FAxx w | master volume `M = xx` (64 at the start), then a fade of `M` by 1 every `lo(w) + 1` ticks towards `hi(w)` (a signed byte, at least 0); `w = 0x4000` is no change and every module starts so. A later FA resets `M` and the fade; the fade stops at its target. A fade set while the tracks are built counts from the second tick. `xx` over 64 or a target over 64 reads the original's volume table past its end (garbage); not reproduced |
 | F8xx, F9xx | played as a pattern whose data are block 2 from its start (the offset table) to the file's end (seen with read watches in Galaxy Man) |
 | other 8000.. | ignored |
 
@@ -127,10 +127,16 @@ reaches up to 0xFF.
 
 ## 6. Volume
 
-Per tick: during the release (the track's remaining wait below `n`), `relsub += s` and the envelope
-stands still (neither the volume nor its counter moves: Tropical Islands' fade-out under F6 at tick
-3075 needs it); otherwise `relsub = 0` and the envelope moves the volume toward the target by its
-step every `d + 1` ticks. The voice's volume is `max(0, volume - relsub)`. A volume over 64 is a
+Per tick the envelope runs on every tick, the release included: when its counter is 0 the volume
+moves toward the target by its step and the counter becomes `d`, else the counter falls by 1. When
+the track's remaining wait is below the release length `n` (the note's last ticks), `relsub += s`
+and the voice plays `max(0, vfrozen - relsub)`, where `vfrozen` is the volume of the last tick
+before the release (F7 also sets it); otherwise `relsub = 0` and `vfrozen` is the volume. (Probe
+modules with a constant raw instrument, F5 and F7 with delays 6 and 0, match the reference
+exactly; Galaxy Man at 325 s needs it.) With a speed of 0 (FC 00) the whole note is in the release.
+
+The master volume `M` of section 4 (FA) scales every voice: the effective volume is
+`(vol * M) >> 6` and a voice adds `(s * eff) >> 6` to its side. A volume over 64 is a
 factor as it is here; the original reads its volume table past row 64 there (mostly 0x80 bytes,
 depending on the module's layout), which is not reproduced and which no known module needs.
 
@@ -150,7 +156,8 @@ retrigger, the volume, the pitch. A wait of `dur` rows counts rows, not ticks: a
 adds to the row in progress and a row ends after `speed` ticks, with the speed as it was when the
 tick began (a speed change by another track moves the end of a wait under way, from the next tick
 on); the wait left is `rows_left * speed - ticks_into_row - 1`. A wait set in the tick uses the
-current speed (`dur * speed - 1`).
+current speed (`dur * speed - 1`). A speed of 0 counts as 256 ticks a row (the original's counter
+wraps), for the sub-counter and for new waits.
 
 ### 7.3 Voices
 
@@ -161,9 +168,10 @@ the rules of the port's `mix` (a voice past its end when a part starts plays the
 and reads behind by the loop length plus the overshoot until its next wrap; one exactly at its end
 wraps before its first sample). A one-shot voice that ends within a part goes back to the position it
 had at the start of that part; an F6 that re-enables it plays on from there. A voice left exactly at
-its end by a part (it stops at the next part's start): a raw instrument goes back to the start of the
-part in which it reached its end (Stormlord, F6 at tick 3990), an 8SVX one stays at its end (Tropical
-Islands, F6 at tick 3756). Only these two cases were seen; synthetic voices always loop.
+its end by a part stops at the next part's start. Its return position is the start of the piece
+it reached its end in, a piece being a run between two block or tick boundaries (the position
+at the piece's start is always kept; variants that kept it only at tick or only at block starts
+were worse against Stormlord, Galaxy Man and Robocop 3). Synthetic voices always loop.
 
 ### 7.4 Song end
 

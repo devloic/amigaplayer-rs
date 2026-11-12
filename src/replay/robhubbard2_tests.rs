@@ -323,3 +323,17 @@ fn takes_no_module_of_the_corpus_lists() {
     eprintln!("{read} files read, {} taken", taken.len());
     assert!(taken.iter().all(|p| p.to_lowercase().contains("/rh2.")), "{taken:?}");
 }
+
+#[test]
+fn library_names_the_format_the_bank_decides() {
+    // an Infogrames module's check takes this layout too, and comes first: the module alone is
+    // named Infogrames, with the Rob Hubbard 2 bank beside it Rob Hubbard 2 (which plays it)
+    let d = module(3, &[SIL, &[0xA0, 60, 0xFF]], [&[1], &[0], &[0], &[0]], &[], &[]);
+    let b = std_bank();
+    let several = crate::open::claimed_by_several(&d);
+    let named = crate::detect_with("rh2.test.dum", &d, &[("rh.ins", &b)]).unwrap();
+    assert!(named.contains("Hubbard"), "{named}");
+    if several {
+        assert!(!crate::detect(&d).unwrap().contains("Hubbard"));
+    }
+}

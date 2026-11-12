@@ -35,6 +35,26 @@ pub fn detect(data: &[u8]) -> Option<String> {
     crate::xmp::format_of(&data)
 }
 
+/// Whether more than one open replayer's check takes `data` (unpacked as [`detect`] does,
+/// which names the first of them). Which one plays it is then decided by which accepts it
+/// with its companion files, as the engine tries them in order: an Infogrames module and a
+/// Rob Hubbard 2 one pass both checks, and the bank beside the module tells them apart.
+pub fn claimed_by_several(data: &[u8]) -> bool {
+    if crate::aiff::detect(data) {
+        return false;
+    }
+    let data = crate::decrunch::decrunch(data.to_vec());
+    #[cfg(feature = "sid")]
+    if crate::sid::detect(&data) {
+        return false;
+    }
+    let data = if crate::replay::timetracker::is_timetracker(&data) { data } else { crate::prowizard::convert(data, Path::new("")) };
+    if crate::protracker::ProTracker::detect(&data).is_some_and(|f| f != "SoundTracker") {
+        return false;
+    }
+    crate::replay::REPLAYERS.iter().filter(|o| (o.detect)(&data)).nth(1).is_some()
+}
+
 /// Whether `data` (after decrunching) is a custom module: an AmigaOS executable with a
 /// DeliTracker player header whose tags say `DTP_CustomPlayer` (the module's own code plays
 /// it). Nothing of it is run. An open replayer may still claim such a file first (`detect`).

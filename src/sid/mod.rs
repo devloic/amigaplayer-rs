@@ -59,7 +59,8 @@ const POWER_ON_DELAY: u32 = 0;
 
 /// Scale_Factor of SimpleMixer
 const SCALE_FACTOR: i32 = 1 << 16;
-const SQRT_2: f64 = 1.41421356237;
+/// (upstream's literal is 1.41421356237; the scale it gives, 46340, is the same)
+const SQRT_2: f64 = std::f64::consts::SQRT_2;
 const SQRT_3: f64 = 1.73205080757;
 
 /// A SID tune playing.

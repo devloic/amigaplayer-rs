@@ -477,8 +477,8 @@ pub const REPLAYERS: &[Open] = &[
     // after the others: its detection is loose (two bytes of the first envelope)
     infogrames::OPEN,
     // strict layout rule (offsets in order, every list closed by FF, two 416-byte tables to the file's end) and a bank beside it;
-    // after Infogrames: its modules pass this rule and their <name>.ins bank passes this bank check, while
-    // Infogrames declines a Rob Hubbard 2 module (no bank of its name), which the engine then gives to this one
+    // after Infogrames, the same format: Infogrames hands it the modules with no bank of their own name (rh.ins
+    // beside them); this entry takes those Infogrames' looser check does not
     robhubbard2::OPEN,
     // last: its content check takes anything (the file name is checked in `new`)
     adpcmmono::OPEN,

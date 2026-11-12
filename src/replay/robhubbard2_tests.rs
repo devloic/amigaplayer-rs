@@ -326,14 +326,16 @@ fn takes_no_module_of_the_corpus_lists() {
 
 #[test]
 fn library_names_the_format_the_bank_decides() {
-    // an Infogrames module's check takes this layout too, and comes first: the module alone is
-    // named Infogrames, with the Rob Hubbard 2 bank beside it Rob Hubbard 2 (which plays it)
-    let d = module(3, &[SIL, &[0xA0, 60, 0xFF]], [&[1], &[0], &[0], &[0]], &[], &[]);
+    // table A's first record starting 00 0F, as in the real modules, is what Infogrames' check looks
+    // for: the module alone is named Infogrames; with only rh.ins beside it Infogrames hands it to
+    // Rob Hubbard 2, which plays it, and with a bank of its own name Infogrames plays it
+    let a0 = rec(0, [(15, 4, 1), (1, 0, 1), (1, 0, 1), (1, 0, 1)]);
+    let d = module(3, &[SIL, &[0xA0, 60, 0xFF]], [&[1], &[0], &[0], &[0]], &[(0, a0)], &[]);
     let b = std_bank();
-    let several = crate::open::claimed_by_several(&d);
+    assert!(crate::open::claimed_by_several(&d));
+    assert_eq!(crate::detect(&d).as_deref(), Some("Infogrames"));
     let named = crate::detect_with("rh2.test.dum", &d, &[("rh.ins", &b)]).unwrap();
     assert!(named.contains("Hubbard"), "{named}");
-    if several {
-        assert!(!crate::detect(&d).unwrap().contains("Hubbard"));
-    }
+    let named = crate::detect_with("test.dum", &d, &[("test.ins", &b)]).unwrap();
+    assert_eq!(named, "Infogrames");
 }

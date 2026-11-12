@@ -698,7 +698,8 @@ impl Replayer for RobHubbard2 {
 /// Colour clocks from the song's start to the timer's start (the reference's start-up).
 const START_DELAY: u64 = 13200;
 
-fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+/// Also called by Infogrames' `new` for a module of its format with no bank of the module's name.
+pub(super) fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     layout(d)?;
     let file = m.bus.read_cstr(m.deli.file_buf);
     let bank =

@@ -417,10 +417,16 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         return None;
     }
     let file = m.bus.read_cstr(m.deli.file_buf);
-    let (bank, bank_try) = bank_names(&file)
+    // no bank of the module's name: the Rob Hubbard 2 modules (Stir Crazy featuring Bobo, Captain
+    // Blood) are this format with the bank `rh.ins` beside them, played by the DeliPlayer
+    // `RobHubbard_2`, whose periods differ by one in places; nothing in the module tells them apart
+    let Some((bank, bank_try)) = bank_names(&file)
         .iter()
         .enumerate()
-        .find_map(|(i, n)| crate::deli::read_companion(m, n).1.ok().map(|b| (b, i as u64)))?;
+        .find_map(|(i, n)| crate::deli::read_companion(m, n).1.ok().map(|b| (b, i as u64)))
+    else {
+        return super::robhubbard2::new(d, _base, m);
+    };
     let addr = m.alloc(bank.len() as u32 + 16);
     if addr == 0 {
         return None;

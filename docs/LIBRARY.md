@@ -73,6 +73,7 @@ while !song.songend() && song.elapsed_secs() < 120.0 {
 | item | |
 |------|--|
 | `detect(&[u8]) -> Option<String>` | which format would play the bytes (after unpacking), without starting it |
+| `detect_with(name, &[u8], companions) -> Option<String>` | as `detect`, given the file name and companion files; where the bytes pass more than one replayer's check (Infogrames and Rob Hubbard 2 modules; the bank beside them decides) it starts the song to name the one that plays it |
 | `formats() -> Vec<&'static str>` | the formats the library knows |
 | `Song::open(name, bytes, rate)` / `open_with(.., companions, ..)` | start a module. Companions (TFMX `smpl.*`, Mark Cooksey `mcs.*`, IFF-SMUS `Instruments/*`, ...) are `(relative path, bytes)` pairs |
 | `Song::open_opts(name, bytes, companions, rate, &Options)` | as `open_with`, with `Options` (`Options::new().allow_custom(true)`: custom modules, `host-68k` builds) |

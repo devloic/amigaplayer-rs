@@ -100,7 +100,7 @@ mod song;
 pub mod songdb;
 pub mod unpack;
 
-pub use song::{detect, formats, Error, Options, Result, Song, Subsongs};
+pub use song::{detect, detect_with, formats, Error, Options, Result, Song, Subsongs};
 #[cfg(feature = "host-68k")]
 pub use song::detect_custom;
 

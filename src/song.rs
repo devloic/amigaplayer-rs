@@ -96,6 +96,26 @@ pub fn detect(data: &[u8]) -> Option<String> {
     catch_unwind(AssertUnwindSafe(|| open::detect(data))).ok().flatten()
 }
 
+/// As [`detect`], told the module's file name and given the companion files
+/// [`Song::open_with`] takes. Where the module alone passes more than one replayer's check
+/// (Infogrames and Rob Hubbard 2 modules pass each other's; the sample bank beside the module
+/// decides), the song is started to see which of them plays it, and that format is named; if
+/// it does not start, the answer is [`detect`]'s.
+///
+/// ```
+/// assert_eq!(amigaplayer_rs::detect_with("x", b"not a module", &[]), None);
+/// ```
+pub fn detect_with(name: &str, data: &[u8], companions: &[(&str, &[u8])]) -> Option<String> {
+    let first = detect(data)?;
+    if !catch_unwind(AssertUnwindSafe(|| open::claimed_by_several(data))).unwrap_or(false) {
+        return Some(first);
+    }
+    match Song::open_with(name, data, companions, 48000) {
+        Ok(s) => Some(s.format().to_string()),
+        Err(_) => Some(first),
+    }
+}
+
 /// Whether `data` is a custom module: an AmigaOS executable that carries its own replay
 /// routine behind a DeliTracker player header (`CUST.*` files, mostly game music ripped with
 /// its player). Packed files are unpacked for the check; nothing of the module is run.

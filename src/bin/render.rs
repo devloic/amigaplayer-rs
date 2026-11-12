@@ -11,6 +11,9 @@
 //! Built with the `songdb` feature it also looks the file up in audacious-uade's song database
 //! (`--songdb DIR`: lengths, author, album, ...; the data is not part of this program) and can
 //! use the length found there as a place to stop (`--stop-at songdb`).
+//!
+//! `--songlengths FILE` does the same for C64 tunes with HVSC's `Songlengths.md5`
+//! (`--stop-at songlengths`: stop at that length, since a SID tune never ends by itself).
 
 use amigaplayer_rs::engine::{Backend, Engine};
 use anyhow::{bail, Context, Result};
@@ -41,6 +44,13 @@ const USAGE: &str = "usage: amigaplayer-render [OPTIONS] MODULE
                     a second), keeping none of that silence. Never earlier than that
                     length; the other stops (song end, --silence, --seconds) stay.
                     Without an entry for the subsong: as without the option
+  --songlengths FILE
+                    HVSC's DOCUMENTS/Songlengths.md5 (not shipped with this program): the
+                    file's MD5 is looked up there, and the length of the subsong is added
+                    to the JSON as songlength_ms (null: not listed)
+  --stop-at songlengths
+                    with --songlengths: stop when that length is reached (a C64 tune never
+                    ends by itself); the other stops stay. Not listed: as without the option
   --players DIR, --eagleplayers DIR, --genies DIR
                     original 68k DeliPlayers, Eagleplayers and DeliGenies (default: none)
   --68k-first       let those players take a module before the built-in replayers
@@ -59,6 +69,8 @@ struct Args {
     info: bool,
     songdb: Option<PathBuf>,
     stop_songdb: bool,
+    songlengths: Option<PathBuf>,
+    stop_songlengths: bool,
     players: Option<PathBuf>,
     eagleplayers: Option<PathBuf>,
     genies: Option<PathBuf>,
@@ -91,6 +103,8 @@ fn parse_args() -> Args {
         info: false,
         songdb: None,
         stop_songdb: false,
+        songlengths: None,
+        stop_songlengths: false,
         players: None,
         eagleplayers: None,
         genies: None,
@@ -132,10 +146,18 @@ fn parse_args() -> Args {
             "--stop-at" => {
                 a.stop_songdb = match it.next().as_deref() {
                     Some("songdb") => true,
-                    Some("default") => false,
+                    Some("songlengths") => {
+                        a.stop_songlengths = true;
+                        a.stop_songdb
+                    }
+                    Some("default") => {
+                        a.stop_songlengths = false;
+                        false
+                    }
                     _ => usage(),
                 }
             }
+            "--songlengths" => a.songlengths = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--players" => a.players = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--eagleplayers" => a.eagleplayers = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--genies" => a.genies = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
@@ -152,6 +174,10 @@ fn parse_args() -> Args {
     a.file = file.unwrap_or_else(|| usage());
     if !(8000..=192000).contains(&a.rate) || !a.seconds.is_finite() || a.seconds < 0.0 || !a.silence.is_finite() || a.silence < 0.0 {
         usage();
+    }
+    if a.stop_songlengths && a.songlengths.is_none() {
+        eprintln!("amigaplayer-render: --stop-at songlengths needs --songlengths FILE");
+        std::process::exit(2);
     }
     if a.stop_songdb && a.songdb.is_none() {
         eprintln!("amigaplayer-render: --stop-at songdb needs --songdb DIR");
@@ -260,6 +286,11 @@ fn run(a: &Args) -> Result<()> {
         Some(dir) => Some(amigaplayer_rs::songdb::SongDb::open(dir)?.lookup(&data)),
         None => None,
     };
+    // the HVSC lengths of the file's songs, if it is listed
+    let hvsc: Option<Vec<u32>> = match &a.songlengths {
+        Some(f) => amigaplayer_rs::songlengths::SongLengths::open(f).with_context(|| f.display().to_string())?.lookup(&data).map(|l| l.to_vec()),
+        None => None,
+    };
     e.play_data(&a.file, data)?;
     let (lo, hi, start) = match &e.playing {
         Some(p) => (p.sub_min, p.sub_max, p.sub),
@@ -318,6 +349,17 @@ fn run(a: &Args) -> Result<()> {
             songdb_len = found.as_ref().and_then(|i| i.subsong(sub)).filter(measured).map(|s| s.length_ms as u64 * a.rate as u64 / 1000);
         }
     }
+    // `--songlengths`: the subsong's length in HVSC's list, and where `--stop-at songlengths` stops
+    let mut songlength_stop: Option<u64> = None;
+    if a.songlengths.is_some() {
+        let sub = if a.info { want } else { p.sub };
+        let ms = hvsc.as_ref().and_then(|l| l.get(sub as usize).copied());
+        info.pop();
+        info.push_str(&format!(",\"songlength_ms\":{}}}", ms.map_or("null".to_string(), |v| v.to_string())));
+        if a.stop_songlengths {
+            songlength_stop = ms.map(|v| v as u64 * a.rate as u64 / 1000);
+        }
+    }
     if a.info {
         println!("{info}");
         return Ok(());
@@ -336,6 +378,7 @@ fn run(a: &Args) -> Result<()> {
         w.write_all(&wav_header(a.rate, if to_stdout { u32::MAX - 36 } else { 0 }))?;
     }
     let limit = if a.seconds > 0.0 { (a.seconds * a.rate as f64) as u64 } else { u64::MAX };
+    let limit = songlength_stop.map_or(limit, |l| limit.min(l));
     let quiet_limit = if a.silence > 0.0 { (a.silence * a.rate as f64) as u64 } else { u64::MAX };
     let mut buf = vec![0f32; 2 * 4096];
     let mut bytes = Vec::with_capacity(4 * 4096);

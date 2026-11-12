@@ -267,7 +267,7 @@ in place, because the open replayers load their modules and companion files thro
 cargo build --release --no-default-features --features host-68k --bin amigaplayer-render
 amigaplayer-render [--out FILE|-] [--format wav|raw] [--rate HZ] [--subsong N|first|default]
                    [--seconds S] [--silence S] [--no-songend] [--volume V] [--info]
-                   [--songdb DIR] [--stop-at songdb|default] MODULE
+                   [--songdb DIR] [--songlengths FILE] [--stop-at songdb|songlengths|default] MODULE
 ```
 
 A module to 16-bit stereo WAV or raw PCM, on a file or on standard output (the default), for
@@ -304,6 +304,15 @@ or with the status `error`, `none` or `nosound` is not used. For example `AHX.Cr
 entry above) renders 94.92 s by the player's own song end and 94.76 s with `--stop-at songdb`.
 Loading the database costs each run about 0.2 s and 19 MB. A directory that is not a database
 is exit status 1; `--songdb` in a build without the feature is exit status 2 with the reason.
+
+`--songlengths FILE` does the same for C64 tunes (a build with the `sid` feature) with HVSC's
+`DOCUMENTS/Songlengths.md5` (not shipped with this program): the file's MD5 is looked up and
+the length of the subsong in the list is added to the JSON as `"songlength_ms"` (`null` if the
+tune or that subsong is not listed). `--stop-at songlengths` stops the render at that length,
+exactly: a SID tune never ends or falls silent by itself, so there is no silence to wait for.
+The other stops apply as before, and a tune not listed renders as without the option. All 628
+tunes of HVSC Update 85 that start are found; a two-song tune listed `3:17.645 0:03.467`
+renders 197.645 s and 3.467 s. The same lookup is in the library as `songlengths::SongLengths`.
 
 ## C and other languages
 

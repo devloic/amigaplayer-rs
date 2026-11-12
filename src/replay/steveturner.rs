@@ -165,6 +165,21 @@ impl Ch {
     fn new() -> Ch {
         Ch { b: [0; 108], env: Env::None, seg: Seg::None, glide: false, stream: Stream::None, ord: 0, pat: 0 }
     }
+
+    /// A channel after a change of subsong: the stop before the new start leaves its
+    /// pending, current and step words at the "none" value $FFFF, as `reset` does. A
+    /// voice whose song word is 0 then stays silent; at the first start the records are
+    /// still zero and such a voice triggers step 0. Both seen in both originals (the
+    /// Eagleplayers "Jason Page Old" of EP 2.06 and "SteveTurner" of UADE): Paradroid 90's
+    /// first song plays channel 3, Ivan Stewart's songs 9-18 (fourth voice word 0),
+    /// reached by a change of subsong, leave it silent.
+    fn stopped() -> Ch {
+        let mut c = Ch::new();
+        c.p32(0x1A, 0x0000_FFFF);
+        c.p32(0x1E, 0x0000_FFFF);
+        c.p32(0x22, 0x0000_FFFF);
+        c
+    }
     fn g8(&self, o: usize) -> u8 {
         self.b.get(o).copied().unwrap_or(0)
     }
@@ -194,6 +209,8 @@ pub struct SteveTurner {
     songs: usize,
     sub: u16,
     start: Option<u16>,
+    /// A change of subsong has been made (see `Ch::stopped`).
+    changed: bool,
     songend: bool,
     master: u16,
     target: u16,
@@ -216,7 +233,8 @@ impl SteveTurner {
 
     /// InitSound: a fresh start of subsong `n` (1-based song number).
     fn init(&mut self, n: u16, hw: &mut Hw) {
-        self.ch = [Ch::new(), Ch::new(), Ch::new(), Ch::new()];
+        let c = if self.changed { Ch::stopped() } else { Ch::new() };
+        self.ch = [c.clone(), c.clone(), c.clone(), c];
         self.master = 0;
         self.song = 0;
         self.gprio = 0;
@@ -818,6 +836,7 @@ impl Replayer for SteveTurner {
     fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
         self.sub = n;
         self.start = Some(n + 1);
+        self.changed = true;
         self.songend = false;
     }
 
@@ -843,6 +862,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songs: count(d, lay.seq),
         sub: 0,
         start: Some(1),
+        changed: false,
         songend: false,
         master: 0,
         target: 255,
@@ -979,6 +999,16 @@ mod tests {
         let mut e = d.clone();
         e[..STEP0].copy_from_slice(&stub_bytes([46, 142, 168, 178], false));
         assert!(!detect(&e));
+    }
+
+    /// A channel at the first start has no step pending word "none" (zeros, so a voice
+    /// whose song word is 0 triggers step 0); after a change of subsong it has.
+    #[test]
+    fn channels_after_a_subsong_change_have_no_step() {
+        let (n, s) = (Ch::new(), Ch::stopped());
+        assert_eq!(n.g16(0x1C), 0);
+        assert_eq!(s.g16(0x1C) as i16, -1);
+        assert_eq!((s.g8(0x1A), s.g8(0x23)), (0, 0));
     }
 
     #[test]

@@ -383,7 +383,8 @@ impl Sm {
             }
             self.lastarp = 0xFF;
             if self.build == Build::D {
-                self.fcnt = 0;
+                // the first step of a fade comes one tick earlier than the others' count
+                self.fcnt = self.fcnt.saturating_sub(1);
             }
         }
         self.pos = self.pos0;

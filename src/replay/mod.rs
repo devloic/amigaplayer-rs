@@ -47,6 +47,7 @@ mod facethemusic_tables;
 pub mod fred;
 pub mod futurecomposer;
 pub mod gamemusiccreator;
+pub mod gtgamesystems;
 pub mod iffsmus;
 pub mod infogrames;
 pub mod instereo1;
@@ -354,6 +355,8 @@ pub const REPLAYERS: &[Open] = &[
     ptm::OPEN,
     // strict: `SPM\x02`, the block offsets and every song block in the file
     stonetracker::OPEN,
+    // strict: the size long, three end records at the places the voice offsets and the size give
+    gtgamesystems::OPEN,
     richardjoseph::OPEN,
     richardjosephrj::OPEN,
     sonix::OPEN,

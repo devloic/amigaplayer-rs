@@ -30,6 +30,8 @@ enum Build {
     A,
     B,
     C,
+    /// Version 3: build A's tables, a tick of build B/C's kind.
+    D,
 }
 
 fn rb(d: &[u8], o: usize) -> u8 {
@@ -47,6 +49,10 @@ struct Lay {
     g: usize,
     /// The period table: 64 words (B) or 46 (A, C).
     periods: usize,
+    /// Build A family: the shift of the header fields (0 in A) and the offset of the step
+    /// table from `g`.
+    ho: isize,
+    tb: usize,
 }
 
 /// The first word `w` at an even offset in `from..to`.
@@ -80,8 +86,18 @@ fn scan(d: &[u8]) -> Option<Lay> {
     if end < 6 || be32(d, end - 6) != 0x00BF_E001 {
         return None;
     }
-    let build = if be16(d, init + 4) == 0x1740 && be16(d, init + 6) == 0xFFED {
-        Build::A
+    // build A and its relatives: the init routine sets up the step table's address (LEA tb(A3),A0)
+    // and adds the sample table's offset (ADDA.L yy(A3),A0), the fields of the header being
+    // `ho` further than build A's, 0xEE being the sample table's
+    let a_fam = (lea..lea + 0x100).step_by(2).find_map(|o| {
+        (be16(d, o) == 0x41EB && be16(d, o + 4) == 0xD1EB && be16(d, o + 8) == 0x2748)
+            .then(|| (be16(d, o + 2) as usize, be16(d, o + 6) as isize - 0xEE))
+    });
+    let (mut ho, mut tb) = (0, 0xF4);
+    let build = if let Some((t, h)) = a_fam {
+        (ho, tb) = (h, t);
+        // version 3: a routine with 0x3C-byte voice records
+        if init == 0x0C && find(d, 0, 0x200, &[0xDBFC, 0x0000, 0x003C]).is_some() { Build::D } else { Build::A }
     } else if init == 0x0C {
         if find(d, 0, 0x200, &[0xDBFC, 0x0000, 0x0038]).is_some() { Build::C } else { Build::B }
     } else {
@@ -99,7 +115,7 @@ fn scan(d: &[u8]) -> Option<Lay> {
     if g < 0x80 || g + 0x1200 > d.len() || periods + 2 * n > d.len() {
         return None;
     }
-    Some(Lay { build, g, periods })
+    Some(Lay { build, g, periods, ho, tb })
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -162,6 +178,9 @@ struct Sm {
     g: usize,
     /// Offset of the fixed-layout tables beyond 0xD0 (C: 0x10 further).
     c: usize,
+    /// Build A family: header shift, step table offset.
+    ho: isize,
+    tb: usize,
     periods: Vec<u16>,
     v: [Voice; 4],
     started: bool,
@@ -213,18 +232,28 @@ impl Sm {
         be32(&self.img, o)
     }
 
+    /// Build A's data layout (build D has it too).
+    fn alay(&self) -> bool {
+        matches!(self.build, Build::A | Build::D)
+    }
+
+    /// A field of build A's header, `o` from `g` in build A itself.
+    fn hf(&self, o: usize) -> usize {
+        (self.g + o).wrapping_add_signed(self.ho)
+    }
+
     /// Build A: the table at the offset long `o` of the header, from `T`.
     fn t(&self) -> usize {
-        self.g + 0xF4
+        self.g + self.tb
     }
 
     fn atab(&self, o: usize) -> usize {
-        self.t().wrapping_add(self.r32(self.g + o) as usize)
+        self.t().wrapping_add(self.r32(self.hf(o)) as usize)
     }
 
     fn silent(&self) -> usize {
         match self.build {
-            Build::A => self.g + 0xF2,
+            Build::A | Build::D => self.hf(0xF2),
             _ => self.g + 0xE6 + self.c,
         }
     }
@@ -232,11 +261,11 @@ impl Sm {
     /// Start, length (words), loop start (bytes) and loop length (words) of sample `s`.
     fn sample(&self, s: u8) -> (u32, u16, u16, u16) {
         let s = s as usize;
-        if self.build == Build::A {
+        if self.alay() {
             let st = self.atab(0xEE);
             let x = (s << 3) & 0xFF;
             let rec = st.wrapping_add(x + (x >> 2));
-            let start = (st as u32).wrapping_add(self.r32(rec)).wrapping_add(self.r32(self.g + 0xEA));
+            let start = (st as u32).wrapping_add(self.r32(rec)).wrapping_add(self.r32(self.hf(0xEA)));
             return (start, self.r16(rec + 4), self.r16(rec + 6), self.r16(rec + 8));
         }
         let soff = self.r32(self.g + 0xE2 + self.c) as usize;
@@ -255,7 +284,7 @@ impl Sm {
     fn instrument(&self, i: u8) -> usize {
         let i = (i & 0x3F) as usize;
         match self.build {
-            Build::A => self.atab(0xDA).wrapping_add(16 * i),
+            Build::A | Build::D => self.atab(0xDA).wrapping_add(16 * i),
             Build::B => self.g + 0xAE8 + 14 * i,
             Build::C => self.g + 0xAF8 + 16 * i,
         }
@@ -263,14 +292,14 @@ impl Sm {
 
     fn arpnote(&self, k: u8) -> u8 {
         match self.build {
-            Build::A => self.r8(self.atab(0xDE).wrapping_add(k as usize)),
+            Build::A | Build::D => self.r8(self.atab(0xDE).wrapping_add(k as usize)),
             _ => self.r8(self.g + 0xE68 + self.c + k as usize),
         }
     }
 
     fn arpsample(&self, k: u8) -> u8 {
         match self.build {
-            Build::A => self.r8(self.atab(0xE2).wrapping_add(k as usize)),
+            Build::A | Build::D => self.r8(self.atab(0xE2).wrapping_add(k as usize)),
             _ => self.r8(self.g + 0xF68 + self.c + k as usize),
         }
     }
@@ -319,7 +348,9 @@ impl Sm {
                 }
             }
         } else {
-            let col = |c: usize| self.g + 0xE8 + self.c + 0x40 * c + self.step as usize;
+            let st = self.step as usize;
+            let (t, g, cc, d) = (self.t(), self.g, self.c, self.build == Build::D);
+            let col = move |c: usize| if d { t + 8 * st + c } else { g + 0xE8 + cc + 0x40 * c + st };
             self.pos0 = self.r8(col(0));
             self.pos_n = self.r8(col(1));
             self.strans = self.r8(col(2));
@@ -357,7 +388,7 @@ impl Sm {
     fn fetch_pattern(&mut self, i: usize) {
         let patlen = self.patlen as usize;
         let (pt, rowp) = match self.build {
-            Build::A => {
+            Build::A | Build::D => {
                 let pl = self.atab(0xD6).wrapping_add(8 * self.pos as usize + self.v[i].trk);
                 let n = self.r8(pl) as usize;
                 (self.r8(pl.wrapping_add(1)), self.atab(0xE6).wrapping_add(n * patlen))
@@ -468,7 +499,7 @@ impl Sm {
             k = 0;
             cn = 0x12u8.wrapping_sub(tune);
         }
-        if self.build == Build::C {
+        if matches!(self.build, Build::C | Build::D) {
             self.v[i].cnote = cn;
         }
         self.table(k as usize)
@@ -518,7 +549,7 @@ impl Sm {
             let in_loop = match self.build {
                 Build::A => rec[0] & 0x80 != 0,
                 Build::B => false,
-                Build::C => s & 0x80 != 0,
+                Build::C | Build::D => s & 0x80 != 0,
             };
             if in_loop {
                 hw.len(i, ll);
@@ -550,7 +581,7 @@ impl Sm {
             v.aloop = rec[11];
             v.afix = rec[12];
             v.tune = rec[13];
-            if self.build == Build::C {
+            if matches!(self.build, Build::C | Build::D) {
                 v.swlen = rec[14];
                 v.swcnt = rec[14];
                 v.swmask = rec[15] & 15;
@@ -598,7 +629,7 @@ impl Sm {
                 let same = s == self.arpsample(apos.wrapping_sub(1));
                 let keep = match self.build {
                     Build::B => false,
-                    Build::C => same,
+                    Build::C | Build::D => same,
                     Build::A => same || s & 0x20 != 0,
                 };
                 if !keep {
@@ -607,7 +638,7 @@ impl Sm {
                 }
             }
             self.lastarp = t;
-            if t != 0x80 && !(self.build == Build::C && t == 0x82) {
+            if t != 0x80 && !(matches!(self.build, Build::C | Build::D) && t == 0x82) {
                 let m = if t == 0x81 {
                     self.v[i].afix
                 } else {
@@ -664,7 +695,7 @@ impl Sm {
                 }
             }
         }
-        if build == Build::C && v.rlen != 0 && v.swlen != 0 && self.lastarp != 0x82 {
+        if matches!(build, Build::C | Build::D) && v.rlen != 0 && v.swlen != 0 && self.lastarp != 0x82 {
             if v.swcnt & v.swmask == 0 {
                 v.rptr = v.rptr.wrapping_add(v.swstep as i16 as i32 as u32);
             }
@@ -733,7 +764,11 @@ impl Sm {
     fn init(&mut self, hw: &mut Hw) {
         let g = self.g;
         for i in 0..4 {
-            let size = if self.build == Build::C { 0x38 } else { 0x34 };
+            let size = match self.build {
+                Build::C => 0x38,
+                Build::D => 0x3C,
+                _ => 0x34,
+            };
             self.v[i] = Voice { trk: self.r32(g + size * i) as usize, bit: self.r16(g + size * i + 4), ..Voice::default() };
         }
         self.tick = 0;
@@ -748,38 +783,46 @@ impl Sm {
         self.pendn = 0;
         self.brk = false;
         if self.build == Build::A {
-            self.speed0 = self.r8(g + 0xD1);
-            self.patlen = self.r8(g + 0xD2);
-            self.loopstep = self.r8(g + 0xD3);
-            self.endstep = self.r8(g + 0xD4);
+            self.speed0 = self.r8(self.hf(0xD1));
+            self.patlen = self.r8(self.hf(0xD2));
+            self.loopstep = self.r8(self.hf(0xD3));
+            self.endstep = self.r8(self.hf(0xD4));
             self.mode = 31;
             // the game's sound-effect sample records go to records 16..23, their
             // offsets made relative to the song's sample table
-            let st = self.atab(0xEE);
-            let add = 0x103F2u32.wrapping_sub(self.r32(g + 0xEE)).wrapping_sub(self.r32(g + 0xEA));
-            for k in 0..80 {
-                let b = self.r8(g - 0x64 + k);
-                if let Some(x) = self.img.get_mut(st + 160 + k) {
-                    *x = b;
+            if self.ho == 0 {
+                let st = self.atab(0xEE);
+                let add = 0x103F2u32.wrapping_sub(self.r32(g + 0xEE)).wrapping_sub(self.r32(g + 0xEA));
+                for k in 0..80 {
+                    let b = self.r8(g - 0x64 + k);
+                    if let Some(x) = self.img.get_mut(st + 160 + k) {
+                        *x = b;
+                    }
+                }
+                for k in 0..8 {
+                    let o = st + 160 + 10 * k;
+                    let v = self.r32(o).wrapping_add(add);
+                    if let Some(x) = self.img.get_mut(o..o + 4) {
+                        x.copy_from_slice(&v.to_be_bytes());
+                    }
                 }
             }
-            for k in 0..8 {
-                let o = st + 160 + 10 * k;
-                let v = self.r32(o).wrapping_add(add);
-                if let Some(x) = self.img.get_mut(o..o + 4) {
-                    x.copy_from_slice(&v.to_be_bytes());
-                }
-            }
-            hw.dmacon(0x000F);
             for v in &mut self.v {
                 v.master = 0x40;
             }
+            // the host's DMA off came with its start (`new`); the voices' silent loop, 0xA0 and
+            // the DMA on follow in the same call
             let silent = self.base.wrapping_add(self.silent() as u32);
+            hw.wait(INIT_WAIT);
             for i in 0..4 {
                 hw.loc(i, silent);
+                hw.wait(8);
                 hw.len(i, 1);
+                hw.wait(8);
                 hw.per(i, 0x00A0);
+                hw.wait(17);
             }
+            hw.wait(2);
             hw.dmacon(0x820F);
             self.step = if self.mode & 2 != 0 { self.loopstep } else { 0 };
             self.load_step();
@@ -788,11 +831,19 @@ impl Sm {
             }
         } else {
             let c = self.c;
-            self.master = self.r8(g + 0xD9 + c);
-            self.speed0 = self.r8(g + 0xDD + c);
-            self.patlen = self.r8(g + 0xDE + c);
-            self.loopstep = self.r8(g + 0xDF + c);
-            self.endstep = self.r8(g + 0xE0 + c);
+            if self.build == Build::D {
+                self.master = 0;
+                self.speed0 = self.r8(self.hf(0xD1));
+                self.patlen = self.r8(self.hf(0xD2));
+                self.loopstep = self.r8(self.hf(0xD3));
+                self.endstep = self.r8(self.hf(0xD4));
+            } else {
+                self.master = self.r8(g + 0xD9 + c);
+                self.speed0 = self.r8(g + 0xDD + c);
+                self.patlen = self.r8(g + 0xDE + c);
+                self.loopstep = self.r8(g + 0xDF + c);
+                self.endstep = self.r8(g + 0xE0 + c);
+            }
             self.step = self.loopstep;
             self.load_step();
         }
@@ -925,6 +976,8 @@ impl Replayer for Sm {
 /// From the host's first write to the song start, and from a timer call to the first write of its
 /// tick, in the reference's runs.
 const START: u64 = 2006;
+/// Build A: from the host's second write to its init's first write.
+const INIT_WAIT: u64 = 785;
 const ENTRY: u64 = 156;
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -939,14 +992,15 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     m.bus.write_word(0xDFF096, 0x000F);
     m.bus.clock = t0 + 8;
     m.bus.write_word(0xDFF09E, 0x00FF);
-    m.bus.clock = t0 + START;
-    Some(Box::new(Sm {
+    let mut sm = Sm {
         img: d.to_vec(),
         base,
         title,
         build: lay.build,
         g: lay.g,
         c: if lay.build == Build::C { 0x10 } else { 0 },
+        ho: lay.ho,
+        tb: lay.tb,
         periods,
         v: [Voice::default(); 4],
         started: false,
@@ -973,7 +1027,15 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         endstep: 0,
         mode: 0,
         lastarp: 0,
-    }))
+    };
+    if lay.build == Build::A {
+        // build A's init runs in the host's start call, its writes before the first tick
+        let mut hw = Hw { bus: &mut m.bus };
+        sm.started = true;
+        sm.init(&mut hw);
+    }
+    m.bus.clock = m.bus.clock.max(t0 + START);
+    Some(Box::new(sm))
 }
 
 #[cfg(test)]
@@ -1078,7 +1140,7 @@ mod tests {
             put16(&mut d, o, 0x6000);
             put16(&mut d, o + 2, disp);
         }
-        let code = [0x47FA, (0x400 - 0x94) as u16, 0x1740, 0xFFED, 0x08F9, 0x0001, 0x00BF, 0xE001, 0x177C, 0x0000, 0xFFFC, 0x4E75];
+        let code = [0x47FA, (0x400 - 0x94) as u16, 0x1740, 0xFFED, 0x41EB, 0x00F4, 0xD1EB, 0x00EE, 0x2748, 0xFF98, 0x08F9, 0x0001, 0x00BF, 0xE001, 0x177C, 0x0000, 0xFFFC, 0x4E75];
         for (k, w) in code.iter().enumerate() {
             put16(&mut d, 0x92 + 2 * k, *w);
         }
@@ -1088,7 +1150,7 @@ mod tests {
         let l = scan(&d).unwrap();
         assert_eq!((l.build, l.g, l.periods), (Build::A, 0x400, 0x300));
         // without the trailing store the filter operand is not where it must be
-        put16(&mut d, 0xA2, 0x1F7C);
+        put16(&mut d, 0xAE, 0x1F7C);
         assert!(scan(&d).is_none());
     }
 

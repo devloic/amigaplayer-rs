@@ -621,7 +621,12 @@ ALONE = {'emsv6': ('uade', 'EMS-6'),   # with all of UADE's players loaded the o
          # is the original; EP206's "IFF EMOD" (V1.02) is another build whose DMA gap is 110 colour
          # clocks (a voice at a period like 538 keeps its old sample), and whose one-shot samples
          # end on loop registers 0 / length 0 (Paula plays 128 KB from address 0: beeps and cracks)
-         'quadracomposer': ('uade', 'QuadraComposer')}
+         'quadracomposer': ('uade', 'QuadraComposer'),
+         # Sound Master: UADE's SoundMaster Eagleplayer (prefixes sm, sm1, sm2, sm3, smpro) plays every build
+         # the port knows (sm.*, .smpro, .sm3); in the full directory the default 68k chain (its PlayerStore
+         # "SoundMaster") plays only .smpro and part of the .sm files and no .sm3, so the original is run from
+         # a directory holding that player alone
+         'soundmaster': ('uade', 'SoundMaster')}
 
 
 def alone_dir(ctx, src, name):

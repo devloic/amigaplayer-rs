@@ -112,7 +112,8 @@ fn scan(d: &[u8]) -> Option<Lay> {
         }
     };
     let n = if build == Build::B { 64 } else { 46 };
-    if g < 0x80 || g + 0x1200 > d.len() || periods + 2 * n > d.len() {
+    let need = if matches!(build, Build::A | Build::D) { tb + 8 } else { 0x1200 };
+    if g < 0x80 || g + need > d.len() || periods + 2 * n > d.len() {
         return None;
     }
     Some(Lay { build, g, periods, ho, tb })
@@ -565,7 +566,7 @@ impl Sm {
             if self.build == Build::A {
                 v.vdir = 0;
             }
-            if self.build == Build::B {
+            if matches!(self.build, Build::B | Build::D) {
                 v.vvol = rec[8];
             }
             v.vdelay = rec[5];
@@ -660,7 +661,7 @@ impl Sm {
                         Self::centre(v);
                     }
                 } else {
-                    let d = if build == Build::B && v.lev != 0 { v.vvol as u16 } else { 0 };
+                    let d = if matches!(build, Build::B | Build::D) && v.lev != 0 { v.vvol as u16 } else { 0 };
                     if v.vdir & 0x80 == 0 {
                         if v.vlen >> 1 == v.vcnt && (build == Build::B || v.vdepth <= 0x40) {
                             v.vdepth = v.vdepth.wrapping_add(v.vinc);
@@ -766,7 +767,8 @@ impl Sm {
         for i in 0..4 {
             let size = match self.build {
                 Build::C => 0x38,
-                Build::D => 0x3C,
+                // a voice's record grows by two bytes with every eight of the header's
+                Build::A | Build::D => (0x34 + self.ho / 4) as usize,
                 _ => 0x34,
             };
             self.v[i] = Voice { trk: self.r32(g + size * i) as usize, bit: self.r16(g + size * i + 4), ..Voice::default() };
@@ -824,7 +826,7 @@ impl Sm {
             }
             hw.wait(2);
             hw.dmacon(0x820F);
-            self.step = if self.mode & 2 != 0 { self.loopstep } else { 0 };
+            self.step = if self.mode & 2 != 0 && self.ho >= 0 { self.loopstep } else { 0 };
             self.load_step();
             for i in 0..4 {
                 self.fetch_pattern(i);

@@ -28,6 +28,13 @@ for a in "$@"; do
   esac
 done
 mkdir -p "$WORK"
+# one run at a time per work directory: two runs (two worktrees, two agents) sharing it would
+# overwrite each other's builds and test binaries mid-run
+exec 9>"$WORK/.lock"
+if ! flock -n 9; then
+  echo "lib-check: $WORK is in use by another run; waiting (LIB_WORK=DIR to use another)" >&2
+  flock 9
+fi
 export CARGO_TARGET_DIR="$WORK/target" CARGO_BUILD_BUILD_DIR="$WORK/builddir"
 export SDL_AUDIO_DRIVER=dummy
 cd "$ROOT"

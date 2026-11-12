@@ -583,6 +583,12 @@ impl Engine {
             let x = crate::aiff::AiffPlayer::open(data, self.rate as u32).map_err(|e| anyhow!(e))?;
             return self.start_pcm(Box::new(x), path);
         }
+        // IFF 8SVX and RIFF WAVE samples of the kinds our decoders know, on the same player
+        if self.only_player.is_none() && (crate::iff8svx::detect(&data) || crate::riffwave::detect(&data)) {
+            let p = if crate::iff8svx::detect(&data) { crate::iff8svx::decode(data) } else { crate::riffwave::decode(data) };
+            let x = p.and_then(|p| crate::aiff::AiffPlayer::from_pcm(p, self.rate as u32)).map_err(|e| anyhow!(e))?;
+            return self.start_pcm(Box::new(x), path);
+        }
         let data = crate::decrunch::decrunch(data);
         // (a TimeTracker song is the open replayer's own under --open-replayers, not the ProWizard conversion's)
         let own = self.open_replayers && crate::replay::timetracker::is_timetracker(&data);

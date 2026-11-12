@@ -35,9 +35,14 @@ sdl3 = { version = "0.20", optional = true }
 # crates/songdb. The database itself (CC BY-NC-SA 4.0) is not part of anything here: it is
 # read from a directory given at run time.
 amigaplayer-songdb = { path = "crates/songdb", version = "0.1.0", optional = true }
+# `archives`: LhA (delharc, MIT OR Apache-2.0; its no_std build, so no clock), deflate for zip and
+# gzip (flate2 on miniz_oxide, MIT OR Apache-2.0), xz (lzma-rs, MIT). All pure Rust.
+delharc = { version = "0.6.2", default-features = false, features = ["lh1", "lz", "lhx"], optional = true }
+flate2 = { version = "1.1", optional = true }
+lzma-rs = { version = "0.3", optional = true }
 
 [features]
-default = ["ui", "native", "host-68k"]
+default = ["ui", "native", "host-68k", "archives"]
 # Hosting of the original 68k DeliPlayers / Eagleplayers / DeliGenies (loading them from
 # disk, running their code on the emulated 68000, the `Engine` methods that drive them).
 # The application needs it; the open-replayer library (`default-features = false`) does not.
@@ -45,6 +50,10 @@ host-68k = []
 # `amigaplayer_rs::songdb`: song lengths and metadata from audacious-uade's song database,
 # and `--songdb` / `--stop-at songdb` of amigaplayer-render. Off by default.
 songdb = ["dep:amigaplayer-songdb"]
+# `amigaplayer_rs::archive`: LhA, zip, gzip, xz and tar archives read in memory, gzip / xz
+# wrappers undone by the decrunchers, and the applications' playing of archives (extracted
+# into a cache directory). Pure Rust; builds for wasm32-unknown-unknown.
+archives = ["dep:delharc", "dep:flate2", "dep:lzma-rs"]
 # C64 SID tunes (PSID/RSID files) on an emulated C64 with a real SID chip model:
 # `amigaplayer_rs::sid`, a port of NostalgicPlayer's C# ports of libsidplayfp and reSIDfp.
 # LICENCE: those two ports are under the GNU General Public License VERSION 2
@@ -80,3 +89,7 @@ required-features = ["host-68k"]
 [[example]]
 name = "make_demo_songdb"
 required-features = ["songdb"]
+
+[[example]]
+name = "unarchive"
+required-features = ["archives"]

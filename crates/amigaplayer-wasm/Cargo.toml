@@ -10,7 +10,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # No SDL window, and none of the players recompiled from the user's own files.
-amigaplayer-rs = { path = "../..", default-features = false }
+# `archives`: gzip / xz wrappers undone by the decrunchers (pure Rust), and the archive
+# readers compiled for wasm32 (lib-check builds them here).
+amigaplayer-rs = { path = "../..", default-features = false, features = ["archives"] }
 
 [profile.release]
 opt-level = 3

@@ -582,6 +582,9 @@ impl Engine {
         self.stop();
         self.last_error = None;
         self.m.deli.songend = false;
+        // a gzip / xz wrapper first, whatever it holds (a recording as well as a module)
+        #[cfg(feature = "archives")]
+        let data = crate::decrunch::unwrap_wrapper(&data).unwrap_or(data);
         // AIFF / AIFF-C recordings are played by our own decoder, from the file itself
         // (not copied into guest memory); an unsupported compression is an error, not a
         // reason to try the other players

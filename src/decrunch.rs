@@ -67,7 +67,15 @@ pub(crate) enum Kind {
     CrunchMania,
     PowerPlayer,
     Xpk(xpk::Method),
+    #[cfg(feature = "archives")]
+    Gzip,
+    #[cfg(feature = "archives")]
+    Xz,
 }
+
+/// The largest file a gzip / xz wrapper may hold.
+#[cfg(feature = "archives")]
+const WRAPPER_LIMIT: usize = 128 << 20;
 
 pub(crate) use xpk::Method as XpkMethod;
 
@@ -102,6 +110,12 @@ fn kind_name(kind: Kind) -> &'static str {
 
 /// Which packer made `data`, by its header alone (nothing is unpacked).
 pub(crate) fn identify(data: &[u8]) -> Option<Kind> {
+    #[cfg(feature = "archives")]
+    match crate::archive::single_kind(data) {
+        Some(crate::archive::Format::Gzip) => return Some(Kind::Gzip),
+        Some(crate::archive::Format::Xz) => return Some(Kind::Xz),
+        _ => {}
+    }
     if data.len() > 12 && &data[..4] == b"PP20" {
         return Some(Kind::PowerPacker);
     }
@@ -141,11 +155,18 @@ pub(crate) fn unpack_identified(data: &[u8]) -> Option<(Kind, Option<Vec<u8>>)> 
         }
         Kind::StoneCracker => s404::depack(data),
         Kind::CrunchMania | Kind::PowerPlayer | Kind::Xpk(_) => ancient_depack(kind, data),
+        #[cfg(feature = "archives")]
+        Kind::Gzip | Kind::Xz => crate::archive::unwrap_single(data, WRAPPER_LIMIT).flatten(),
     };
     Some((kind, out.filter(|d| !d.is_empty())))
 }
 
 pub fn decrunch(data: Vec<u8>) -> Vec<u8> {
+    // a gzip / xz wrapper (`tune.mod.gz`), then what it holds may be packed in turn
+    #[cfg(feature = "archives")]
+    if let Some(r) = unwrap_wrapper(&data) {
+        return r;
+    }
     if data.len() > 12 && &data[..4] == b"PP20" {
         match pp20(&data) {
             Some(d) => {
@@ -177,6 +198,24 @@ pub fn decrunch(data: Vec<u8>) -> Vec<u8> {
         None => {}
     }
     data
+}
+
+/// The content of a gzip / xz wrapper (itself decrunched), or `None` when `data` is not one or
+/// cannot be read (it is then used as it is).
+#[cfg(feature = "archives")]
+pub(crate) fn unwrap_wrapper(data: &[u8]) -> Option<Vec<u8>> {
+    let kind = crate::archive::single_kind(data)?;
+    match crate::archive::unwrap_single(data, WRAPPER_LIMIT)? {
+        Some(d) if !d.is_empty() => {
+            log::info!("{kind}: {} -> {} bytes", data.len(), d.len());
+            // (a wrapper inside a wrapper is not undone again: no unbounded recursion)
+            Some(if crate::archive::single_kind(&d).is_some() { d } else { decrunch(d) })
+        }
+        _ => {
+            log::warn!("{kind} data is corrupt; using it as is");
+            None
+        }
+    }
 }
 
 struct Bits<'a> {

@@ -24,6 +24,8 @@
 //! | [`XpkRake`](Packer::XpkRake)         | XPK container with the RAKE method |
 //! | [`XpkShri`](Packer::XpkShri)         | XPK container with the SHRI method |
 //! | [`XpkSmpl`](Packer::XpkSmpl)         | XPK container with the SMPL method |
+//! | `Gzip` (feature `archives`)          | gzip header `1F 8B 08` (all its members; a `.tar.gz` gives the tar) |
+//! | `Xz` (feature `archives`)            | xz header `FD 37 7A 58 5A 00` |
 //!
 //! ```
 //! use amigaplayer_rs::unpack::{packer, unpack};
@@ -77,6 +79,12 @@ pub enum Packer {
     XpkShri,
     /// XPK container using the SMPL method.
     XpkSmpl,
+    /// gzip (feature `archives`).
+    #[cfg(feature = "archives")]
+    Gzip,
+    /// xz (feature `archives`).
+    #[cfg(feature = "archives")]
+    Xz,
 }
 
 impl Packer {
@@ -99,6 +107,10 @@ impl Packer {
             Packer::XpkRake => "XPK RAKE",
             Packer::XpkShri => "XPK SHRI",
             Packer::XpkSmpl => "XPK SMPL",
+            #[cfg(feature = "archives")]
+            Packer::Gzip => "gzip",
+            #[cfg(feature = "archives")]
+            Packer::Xz => "xz",
         }
     }
 }
@@ -130,6 +142,10 @@ impl From<Kind> for Packer {
                 XpkMethod::Shri => Packer::XpkShri,
                 XpkMethod::Smpl => Packer::XpkSmpl,
             },
+            #[cfg(feature = "archives")]
+            Kind::Gzip => Packer::Gzip,
+            #[cfg(feature = "archives")]
+            Kind::Xz => Packer::Xz,
         }
     }
 }

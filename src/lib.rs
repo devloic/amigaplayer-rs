@@ -82,6 +82,11 @@
 //! compatible terms** (GPL-2.0-or-later, GPL-3.0-or-later, AGPL-3.0-or-later; not
 //! GPL-2.0-only).
 //!
+//! The `sid` feature (off by default) adds the C64 SID player, ported from code under the GNU
+//! General Public License **version 2** whose files do not say "or any later version"
+//! (`LICENSE-LibSidPlayFp`, `LICENSE-LibReSidFp`): **a build with `sid` is GPL-2.0-only as a
+//! whole.**
+//!
 //! # Environment variables
 //!
 //! The emulation reads a few `DELI_*` environment variables for debugging and for comparing
@@ -166,6 +171,10 @@ pub mod riffwave;
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod replay;
+#[cfg(feature = "sid")]
+#[doc(hidden)]
+#[allow(missing_docs)]
+pub mod sid;
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod trace;

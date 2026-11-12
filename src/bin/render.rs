@@ -289,6 +289,8 @@ fn run(a: &Args) -> Result<()> {
         Backend::Replay(_) => "open-replayer",
         Backend::Mix(_) => "xmp",
         Backend::Pcm(_) => "pcm",
+        #[cfg(feature = "sid")]
+        Backend::Sid(_) => "sid",
     };
     #[allow(unused_mut)]
     let mut info = format!(

@@ -45,6 +45,14 @@ host-68k = []
 # `amigaplayer_rs::songdb`: song lengths and metadata from audacious-uade's song database,
 # and `--songdb` / `--stop-at songdb` of amigaplayer-render. Off by default.
 songdb = ["dep:amigaplayer-songdb"]
+# C64 SID tunes (PSID/RSID files) on an emulated C64 with a real SID chip model:
+# `amigaplayer_rs::sid`, a port of NostalgicPlayer's C# ports of libsidplayfp and reSIDfp.
+# LICENCE: those two ports are under the GNU General Public License VERSION 2
+# (LICENSE-LibSidPlayFp, LICENSE-LibReSidFp), and their files do not say "or any later
+# version": a binary or library built with this feature is a GPL-2.0-only work as a whole
+# (not GPL-2.0-or-later like the rest). Off by default for that reason. No Commodore ROM
+# image is included (see src/sid/mod.rs).
+sid = []
 # The SDL3 player window. The library (engine only) builds without it.
 ui = ["dep:sdl3", "host-68k"]
 # The players recompiled to Rust (crates/players-native/gen), when generated. They

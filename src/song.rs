@@ -161,6 +161,8 @@ pub const MAX_SEEK_SECS: f64 = 86_400.0;
 /// name (a version or variant).
 pub fn formats() -> Vec<&'static str> {
     let mut v = vec!["ProTracker", "AIFF"];
+    #[cfg(feature = "sid")]
+    v.extend(["PSID", "RSID"]);
     v.extend(crate::replay::REPLAYERS.iter().map(|o| o.name));
     v.extend(crate::xmp::LOADERS.iter().filter(|l| !crate::xmp::LEFT_TO_OTHER_PLAYERS.contains(&l.name)).map(|l| l.name));
     v

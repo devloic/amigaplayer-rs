@@ -25,8 +25,10 @@ Status of the port against the original (NoteStruct of every tick):
 
 The player opens `stonepacker.library` and calls its offset -30 before it loads the sample file; when
 the call returns 0 it fails with "could not load additional files". The library is not part of the
-host, so under the host both players fail on every module (a stub that returns non-zero lets it go on:
-it then loads the sample file with plain `Open`/`Read`, calls the library at -36 and plays). The
+host; its result is a handle the player only keeps and passes back to -36 (in a0; it never reads or
+writes the handle's memory), so the host's stub answers -30 with a zeroed block of its own (src/os.rs
+`stub_call`). The player then loads the sample file with plain `Open`/`Read`, calls the library at -36
+and plays. The
 sample file is `SPS.` followed by the rest of the name for a song named `SPM.<rest>` (any case), else
 `SPS.` followed by the whole name; only that one name is tried.
 

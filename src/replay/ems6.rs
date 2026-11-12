@@ -13,7 +13,8 @@
 //! channels a side). A CIA timer interrupt every 71050 colour clocks mixes the next 280 or 282
 //! samples (282 when an accumulator stepping by 97 passes 512) and runs the sequencer every `tlen`
 //! samples on the way. Each sample of a side is the sum over its voices of `s * vol >> 6`,
-//! divided (truncated) by the module's voice count `a`. Paula's pointer leads the mixer by about
+//! divided (truncated) by the module's voice count `a`; `vol` is the voice's volume times the master
+//! volume of sequence word FA (and its fade) over 64. Paula's pointer leads the mixer by about
 //! 1100 samples, so what is heard is the ring's previous lap (silence for the first 2.3 s).
 //!
 //! Choices where the specification is silent (none can panic or hang):
@@ -250,6 +251,8 @@ struct Track {
     inst: usize,
     env: [u8; 4],
     vol: i32,
+    /// The volume of the last tick before the release (the release plays this less `relsub`).
+    vfrozen: i32,
     cnt: i32,
     f4on: bool,
     f4cnt: u8,
@@ -298,6 +301,8 @@ pub struct Ems6 {
     w: usize,
     delay: u64,
     songend: bool,
+    master: i32,
+    fade: Option<(i32, i32, i32)>,
 }
 
 /// Offsets of a block's records: the first long / 4 longs from `at`, each record running to the
@@ -366,11 +371,17 @@ impl Ems6 {
             w: 0,
             delay: 0,
             songend: false,
+            master: 64,
+            fade: None,
         };
         for i in 0..lay.tracks {
             let mut t = Track::new(seq_of(i));
             r.next_pattern(&mut t);
             r.tracks.push(t);
+        }
+        // a fade the first sequence words start counts from the second tick
+        if let Some(f) = r.fade.as_mut() {
+            f.1 = -1;
         }
         Some(r)
     }
@@ -385,7 +396,7 @@ impl Ems6 {
     }
 
     /// The track's next pattern from its sequence (SPEC section 3).
-    fn next_pattern(&self, t: &mut Track) {
+    fn next_pattern(&mut self, t: &mut Track) {
         if t.rep > 0 {
             t.rep -= 1;
             t.pi = 0;
@@ -410,7 +421,14 @@ impl Ems6 {
                     0xFB => t.rep = (w & 0xFF) as i32 - 1,
                     0xFD => t.tr = s8(w as u8),
                     0xFC => t.iofs = (w & 0xFF) as usize,
-                    0xFA => t.si += 1,
+                    0xFA => {
+                        // master volume `xx`, then by 1 every `lo + 1` ticks towards `hi` (the next
+                        // word's bytes)
+                        let p = t.seq.get(t.si).copied().unwrap_or(0);
+                        self.master = (w & 0xFF) as i32;
+                        self.fade = Some(((p & 0xFF) as i32 + 1, 0, ((p >> 8) as u8 as i8 as i32).max(0)));
+                        t.si += 1;
+                    }
                     0xF8 | 0xF9 => {
                         // played as a pattern whose data starts at block 2 (its offset table)
                         t.pat = Some(Pat { start: self.b2.min(self.d.len()), end: self.d.len() });
@@ -504,7 +522,8 @@ impl Ems6 {
         let rows = if t.dur == 0 { 256 } else { t.dur as i32 };
         t.rows_left = rows;
         t.sub = 0;
-        t.wait = rows * self.speed - 1;
+        // a speed of 0 is 256 ticks a row (the original's counter wraps)
+        t.wait = rows * if self.speed == 0 { 256 } else { self.speed } - 1;
     }
 
     /// One row of the track's pattern: commands up to a note or a hold (SPEC section 4).
@@ -546,6 +565,7 @@ impl Ems6 {
                 0xF7 => {
                     t.env = [a0, a1, a2, a3];
                     t.vol = a0 as i32;
+                    t.vfrozen = t.vol;
                     t.cnt = a3 as i32;
                     t.pi += 4;
                 }
@@ -659,11 +679,12 @@ impl Ems6 {
         let mut just = false;
         if t.wait > 0 {
             t.sub += 1;
-            if t.sub >= self.tick_speed {
+            let ts = if self.tick_speed == 0 { 256 } else { self.tick_speed };
+            if t.sub >= ts {
                 t.sub = 0;
                 t.rows_left -= 1;
             }
-            t.wait = (t.rows_left * self.tick_speed - t.sub - 1).max(0);
+            t.wait = (t.rows_left * ts - t.sub - 1).max(0);
         } else {
             self.parse(t);
             just = true;
@@ -678,26 +699,29 @@ impl Ems6 {
                 }
             }
         }
-        // volume: the release in the note's last ticks (the envelope stands still), else the
-        // envelope
+        // volume: the envelope runs on every tick; in the note's last ticks (the release) the voice
+        // plays the volume the last tick before it had, less the release so far
         let [_, target, speed, delay] = t.env;
-        if t.wait < t.rel.0 as i32 {
+        if t.cnt == 0 {
+            let (target, speed) = (target as i32, speed as i32);
+            if t.vol < target {
+                t.vol = (t.vol + speed).min(target);
+            } else if t.vol > target {
+                t.vol = (t.vol - speed).max(target);
+            }
+            t.cnt = delay as i32;
+        } else {
+            t.cnt -= 1;
+        }
+        // (with a speed of 0 the remaining wait the release looks at is below any release)
+        let left = if self.speed == 0 { -1 } else { t.wait };
+        if left < t.rel.0 as i32 {
             t.relsub += t.rel.1 as i32;
         } else {
             t.relsub = 0;
-            if t.cnt == 0 {
-                let (target, speed) = (target as i32, speed as i32);
-                if t.vol < target {
-                    t.vol = (t.vol + speed).min(target);
-                } else if t.vol > target {
-                    t.vol = (t.vol - speed).max(target);
-                }
-                t.cnt = delay as i32;
-            } else {
-                t.cnt -= 1;
-            }
+            t.vfrozen = t.vol;
         }
-        t.v.vol = (t.vol - t.relsub).max(0);
+        t.v.vol = (t.vfrozen - t.relsub).max(0);
         // pitch: the slide, the arpeggio, the vibrato
         let sliding = t.slide.is_some();
         if let Some(sl) = t.slide.as_mut() {
@@ -788,6 +812,13 @@ impl Ems6 {
 
     fn tick_tracks(&mut self) {
         self.tick_speed = self.speed;
+        if let Some((per, cnt, target)) = self.fade.as_mut() {
+            *cnt += 1;
+            if *cnt >= *per {
+                *cnt = 0;
+                self.master += (*target - self.master).signum();
+            }
+        }
         let mut tracks = std::mem::take(&mut self.tracks);
         for t in tracks.iter_mut() {
             self.track_tick(t);
@@ -818,6 +849,7 @@ impl Ems6 {
     fn mix(&mut self, out: &mut [[u8; 282]; 2], at: usize, cnt: usize) {
         let d = &self.d;
         let a = self.a;
+        let master = self.master;
         for side in 0..2 {
             let mut vs: Vec<&mut Voice> =
                 self.tracks.iter_mut().skip(side).step_by(2).map(|t| &mut t.v).filter(|v| v.on).collect();
@@ -828,12 +860,9 @@ impl Ems6 {
                 if !v.hold && (v.pos >> 16) >= v.end {
                     v.pending = true;
                 }
-                // a raw-instrument voice at its end keeps the start of the part it reached it in:
-                // it stops and goes back there (and F6 plays on from there); an 8SVX one stays
-                // at its end (Stormlord tick 3990, Tropical Islands tick 3756)
-                if !(v.pending && v.raw) {
-                    v.p0 = v.pos;
-                }
+                // the start of this piece: a voice that stops at its end goes back here (F6 plays
+                // on from there); pieces split at block and tick boundaries alike
+                v.p0 = v.pos;
             }
             for j in 0..cnt {
                 let mut acc = 0i32;
@@ -851,7 +880,7 @@ impl Ems6 {
                     let ip = v.base as i64 + (v.pos >> 16) - v.disp;
                     // a step of 0 (a note past the table with no entry) is silent
                     let s = if ip >= 0 && v.step != 0 { d.get(ip as usize).map_or(0, |&x| s8(x)) } else { 0 };
-                    acc += (s * v.vol) >> 6;
+                    acc += (s * ((v.vol * master) >> 6)) >> 6;
                     v.pos += v.step as i64;
                     if !v.hold && (v.pos >> 16) >= v.end {
                         v.pending = true;
@@ -923,6 +952,7 @@ impl Track {
             inst: 0,
             env: [0; 4],
             vol: 0,
+            vfrozen: 0,
             cnt: 0,
             f4on: false,
             f4cnt: 0,

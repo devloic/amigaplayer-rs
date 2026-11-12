@@ -98,7 +98,9 @@ fn parse_args() -> Args {
         file: PathBuf::new(),
     };
     let mut file = None;
-    let mut it = std::env::args().skip(1);
+    // (a file name need not be UTF-8: options are read as text, the file name as given)
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
     fn num<T: std::str::FromStr>(v: Option<String>) -> T {
         v.and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())
     }
@@ -143,7 +145,7 @@ fn parse_args() -> Args {
                 std::process::exit(0);
             }
             _ if s.starts_with("--") => usage(),
-            _ if file.is_none() => file = Some(PathBuf::from(s)),
+            _ if file.is_none() => file = Some(PathBuf::from(&raw[raw.len() - it.len() - 1])),
             _ => usage(),
         }
     }

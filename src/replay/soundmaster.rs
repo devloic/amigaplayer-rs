@@ -382,6 +382,9 @@ impl Sm {
                 }
             }
             self.lastarp = 0xFF;
+            if self.build == Build::D {
+                self.fcnt = 0;
+            }
         }
         self.pos = self.pos0;
     }
@@ -856,6 +859,9 @@ impl Sm {
     }
 
     fn tick_bc(&mut self, hw: &mut Hw) {
+        if self.build == Build::D {
+            self.fade();
+        }
         hw.dmacon(self.pend);
         self.dmaon = 0;
         self.brk = false;
@@ -885,6 +891,13 @@ impl Sm {
         self.advance();
         hw.dmacon(self.dmaon | self.pend);
         self.pend = self.pendn;
+        if self.build != Build::D {
+            self.fade();
+        }
+    }
+
+    /// The master volume's fade, one step of it.
+    fn fade(&mut self) {
         if self.fcnt != 0 {
             self.fcnt -= 1;
         } else {

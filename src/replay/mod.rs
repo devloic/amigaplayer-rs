@@ -105,6 +105,7 @@ pub mod quartetst;
 pub mod quartetpsg;
 pub mod voodoosupremesynthesizer;
 pub mod suntronic;
+pub mod suntronic_driver;
 pub mod paulrobotham;
 pub mod paultonge;
 pub mod howiedavies;
@@ -425,6 +426,9 @@ pub const REPLAYERS: &[Open] = &[
     seanconnolly::OPEN,
     speedya1system::OPEN,
     quartet::OPEN,
+    // before `suntronic`, whose fixed offsets fit only its two driver builds: `suntronic_driver`
+    // leaves those two builds to it (by their code length) and takes the other builds' modules
+    suntronic_driver::OPEN,
     suntronic::OPEN,
     quartetst::OPEN,
     gluemon::OPEN,

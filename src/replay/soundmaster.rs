@@ -1218,25 +1218,72 @@ mod tests {
         assert!(!detect(&d[..0x100]));
     }
 
-    #[test]
-    fn build_a_is_recognised_by_its_init() {
+    /// An image the scan takes for a build of the A family: `tb` and `yy` are the step table's
+    /// offset and the sample table's long in the init's two instructions, `d3` makes it version 3.
+    fn module_a(tb: u16, yy: u16, d3: bool) -> Vec<u8> {
         let mut d = vec![0u8; 0x2000];
-        for (o, disp) in [(0, 0x90), (4, 0x100), (8, 0x02)] {
+        let init = if d3 { 0x0C } else { 0x92 };
+        for (o, disp) in [(0, (init - 2) as u16), (4, 0x100), (8, 0x02)] {
             put16(&mut d, o, 0x6000);
             put16(&mut d, o + 2, disp);
         }
-        let code = [0x47FA, (0x400 - 0x94) as u16, 0x1740, 0xFFED, 0x41EB, 0x00F4, 0xD1EB, 0x00EE, 0x2748, 0xFF98, 0x08F9, 0x0001, 0x00BF, 0xE001, 0x177C, 0x0000, 0xFFFC, 0x4E75];
+        let code = [
+            0x47FA, (0x400 - init - 2) as u16, 0x1740, 0xFFED, 0x41EB, tb, 0xD1EB, yy, 0x2748, 0xFF98, 0x08B9, 0x0001, 0x00BF, 0xE001, 0x4A2B,
+            0x00E1, 0x6608, 0x08F9, 0x0001, 0x00BF, 0xE001, 0x177C, 0x0000, 0xFFFC, 0x4E75,
+        ];
         for (k, w) in code.iter().enumerate() {
-            put16(&mut d, 0x92 + 2 * k, *w);
+            put16(&mut d, init + 2 * k, *w);
         }
-        for (k, w) in [0x0C00u16, 0x002E, 0x0200, 0xE300, 0x41FA, (0x300 - 0xCA) as u16].iter().enumerate() {
-            put16(&mut d, 0xC0 + 2 * k, *w);
+        if d3 {
+            for (k, w) in [0xDBFCu16, 0, 0x3C].iter().enumerate() {
+                put16(&mut d, 0x60 + 2 * k, *w);
+            }
         }
+        for (k, w) in [0x0C00u16, 0x002E, 0x0200, 0xE300, 0x41FA, (0x300 - 0xEA) as u16].iter().enumerate() {
+            put16(&mut d, 0xE0 + 2 * k, *w);
+        }
+        d
+    }
+
+    #[test]
+    fn build_a_is_recognised_by_its_init() {
+        let d = module_a(0x00F4, 0x00EE, false);
         let l = scan(&d).unwrap();
-        assert_eq!((l.build, l.g, l.periods), (Build::A, 0x400, 0x300));
+        assert_eq!((l.build, l.g, l.periods, l.ho, l.tb), (Build::A, 0x400, 0x300, 0, 0xF4));
+        // the LED flag is the byte tested after the filter's clear
+        assert_eq!(l.led, Some(0xE1));
         // without the trailing store the filter operand is not where it must be
-        put16(&mut d, 0xAE, 0x1F7C);
-        assert!(scan(&d).is_none());
+        let mut e = d.clone();
+        put16(&mut e, 0x92 + 42, 0x1F7C);
+        assert!(scan(&e).is_none());
+    }
+
+    #[test]
+    fn the_family_shifts_its_header_with_the_build() {
+        // A-8: fields 8 earlier, A+8: 8 later
+        for (tb, yy, ho) in [(0xECu16, 0xE6u16, -8isize), (0xFC, 0xF6, 8)] {
+            let l = scan(&module_a(tb, yy, false)).unwrap();
+            assert_eq!((l.build, l.ho, l.tb), (Build::A, ho, tb as usize));
+        }
+        // version 3: its init at 0x0C and the 0x3C-byte voice stride
+        let l = scan(&module_a(0x012C, 0x010E, true)).unwrap();
+        assert_eq!((l.build, l.ho, l.tb), (Build::D, 0x20, 0x12C));
+        // a small loader file is enough for the family: the tables need g + tb + 8 bytes
+        let d = module_a(0x00F4, 0x00EE, false);
+        assert!(scan(&d[..0x400 + 0xF4 + 8]).is_some());
+        assert!(scan(&d[..0x400 + 0xF4 + 6]).is_none());
+    }
+
+    #[test]
+    fn the_led_follows_the_init_flag() {
+        for (flag, led) in [(0u8, false), (1, true)] {
+            let mut d = module_a(0x00F4, 0x00EE, false);
+            d[0x400 + 0xE1] = flag;
+            let mut e = Engine::new(48000.0);
+            e.open_replayers = true;
+            e.play_data(Path::new("/sm-test/led.sm"), d).unwrap();
+            assert_eq!(e.m.bus.led(), led);
+        }
     }
 
     fn reg(log: &[(u32, u16)], a: u32) -> Vec<u16> {
@@ -1285,5 +1332,104 @@ mod tests {
         let vol = reg(&log, 0xDFF0A8);
         // 0x300 - 4 a tick: 0x2FC >> 4 = 0x2F
         assert_eq!(vol[..3], [0x30, 0x2F, 0x2F]);
+    }
+
+    /// Plays `d` for `ticks` ticks of audio; `None` when the module is refused.
+    fn play(d: Vec<u8>, name: &str, frames: usize) -> Option<Engine> {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.play_data(Path::new(name), d).ok()?;
+        let mut out = vec![0f32; 2 * frames];
+        e.render(&mut out);
+        Some(e)
+    }
+
+    /// A small deterministic generator for the corruption sweeps.
+    fn lcg(s: &mut u32) -> u32 {
+        *s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        *s >> 8
+    }
+
+    #[test]
+    fn truncated_and_corrupted_images_do_not_panic_or_hang() {
+        let b = module_b(3);
+        for n in (0..b.len()).step_by(0x101) {
+            let _ = play(b[..n].to_vec(), "/sm-test/trunc.sm", 960 * 3);
+        }
+        let mut seed = 7u32;
+        for round in 0..60 {
+            // the variables, the tables and the song: a few bytes of each changed at random
+            let mut d = b.clone();
+            for _ in 0..1 + round % 8 {
+                let o = G + lcg(&mut seed) as usize % (d.len() - G);
+                d[o] = lcg(&mut seed) as u8;
+            }
+            let _ = play(d, "/sm-test/corrupt.sm", 960 * 20);
+        }
+        // the family: a header and tables of zeros, then of noise
+        for (tb, yy, d3) in [(0xF4u16, 0xEEu16, false), (0xEC, 0xE6, false), (0xFC, 0xF6, false), (0x12C, 0x10E, true)] {
+            let mut d = module_a(tb, yy, d3);
+            let _ = play(d.clone(), "/sm-test/a.sm", 960 * 20);
+            for o in 0x400..d.len() {
+                d[o] = lcg(&mut seed) as u8;
+            }
+            let _ = play(d.clone(), "/sm-test/a-noise.sm", 960 * 20);
+            for n in (0x400..d.len()).step_by(0x3F3) {
+                let _ = play(d[..n].to_vec(), "/sm-test/a-trunc.sm", 960 * 3);
+            }
+        }
+    }
+
+    /// A module of the lead-downloaded corpus, when this machine has it.
+    fn corpus(rel: &str) -> Option<Vec<u8>> {
+        std::fs::read(Path::new("/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/SoundMasterII2/files").join(rel)).ok()
+    }
+
+    const CORPUS: [(&str, &str); 6] = [
+        ("sm1/_unknown/rackney'sisland 1.sm", "A-8"),
+        ("sm1/_unknown/rackney'sisland 3.sm", "A+8"),
+        ("v1/Jeroen Soede/futureshock-gameover.smpro", "C"),
+        ("v3/Jeroen Soede/doofus 1.sm3", "D"),
+        ("v3/Michael Jestram/necromania-loader fixed.sm3", "D"),
+        ("v3/Michael Jestram/x-out-loader & jingle.sm3", "D"),
+    ];
+
+    #[test]
+    fn corpus_modules_play_and_survive_damage() {
+        let mut seed = 99u32;
+        for (rel, _) in CORPUS {
+            let Some(d) = corpus(rel) else { continue };
+            let e = play(d.clone(), "/sm-test/c.sm", 48000 * 2).expect(rel);
+            assert_eq!(e.playing.as_ref().unwrap().format, "Sound Master", "{rel}");
+            for n in (0..d.len()).step_by(d.len() / 40 + 1) {
+                let _ = play(d[..n].to_vec(), "/sm-test/c-trunc.sm", 960 * 3);
+            }
+            for _ in 0..12 {
+                let mut x = d.clone();
+                for _ in 0..16 {
+                    let o = lcg(&mut seed) as usize % x.len();
+                    x[o] = lcg(&mut seed) as u8;
+                }
+                let _ = play(x, "/sm-test/c-corrupt.sm", 960 * 50);
+            }
+        }
+    }
+
+    #[test]
+    fn subsongs_of_builds_d_and_a8() {
+        // x-out-loader & jingle: a second song named by the variables
+        if let Some(d) = corpus("v3/Michael Jestram/x-out-loader & jingle.sm3") {
+            let mut e = play(d, "/sm-test/x.sm3", 960).unwrap();
+            assert_eq!(e.playing.as_ref().unwrap().sub_max, 1);
+            e.change_subsong(1).unwrap();
+            assert_eq!(e.playing.as_ref().unwrap().sub, 1);
+            let mut out = vec![0f32; 2 * 48000];
+            e.render(&mut out);
+        }
+        // one song when the three bytes read 0, 0, 1
+        if let Some(d) = corpus("v3/Jeroen Soede/doofus 1.sm3") {
+            let e = play(d, "/sm-test/d1.sm3", 960).unwrap();
+            assert_eq!(e.playing.as_ref().unwrap().sub_max, 0);
+        }
     }
 }

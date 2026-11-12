@@ -12,6 +12,9 @@
 //! (`--songdb DIR`: lengths, author, album, ...; the data is not part of this program) and can
 //! use the length found there as a place to stop (`--stop-at songdb`).
 //!
+//! An archive (LhA, zip, tar, gzip / xz of a tar) plays as the list of its entries, extracted
+//! into a cache directory (see `amigaplayer_rs::playlist`).
+//!
 //! `--songlengths FILE` does the same for C64 tunes with HVSC's `Songlengths.md5`
 //! (`--stop-at songlengths`: stop at that length, since a SID tune never ends by itself).
 
@@ -56,6 +59,17 @@ const USAGE: &str = "usage: amigaplayer-render [OPTIONS] MODULE
   --libs DIR        LIBS:, where a library a player opens is looked for after the
                     module's directory, its libs/ and ../libs/ (default: none)
   --68k-first       let those players take a module before the built-in replayers
+  --archive-entry NAME
+                    MODULE is an archive: play only its entry NAME (its path in the
+                    archive or its file name, in any case)
+
+MODULE may be an archive (LhA, zip, tar, .tar.gz, .tar.xz): it is extracted into a
+cache directory ($AMIGAPLAYER_ARCHIVE_CACHE, else ~/.cache/amigaplayer-rs/archives),
+where a module finds the companion files of the archive beside it, and its entries
+play one after the other in the archive's order, each with the stops above; the
+entries no player takes are skipped (named on standard error). --info prints one
+line per entry that plays, with its name as archive_entry. A gzip or xz file of one
+module plays as that module.
 
 exit status: 0 played, 1 the module could not be played, 2 wrong usage";
 
@@ -78,6 +92,7 @@ struct Args {
     genies: Option<PathBuf>,
     libs: Option<PathBuf>,
     m68k_first: bool,
+    archive_entry: Option<String>,
     file: PathBuf,
 }
 
@@ -113,6 +128,7 @@ fn parse_args() -> Args {
         genies: None,
         libs: None,
         m68k_first: false,
+        archive_entry: None,
         file: PathBuf::new(),
     };
     let mut file = None;
@@ -167,6 +183,7 @@ fn parse_args() -> Args {
             "--genies" => a.genies = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--libs" => a.libs = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--68k-first" => a.m68k_first = true,
+            "--archive-entry" => a.archive_entry = Some(it.next().unwrap_or_else(|| usage())),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -270,6 +287,46 @@ fn wav_header(rate: u32, data_len: u32) -> [u8; 44] {
     h
 }
 
+/// Where the audio goes: opened when the first module has started (a file that does not play
+/// gives no output at all).
+struct Sink {
+    file: Option<std::fs::File>,
+    w: Box<dyn Write>,
+    /// The frames written to it, over all the modules.
+    done: u64,
+}
+
+impl Sink {
+    fn open(a: &Args) -> Result<Sink> {
+        let to_stdout = a.out == "-";
+        let file = if to_stdout { None } else { Some(std::fs::File::create(&a.out).with_context(|| a.out.clone())?) };
+        let mut w: Box<dyn Write> = match &file {
+            Some(f) => Box::new(std::io::BufWriter::new(f.try_clone()?)),
+            None => Box::new(std::io::BufWriter::new(std::io::stdout())),
+        };
+        if !a.raw {
+            // a stream's length is not known when the header goes out: the largest, as is usual
+            w.write_all(&wav_header(a.rate, if to_stdout { u32::MAX - 36 } else { 0 }))?;
+        }
+        Ok(Sink { file, w, done: 0 })
+    }
+}
+
+/// The databases given on the command line, opened once for all the modules.
+struct Dbs {
+    #[cfg(feature = "songdb")]
+    songdb: Option<amigaplayer_rs::songdb::SongDb>,
+    songlengths: Option<amigaplayer_rs::songlengths::SongLengths>,
+}
+
+/// A module that has started, with the stops its databases give.
+struct Started {
+    /// where `--stop-at songdb` may stop: the length the database gives the subsong, in frames
+    songdb_len: Option<u64>,
+    /// `--stop-at songlengths`: the subsong's length in HVSC's list, in frames
+    songlength_stop: Option<u64>,
+}
+
 fn run(a: &Args) -> Result<()> {
     let mut e = Engine::new(a.rate as f64);
     e.m.os.libs_dir = a.libs.clone();
@@ -286,18 +343,71 @@ fn run(a: &Args) -> Result<()> {
     if let Some(v) = a.volume {
         e.settings.volume = v;
     }
-    let data = std::fs::read(&a.file)?;
+    // an archive: its entries in order, those no player takes skipped (`items` gives the file
+    // itself for anything else)
+    let items = amigaplayer_rs::playlist::items(&a.file, a.archive_entry.as_deref()).map_err(anyhow::Error::msg)?;
+    let dbs = Dbs {
+        #[cfg(feature = "songdb")]
+        songdb: match &a.songdb {
+            Some(dir) => Some(amigaplayer_rs::songdb::SongDb::open(dir)?),
+            None => None,
+        },
+        songlengths: match &a.songlengths {
+            Some(f) => Some(amigaplayer_rs::songlengths::SongLengths::open(f).with_context(|| f.display().to_string())?),
+            None => None,
+        },
+    };
+    let mut sink: Option<Sink> = None;
+    let mut played = 0;
+    for item in &items {
+        let started = match start(&mut e, a, &dbs, item) {
+            Ok(s) => s,
+            Err(err) => match &item.entry {
+                Some(name) => {
+                    eprintln!("amigaplayer-render: entry {name}: skipped ({err:#})");
+                    continue;
+                }
+                None => return Err(err),
+            },
+        };
+        played += 1;
+        if a.info {
+            continue;
+        }
+        if sink.is_none() {
+            sink = Some(Sink::open(a)?);
+        }
+        if !render_module(&mut e, a, &started, sink.as_mut().unwrap())? {
+            // the reader went away (`| head`, a stopped ffmpeg): not a failure of the render
+            return Ok(());
+        }
+    }
+    if played == 0 {
+        bail!("{}: no entry of the archive plays", a.file.display());
+    }
+    let Some(mut s) = sink else { return Ok(()) };
+    match s.w.flush() {
+        Err(err) if err.kind() != std::io::ErrorKind::BrokenPipe => return Err(err.into()),
+        _ => {}
+    }
+    drop(s.w);
+    if let (Some(f), false) = (&mut s.file, a.raw) {
+        f.seek(SeekFrom::Start(0))?;
+        f.write_all(&wav_header(a.rate, (s.done * 4).min(u32::MAX as u64 - 36) as u32))?;
+    }
+    eprintln!("{:.2} s rendered", s.done as f64 / a.rate as f64);
+    Ok(())
+}
+
+/// Starts `item` at the subsong asked for and prints its line of JSON (on standard output
+/// with `--info`, else on standard error).
+fn start(e: &mut Engine, a: &Args, dbs: &Dbs, item: &amigaplayer_rs::playlist::Item) -> Result<Started> {
+    let data = std::fs::read(&item.path)?;
     #[cfg(feature = "songdb")]
-    let db_info = match &a.songdb {
-        Some(dir) => Some(amigaplayer_rs::songdb::SongDb::open(dir)?.lookup(&data)),
-        None => None,
-    };
+    let db_info = dbs.songdb.as_ref().map(|db| db.lookup(&data));
     // the HVSC lengths of the file's songs, if it is listed
-    let hvsc: Option<Vec<u32>> = match &a.songlengths {
-        Some(f) => amigaplayer_rs::songlengths::SongLengths::open(f).with_context(|| f.display().to_string())?.lookup(&data).map(|l| l.to_vec()),
-        None => None,
-    };
-    e.play_data(&a.file, data)?;
+    let hvsc: Option<Vec<u32>> = dbs.songlengths.as_ref().and_then(|l| l.lookup(&data).map(|l| l.to_vec()));
+    e.play_data(&item.path, data)?;
     let (lo, hi, start) = match &e.playing {
         Some(p) => (p.sub_min, p.sub_max, p.sub),
         None => bail!("{}", e.last_error.clone().unwrap_or_else(|| "the module did not start".into())),
@@ -339,7 +449,11 @@ fn run(a: &Args) -> Result<()> {
         json_str(&p.author),
         p.sub
     );
-    // where `--stop-at songdb` may stop: the length the database gives the subsong, in frames
+    // the entry of the archive this is
+    if let Some(name) = &item.entry {
+        info.pop();
+        info.push_str(&format!(",\"archive_entry\":{}}}", json_str(name)));
+    }
     #[allow(unused_mut)]
     let mut songdb_len: Option<u64> = None;
     #[cfg(feature = "songdb")]
@@ -355,7 +469,6 @@ fn run(a: &Args) -> Result<()> {
             songdb_len = found.as_ref().and_then(|i| i.subsong(sub)).filter(measured).map(|s| s.length_ms as u64 * a.rate as u64 / 1000);
         }
     }
-    // `--songlengths`: the subsong's length in HVSC's list, and where `--stop-at songlengths` stops
     let mut songlength_stop: Option<u64> = None;
     if a.songlengths.is_some() {
         let sub = if a.info { want } else { p.sub };
@@ -368,23 +481,19 @@ fn run(a: &Args) -> Result<()> {
     }
     if a.info {
         println!("{info}");
-        return Ok(());
+    } else {
+        eprintln!("{info}");
     }
-    eprintln!("{info}");
+    Ok(Started { songdb_len, songlength_stop })
+}
 
-    let to_stdout = a.out == "-";
-    let mut file = if to_stdout { None } else { Some(std::fs::File::create(&a.out).with_context(|| a.out.clone())?) };
-    let stdout = std::io::stdout();
-    let mut w: Box<dyn Write> = match &file {
-        Some(f) => Box::new(std::io::BufWriter::new(f.try_clone()?)),
-        None => Box::new(std::io::BufWriter::new(stdout.lock())),
-    };
-    if !a.raw {
-        // a stream's length is not known when the header goes out: the largest, as is usual
-        w.write_all(&wav_header(a.rate, if to_stdout { u32::MAX - 36 } else { 0 }))?;
-    }
+/// Renders the module that has started into `out`, up to its stops. `Ok(false)` when the
+/// reader of the output went away.
+fn render_module(e: &mut Engine, a: &Args, st: &Started, out: &mut Sink) -> Result<bool> {
+    let songdb_len = st.songdb_len;
+    let w = &mut out.w;
     let limit = if a.seconds > 0.0 { (a.seconds * a.rate as f64) as u64 } else { u64::MAX };
-    let limit = songlength_stop.map_or(limit, |l| limit.min(l));
+    let limit = st.songlength_stop.map_or(limit, |l| limit.min(l));
     let quiet_limit = if a.silence > 0.0 { (a.silence * a.rate as f64) as u64 } else { u64::MAX };
     let mut buf = vec![0f32; 2 * 4096];
     let mut bytes = Vec::with_capacity(4 * 4096);
@@ -419,9 +528,8 @@ fn run(a: &Args) -> Result<()> {
             bytes.extend_from_slice(&r.to_le_bytes());
         }
         if let Err(err) = w.write_all(&bytes) {
-            // the reader went away (`| head`, a stopped ffmpeg): not a failure of the render
             if err.kind() == std::io::ErrorKind::BrokenPipe {
-                return Ok(());
+                return Ok(false);
             }
             return Err(err.into());
         }
@@ -441,17 +549,8 @@ fn run(a: &Args) -> Result<()> {
     if held > 0 {
         w.write_all(&vec![0u8; 4 * held as usize]).or_else(|err| if err.kind() == std::io::ErrorKind::BrokenPipe { Ok(()) } else { Err(err) })?;
     }
-    match w.flush() {
-        Err(err) if err.kind() != std::io::ErrorKind::BrokenPipe => return Err(err.into()),
-        _ => {}
-    }
-    drop(w);
-    if let (Some(f), false) = (&mut file, a.raw) {
-        f.seek(SeekFrom::Start(0))?;
-        f.write_all(&wav_header(a.rate, (done * 4).min(u32::MAX as u64 - 36) as u32))?;
-    }
-    eprintln!("{:.2} s rendered", done as f64 / a.rate as f64);
-    Ok(())
+    out.done += done;
+    Ok(true)
 }
 
 fn main() {

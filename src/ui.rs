@@ -147,6 +147,32 @@ impl App {
             return;
         }
         let path = self.list[i].clone();
+        // an archive: extracted, and replaced in the list by its entries that a player takes
+        match amigaplayer_rs::playlist::items(&path, None) {
+            Ok(items) if items.first().is_some_and(|x| x.entry.is_some()) => {
+                let mut e = self.engine.lock().unwrap();
+                let ok: Vec<PathBuf> = items.into_iter().filter(|x| e.play_file(&x.path).is_ok()).map(|x| x.path).collect();
+                e.stop();
+                drop(e);
+                let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                if ok.is_empty() {
+                    self.playing_idx = Some(i);
+                    self.sel = i;
+                    self.set_status(format!("{name}: no entry of the archive plays"), true);
+                    return;
+                }
+                self.list.splice(i..=i, ok);
+                return self.play_index(i);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                self.engine.lock().unwrap().stop();
+                self.playing_idx = Some(i);
+                self.sel = i;
+                self.set_status(err, true);
+                return;
+            }
+        }
         let r = self.engine.lock().unwrap().play_file(&path);
         self.playing_idx = Some(i);
         self.sel = i;

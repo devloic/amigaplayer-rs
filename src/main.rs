@@ -27,6 +27,7 @@ struct Args {
     interp: Interp,
     xmp_filter: bool,
     volume: Option<f32>,
+    archive_entry: Option<String>,
     files: Vec<PathBuf>,
 }
 
@@ -37,7 +38,7 @@ fn usage() -> ! {
          \x20                 [--wav OUT.wav [--seconds N] [--subsong N] [--volume V]]\n\
          \x20                 [--filter a500|a1200|none|auto] [--led auto|on|off|force]\n\
          \x20                 [--separation 0..1] [--mono] [--interp nearest|linear|spline]\n\
-         \x20                 [--xmp-filter on|off]\n\
+         \x20                 [--xmp-filter on|off] [--archive-entry NAME]\n\
          \x20                 [FILES/DIRS...]\n\
          \n\
          Without --wav the SDL3 player window opens with FILES as the module list.\n\
@@ -63,13 +64,19 @@ fn usage() -> ! {
          (default 0.7; 1 = hard Amiga panning) and --mono shape the Paula mix.\n\
          --interp and --xmp-filter are libxmp's mixer's (linear, on). --volume V\n\
          sets the output volume (default 0.8; UADE's level is 1). With --wav the\n\
-         stages in effect are printed on stderr (`output: ...`, `led-switched: ...`)."
+         stages in effect are printed on stderr (`output: ...`, `led-switched: ...`).\n\
+         An archive (LhA, zip, tar, .tar.gz, .tar.xz) is extracted into a cache\n\
+         directory ($AMIGAPLAYER_ARCHIVE_CACHE, else ~/.cache/amigaplayer-rs/archives)\n\
+         and its entries play in order, those no player takes skipped (with --wav:\n\
+         one after the other, each up to --seconds); --archive-entry NAME plays only\n\
+         the entry of that name (its path in the archive or its file name, any case).\n\
+         A gzip or xz file of one module plays as the module."
     );
     std::process::exit(2)
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { players: None, eagleplayers: None, genies: None, libs: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, files: Vec::new() };
+    let mut a = Args { players: None, eagleplayers: None, genies: None, libs: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
     // (a file name need not be UTF-8: options are read as text, file names as given)
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
@@ -123,6 +130,7 @@ fn parse_args() -> Args {
                 }
             }
             "--volume" => a.volume = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
+            "--archive-entry" => a.archive_entry = Some(it.next().unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
             _ => a.files.push(PathBuf::from(&raw[raw.len() - it.len() - 1])),
         }
@@ -210,45 +218,65 @@ fn render_wav(args: &Args) -> Result<()> {
         e.m.bus.write_log = Some(Vec::new());
         e.m.bus.paula.native_log = Some(Vec::new());
     }
-    e.play_file(file)?;
-    for _ in 0..args.subsong.unsigned_abs() {
-        e.change_subsong(args.subsong.signum())?;
-    }
-    if let Some(p) = &e.playing {
-        eprintln!(
-            "playing \"{}\" [{}] subsongs {}..{} (current {})",
-            p.module_name, p.format, p.sub_min, p.sub_max, p.sub
-        );
-    }
-    // printed after the render: the built-in voices are only known to be in use
-    // once the player has played a note
-    let mut report = e.output_report();
+    // an archive: its entries in order, each rendered as a module given alone would be (up to
+    // --seconds or its song end), one after the other; the entries no player takes are skipped
+    let items = amigaplayer_rs::playlist::items(file, args.archive_entry.as_deref()).map_err(anyhow::Error::msg)?;
     let total = (args.seconds * SAMPLE_RATE as f64) as usize;
-    let mut out = vec![0f32; total * 2];
+    let mut out: Vec<f32> = Vec::new();
     let mut done = 0;
-    while done < total {
-        let n = (total - done).min(4800);
-        e.render(&mut out[done * 2..(done + n) * 2]);
-        done += n;
-        if e.playing.is_none() {
-            break;
+    let mut played = 0;
+    for item in &items {
+        if let Some(name) = &item.entry {
+            if let Err(err) = e.play_file(&item.path) {
+                eprintln!("entry {name}: skipped ({err})");
+                continue;
+            }
+            eprintln!("entry {name}");
+        } else {
+            e.play_file(&item.path)?;
         }
-        if e.songend() {
-            eprintln!("song end after {:.1}s", done as f64 / SAMPLE_RATE as f64);
-            break;
+        played += 1;
+        for _ in 0..args.subsong.unsigned_abs() {
+            e.change_subsong(args.subsong.signum())?;
+        }
+        if let Some(p) = &e.playing {
+            eprintln!(
+                "playing \"{}\" [{}] subsongs {}..{} (current {})",
+                p.module_name, p.format, p.sub_min, p.sub_max, p.sub
+            );
+        }
+        // printed after the render: the built-in voices are only known to be in use
+        // once the player has played a note
+        let mut report = e.output_report();
+        let start = done;
+        out.resize(out.len() + total * 2, 0.0);
+        while done - start < total {
+            let n = (total - (done - start)).min(4800);
+            e.render(&mut out[done * 2..(done + n) * 2]);
+            done += n;
+            if e.playing.is_none() {
+                break;
+            }
+            if e.songend() {
+                eprintln!("song end after {:.1}s", (done - start) as f64 / SAMPLE_RATE as f64);
+                break;
+            }
+        }
+        out.truncate(done * 2);
+        if e.playing.is_some() {
+            report = e.output_report();
+        }
+        eprintln!("{report}");
+        eprintln!("{}", e.led_report());
+        if let Some(err) = &e.last_error {
+            eprintln!("error: {err}");
+        }
+        if !e.m.os.console.is_empty() {
+            eprintln!("guest console:\n{}", e.m.os.console);
         }
     }
-    out.truncate(done * 2);
-    if e.playing.is_some() {
-        report = e.output_report();
-    }
-    eprintln!("{report}");
-    eprintln!("{}", e.led_report());
-    if let Some(err) = &e.last_error {
-        eprintln!("error: {err}");
-    }
-    if !e.m.os.console.is_empty() {
-        eprintln!("guest console:\n{}", e.m.os.console);
+    if played == 0 {
+        bail!("{}: no entry of the archive plays", file.display());
     }
     let peak = out.iter().fold(0f32, |a, &b| a.max(b.abs()));
     eprintln!("{} frames written, peak {:.3}", done, peak);
@@ -282,25 +310,37 @@ fn render_wav(args: &Args) -> Result<()> {
     write_wav(wav, SAMPLE_RATE, &out)
 }
 
+/// The window's list: FILES, or with --archive-entry the entry of that name in each archive.
+fn window_files(args: &Args) -> Result<Vec<PathBuf>> {
+    let Some(want) = args.archive_entry.as_deref() else { return Ok(args.files.clone()) };
+    let mut v = Vec::new();
+    for f in &args.files {
+        v.extend(amigaplayer_rs::playlist::items(f, Some(want)).map_err(anyhow::Error::msg)?.into_iter().map(|i| i.path));
+    }
+    Ok(v)
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args = parse_args();
     let r = if args.wav.is_some() {
         render_wav(&args)
     } else {
-        ui::run(
-            args.players.clone().or_else(default_players_dir),
-            args.eagleplayers.clone().or_else(default_eagleplayers_dir),
-            args.genies.clone().or_else(default_genies_dir),
-            args.libs.clone().or_else(default_libs_dir),
-            &args.use_genies,
-            args.files.clone(),
-            {
-                let mut s = Settings::default();
-                apply_settings(&args, &mut s);
-                s
-            },
-        )
+        window_files(&args).and_then(|files| {
+            ui::run(
+                args.players.clone().or_else(default_players_dir),
+                args.eagleplayers.clone().or_else(default_eagleplayers_dir),
+                args.genies.clone().or_else(default_genies_dir),
+                args.libs.clone().or_else(default_libs_dir),
+                &args.use_genies,
+                files,
+                {
+                    let mut s = Settings::default();
+                    apply_settings(&args, &mut s);
+                    s
+                },
+            )
+        })
     };
     if let Err(e) = r {
         eprintln!("amigaplayer-rs: {e:#}");

@@ -1,8 +1,9 @@
 #!/bin/bash
 # Checks the library side of the repository, end to end (no network, no audio device):
 #   1. the open-replayer library with default features off, with `host-68k` (custom
-#      modules through `Song`) and with `songdb` (the song database reader, on a synthetic
-#      database): build, tests (unit, integration, doctests), examples
+#      modules through `Song`), with `archives` (the archive readers) and with `songdb` (the
+#      song database reader, on a synthetic database): build, tests (unit, integration,
+#      doctests), examples
 #   2. the application (default features) still builds
 #   3. the C API: its tests with and without its features, build the cdylib/staticlib,
 #      compile examples/c/play.c, link it both ways, render a synthetic module and compare
@@ -46,6 +47,12 @@ cargo test --release --no-default-features
 cargo build --release --no-default-features --examples
 echo "== 1b. library with host-68k (custom modules), and the headless renderer"
 cargo test --release --no-default-features --features host-68k
+echo "== 1b'. archives (LhA, zip, gzip, xz, tar in memory), and the unarchive example on a fixture"
+cargo test --release --no-default-features --features archives
+cargo build --release --no-default-features --features archives --examples
+"$T/examples/unarchive" src/archive/fixtures/t-o5-h1.lha | grep -q '^ *3000  mods/tune.mod$' \
+  || { echo "unarchive: mods/tune.mod not listed" >&2; exit 1; }
+echo "unarchive lists the LhA fixture"
 echo "== 1c. song database: the crate, the library with songdb, the renderer's --songdb"
 cargo test --release -p amigaplayer-songdb
 cargo test --release --no-default-features --features "host-68k songdb"

@@ -134,7 +134,39 @@ amigaplayer-rs --noteplayer 8Voices-NotePlayer ... # another genie plays _note p
 amigaplayer-rs --noteplayer builtin ...            # the built-in renderer plays them
 amigaplayer-rs --genie NAME ...                    # run any other genie
 amigaplayer-rs --libs DIR ...                      # LIBS: for the players' disk libraries
+amigaplayer-rs --wav out.wav ARCHIVE.lha           # every module in an archive, in order
+amigaplayer-rs --archive-entry NAME ARCHIVE.lha    # only that entry of the archive
 ```
+
+### Archives
+
+A file given or dropped may be an archive: LhA / LZH (`-lh0-`, `-lh1-`, `-lh4-` to `-lh7-`,
+`-lhx-`, `-lz4-`, `-lz5-`, `-lzs-`, `-pm0-`; header levels 0 to 3), zip (stored and deflate),
+tar, or a tar in gzip or xz. Its entries play in the archive's order, as a playlist; the
+entries no player takes (companion files, texts) are skipped, and `.info` icons and texts are
+not tried. In the window the archive's line is replaced by its playable entries when it is first
+played; with `--wav` they are rendered one after the other, each up to `--seconds` or its song
+end. `--archive-entry NAME` (amigaplayer-rs and amigaplayer-render) plays only the entry of that
+name: its path in the archive, or its file name, in any case. A gzip or xz file of a single
+module (`tune.mod.gz`) is not an archive: it plays as the module, beside its own companion files
+(the decrunchers undo gzip and xz like PowerPacker). Amiga LZX archives are recognised and
+refused: no decoder under a clear free licence was at hand (NostalgicPlayer's derives from
+`unlzx.c`, whose licence is unclear).
+
+Modules in archives often need their companions from the same archive (`smp.*`, `*.ins`,
+`Instruments/`, TFMX `mdat.*` with `smpl.*`). So an archive is extracted, whole, into a
+directory of its own, and its entries are played from there: the players, the 68k ones
+included, find the companions beside the module as they would on disk, with nothing changed in
+how files are looked up. The directory is
+`$AMIGAPLAYER_ARCHIVE_CACHE/<hash>-<size>` (default `$XDG_CACHE_HOME/amigaplayer-rs/archives`,
+else `~/.cache/amigaplayer-rs/archives`), named after a hash of the archive's bytes, so a second
+visit reuses it; the 200 most recently used are kept, older ones are deleted. Entry names are
+made relative (no `..`, no volume, no absolute path) before anything is written, archives
+larger than 512 MiB are refused, entries larger than 128 MiB and archives past 256 MiB
+extracted are cut, and nothing in the directory is ever run. A virtual directory in the
+emulated OS (the library's in-memory companions) was the other choice; it would not reach
+libxmp's loaders and the 68k players' own file look-ups in the same way, and the files
+on disk let a user look at what was played.
 
 Players are looked up in `--players DIR`, `$DELIPLAYERS`,
 `~/.config/amigaplayer-rs/DeliPlayers`, then `./DeliPlayers`; Eagleplayers in
@@ -846,7 +878,14 @@ song.render_i16(&mut pcm);               // repeat until song.songend() or a tim
 * **WebAssembly**: `crates/amigaplayer-wasm` (the `dp_*` ABI; protocol and a JavaScript example
   in its README).
 * **Rust examples**: `cargo run --release --no-default-features --example play_to_wav -- tune.mod
-  out.wav`, `--example list_formats`.
+  out.wav`, `--example list_formats`; `--features archives --example unarchive -- x.lha [DIR]`
+  lists (and extracts) an archive and says which entries a replayer recognises.
+* **Archives** (feature `archives`, pure Rust, also in the WebAssembly build):
+  `amigaplayer_rs::archive::extract(name, &bytes, &Limits::default())` gives the entries of an
+  LhA, zip, tar, gzip or xz archive in memory, with size caps and no panic on corrupt data;
+  `Song::open_with(&entry.name, &entry.data, &archive.companions(i), rate)` plays one with the
+  others as its companions. The crates it uses: `delharc` (LhA, MIT OR Apache-2.0), `flate2` on
+  `miniz_oxide` (MIT OR Apache-2.0), `lzma-rs` (MIT).
 * `tools/lib-check.sh` builds and tests all of it.
 
 The library is GPL-2.0-or-later like the rest, with the per-file attributions and `LICENSE-*`

@@ -120,6 +120,13 @@ fn amiga_lha_names_end_at_the_comment() {
 }
 
 #[test]
+fn zip_names_in_cp437() {
+    assert_eq!(CP437_HIGH.chars().count(), 128);
+    assert_eq!(zip_text(b"Mot\x94rhead", 0), "Motörhead");
+    assert_eq!(zip_text("Motörhead".as_bytes(), 0x800), "Motörhead");
+}
+
+#[test]
 fn lzx_is_recognised_not_extracted() {
     let mut d = b"LZX\0\0\0\0\0\0\0".to_vec();
     d.resize(64, 0);

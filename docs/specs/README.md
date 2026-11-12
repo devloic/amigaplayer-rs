@@ -17,6 +17,7 @@ before publication so that it describes behaviour only; what was removed or rewo
 | `davidhanney/` | David Hanney replayer (`dh.*`): format, replay, Paula writes, timing | no `src/replay` file at this commit |
 | `markcooksey/` | Mark Cooksey / Richard Frankish replayer (`mc.*`, `mcr.*`/`mcs.*`) | no `src/replay` file at this commit |
 | `robhubbard/` | Rob Hubbard, Amiga `rh.*` (not the ST variant `rho.*`, which is `src/replay/robhubbardst.rs`) | no `src/replay` file at this commit |
+| `robhubbard2/` | Rob Hubbard 2 (`rh2.*.dum` + `rh.ins` bank): format, envelopes, tables, write order, what the NotePlayer genie adds, timing model | `src/replay/robhubbard2.rs` |
 | `anders0land/` | Anders 0land replayer: behaviour spec | `src/replay/anders0land.rs` |
 | `artandmagic/` | Art & Magic (`aam.*`) replayer: behaviour specification | `src/replay/artandmagic.rs` |
 | `bladepacker/` | Blade Packer replayer: behaviour spec | `src/replay/bladepacker.rs` |

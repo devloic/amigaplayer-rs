@@ -320,6 +320,22 @@ fn plays_a_tone_at_pitch() {
     }
 }
 
+/// The library's `Song` plays a SID tune (detection, the engine's backend, its render).
+#[test]
+fn plays_through_the_library_song() {
+    let mut f = Psid::new(tone_code(pal_freq(440.0)));
+    f.songs = 2;
+    let d = f.bytes();
+    assert_eq!(crate::detect(&d).as_deref(), Some("PSID"));
+    let mut s = crate::Song::open("tone.sid", &d, RATE).unwrap();
+    assert_eq!(s.format(), "PSID");
+    assert_eq!((s.subsongs().first, s.subsongs().last), (0, 1));
+    let mut out = vec![0f32; RATE as usize * 2];
+    s.render_f32(&mut out);
+    assert!(out[RATE as usize..].iter().any(|&x| x.abs() > 0.03));
+    assert!(!s.songend());
+}
+
 #[test]
 fn the_output_rate_is_honoured() {
     for rate in [8000u32, 22050, 44100, 48000, 96000] {

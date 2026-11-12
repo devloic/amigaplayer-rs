@@ -96,6 +96,8 @@ impl Song {
         match &e.playing {
             Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_) | Backend::Pcm(_), .. }) => {}
             Some(Playing { backend: Backend::Native(_), format, .. }) if format != "SoundTracker" => {}
+            #[cfg(feature = "sid")]
+            Some(Playing { backend: Backend::Sid(_), .. }) => {}
             Some(p @ Playing { backend: Backend::Deli(_), .. }) if custom && p.is_custom() => {}
             _ => bail!("no open replayer plays this module"),
         }

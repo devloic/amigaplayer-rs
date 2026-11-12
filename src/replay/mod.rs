@@ -34,6 +34,7 @@ pub mod davidhanney;
 pub mod davidwhittaker;
 pub mod digibooster;
 pub mod digitalmugician;
+pub mod digitalsoundcreations;
 pub mod digitalsoundstudio;
 pub mod dynamicsynthesizer;
 pub mod dsc;
@@ -384,6 +385,8 @@ pub const REPLAYERS: &[Open] = &[
     soundmaster::OPEN,
     timfollin::OPEN,
     dsc::OPEN,
+    // strict: FORM DTRK with its four chunks, or the Populous layout to the file's exact size; takes no dsc.* file
+    digitalsoundcreations::OPEN,
     scumm::OPEN,
     jasonbrooke::OPEN,
     silmarils::OPEN,

@@ -43,41 +43,62 @@ once per player tick; the exit routine (offset 4) is not called.
 
 | part | model |
 |---|---|
-| CPU | the `m68k` crate as a 68000 (cycle counts per instruction, bus accesses stamped to the clock they happen on, level-6 interrupts taken at instruction boundaries) at 8.000 MHz |
-| RAM | 4 MB at 0; the tune is loaded at `$10002`; the stack is at the top |
-| YM2149 | at `$FF8800`-`$FF88FF`: even addresses read the selected register, writes with bit 1 of the address clear select a register, set write it; word writes put the high byte on the bus, so `move.l #$08000F00,$ff8800` sets R8; registers 0-13 with their masks, 14 and 15 read back what was written |
-| MFP 68901 | at `$FFFA00`-`$FFFA25` (odd bytes): timers A-D with prescalers 4, 10, 16, 50, 64, 100, 200 of 2.4576 MHz, data registers (0 = 256), IER/IPR/ISR/IMR, vector register (high nibble + source number; default `$40`, no software end of interrupt: the in-service bits stay clear unless the tune sets bit 3), priority 15 (GPI7, timer A) to 0; timer A's event-count mode counts the STE DMA's frame ends; pulse-width modes are not modelled |
-| STE DMA sound | `$FF8900`-`$FF8925`: frame start/end/counter, control (play, loop), mode (rate 6258 / 12517 / 25033 / 50066 Hz, mono bit), the microwire interface for the master volume (command 3); end of frame counts timer A |
+| CPU | the `m68k` crate as a 68000 (its cycle counts only bound a call), the registers kept from one call to the next, each call starting as after a reset (supervisor, mask 7) |
+| RAM | 4 MB at 0; the tune is loaded at `$10002`; the stack is at the top; the vectors are zero but `$14` (division by zero) and timer C's (`$114`), which go to an RTE at `$500` (an unset vector runs the zeroed memory up to that RTE, which returns from the exception) |
+| YM2149 | at `$FF8800`-`$FF88FF`: even addresses read the selected register, writes with bit 1 of the address clear select a register, set write it; word writes put the high byte on the bus, so `move.l #$08000F00,$ff8800` sets R8; registers 0-13 with their masks (R7 keeps 6 bits), 14 and 15 read back what was written |
+| MFP 68901 | at `$FFFA00`-`$FFFA25` (odd bytes): timers A-D with prescalers 4, 10, 16, 50, 64, 100, 200 of 2.4576 MHz and the GPI7 line (an event timer with a count of 1); a timer counts only while its enable bit (IERA / IERB) is set, its mask bit (IMRA / IMRB) lets the handler be called; enabling a running-mode timer, or writing its data register while stopped, restarts it; fixed vectors `$134` A, `$120` B, `$114` C, `$110` D, `$13C` GPI7; no pending / in-service registers (they read back what was written); timer A's event-count mode and GPI7 count the STE DMA's frame ends; pulse-width modes are not modelled |
+| STE DMA sound | `$FF8900`-`$FF8925`: frame start/end/counter, control (play, loop), mode (rate 6258 / 12517 / 25033 / 50066 Hz, mono bit; 50 kHz averaged in pairs), the microwire interface for the master volume (command 3); end of frame counts timer A |
 | BIOS | `TRAP #1` GEMDOS `Malloc` ($48, from a 1 MB heap below the stack; -1 asks the free size) and `Sversion` ($30); `TRAP #14` XBIOS `Xbtimer` (31), `DoSound` (32, its byte-code run one step per tick), `Supexec` (38), `Blitmode` (64: no blitter); other calls return 0 |
-| vectors | the MFP's ($100-$13C) and the division by zero go to an RTE; every other exception ends the tune |
+| illegal | an illegal instruction, a line-A or line-F opcode and a STOP end the tune |
 | cookie jar | `_SND` = 3, `_MCH` = `$00010000` (STE) at `$900`, pointer at `$5A0` |
 | video | `$FF820A` reads 2 (50 Hz), `$FF8260` reads 0 |
 
-Timing. One clock: the CPU's 8 MHz. The YM is stepped every 8 of its 2 MHz clocks (32 CPU clocks);
-the MFP and the DMA advance with every instruction. Init runs first and takes no time of the tune's
-(the tune's audio starts when it returns, as in the reference player). Then play is called every
-tick at the rate in the tags, with the CPU in supervisor mode, interrupt mask 3: the MFP's level-6
-interrupts preempt it, run their handlers (digidrums, SID voices, sync-buzzer) and return into it.
-Between calls the CPU idles on a stub; timer interrupts are taken there too. A vertical-blank tick
-(the default and `!V`) is the ST's real frame: 160,256 clocks of its 8.021247 MHz CPU, which at a
-rate of 50 is 50.05 Hz; a timer's tick is exact (`TC50` is 50.000 Hz). A play call that is still
-running at the next tick delays it (a tick missed by a whole period is dropped).
+Timing. The machine lives on the output-sample clock, not the CPU's. A call (the init, the play
+routine, a timer's handler) runs to its return at once: no machine time passes in it, the timers do
+not advance, no interrupt comes in it, and all its register writes are stamped with the sample it
+was made at. Per output sample, in this order: the YM makes its sample (the writes of the calls so
+far are in), the DMA makes its sample (and may signal a frame end), then each timer A, B, C, D, GPI7
+advances by one sample (a timer's prescaled rate added to an accumulator that takes one data-register
+step per output rate passed, so its rate is exact on average and its underflows land on a sample;
+one handler call per sample at most), and each that underflowed, enabled and unmasked, has its
+handler called (SR `$2300`, return by RTE) there, its writes reaching the YM at the next sample.
+At every player tick, before the sample, `DoSound`'s script is stepped and the play routine
+called (SR `$2300`, return by RTS). A tick is a whole number of output samples: rate x 313 x 512 x 50
+/ (tick rate x 8,021,247) rounded down, i.e. 958 at 48 kHz for a 50 Hz tune (the ST's frame of 313
+lines of 512 clocks at its 8.021247 MHz clock; the 0.1 % short tick is the reference player's
+and is kept so that the writes land on the same samples), for every kind of tick tag. Init runs
+first and takes no time of the tune's. On a real ST a timer interrupt can preempt a play routine
+that takes thousands of clocks; here it cannot, which is how the reference player runs the tunes.
 
-Bounds. The CPU runs for one tick's worth of clocks at a time, whatever the tune does; an init
-that has not returned after 1 s of CPU time, an illegal instruction, an address error or a jump
-to the vector of an unset exception ends the tune, which then plays silence.
+Bounds. Every call has a budget of 8 MHz CPU clocks: an init 8,000,000 (1 s), a play call 641,024
+(4 frames), a handler 160,256 (1 frame); an illegal instruction, a STOP or a call that exceeds
+its budget ends the tune, which then plays silence, so a tune that never returns costs a bounded
+amount of CPU time. (The reference player allows an init and a play call 500 frames.)
 
 ## 3. YM2149 model
 
 Steps of 8 chip clocks (250 kHz). Tone counters count up and toggle at the period (a period of 0
-holds the channel high: the sample-playing trick); the 17-bit noise register is shifted every
-second step when the noise counter reaches R6 (input: bit 0 xor bit 2); the envelope advances
-through 32 levels every R11/R12 steps (shapes by CONT/ATT/ALT/HOLD); a channel outputs when its
-tone and noise sources (each OR-ed with its mixer disable bit) are both high, at the volume
-register's 4-bit value (as level 2 v + 1) or the envelope's 5-bit level. Levels fall by 1.77 dB per
-5-bit level (3.5 dB per volume step); the three channels share a saturating output stage,
-`s / (1 + s / 3)`. Both constants were fitted to the reference player's chip (below), not taken
-from a table. Mono, a 5 Hz high-pass for the DC; the STE DMA is added in stereo.
+holds the channel high: the sample-playing trick; the square waves start high, high, low); the
+17-bit noise register is shifted every second step when the noise counter reaches R6 (input: bit 0
+xor bit 2); the envelope advances through 32 levels every R11/R12 steps (its shape through a
+128-entry table, the first 64 for the first pass, the second 64 for what repeats or holds; a chip
+that has not had R13 written sits in the second pass with a silent envelope); a channel outputs when
+its tone and noise sources (each OR-ed with its mixer disable bit, the state of the step before) are
+both high, at the volume register's 4-bit value (as level 2 v + 1) or the envelope's 5-bit level.
+A write of a tone period of 0 or 1 inside a timer handler restarts that channel's square wave
+(flips it, counter to 0) when the handler returns (the sync-square effect).
+
+The three channels' 5-bit levels (0 for a channel the mixer silences) are looked up in a
+32 x 32 x 32 table of 16-bit outputs (a single channel at full volume about 17,100). The reference
+player's table is a measurement of an ST; it is not copied here. Seen from outside it is two
+16 x 16 x 16 grids: when any of the three levels is odd every even level acts as the next odd one,
+and when all are even they act as themselves. Each grid is modelled by
+`(w[a] + w[b] + w[c]) exp(-(k[a] + k[b] + k[c]))` for the three nodes, 16 w and 16 k per grid fitted by
+least squares to the reference's table (rms error 1.0 % of its rms for the odd grid, 0.8 % for the
+even one, 958 at the worst of 32768). Each output sample is the integer average of the chip's steps
+it spans (the output rate against 250 kHz, 5 or 6 steps at 48 kHz); the 2048 latest samples' moving
+average is subtracted. The STE DMA is added in stereo at the reference's level for a centred sound.
+The result is clamped to 16 bits and scaled to +-1.
 
 ## 4. Sources and licence
 
@@ -97,14 +118,23 @@ documentation, with these exceptions where behaviour was read from a reference:
 
 Reference: AtariAudio 1.30, built from the clone with its YM2149 writes logged (a harness in the
 scratch directory; nothing of it is in the repository), 10 s of the default subsong at 48 kHz.
-The register writes are compared tick by tick (the reference's tick is 959 samples; the init's writes
-count as the first tick's).
+`examples/sndh_regs.rs` prints this player's writes as `SAMPLE REG VALUE` and
+`examples/sndh_wav.rs` renders a WAV, for the comparison.
 
 | set | result |
 |---|---|
-| 5 corpus files (modland `SNDH/`: Action, Bionic Commando, Blasteroids, Gem'X, Thrust), all ICE!-packed | 4 of 4 vertical-blank tunes: the ordered YM writes of all 470 compared ticks equal the reference's. Action (driven by timer C, with a volume-register digidrum at 7.6 kHz) differs in the phase of the timer writes: the reference runs its timer handlers on host samples, here they run on the clock |
-| 33 further modland files (Count Zero, Daglish, Follin, Hubbard, Huelsbeck, Jess, Lap, Mad Max, Tao, Tomchi, Whittaker) | 27 equal in every tick; 6 differ only where timers are involved (Mad Max x3, Tao 13, Goldrunner, Populous: their writes per register are within 1 % in number, in different phase) |
-| audio, 38 files | not sample-exact (another chip model: the reference uses a table measured on a real ST, with random start phases of the tones). Level at one, two and three channels at full volume: 8210 / 9466 / 9246 RMS (reference) against 8122 / 9357 / 9454; the 15 volume steps of one channel within 1.6 dB of the reference's; whole-file RMS 0.94 to 2.09 (mean 1.14) of the reference's; a 10 ms RMS-envelope correlation of 0.59 (median 0.65), low because of the 0.1 % tick drift and tone phases, not a difference of notes |
+| 5 corpus files (modland `SNDH/`: Action, Bionic Commando, Blasteroids, Gem'X, Thrust), all ICE!-packed | the ordered YM writes of all 470 compared ticks equal the reference's, each on the same output sample (Action is driven by timer C, with a volume-register digidrum at 7.6 kHz) |
+| 33 further modland files (Count Zero, Daglish, Follin, Hubbard, Huelsbeck, Jess, Lap, Mad Max, Tao, Tomchi, Whittaker) | all 33 equal in every write (sample, register, value), the timer-driven ones (Mad Max x3, Tao 13, Goldrunner, Populous) included |
+| audio, 38 files | RMS ratio 0.965 to 1.026 of the reference's (median 0.996), correlation 0.9995 or better, signal-to-error 27 to 38 dB (median 35 dB), 0.2 to 34 % of the samples exactly equal; the difference is the channel summing (a fit of the reference's measured table against the table itself) |
+
+What the timer-driven tunes needed (the seven that differed in phase): the reference does not run
+the CPU alongside the chips. It calls the play routine and each timer's handler to completion in
+zero time, timers counting on the output-sample grid only while their enable bit is set; the earlier
+model of this player (cycle-accurate, handlers preempting the play routine, timers on the CPU clock)
+put the same writes some tens of samples later and in another order. Matching the reference on the
+rest: the tick of a whole 958 samples, the low memory the tune can read (the vectors zero, the
+reset-vector words left at 0 and 4 by each call, as the reference leaves them: Goldrunner reads
+them), the envelope's initial position, the square waves' initial states.
 
 Not checked against any real ST recording. The remaining gaps are listed in the head of
 `src/replay/sndh.rs` (blitter, pulse-width timers, USART, a length database for tunes without `TIME`

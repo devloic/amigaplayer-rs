@@ -1,12 +1,13 @@
 //! Prints the YM2149 register writes an SNDH tune makes on the built-in Atari ST machine, one per
-//! line as `CLOCK REG VALUE` (CPU clocks at 8 MHz from the start of the subsong, decimal), for a
-//! check against another player's register log (AtariAudio patched to log its writes, for one).
+//! line as `SAMPLE REG VALUE` (the output sample, at 48 kHz, the write falls on, counted from the
+//! start of the subsong, decimal; the init's writes at 0), for a check against another player's
+//! register log (AtariAudio patched to log its writes, for one).
 //!
 //!   cargo run --release --no-default-features --features archives --example sndh_regs -- FILE [SUBSONG [TICKS]]
 //!
 //! FILE may be ICE!-packed; SUBSONG is 1-based (default: the file's own); TICKS player ticks
 //! (default 500). The first line, `# tick-rate N [vbl]`, gives the player's tick rate (and whether
-//! the tick is the ST's vertical blank, 50.05 Hz at a rate of 50).
+//! the tune asks for the vertical blank).
 
 use amigaplayer_rs::replay::sndh::{self, SndhPlayer};
 

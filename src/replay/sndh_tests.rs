@@ -121,55 +121,138 @@ fn init_gets_the_subsong_in_d0() {
 fn play_is_called_once_per_tick_at_the_rate() {
     let d = two_song_tune();
     let w = writes(&d, 0, 10);
-    // the machine's first event is the chip's mixer reset; play writes R0 and R1 each tick
+    // play writes R0 and R1 each tick; the init's writes (none here) would be at sample 0
     let r1: Vec<u64> = w.iter().filter(|x| x.1 == 1).map(|x| x.0).collect();
     assert_eq!(r1.len(), 10);
-    // TC50 is an exact 50 Hz: 160,000 clocks of 8 MHz between calls
+    // a tick is a whole number of output samples: 48000 * 313 * 512 * 50 / (50 * 8,021,247) = 958
+    assert_eq!(r1[0], 0);
     for p in r1.windows(2) {
-        assert_eq!(p[1] - p[0], 160_000);
+        assert_eq!(p[1] - p[0], 958);
     }
 }
 
 #[test]
-fn vbl_tick_is_the_st_frame() {
-    let d = sndh(b"##01\0!V50\0", &[0x4E, 0x75], &{
-        let mut p = Vec::new();
-        ym_set(&mut p, 1, 7);
-        p.extend_from_slice(&[0x4E, 0x75]);
-        p
-    });
-    let w = writes(&d, 0, 6);
-    let t: Vec<u64> = w.iter().filter(|x| x.1 == 1).map(|x| x.0).collect();
-    // 160,256 clocks of 8.021247 MHz = 159,832 clocks of 8 MHz (rounded by the tick's own arithmetic)
-    let step = t[3] - t[2];
-    assert!((159_800..159_870).contains(&step), "{step}");
+fn tick_length_is_the_references() {
+    // whole samples of the ST's frame (313 lines of 512 clocks at 8.021247 MHz) over the tick rate
+    assert_eq!(SndhPlayer::samples_per_tick(48000, 50), 958);
+    assert_eq!(SndhPlayer::samples_per_tick(44100, 50), 881);
+    assert_eq!(SndhPlayer::samples_per_tick(48000, 60), 799);
+    assert_eq!(SndhPlayer::samples_per_tick(48000, 200), 239);
+    assert_eq!(SndhPlayer::samples_per_tick(1000, 2000), 1);
 }
 
-#[test]
-fn timer_interrupts_preempt_and_return() {
-    // init: vector $134 = handler (timer A), timer A: data 128, prescale 16 (2457600 / 16 / 128 = 1200 Hz),
-    // enabled and unmasked; handler: YM R0 = $55, RTE. Play does nothing.
+/// The init code of a tune that sets timer A (data `data`, control `ctrl`) enabled and unmasked
+/// with the handler `handler` (which ends in an RTE, or not).
+fn timer_a_init(data: u8, ctrl: u8, handler: &[u8]) -> Vec<u8> {
     let mut init = Vec::new();
     // lea handler(pc),a0 ; move.l a0,$134.w
     let lea_at = init.len();
     init.extend_from_slice(&[0x41, 0xFA, 0, 0]);
     init.extend_from_slice(&[0x21, 0xC8, 0x01, 0x34]);
-    for (reg, val) in [(0x07u16, 0x20u8), (0x13, 0x20), (0x1F, 0x80), (0x19, 0x03)] {
+    for (reg, val) in [(0x07u16, 0x20u8), (0x13, 0x20), (0x1F, data), (0x19, ctrl)] {
         init.extend_from_slice(&[0x13, 0xFC, 0, val, 0x00, 0xFF, 0xFA, reg as u8]);
     }
     init.extend_from_slice(&[0x4E, 0x75]);
     let handler_at = init.len();
     init[lea_at + 2..lea_at + 4].copy_from_slice(&((handler_at - (lea_at + 2)) as u16).to_be_bytes());
-    ym_set(&mut init, 0, 0x55);
-    init.extend_from_slice(&[0x4E, 0x73]);
-    let d = sndh(b"##01\0TC50\0", &init, &[0x4E, 0x75]);
+    init.extend_from_slice(handler);
+    init
+}
+
+/// A handler that writes YM R0 = $55 and returns.
+fn write_55_handler() -> Vec<u8> {
+    let mut h = Vec::new();
+    ym_set(&mut h, 0, 0x55);
+    h.extend_from_slice(&[0x4E, 0x73]);
+    h
+}
+
+#[test]
+fn timer_handlers_run_on_the_output_sample_grid() {
+    // timer A: data 128, prescale 16 (2457600 / 16 / 128 = 1200 Hz): one underflow per 40 samples
+    let d = sndh(b"##01\0TC50\0", &timer_a_init(128, 3, &write_55_handler()), &[0x4E, 0x75]);
     let w = writes(&d, 0, 10);
     let hits: Vec<u64> = w.iter().filter(|x| x.1 == 0 && x.2 == 0x55).map(|x| x.0).collect();
-    // 10 ticks = 0.2 s at 1200 Hz = 240 interrupts (the init and the first interrupt take a little)
-    assert!((236..=241).contains(&hits.len()), "{}", hits.len());
-    // the spacing is 8,000,000 / 1200 = 6,666.7 clocks
-    let gap = hits[100] - hits[99];
-    assert!((6660..=6675).contains(&gap), "{gap}");
+    // 10 ticks = 9580 samples
+    assert_eq!(hits.len(), 239);
+    // the first underflow is at the 40th sample, after which they come every 40
+    assert_eq!(hits[0], 40);
+    assert!(hits.windows(2).all(|p| p[1] - p[0] == 40));
+}
+
+#[test]
+fn a_timer_and_the_play_routine_never_interleave() {
+    // play writes R0 = 1, runs a long loop, then writes R1 = 7: on a real ST the 1200 Hz timer
+    // would come in between; here a call takes no machine time and the two writes are on one sample
+    let mut play = Vec::new();
+    ym_set(&mut play, 0, 1);
+    play.extend_from_slice(&[0x30, 0x3C, 0x01, 0xF4, 0x51, 0xC8, 0xFF, 0xFE]); // move.w #500,d0 ; dbra d0,*
+    ym_set(&mut play, 1, 7);
+    play.extend_from_slice(&[0x4E, 0x75]);
+    let d = sndh(b"##01\0TC50\0", &timer_a_init(128, 3, &write_55_handler()), &play);
+    let w = writes(&d, 0, 20);
+    let mut seen = 0;
+    for (i, x) in w.iter().enumerate() {
+        if x.1 == 0 && x.2 == 1 {
+            assert_eq!((w[i + 1].1, w[i + 1].2, w[i + 1].0), (1, 7, x.0), "{i}");
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 20);
+    assert!(w.iter().any(|x| x.1 == 0 && x.2 == 0x55));
+}
+
+#[test]
+fn a_handler_that_never_returns_ends_the_tune() {
+    // the handler is `bra.s *`
+    let d = sndh(b"##01\0TC50\0", &timer_a_init(128, 3, &[0x60, 0xFE]), &[0x4E, 0x75]);
+    let mut p = SndhPlayer::new(&d, 48000).unwrap();
+    assert!(!p.dead());
+    let mut out = vec![0f32; 2 * 4800];
+    p.render(&mut out);
+    assert!(p.dead());
+    assert!(out[out.len() - 100..].iter().all(|&x| x == 0.0));
+}
+
+#[test]
+fn a_stop_in_the_play_routine_ends_the_tune() {
+    // stop #$2000: nothing can wake it
+    let d = sndh(b"##01\0TC50\0", &[0x4E, 0x75], &[0x4E, 0x72, 0x20, 0x00, 0x4E, 0x75]);
+    let mut p = SndhPlayer::new(&d, 48000).unwrap();
+    let mut out = vec![0f32; 2 * 4800];
+    p.render(&mut out);
+    assert!(p.dead());
+}
+
+#[test]
+fn the_init_writes_are_at_sample_zero() {
+    let mut init = Vec::new();
+    ym_set(&mut init, 8, 9);
+    init.extend_from_slice(&[0x4E, 0x75]);
+    let d = sndh(b"##01\0TC50\0", &init, &[0x4E, 0x75]);
+    let w = writes(&d, 0, 3);
+    assert_eq!(w, vec![(0, 8, 9)]);
+}
+
+#[test]
+fn a_period_written_in_a_handler_restarts_the_square_wave() {
+    // timer A's handler writes tone period 1 to channel A (the sync-square effect): the wave is
+    // restarted at the handler's end, so the channel's edge flips at each call
+    let mut y = Ym::new(48000);
+    y.write(7, 0x3E);
+    y.write(8, 15);
+    y.write(0, 0x00);
+    y.write(1, 0x08); // a slow tone: period $800
+    let before = y.sample();
+    y.set_in_irq(true);
+    y.write(0, 1);
+    y.write(1, 0);
+    y.set_in_irq(false);
+    y.write(0, 0);
+    y.write(1, 8);
+    // the edge flipped by the restart: the level seen is the other half of the square wave
+    let after = y.sample();
+    assert_ne!(before, after);
 }
 
 #[test]
@@ -256,32 +339,60 @@ fn engine_plays_it() {
 #[test]
 fn ste_dma_plays_a_frame_and_signals_its_end() {
     let d = sndh(b"##01\0TC50\0", &[0x4E, 0x75], &[0x4E, 0x75]);
-    let mut m = Machine::new(&d, 50, false, 1);
-    m.finish_init();
+    let mut m = Machine::new(&d, 48000);
+    assert!(m.call(BASE, Some(1), false, INIT_BUDGET));
     // 8 stereo frames at $20000: left i, right -i
     for i in 0..8u32 {
         m.bus.w8(0x20000 + 2 * i, i as u8);
         m.bus.w8(0x20001 + 2 * i, (i as u8).wrapping_neg());
     }
-    let b = &mut m.bus;
     let set = |b: &mut StBus, a: u32, v: u8| b.write_byte(0xFF8900 + a, v);
-    // start $020000, end $020010; mode: stereo, 50 kHz (rate 3); control: play, loop off
-    for (a, v) in [(3, 2), (5, 0), (7, 0), (0xF, 2), (0x11, 0), (0x13, 0x10), (0x21, 3), (1, 1)] {
-        set(b, a, v);
+    // start $020000, end $020010; mode: stereo, 25 kHz (rate 2); control: play, loop off
+    for (a, v) in [(3, 2), (5, 0), (7, 0), (0xF, 2), (0x11, 0), (0x13, 0x10), (0x21, 2), (1, 1)] {
+        set(&mut m.bus, a, v);
     }
-    b.events.clear();
-    // 8 samples at 50,066 Hz = 1,278 clocks, the frame's end is noticed at the 9th (1,438)
-    m.pass(1500);
-    let s: Vec<(i8, i8)> = m.bus.events.iter().filter_map(|e| if let Ev::Dma(l, r) = e.1 { Some((l, r)) } else { None }).collect();
-    assert_eq!(&s[..8], &[(0, 0), (1, -1), (2, -2), (3, -3), (4, -4), (5, -5), (6, -6), (7, -7)]);
-    // the frame ended: playing stopped (no loop), the output is back to 0
+    let mut levels: Vec<(i32, i32)> = Vec::new();
+    let mut ends = 0;
+    for _ in 0..40 {
+        let b = &mut m.bus;
+        let (l, e) = b.dma.sample(&b.ram);
+        ends += e as u32;
+        if levels.last() != Some(&l) {
+            levels.push(l);
+        }
+    }
+    // each frame's output is held for the output samples until the next (a DAC sample per 1.92
+    // output samples); volume 64 and a stereo source's gain of 2: 128 per count
+    let want: Vec<(i32, i32)> = (0..8).map(|i| (128 * i, -128 * i)).chain([(0, 0)]).collect();
+    assert_eq!(levels, want);
+    // the frame ended once: playing stopped (no loop), the output is back to 0
+    assert_eq!(ends, 1);
     assert_eq!(m.bus.read_byte(0xFF8901) & 1, 0);
-    assert_eq!(*s.last().unwrap(), (0, 0));
+}
+
+#[test]
+fn ste_dma_frame_end_counts_on_timer_a() {
+    // timer A in event-count mode with a count of 2, enabled and unmasked, counts the DMA's frame
+    // ends; GPI7 does too (count 1)
+    let mut m = Mfp::new(48000);
+    m.write(0x07, 0xA0);
+    m.write(0x13, 0xA0);
+    m.write(0x1F, 2);
+    m.write(0x19, 8);
+    // the GPI7 line fires at the first event, timer A at the second
+    m.event_a();
+    assert!(m.tick(4));
+    assert!(!m.tick(0));
+    m.event_a();
+    assert!(m.tick(0));
+    assert!(m.tick(4));
+    // an event is counted once
+    assert!(!m.tick(0) && !m.tick(4));
 }
 
 #[test]
 fn ste_microwire_sets_the_master_volume() {
-    let mut dma = super::Dma::new();
+    let mut dma = super::Dma::new(48000);
     assert_eq!(dma.volume, 64);
     dma.write16(0x24, 0x07FF);
     dma.write16(0x22, 0x04C0 | 20); // master volume 20 of 40
@@ -295,116 +406,188 @@ fn ste_microwire_sets_the_master_volume() {
 
 // ------------------------------------------------------------------ the chips
 
+/// A chip that makes one step per output sample (the output rate of the chip's step rate).
+fn ym_at_step_rate() -> Ym {
+    Ym::new(250_000)
+}
+
 #[test]
 fn ym_tone_noise_and_envelope() {
-    let mut y = Ym::new();
-    y.reset();
-    // channel A, period 2: toggles every 2 steps; volume 15 -> level 31
-    y.write(0, 2);
+    // channel A, period 4: a square wave of 8 steps, at full volume (level 31)
+    let mut y = ym_at_step_rate();
+    y.write(0, 4);
     y.write(7, 0x3E);
     y.write(8, 15);
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..40 {
-        seen.insert((y.step() * 1000.0) as i32);
-    }
-    assert_eq!(seen.len(), 2, "{seen:?}");
+    let v: Vec<i32> = (0..800).map(|_| y.sample()).collect();
+    let (lo, hi) = (v[400..].iter().min().unwrap(), v[400..].iter().max().unwrap());
+    assert!(hi - lo > 15000, "{lo} {hi}");
+    let mid = (lo + hi) / 2;
+    let edges = v[400..].windows(2).filter(|w| w[0] < mid && w[1] >= mid).count();
+    assert!((49..=51).contains(&edges), "{edges}");
     // tone period 0 holds the channel high (sample playing through the volume register)
-    let mut y = Ym::new();
+    let mut y = ym_at_step_rate();
     y.write(7, 0x3E);
     y.write(8, 15);
-    let a = y.step();
-    assert!(a > 0.9 && (0..50).all(|_| (y.step() - a).abs() < 1e-6));
-    // noise only: the output both varies and is not constant
-    let mut y = Ym::new();
+    let v: Vec<i32> = (0..50).map(|_| y.sample()).collect();
+    assert!(v.iter().all(|&x| x > 15000), "{v:?}");
+    // noise only on channel A: the output varies between silence and the channel's level
+    let mut y = ym_at_step_rate();
     y.write(7, 0x37);
     y.write(8, 15);
     y.write(6, 1);
-    let v: Vec<f32> = (0..400).map(|_| y.step()).collect();
-    let (lo, hi) = (v.iter().cloned().fold(9.0, f32::min), v.iter().cloned().fold(0.0, f32::max));
-    assert!(lo < 0.05 && hi > 0.9, "{lo} {hi}");
-    // envelope shape 0x0E, period 1: a triangle through 32 levels up and down
-    let mut y = Ym::new();
-    y.write(7, 0x3E);
+    let v: Vec<i32> = (0..20000).map(|_| y.sample()).collect();
+    let (lo, hi) = (*v.iter().min().unwrap(), *v.iter().max().unwrap());
+    assert!(hi - lo > 15000, "{lo} {hi}");
+    // a silent chip is silent
+    let mut y = ym_at_step_rate();
+    assert!((0..100).all(|_| y.sample() == 0));
+}
+
+#[test]
+fn ym_envelope_shapes() {
+    let down: Vec<u8> = (0..32).rev().collect();
+    let up: Vec<u8> = (0..32).collect();
+    let zero = [0u8; 32];
+    let hi = [31u8; 32];
+    let check = |shape: u8, segs: [&[u8]; 4]| {
+        let e = super::ym::envelope(shape);
+        let want: Vec<u8> = segs.iter().flat_map(|s| s.iter().copied()).collect();
+        assert_eq!(e.to_vec(), want, "shape {shape:#x}");
+    };
+    check(0x00, [&down, &zero, &zero, &zero]);
+    check(0x04, [&up, &zero, &zero, &zero]);
+    check(0x08, [&down, &down, &down, &down]);
+    check(0x09, [&down, &zero, &zero, &zero]);
+    check(0x0A, [&down, &up, &down, &up]);
+    check(0x0B, [&down, &hi, &hi, &hi]);
+    check(0x0C, [&up, &up, &up, &up]);
+    check(0x0D, [&up, &hi, &hi, &hi]);
+    check(0x0E, [&up, &down, &up, &down]);
+    check(0x0F, [&up, &zero, &zero, &zero]);
+}
+
+#[test]
+fn ym_envelope_runs_through_the_shape() {
+    // channel A on the envelope, shape $0E (triangle), period 1: one level per step; the output
+    // follows the 32 levels up and down
+    let mut y = ym_at_step_rate();
+    y.write(7, 0x3F);
     y.write(0, 0);
+    y.write(7, 0x3E);
     y.write(8, 0x10);
     y.write(11, 1);
     y.write(12, 0);
     y.write(13, 0x0E);
-    let levels: Vec<u8> = (0..70).map(|_| { y.step(); y.env_level() }).collect();
-    assert_eq!(levels[0], 1);
-    assert_eq!(levels[30], 31);
-    assert!(levels[40] < 31 && levels[62] < 3);
-    // shape 0x00: one down ramp, then silence
-    let mut y = Ym::new();
-    y.write(13, 0);
-    y.write(11, 1);
-    for _ in 0..100 {
-        y.step();
-    }
-    assert_eq!(y.env_level(), 0);
+    let v: Vec<i32> = (0..130).map(|_| y.sample()).collect();
+    // rising through the first 32 steps, falling through the next 32
+    let mx = v.iter().position(|&x| x == *v[..70].iter().max().unwrap()).unwrap();
+    assert!((28..=36).contains(&mx), "{mx}");
+    assert!(v[8] < v[16] && v[16] < v[28]);
+    assert!(v[40] > v[52] && v[52] > v[60]);
 }
 
 #[test]
 fn ym_register_masks() {
-    let mut y = Ym::new();
-    y.write(1, 0xFF);
-    y.write(6, 0xFF);
-    y.write(8, 0xFF);
-    assert_eq!((y.read(1), y.read(6), y.read(8)), (0x0F, 0x1F, 0x1F));
+    let d = sndh(b"##01\0TC50\0", &[0x4E, 0x75], &[0x4E, 0x75]);
+    let mut m = Machine::new(&d, 48000);
+    for (r, v) in [(1u8, 0xFFu8), (6, 0xFF), (7, 0xFF), (8, 0xFF)] {
+        m.bus.ym_write(0, r);
+        m.bus.ym_write(2, v);
+    }
+    let rd = |m: &mut Machine, r: u8| {
+        m.bus.ym_write(0, r);
+        m.bus.ym_read(0)
+    };
+    assert_eq!((rd(&mut m, 1), rd(&mut m, 6), rd(&mut m, 7), rd(&mut m, 8)), (0x0F, 0x1F, 0x3F, 0x1F));
 }
 
 #[test]
-fn mfp_timer_counts_and_vectors() {
-    let mut m = Mfp::new(8_000_000);
+fn mix_model_is_near_the_measured_levels() {
+    // one channel at the 16 volumes: the first and the last, and the saturation of three
+    let t = super::ym::mix_table();
+    let one = |l: usize| t[l] as f32;
+    assert!((one(31) - 17344.0).abs() < 1500.0, "{}", one(31));
+    assert!(one(31) > 15.0 * one(15));
+    let two = t[31 | 31 << 5] as f32;
+    let three = t[31 | 31 << 5 | 31 << 10] as f32;
+    assert!(two > 1.4 * one(31) && two < 1.8 * one(31), "{two}");
+    assert!(three > two && three <= 32767.0);
+}
+
+#[test]
+fn mix_table_treats_even_levels_as_the_next_odd_one_beside_an_odd_one() {
+    let t = super::ym::mix_table();
+    let at = |a: usize, b: usize, c: usize| t[a | b << 5 | c << 10];
+    // an odd level among the three promotes the even ones; three even levels stand for themselves
+    assert_eq!(at(10, 1, 20), at(11, 1, 21));
+    assert_eq!(at(30, 0, 5), at(31, 1, 5));
+    assert_ne!(at(10, 0, 20), at(11, 1, 21));
+    // symmetric in the channels, silent with none
+    assert_eq!(at(7, 20, 3), at(3, 7, 20));
+    assert_eq!(at(0, 0, 0), 0);
+    // the output rises with each level
+    assert!((1..16).all(|v| at(2 * v + 1, 0, 0) >= at(2 * v - 1, 0, 0)));
+    assert!((1..16).all(|v| at(2 * v, 0, 0) >= at(2 * v - 2, 0, 0)));
+}
+
+#[test]
+fn a_tune_that_never_writes_the_envelope_shape_has_a_silent_envelope() {
+    // channel B on the envelope with the tone and noise out of the way: nothing sounds
+    let mut y = ym_at_step_rate();
+    y.write(7, 0x3F);
+    y.write(9, 0x10);
+    y.write(11, 1);
+    assert!((0..200).all(|_| y.sample().abs() < 20));
+}
+
+#[test]
+fn mfp_timer_counts_and_fires() {
+    let mut m = Mfp::new(48000);
     m.write(0x07, 0x20); // IERA: timer A
     m.write(0x13, 0x20); // IMRA
-    m.write(0x1F, 4); // TADR = 4
-    m.write(0x19, 1); // prescale 4 -> 16 MFP clocks per underflow
-    assert!(!m.irq());
-    // 16 MFP clocks = 16 * 8e6 / 2.4576e6 = 52.08 CPU clocks
-    m.advance(52);
-    assert!(!m.irq());
-    m.advance(1);
-    assert!(m.irq());
-    assert_eq!(m.acknowledge(), 0x40 + 13);
-    assert!(!m.irq());
-    // next_event predicts the next underflow
-    let n = m.next_event().unwrap();
-    assert!((51..=54).contains(&n), "{n}");
-    // data register read-back counts down
-    m.advance(30);
-    assert!(m.read(0x1F) < 4);
-    // masked: pending but not delivered
-    m.write(0x13, 0);
-    m.advance(200);
-    assert!(!m.irq());
-    m.write(0x13, 0x20);
-    assert!(m.irq());
-    // priority: timer A (13) over timer C (5)
-    m.write(0x09, 0x20);
-    m.write(0x15, 0x20);
-    m.write(0x23, 1);
-    m.write(0x1D, 0x10);
-    m.advance(2000);
-    assert_eq!(m.acknowledge(), 0x40 + 13);
-    assert_eq!(m.acknowledge(), 0x40 + 5);
+    m.write(0x1F, 128); // TADR = 128
+    m.write(0x19, 3); // prescale 16: 3.2 counts per output sample at 48 kHz
+    let mut fires = Vec::new();
+    for s in 1..=400 {
+        if m.tick(0) {
+            fires.push(s);
+        }
+    }
+    assert_eq!(fires.len(), 10);
+    assert_eq!(fires[0], 40);
+    assert!(fires.windows(2).all(|p| p[1] - p[0] == 40));
+    // the data register reads back what is left
+    m.tick(0);
+    assert!(m.read(0x1F) < 128);
 }
 
 #[test]
-fn mfp_in_service_blocks_with_software_eoi() {
-    let mut m = Mfp::new(8_000_000);
-    m.write(0x17, 0x48); // software end of interrupt
-    m.write(0x07, 0x20);
+fn mfp_enable_counts_and_mask_gates() {
+    // not enabled: it does not count at all
+    let mut m = Mfp::new(48000);
     m.write(0x13, 0x20);
-    m.write(0x1F, 1);
+    m.write(0x1F, 2);
     m.write(0x19, 1);
-    m.advance(200);
-    assert_eq!(m.acknowledge(), 0x40 + 13);
-    m.advance(200);
-    // pending again but in service: not delivered until the handler clears ISR
-    assert!(!m.irq());
-    m.write(0x0F, 0xDF);
-    assert!(m.irq());
+    assert!((0..100).all(|_| !m.tick(0)));
+    // enabled but masked: counts, no handler
+    m.write(0x13, 0);
+    m.write(0x07, 0x20);
+    assert!((0..100).all(|_| !m.tick(0)));
+    // enabling restarts the counter; several underflows in one sample are one call
+    m.write(0x13, 0x20);
+    assert!(m.tick(0));
+    // timer C is enabled and unmasked at the start (stopped, no handler until started)
+    let mut m = Mfp::new(48000);
+    assert!(!m.tick(2));
+    m.write(0x23, 1);
+    m.write(0x1D, 0x10);
+    assert!(m.tick(2));
+    // timer D's own bits
+    m.write(0x09, 0x30);
+    m.write(0x15, 0x30);
+    m.write(0x25, 1);
+    m.write(0x1D, 0x11);
+    assert!(m.tick(3));
 }
 
 // ------------------------------------------------------------------ real tunes, when present
@@ -471,8 +654,7 @@ fn corpus_register_streams_match_the_reference() {
             "Gem_X.sndh" => GEM_X,
             _ => continue,
         };
-        // (the machine's own first event, the mixer reset, is not the tune's)
-        let got: Vec<(u8, u8)> = w.iter().skip(1).take(want.len()).map(|x| (x.1, x.2)).collect();
+        let got: Vec<(u8, u8)> = w.iter().take(want.len()).map(|x| (x.1, x.2)).collect();
         assert_eq!(got, want, "{name}");
     }
 }

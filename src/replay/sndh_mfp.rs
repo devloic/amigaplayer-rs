@@ -1,93 +1,126 @@
 //! The Atari ST's MC68901 multi-function peripheral (MFP) for the SNDH player (`sndh.rs`): the
-//! four timers A to D with their prescalers, the interrupt enable / pending / mask / in-service
-//! registers, the vector register and the interrupt delivery to the CPU (level 6).
+//! four timers A to D with their prescalers and the GPI7 line, as the tunes use them for a
+//! digidrum, a SID voice, a sync-buzzer or the STE DMA sound's end-of-frame count.
 //!
 //! Original implementation, written for this project (GPL-2.0-or-later) from the MC68901's data
 //! sheet and the Atari ST hardware documentation (register map at $FFFA01 + 2 n; the timers'
 //! delay-mode prescalers 4, 10, 16, 50, 64, 100 and 200 of the 2.4576 MHz clock; the data
-//! registers counting down and reloading, 0 meaning 256; the sixteen interrupt sources, numbered
-//! 15 (GPI7, timer A) down to 0 with the higher number the higher priority; vector number = the
-//! vector register's high nibble + the source number). The behaviours of the MFP with a "no
-//! software end-of-interrupt" vector register (the default here) are those of the data sheet's
-//! automatic end of interrupt mode: the in-service bit is never set.
+//! registers counting down and reloading; the vectors of the ST's operating system, 0x134 timer A,
+//! 0x120 B, 0x114 C, 0x110 D, 0x13C GPI7), and with the timing of AtariAudio (MIT, see
+//! `LICENSE-AtariAudio`) as a behavioural reference, so that the register writes the interrupt
+//! handlers make fall on the same output sample as in that player.
 //!
-//! Timer A's and B's event-count mode counts the external events given with `event_a` (the STE
-//! DMA sound's end-of-frame signal); the pulse-width modes are not modelled (the timer stops).
+//! The timing model is the host's: the timers advance once per output sample (`tick`), not per
+//! CPU clock. Each tick adds the timer's prescaled rate to an accumulator and takes one data
+//! register step each time the accumulator passes the output rate, so a timer runs at its exact
+//! rate on average and its underflows land on the output-sample grid. A timer counts only while its
+//! interrupt-enable bit is set; the interrupt-mask bit gates the call of the handler; there is no
+//! pending register, no in-service register and no vector number (the vectors are fixed).
+//!
+//! Event-count mode (timer A with control bit 3, and the GPI7 line) counts the external events
+//! given with `event_a`, the STE DMA sound's end of frame. The pulse-width modes are not modelled
+//! (they count events as the event mode does).
 
 /// The MFP clock, Hz.
-pub const MFP_HZ: u64 = 2_457_600;
+pub const MFP_HZ: u32 = 2_457_600;
 
-/// Register offsets (odd bytes of $FFFA00).
-mod r {
-    pub const IERA: usize = 0x07;
-    pub const IERB: usize = 0x09;
-    pub const IPRA: usize = 0x0B;
-    pub const IPRB: usize = 0x0D;
-    pub const ISRA: usize = 0x0F;
-    pub const ISRB: usize = 0x11;
-    pub const IMRA: usize = 0x13;
-    pub const IMRB: usize = 0x15;
-    pub const VR: usize = 0x17;
-    pub const TACR: usize = 0x19;
-    pub const TBCR: usize = 0x1B;
-    pub const TCDCR: usize = 0x1D;
-    pub const TADR: usize = 0x1F;
-    pub const TBDR: usize = 0x21;
-    pub const TCDR: usize = 0x23;
-    pub const TDDR: usize = 0x25;
-}
+/// Timers A, B, C, D, then the GPI7 line (which behaves as an event timer counting to 1).
+pub const TIMERS: usize = 5;
 
-/// The interrupt source number (bit of the 16-bit pending word) of each timer A, B, C, D.
-const TIMER_IRQ: [u8; 4] = [13, 8, 5, 4];
-
-const PRESCALE: [u32; 8] = [0, 4, 10, 16, 50, 64, 100, 200];
+/// The interrupt vector address of each of them.
+pub const VECTORS: [u32; TIMERS] = [0x134, 0x120, 0x114, 0x110, 0x13C];
 
 #[derive(Clone, Copy, Default)]
 struct Timer {
-    /// Control: low 3 bits the delay-mode prescaler choice, bit 3 (timers A and B) the event mode.
+    /// The interrupt-enable bit: only an enabled timer counts.
+    enable: bool,
+    /// The interrupt-mask bit: an underflow calls the handler only when set.
+    mask: bool,
+    /// Control: low 3 bits the delay-mode prescaler choice (0 stopped), bit 3 the event mode.
     ctrl: u8,
-    /// The value the counter reloads (0 = 256).
+    /// The counter now.
+    count: u8,
+    /// The value it reloads.
     reload: u8,
-    /// The counter now (1..=256).
-    count: u16,
-    /// MFP clocks accumulated towards the next prescaled tick.
-    sub: u32,
+    /// MFP clocks accumulated towards the next step, in units of 1 / host rate.
+    inner: u32,
+    /// An external event waits to be counted.
+    event: bool,
 }
 
 impl Timer {
-    fn period(&self) -> u32 {
-        if self.ctrl & 8 != 0 { 0 } else { PRESCALE[(self.ctrl & 7) as usize] }
+    fn restart(&mut self) {
+        self.inner = 0;
+        self.count = self.reload;
     }
-    fn reload_value(&self) -> u16 {
-        if self.reload == 0 { 256 } else { self.reload as u16 }
+
+    fn counter_mode(&self) -> bool {
+        self.ctrl & 7 != 0 && self.ctrl & 8 == 0
+    }
+
+    fn set_enable(&mut self, en: bool) {
+        if self.enable != en && en && self.counter_mode() {
+            self.restart();
+        }
+        self.enable = en;
+    }
+
+    fn set_data(&mut self, v: u8) {
+        self.reload = v;
+        if self.ctrl == 0 {
+            self.restart();
+        }
+    }
+
+    /// One output sample passes; true when the timer underflowed and its handler is to be called.
+    fn tick(&mut self, host_rate: u32) -> bool {
+        let mut fire = false;
+        if self.enable {
+            if self.ctrl & 8 != 0 {
+                if self.event {
+                    self.count = self.count.wrapping_sub(1);
+                    if self.count == 0 {
+                        self.count = self.reload;
+                        fire = true;
+                    }
+                    self.event = false;
+                }
+            } else if self.ctrl & 7 != 0 {
+                const PRESCALE: [u32; 8] = [0, 4, 10, 16, 50, 64, 100, 200];
+                self.inner += MFP_HZ / PRESCALE[(self.ctrl & 7) as usize];
+                // (nearly always zero or one pass; a prescale of 4 at a low output rate a few)
+                while self.inner >= host_rate {
+                    self.count = self.count.wrapping_sub(1);
+                    if self.count == 0 {
+                        self.count = self.reload;
+                        fire = true;
+                    }
+                    self.inner -= host_rate;
+                }
+            }
+        }
+        fire && self.mask
     }
 }
 
 #[derive(Clone)]
 pub struct Mfp {
     regs: [u8; 0x30],
-    timers: [Timer; 4],
-    /// The pending word: bit n is source n.
-    pending: u16,
-    /// The CPU clocks' remainder towards the MFP clock: `acc` counts in units of 1/CPU_HZ * MFP_HZ.
-    acc: u64,
-    /// The CPU's clock, Hz, the unit of `advance`.
-    cpu_hz: u64,
+    timers: [Timer; TIMERS],
+    host_rate: u32,
 }
 
 impl Mfp {
-    pub fn new(cpu_hz: u64) -> Mfp {
-        let mut m = Mfp { regs: [0; 0x30], timers: [Timer::default(); 4], pending: 0, acc: 0, cpu_hz };
-        // the operating system leaves timer C's interrupt enabled and unmasked (its vector is
-        // the tune's to set); no software end of interrupt
-        m.regs[r::IERB] = 1 << 5;
-        m.regs[r::IMRB] = 1 << 5;
-        m.regs[r::VR] = 0x40;
+    pub fn new(host_rate: u32) -> Mfp {
+        let mut m = Mfp { regs: [0; 0x30], timers: [Timer::default(); TIMERS], host_rate: host_rate.max(1) };
+        // the operating system leaves timer C's interrupt enabled and unmasked (its vector is the
+        // tune's to set); GPI7 is an event timer with a count of 1
+        m.timers[2].enable = true;
+        m.timers[2].mask = true;
+        m.timers[4].ctrl = 8;
+        m.timers[4].reload = 1;
+        m.timers[4].count = 1;
         m
-    }
-
-    fn word(&self, a: usize, b: usize) -> u16 {
-        (self.regs[a] as u16) << 8 | self.regs[b] as u16
     }
 
     pub fn read(&self, off: usize) -> u8 {
@@ -96,19 +129,12 @@ impl Mfp {
             return 0xFF;
         }
         match off {
-            r::IPRA => (self.pending >> 8) as u8,
-            r::IPRB => self.pending as u8,
-            r::TADR => self.counter(0),
-            r::TBDR => self.counter(1),
-            r::TCDR => self.counter(2),
-            r::TDDR => self.counter(3),
+            0x1F => self.timers[0].count,
+            0x21 => self.timers[1].count,
+            0x23 => self.timers[2].count,
+            0x25 => self.timers[3].count,
             _ => self.regs[off],
         }
-    }
-
-    fn counter(&self, t: usize) -> u8 {
-        let c = &self.timers[t];
-        if c.count == 0 { c.reload } else { (c.count & 0xFF) as u8 }
     }
 
     pub fn write(&mut self, off: usize, v: u8) {
@@ -116,164 +142,49 @@ impl Mfp {
         if off & 1 == 0 || off >= self.regs.len() {
             return;
         }
+        let t = &mut self.timers;
         match off {
-            r::IERA | r::IERB => {
-                self.regs[off] = v;
-                // a disabled source has no pending interrupt
-                if off == r::IERA {
-                    self.pending &= !(((!v) as u16) << 8);
-                } else {
-                    self.pending &= !((!v) as u16);
-                }
+            0x19 => t[0].ctrl = v & 0x0F,
+            0x1B => t[1].ctrl = v & 0x0F,
+            0x1D => {
+                t[2].ctrl = (v >> 4) & 7;
+                t[3].ctrl = v & 7;
             }
-            r::IPRA => self.pending &= (v as u16) << 8 | 0xFF,
-            r::IPRB => self.pending &= 0xFF00 | v as u16,
-            r::ISRA | r::ISRB => self.regs[off] &= v,
-            r::TACR | r::TBCR => {
-                let t = (off - r::TACR) / 2;
-                self.set_ctrl(t, v & 0x0F);
-                self.regs[off] = v;
+            0x1F => t[0].set_data(v),
+            0x21 => t[1].set_data(v),
+            0x23 => t[2].set_data(v),
+            0x25 => t[3].set_data(v),
+            0x07 => {
+                t[0].set_enable(v & 0x20 != 0);
+                t[1].set_enable(v & 0x01 != 0);
+                t[4].set_enable(v & 0x80 != 0);
             }
-            r::TCDCR => {
-                self.set_ctrl(2, (v >> 4) & 7);
-                self.set_ctrl(3, v & 7);
-                self.regs[off] = v;
+            0x09 => {
+                t[2].set_enable(v & 0x20 != 0);
+                t[3].set_enable(v & 0x10 != 0);
             }
-            r::TADR | r::TBDR | r::TCDR | r::TDDR => {
-                let t = (off - r::TADR) / 2;
-                self.timers[t].reload = v;
-                // a stopped timer loads its counter
-                if self.timers[t].period() == 0 && self.timers[t].ctrl & 8 == 0 {
-                    self.timers[t].count = self.timers[t].reload_value();
-                }
-                self.regs[off] = v;
+            0x13 => {
+                t[0].mask = v & 0x20 != 0;
+                t[1].mask = v & 0x01 != 0;
+                t[4].mask = v & 0x80 != 0;
             }
-            _ => self.regs[off] = v,
+            0x15 => {
+                t[2].mask = v & 0x20 != 0;
+                t[3].mask = v & 0x10 != 0;
+            }
+            _ => {}
         }
+        self.regs[off] = v;
     }
 
-    fn set_ctrl(&mut self, t: usize, v: u8) {
-        let tm = &mut self.timers[t];
-        let was_stopped = tm.period() == 0 && tm.ctrl & 8 == 0;
-        tm.ctrl = v;
-        // a pulse-width mode (A and B, bit 3 with bits 0-2 other than 0) is not modelled: stopped
-        if v & 8 != 0 && v & 7 != 0 {
-            tm.ctrl = 0;
-        }
-        if was_stopped && (tm.period() != 0 || tm.ctrl & 8 != 0) {
-            // starting: the prescaler begins afresh, the counter keeps what was loaded
-            tm.sub = 0;
-            if tm.count == 0 {
-                tm.count = tm.reload_value();
-            }
-        }
+    /// One output sample passes for timer `t` (0 to 4); true when its handler is to be called.
+    pub fn tick(&mut self, t: usize) -> bool {
+        self.timers[t].tick(self.host_rate)
     }
 
-    fn raise(&mut self, t: usize) {
-        let n = TIMER_IRQ[t];
-        let en = if n >= 8 { self.regs[r::IERA] >> (n - 8) } else { self.regs[r::IERB] >> n };
-        if en & 1 != 0 {
-            self.pending |= 1 << n;
-        }
-    }
-
-    /// Counts `steps` timer decrements of timer `t`, raising its interrupt on each underflow.
-    fn count_down(&mut self, t: usize, mut steps: u64) {
-        while steps > 0 {
-            let tm = &mut self.timers[t];
-            if tm.count == 0 {
-                tm.count = tm.reload_value();
-            }
-            let c = tm.count as u64;
-            if steps >= c {
-                steps -= c;
-                tm.count = tm.reload_value();
-                self.raise(t);
-            } else {
-                tm.count -= steps as u16;
-                steps = 0;
-            }
-        }
-    }
-
-    /// An external event on timer A's input (the STE DMA sound's end of frame).
+    /// The STE DMA sound's end-of-frame signal: an event for timer A and for GPI7.
     pub fn event_a(&mut self) {
-        if self.timers[0].ctrl & 8 != 0 {
-            self.count_down(0, 1);
-        }
-    }
-
-    /// Lets `cycles` CPU clocks pass.
-    pub fn advance(&mut self, cycles: u64) {
-        if cycles == 0 {
-            return;
-        }
-        self.acc += cycles * MFP_HZ;
-        let clocks = self.acc / self.cpu_hz;
-        self.acc %= self.cpu_hz;
-        if clocks == 0 {
-            return;
-        }
-        for t in 0..4 {
-            let p = self.timers[t].period();
-            if p == 0 {
-                continue;
-            }
-            let total = self.timers[t].sub as u64 + clocks;
-            self.timers[t].sub = (total % p as u64) as u32;
-            self.count_down(t, total / p as u64);
-        }
-    }
-
-    /// CPU clocks until the next timer underflow, if a timer runs.
-    pub fn next_event(&self) -> Option<u64> {
-        let mut best: Option<u64> = None;
-        for t in 0..4 {
-            let tm = &self.timers[t];
-            let p = tm.period() as u64;
-            if p == 0 {
-                continue;
-            }
-            let count = if tm.count == 0 { tm.reload_value() } else { tm.count } as u64;
-            // MFP clocks to the underflow: the rest of the current prescale period plus the others
-            let clocks = (p - tm.sub as u64) + (count - 1) * p;
-            // CPU clocks until that many MFP clocks have passed (rounded up)
-            let need = clocks * self.cpu_hz;
-            let cpu = (need.saturating_sub(self.acc)).div_ceil(MFP_HZ).max(1);
-            best = Some(best.map_or(cpu, |b| b.min(cpu)));
-        }
-        best
-    }
-
-    /// The highest-priority pending, unmasked source that is not blocked by one in service.
-    fn deliverable(&self) -> Option<u8> {
-        let ready = self.pending & self.word(r::IMRA, r::IMRB);
-        let in_service = self.word(r::ISRA, r::ISRB);
-        let blocked_from = if in_service == 0 { 0 } else { 16 - in_service.leading_zeros() as u8 };
-        (0..16u8).rev().find(|&n| ready & (1 << n) != 0 && n >= blocked_from)
-    }
-
-    /// Whether an interrupt is waiting for the CPU.
-    pub fn irq(&self) -> bool {
-        self.deliverable().is_some()
-    }
-
-    /// The interrupt acknowledge cycle: the vector number of the interrupt taken. Clears its
-    /// pending bit; with the vector register's software end-of-interrupt bit (3) set it also
-    /// marks it in service.
-    pub fn acknowledge(&mut self) -> u32 {
-        let Some(n) = self.deliverable() else {
-            // spurious: the vector of source 15 is as near as the MFP comes
-            return (self.regs[r::VR] & 0xF0) as u32 | 15;
-        };
-        self.pending &= !(1 << n);
-        if self.regs[r::VR] & 8 != 0 {
-            if n >= 8 {
-                self.regs[r::ISRA] |= 1 << (n - 8);
-            } else {
-                self.regs[r::ISRB] |= 1 << n;
-            }
-        }
-        (self.regs[r::VR] & 0xF0) as u32 | n as u32
+        self.timers[0].event = true;
+        self.timers[4].event = true;
     }
 }

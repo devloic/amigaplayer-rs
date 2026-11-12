@@ -175,12 +175,22 @@ fn a_looped_sample_sends_a_second_endless_write() {
     r.d = x;
     assert_eq!(r.note_req(3, 300).0.vol, 64);
     assert_eq!(r.note_req(8, 300).0.len, 0);
-    // on the engine: the loop's pointer and length follow the note's write
-    let (e, log) = play(d, 0.05);
+    // the loop's write goes to the same request after the note's and waits in the device's queue
+    // (SPEC section 7: the device then reads cycles 0 from the request when the note starts, so the
+    // note's sample repeats and the loop is never taken, as in the reference)
+    let lay = layout(&d).unwrap();
+    let mut r = GtGameSystems::build(&d, 0x10000, &lay);
+    let mut m = Machine::new(m68k::CpuType::M68000);
+    let mut hw = Hw { bus: &mut m.bus };
+    r.tick(&mut hw);
+    let start = 0x10000 + 0x70 + 3600;
+    assert_eq!((r.v[0].req.data, r.v[0].req.len, r.v[0].req.cycles), (start + 100, 400, 0));
+    assert!(r.v[0].ch.latched && r.v[0].ch.queued == 1);
+    let (e, log) = play(d, 0.5);
     let base = e.m.deli.list.first().map(|l| l.0).unwrap() + 0x70;
-    let a = base + 3600 + 100;
     let c0 = chan(&log, 0);
-    assert!(c0.iter().any(|w| w.0 == 0xDFF0A2 && w.1 == a as u16), "{c0:x?}");
+    assert!(c0.iter().any(|w| w.0 == 0xDFF0A2 && w.1 == (base + 3600) as u16), "{c0:x?}");
+    assert!(!c0.iter().any(|w| w.0 == 0xDFF0A2 && w.1 == (base + 3700) as u16), "{c0:x?}");
 }
 
 #[test]
@@ -252,7 +262,7 @@ fn real_modules_when_present() {
         if is {
             n += 1;
             let (_, log) = play(d, 2.0);
-            assert!(log.iter().any(|w| w.0 == 0xDFF0A8 && w.1 == 64), "{}", p.display());
+            assert!(log.iter().any(|w| (w.0 & 0xF) == 8 && w.0 >= 0xDFF0A8 && w.1 == 64), "{}", p.display());
         }
     }
     assert_eq!(n, 7);

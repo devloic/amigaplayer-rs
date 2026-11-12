@@ -183,3 +183,20 @@ when a pass starts at a service; `DMACON` off when a channel ends.
 `src/replay/gtgamesystems.rs` follows this text and models section 7 itself. The reference's audio is
 what the engine's device makes of the requests; if the engine's device is changed, the port's model
 (and this section 7) must change with it.
+
+Results (write logs of the reference and of the port, same build, module base 0x45e0 on both):
+
+| module | Paula writes | song end | result |
+|---|---|---|---|
+| carver 1.dux | 10323 | 146.0 s | every write equal in value, order and colour clock |
+| carver 2.dux | 15060 | 115.3 s | equal |
+| carver 3.dux | 14239 | 115.3 s | equal |
+| carver 4.dux | 11939 | 130.6 s | equal |
+| carver 5.dux | 18761 | 169.0 s | equal |
+| carver 6.dux | 15204 | 123.0 s | equal |
+| carver end.dux | 6841 | 99.9 s | equal |
+
+WAV and DMA logs are bit-identical too. With the song end ignored on both sides, the 7 modules also
+stay equal for 360 s past it (257,527 writes). Of 29 synthetic probe modules, 27 are equal over 8 s.
+The two that differ use sample numbers 8 and up (section 5), where the reference reads player
+memory.

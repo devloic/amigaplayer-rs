@@ -211,6 +211,9 @@ struct Sm {
     mode: u8,
     /// Build C: the last arpeggio value of the tick (a register of the original).
     lastarp: u8,
+    /// The subsong playing and the number of them.
+    sub: u16,
+    nsub: u16,
 }
 
 // Colour clocks between the original's writes, so the DMA off and on writes of a
@@ -239,6 +242,17 @@ impl Sm {
     }
 
     /// A field of build A's header, `o` from `g` in build A itself.
+    /// How many songs the module holds: build D's header names a second one by its first, loop
+    /// and end steps (0, 0 and 1 when there is none), build A-8's by a loop step other than 0,
+    /// the song then playing from it.
+    fn subsong_count(&self) -> u16 {
+        match self.build {
+            Build::D if (self.r8(self.hf(0xF7)), self.r8(self.hf(0xF8)), self.r8(self.hf(0xF9))) != (0, 0, 1) => 2,
+            Build::A if self.ho < 0 && self.r8(self.hf(0xD3)) != 0 => 2,
+            _ => 1,
+        }
+    }
+
     fn hf(&self, o: usize) -> usize {
         (self.g + o).wrapping_add_signed(self.ho)
     }
@@ -411,11 +425,11 @@ impl Sm {
     fn read_row(&mut self, i: usize) {
         let p = self.v[i].rowp.wrapping_add(self.row as usize);
         let (mut note, mut par) = (self.r8(p), self.r8(p.wrapping_add(1)));
-        if self.build == Build::A {
-            if self.mode & 2 == 0 {
-                note = 0;
-                par = 0;
-            }
+        if self.build == Build::A && self.mode & 2 == 0 {
+            note = 0;
+            par = 0;
+        } else if self.build == Build::A && self.ho >= 0 {
+            // (builds A and A+8 are not known to use the speed and break words)
         } else if note == 0xFD {
             self.speed = par;
             note = 0;
@@ -830,7 +844,7 @@ impl Sm {
             }
             hw.wait(2);
             hw.dmacon(0x820F);
-            self.step = if self.mode & 2 != 0 && self.ho >= 0 { self.loopstep } else { 0 };
+            self.step = if (self.mode & 2 != 0 && self.ho >= 0) || self.sub != 0 { self.loopstep } else { 0 };
             self.load_step();
             for i in 0..4 {
                 self.fetch_pattern(i);
@@ -844,6 +858,10 @@ impl Sm {
                 self.loopstep = self.r8(self.hf(0xD3));
                 self.endstep = self.r8(self.hf(0xD4));
                 self.step = 0;
+                if self.sub != 0 {
+                    // the second song: its first, loop and end steps follow the header's
+                    (self.step, self.loopstep, self.endstep) = (self.r8(self.hf(0xF7)), self.r8(self.hf(0xF8)), self.r8(self.hf(0xF9)));
+                }
             } else {
                 self.master = self.r8(g + 0xD9 + c);
                 self.speed0 = self.r8(g + 0xDD + c);
@@ -975,6 +993,24 @@ impl Replayer for Sm {
         self.songend
     }
 
+    fn subsongs(&self) -> (u16, u16, u16) {
+        (0, self.nsub - 1, self.sub)
+    }
+
+    fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
+        // the host's stop and start again: volumes to 0, DMA off, the audio modulation off
+        self.sub = n;
+        hw.dmacon(0x000F);
+        for i in 0..4 {
+            hw.vol(i, 0);
+        }
+        hw.dmacon(0x000F);
+        hw.bus.write_word(0xDFF09E, 0x00FF);
+        self.started = true;
+        self.songend = false;
+        self.init(hw);
+    }
+
     /// The first tick's first write follows its timer call by this much (the interrupt's entry).
     fn timer_delay(&self) -> u64 {
         ENTRY
@@ -1046,7 +1082,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         endstep: 0,
         mode: 0,
         lastarp: 0,
+        sub: 0,
+        nsub: 1,
     };
+    sm.nsub = sm.subsong_count();
     if lay.build == Build::A {
         // build A's init runs in the host's start call, its writes before the first tick
         let mut hw = Hw { bus: &mut m.bus };

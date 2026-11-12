@@ -36,6 +36,10 @@ pub enum Backend {
     Mix(Box<crate::xmp::XmpPlayer>),
     /// recorded audio (crate::aiff), played as it is: no Paula, no Amiga filters
     Pcm(Box<crate::aiff::AiffPlayer>),
+    /// a C64 SID tune on the emulated C64 and SID chip (crate::sid), which renders
+    /// stereo itself: no Paula, no Amiga filters
+    #[cfg(feature = "sid")]
+    Sid(Box<crate::sid::SidPlayer>),
 }
 
 pub struct Playing {
@@ -595,6 +599,13 @@ impl Engine {
             return self.start_pcm(Box::new(x), path);
         }
         let data = crate::decrunch::decrunch(data);
+        // C64 SID tunes (PSID/RSID) are played by the C64 emulation, from the file itself;
+        // a file it refuses is an error, not a reason to try the other players
+        #[cfg(feature = "sid")]
+        if self.only_player.is_none() && crate::sid::detect(&data) {
+            let x = crate::sid::SidPlayer::open(&data, self.rate as u32).map_err(|e| anyhow!(e))?;
+            return self.start_sid(Box::new(x), path);
+        }
         // (a TimeTracker song is the open replayer's own under --open-replayers, not the ProWizard conversion's)
         let own = self.open_replayers && crate::replay::timetracker::is_timetracker(&data);
         let data = if self.only_player.is_some() || own { data } else { crate::prowizard::convert(data, path) };
@@ -830,6 +841,26 @@ impl Engine {
             sub: 0,
             backend: Backend::Mix(x),
             author: String::new(),
+            frames: 0,
+            custom_player: false,
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "sid")]
+    fn start_sid(&mut self, x: Box<crate::sid::SidPlayer>, path: &Path) -> Result<()> {
+        self.m.bus.paula.reset();
+        self.intena_seen = 0;
+        self.next_timer = None;
+        let title = x.title().to_string();
+        self.playing = Some(Playing {
+            module_name: if title.is_empty() { file_name(path) } else { title },
+            format: x.format().to_string(),
+            sub_min: 0,
+            sub_max: x.subsongs() - 1,
+            sub: x.subsong(),
+            author: x.author().to_string(),
+            backend: Backend::Sid(x),
             frames: 0,
             custom_player: false,
         });
@@ -1087,6 +1118,16 @@ impl Engine {
                     (*sub, *frames) = (n as u16, 0);
                     self.heard = false;
                 }
+                #[cfg(feature = "sid")]
+                Some(Playing { backend: Backend::Sid(x), sub, frames, .. }) => {
+                    let n = x.subsong() as i32 + delta;
+                    if n < 0 || n >= x.subsongs() as i32 {
+                        return Ok(());
+                    }
+                    x.set_subsong(n as u16).map_err(|e| anyhow!(e))?;
+                    (*sub, *frames) = (n as u16, 0);
+                    self.heard = false;
+                }
                 _ => {}
             }
             return Ok(());
@@ -1140,6 +1181,8 @@ impl Engine {
                 }
             }
             Some(Playing { backend: Backend::Replay(_) | Backend::Mix(_) | Backend::Pcm(_), .. }) | None => {}
+            #[cfg(feature = "sid")]
+            Some(Playing { backend: Backend::Sid(_), .. }) => {}
         }
     }
 
@@ -1149,6 +1192,9 @@ impl Engine {
             Some(Playing { backend: Backend::Replay(r), .. }) => r.songend(),
             Some(Playing { backend: Backend::Mix(x), .. }) => x.ended(),
             Some(Playing { backend: Backend::Pcm(x), .. }) => x.ended(),
+            // a SID tune has no end; a CPU stopped on a halt instruction plays no more
+            #[cfg(feature = "sid")]
+            Some(Playing { backend: Backend::Sid(x), .. }) => x.halted(),
             Some(_) => self.m.deli.songend,
             None => false,
         }
@@ -1181,6 +1227,8 @@ impl Engine {
             Backend::Native(pt) => Some(pt.tick_clocks()),
             Backend::Replay(r) => Some(r.tick_clocks()),
             Backend::Mix(_) | Backend::Pcm(_) => None,
+            #[cfg(feature = "sid")]
+            Backend::Sid(_) => None,
             Backend::Deli(idx) => self
                 .m
                 .deli
@@ -1271,6 +1319,8 @@ impl Engine {
                 self.m.bus.gaps = None;
             }
             Backend::Mix(_) | Backend::Pcm(_) => {}
+            #[cfg(feature = "sid")]
+            Backend::Sid(_) => {}
             Backend::Native(pt) => {
                 // its DMA waits run the clock on, as the 68k replay's loops do
                 pt.tick(&mut self.m.bus);
@@ -1363,6 +1413,8 @@ impl Engine {
             Backend::Replay(_) => ("open-replayer", p.format.clone()),
             Backend::Mix(_) => ("libxmp-port", p.format.clone()),
             Backend::Pcm(_) => ("aiff-decoder", p.format.clone()),
+            #[cfg(feature = "sid")]
+            Backend::Sid(_) => ("sid-port", p.format.clone()),
         };
         let q = |t: &str| t.replace(' ', "_");
         let mut o = format!("output: backend={backend} player={} format={}", q(&player), q(&p.format));
@@ -1446,6 +1498,11 @@ impl Engine {
         }
         if let Some(Playing { backend: Backend::Pcm(_), .. }) = &self.playing {
             self.render_pcm(out);
+            return;
+        }
+        #[cfg(feature = "sid")]
+        if let Some(Playing { backend: Backend::Sid(_), .. }) = &self.playing {
+            self.render_sid(out);
             return;
         }
         let sep = self.settings.separation.clamp(0.0, 1.0);
@@ -1548,6 +1605,31 @@ impl Engine {
         if self.paused {
             out.fill(0.0);
         }
+        *frames += n as u64;
+        for o in out.iter_mut() {
+            *o = (*o * gain).clamp(-1.0, 1.0);
+        }
+        self.heard |= out[..n * 2].iter().any(|&s| s != 0.0);
+        if self.settings.mono {
+            for f in out.chunks_exact_mut(2) {
+                let m = (f[0] + f[1]) * 0.5;
+                f[0] = m;
+                f[1] = m;
+            }
+        }
+    }
+
+    /// `render` for a C64 SID tune: the emulation's samples at the default volume (0.8)
+    /// unchanged, so that the 16-bit WAV the CLI writes holds them as they are.
+    #[cfg(feature = "sid")]
+    fn render_sid(&mut self, out: &mut [f32]) {
+        let Some(Playing { backend: Backend::Sid(x), frames, .. }) = &mut self.playing else { return };
+        let gain = self.settings.volume / 0.8;
+        if self.paused {
+            out.fill(0.0);
+            return;
+        }
+        let n = x.render(out);
         *frames += n as u64;
         for o in out.iter_mut() {
             *o = (*o * gain).clamp(-1.0, 1.0);

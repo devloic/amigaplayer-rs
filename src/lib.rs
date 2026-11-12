@@ -178,6 +178,9 @@ pub mod replay;
 pub mod sid;
 #[doc(hidden)]
 #[allow(missing_docs)]
+pub mod dmf;
+#[doc(hidden)]
+#[allow(missing_docs)]
 pub mod mptmath;
 #[doc(hidden)]
 #[allow(missing_docs)]

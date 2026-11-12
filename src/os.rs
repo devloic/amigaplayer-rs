@@ -1417,6 +1417,18 @@ fn audio_dma(m: &mut Machine, ch: usize, on: bool) {
     m.bus.write_word(0xDFF096, if on { 0x8000 } else { 0 } | 1 << ch);
 }
 
+/// A write takes over an idle channel: DMA off, and the channel's audio interrupt request
+/// with it. An idle channel's request is left set when the device last stopped it (that is
+/// what lets Paula's channel run down), and the request a channel raised while it ran down
+/// is the end of a pass of a write that is gone: the real device takes such an interrupt
+/// the moment it is raised, so it must not be taken here for the start of the new write's
+/// first pass (the interrupt that DMA start raises would then end that pass: from the third
+/// note on a channel, notes played about 3 words).
+fn audio_dma_off(m: &mut Machine, ch: usize) {
+    audio_dma(m, ch, false);
+    m.bus.paula.write_intreq(0x80 << ch);
+}
+
 /// Puts a write's sample in the channel's registers, for Paula's next reload.
 fn audio_latch(m: &mut Machine, ch: usize, io: u32) {
     let (data, len) = (m.bus.r32(io + 34), m.bus.r32(io + 38));
@@ -1504,7 +1516,7 @@ fn audio_command(m: &mut Machine, ioreq: u32, cmd: u16) -> bool {
                 audio_latch(m, ch, ioreq);
                 if !m.os.audio[ch].stopped {
                     // starting DMA loads the registers and raises the interrupt
-                    audio_dma(m, ch, false);
+                    audio_dma_off(m, ch);
                     audio_dma(m, ch, true);
                 }
             } else if c.latched.is_none() {
@@ -2749,6 +2761,111 @@ mod tests {
         assert_eq!(m.bus.r8(w + 31), IOERR_ABORTED);
         assert_eq!(m.bus.paula.dmacon & 2, 0);
         assert_eq!(m.os.audio[1].key, 0);
+    }
+
+    /// A write of `len` bytes at period 200 with `cycles` passes on `unit`, on its own request.
+    fn note(m: &mut Machine, port: u32, unit: u32, key: u16, len: u32, cycles: u16) -> u32 {
+        let io = ioa(m, port, 3, unit, key, 0, ADIOF_PERVOL);
+        m.bus.w32(io + 34, 0x1000);
+        m.bus.w32(io + 38, len);
+        m.bus.w16(io + 42, 200);
+        m.bus.w16(io + 46, cycles);
+        begin_io(m, io);
+        io
+    }
+
+    /// Runs Paula in steps of 50 colour clocks (the engine's are one output sample, 74) (the device looks at the
+    /// channels after each), for `n` steps.
+    fn steps(m: &mut Machine, n: u32) {
+        for _ in 0..n {
+            run_paula(m, 50);
+            audio_service(m);
+        }
+    }
+
+    /// Runs Paula without the device looking, until channel `ch` has an interrupt request
+    /// pending (a pass that ended between two looks).
+    fn until_irq(m: &mut Machine, ch: usize) {
+        for _ in 0..1000 {
+            if m.bus.paula.intreq & 0x80 << ch != 0 {
+                return;
+            }
+            run_paula(m, 100);
+        }
+        panic!("no interrupt request");
+    }
+
+    fn words(m: &Machine, ch: u8) -> usize {
+        m.bus.paula.dma_log.as_ref().unwrap().iter().filter(|e| e.1 == ch).count()
+    }
+
+    fn flush(m: &mut Machine, port: u32, unit: u32, key: u16) -> u32 {
+        let f = ioa(m, port, 8, unit, key, 0, 0);
+        begin_io(m, f);
+        f
+    }
+
+    #[test]
+    fn audio_device_write_plays_all_its_words_note_after_note() {
+        let mut m = Machine::new(CpuType::M68000);
+        m.bus.paula.dma_log = Some(Vec::new());
+        let p = port(&mut m);
+        let (_, key) = allocate(&mut m, p, 4, 0);
+        drain(&mut m, p);
+        let mut seen = 0;
+        for n in 0..4 {
+            let w = note(&mut m, p, 4, key, 40, 1);
+            steps(&mut m, 500);
+            // 20 words, and the first of the restart, fetched before the device turns DMA off
+            assert!((20..=21).contains(&(words(&m, 2) - seen)), "note {n} plays 40 bytes, played {}", words(&m, 2) - seen);
+            seen = words(&m, 2);
+            assert_eq!(drain(&mut m, p), vec![w], "note {n} is replied at its end");
+            assert_eq!(m.bus.r8(w + 31), 0);
+            assert_eq!(m.bus.paula.dmacon & 4, 0, "nothing follows: DMA off");
+            // the player cuts the next note in with a CMD_FLUSH, after a pass ended that
+            // the device has not looked at yet
+            let w2 = note(&mut m, p, 4, key, 40, 1);
+            steps(&mut m, 20);
+            until_irq(&mut m, 2);
+            let f = flush(&mut m, p, 4, key);
+            assert_eq!(drain(&mut m, p), vec![w2, f]);
+            assert_eq!(m.bus.r8(w2 + 31), IOERR_ABORTED);
+            // the channel runs down, and leaves its interrupt request set
+            steps(&mut m, 30);
+            seen = words(&m, 2);
+        }
+    }
+
+    #[test]
+    fn audio_device_cycles_loop_and_zero_repeats_until_flush() {
+        let mut m = Machine::new(CpuType::M68000);
+        m.bus.paula.dma_log = Some(Vec::new());
+        let p = port(&mut m);
+        let (_, key) = allocate(&mut m, p, 1, 0);
+        drain(&mut m, p);
+        // three passes of 10 words
+        let w = note(&mut m, p, 1, key, 20, 3);
+        steps(&mut m, 400);
+        assert!((30..=31).contains(&words(&m, 0)));
+        assert_eq!(drain(&mut m, p), vec![w]);
+        assert_eq!(m.bus.paula.dmacon & 1, 0);
+        // forever: still playing after 10 passes, until CMD_FLUSH
+        let w = note(&mut m, p, 1, key, 20, 0);
+        let before = words(&m, 0);
+        steps(&mut m, 1000); // 125 words
+        assert!((124..=126).contains(&(words(&m, 0) - before)), "{}", words(&m, 0) - before);
+        assert!(drain(&mut m, p).is_empty());
+        assert_ne!(m.bus.paula.dmacon & 1, 0);
+        let f = flush(&mut m, p, 1, key);
+        assert_eq!(drain(&mut m, p), vec![w, f]);
+        assert_eq!(m.bus.paula.dmacon & 1, 0);
+        // and a write after the flush plays
+        steps(&mut m, 30);
+        let before = words(&m, 0);
+        let w = note(&mut m, p, 1, key, 20, 1);
+        steps(&mut m, 200);
+        assert!((10..=11).contains(&(words(&m, 0) - before)));
+        assert_eq!(drain(&mut m, p), vec![w]);
     }
 
 }

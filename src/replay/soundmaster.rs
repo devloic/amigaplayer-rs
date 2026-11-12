@@ -839,6 +839,7 @@ impl Sm {
                 self.patlen = self.r8(self.hf(0xD2));
                 self.loopstep = self.r8(self.hf(0xD3));
                 self.endstep = self.r8(self.hf(0xD4));
+                self.step = 0;
             } else {
                 self.master = self.r8(g + 0xD9 + c);
                 self.speed0 = self.r8(g + 0xDD + c);
@@ -846,7 +847,9 @@ impl Sm {
                 self.loopstep = self.r8(g + 0xDF + c);
                 self.endstep = self.r8(g + 0xE0 + c);
             }
-            self.step = self.loopstep;
+            if self.build != Build::D {
+                self.step = self.loopstep;
+            }
             self.load_step();
         }
         self.speed = self.speed0;

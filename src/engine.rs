@@ -589,6 +589,11 @@ impl Engine {
             let x = p.and_then(|p| crate::aiff::AiffPlayer::from_pcm(p, self.rate as u32)).map_err(|e| anyhow!(e))?;
             return self.start_pcm(Box::new(x), path);
         }
+        // ZX Spectrum / Amstrad CPC AY tunes (ZXAYEMUL): the built-in Z80 and AY-3-8912
+        if self.only_player.is_none() && crate::replay::ay::detect(&data) {
+            let x = crate::replay::ay::player(&data, self.rate as u32).map_err(|e| anyhow!(e))?;
+            return self.start_pcm(Box::new(x), path);
+        }
         let data = crate::decrunch::decrunch(data);
         // (a TimeTracker song is the open replayer's own under --open-replayers, not the ProWizard conversion's)
         let own = self.open_replayers && crate::replay::timetracker::is_timetracker(&data);
@@ -834,12 +839,13 @@ impl Engine {
         self.intena_seen = 0;
         self.next_timer = None;
         let title = x.title().to_string();
+        let (sub_min, sub_max, sub) = x.subsongs();
         self.playing = Some(Playing {
             module_name: if title.is_empty() { file_name(path) } else { title },
             format: x.format().to_string(),
-            sub_min: 0,
-            sub_max: 0,
-            sub: 0,
+            sub_min,
+            sub_max,
+            sub,
             backend: Backend::Pcm(x),
             author: String::new(),
             frames: 0,
@@ -1066,6 +1072,16 @@ impl Engine {
                         return Ok(());
                     }
                     x.start(n as usize);
+                    (*sub, *frames) = (n as u16, 0);
+                    self.heard = false;
+                }
+                Some(Playing { backend: Backend::Pcm(x), sub, frames, .. }) => {
+                    let (lo, hi, cur) = x.subsongs();
+                    let n = cur as i32 + delta;
+                    if n < lo as i32 || n > hi as i32 {
+                        return Ok(());
+                    }
+                    x.set_subsong(n as u16);
                     (*sub, *frames) = (n as u16, 0);
                     self.heard = false;
                 }

@@ -45,6 +45,21 @@ pub struct AiffPlayer {
     loop_start: Option<usize>,
     /// a repeating sample has reached its end at least once
     wrapped: bool,
+    /// audio generated while it plays (`from_stream`), in place of the sample data
+    stream: Option<Box<dyn Stream>>,
+}
+
+/// Audio generated as it plays (a sound chip's emulation: `crate::replay::ay`), for
+/// `AiffPlayer::from_stream` to play through the recorded-audio backend.
+pub trait Stream: Send {
+    /// Fills `out` with interleaved stereo frames at the output rate; returns how many.
+    fn render(&mut self, out: &mut [f32]) -> usize;
+    fn ended(&self) -> bool;
+    /// The first, last and current subsong.
+    fn subsongs(&self) -> (u16, u16, u16);
+    fn set_subsong(&mut self, n: u16);
+    /// The length of the current subsong, when the file states it.
+    fn duration_secs(&self) -> Option<f64>;
 }
 
 /// Decoded (or in-place) sample data of another file format (`crate::iff8svx`,
@@ -175,6 +190,7 @@ impl AiffPlayer {
             title,
             loop_start: None,
             wrapped: false,
+            stream: None,
         })
     }
 
@@ -211,7 +227,48 @@ impl AiffPlayer {
             loop_start: p.loop_start.filter(|&s| s < frames),
             wrapped: false,
             data: p.data,
+            stream: None,
         })
+    }
+
+    /// Plays generated audio: `s` renders at the output rate itself.
+    pub fn from_stream(s: Box<dyn Stream>, format: &'static str, title: String, rate: u32) -> AiffPlayer {
+        AiffPlayer {
+            data: Vec::new(),
+            start: 0,
+            frames: 0,
+            channels: 2,
+            bytes: 2,
+            bits: 16,
+            enc: Enc::Le,
+            src_rate: rate as f64,
+            step: 1.0,
+            pos: 0.0,
+            format,
+            title,
+            loop_start: None,
+            wrapped: false,
+            stream: Some(s),
+        }
+    }
+
+    /// The first, last and current subsong (only generated audio has more than one).
+    pub fn subsongs(&self) -> (u16, u16, u16) {
+        self.stream.as_ref().map_or((0, 0, 0), |s| s.subsongs())
+    }
+
+    pub fn set_subsong(&mut self, n: u16) {
+        if let Some(s) = &mut self.stream {
+            s.set_subsong(n);
+        }
+    }
+
+    /// The length in seconds, when it is known (always for a recording).
+    pub fn duration_hint(&self) -> Option<f64> {
+        match &self.stream {
+            Some(s) => s.duration_secs(),
+            None => Some(self.duration_secs()),
+        }
     }
 
     pub fn format(&self) -> &'static str {
@@ -229,12 +286,18 @@ impl AiffPlayer {
 
     /// The recording's length in seconds.
     pub fn duration_secs(&self) -> f64 {
+        if let Some(s) = &self.stream {
+            return s.duration_secs().unwrap_or(0.0);
+        }
         if self.src_rate > 0.0 { self.frames as f64 / self.src_rate } else { 0.0 }
     }
 
     /// The sample has reached its end; a repeating one plays on from its repeat part
     /// (`render` goes on filling), as NostalgicPlayer's sample player does.
     pub fn ended(&self) -> bool {
+        if let Some(s) = &self.stream {
+            return s.ended();
+        }
         self.wrapped || self.pos >= self.frames as f64
     }
 
@@ -271,6 +334,9 @@ impl AiffPlayer {
     /// Fills `out` with interleaved stereo frames; returns how many frames were
     /// decoded (the rest of `out` is silence).
     pub fn render(&mut self, out: &mut [f32]) -> usize {
+        if let Some(s) = &mut self.stream {
+            return s.render(out);
+        }
         let mut n = 0;
         for f in out.chunks_exact_mut(2) {
             if let (Some(s), true) = (self.loop_start, self.pos >= self.frames as f64) {

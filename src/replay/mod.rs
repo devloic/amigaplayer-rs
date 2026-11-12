@@ -133,6 +133,7 @@ pub mod richardjosephrj;
 pub mod bendaglishsid;
 pub mod markii;
 pub mod pokeynoise;
+pub mod ay;
 pub mod riffraff;
 pub mod fashiontracker;
 pub mod seanconnolly;

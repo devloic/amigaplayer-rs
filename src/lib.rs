@@ -227,6 +227,24 @@ pub fn default_genies_dir() -> Option<PathBuf> {
     c.into_iter().find(|p| p.is_dir())
 }
 
+/// The LIBS: directory, where a library a player opens is looked for after the module's own
+/// directories (see `os`): `$AMIGAPLAYER_LIBS`, `~/.config/amigaplayer-rs/Libs`, the older
+/// `~/.config/deliplayer/Libs`, then `./Libs`, whichever exists first.
+#[cfg(feature = "host-68k")]
+#[doc(hidden)]
+pub fn default_libs_dir() -> Option<PathBuf> {
+    let mut c = Vec::new();
+    if let Ok(p) = std::env::var("AMIGAPLAYER_LIBS") {
+        c.push(PathBuf::from(p));
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        c.push(Path::new(&h).join(".config/amigaplayer-rs/Libs"));
+        c.push(Path::new(&h).join(".config/deliplayer/Libs"));
+    }
+    c.push(PathBuf::from("Libs"));
+    c.into_iter().find(|p| p.is_dir())
+}
+
 /// The Eagleplayers directory: `$EAGLEPLAYERS`, `~/.config/amigaplayer-rs/Eagleplayers`, the older
 /// `~/.config/deliplayer/Eagleplayers`, then `./Eagleplayers`, whichever exists first.
 #[cfg(feature = "host-68k")]

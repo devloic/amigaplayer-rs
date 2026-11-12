@@ -2,7 +2,7 @@ mod ui;
 
 use amigaplayer_rs::paulaout::Filter;
 use amigaplayer_rs::xmp::mixer::Interp;
-use amigaplayer_rs::{default_eagleplayers_dir, default_genies_dir, default_players_dir, engine, SAMPLE_RATE};
+use amigaplayer_rs::{default_eagleplayers_dir, default_genies_dir, default_libs_dir, default_players_dir, engine, SAMPLE_RATE};
 use amigaplayer_rs::engine::Settings;
 
 use anyhow::{bail, Result};
@@ -12,6 +12,7 @@ struct Args {
     players: Option<PathBuf>,
     eagleplayers: Option<PathBuf>,
     genies: Option<PathBuf>,
+    libs: Option<PathBuf>,
     use_genies: Vec<String>,
     only_player: Option<String>,
     open_replayers: bool,
@@ -32,7 +33,7 @@ struct Args {
 fn usage() -> ! {
     eprintln!(
         "usage: amigaplayer-rs [--players DIR] [--eagleplayers DIR] [--player NAME] [--open-replayers]\n\
-         \x20                 [--genies DIR] [--genie NAME]... [--noteplayer NAME]\n\
+         \x20                 [--genies DIR] [--genie NAME]... [--noteplayer NAME] [--libs DIR]\n\
          \x20                 [--wav OUT.wav [--seconds N] [--subsong N] [--volume V]]\n\
          \x20                 [--filter a500|a1200|none|auto] [--led auto|on|off|force]\n\
          \x20                 [--separation 0..1] [--mono] [--interp nearest|linear|spline]\n\
@@ -44,7 +45,11 @@ fn usage() -> ! {
          ~/.config/amigaplayer-rs/DeliPlayers, ./DeliPlayers), --eagleplayers DIR the\n\
          Eagleplayers (default: $EAGLEPLAYERS, ~/.config/amigaplayer-rs/Eagleplayers,\n\
          ./Eagleplayers); DeliPlayers are tried first. --player NAME tries only the\n\
-         player of that name. --genies DIR holds the DeliGenies (default: $DELIGENIES,\n\
+         player of that name (a player without a module check, like BFB Master, plays\n\
+         only when chosen so). A library a player opens is loaded from the module's\n\
+         directory, its libs/, ../libs/, then --libs DIR (LIBS:; default:\n\
+         $AMIGAPLAYER_LIBS, ~/.config/amigaplayer-rs/Libs, ./Libs).\n\
+         --genies DIR holds the DeliGenies (default: $DELIGENIES,\n\
          ~/.config/amigaplayer-rs/DeliGenies, ./DeliGenies); --genie NAME runs one, and a\n\
          NotePlayer genie (--noteplayer NAME) plays the notes of _note players\n\
          (default: 4Voices-NotePlayer when installed; --noteplayer builtin has the\n\
@@ -64,7 +69,7 @@ fn usage() -> ! {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { players: None, eagleplayers: None, genies: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, files: Vec::new() };
+    let mut a = Args { players: None, eagleplayers: None, genies: None, libs: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, files: Vec::new() };
     // (a file name need not be UTF-8: options are read as text, file names as given)
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
@@ -75,6 +80,7 @@ fn parse_args() -> Args {
             "--player" => a.only_player = it.next(),
             "--open-replayers" => a.open_replayers = true,
             "--genies" => a.genies = it.next().map(PathBuf::from),
+            "--libs" => a.libs = it.next().map(PathBuf::from),
             "--genie" | "--noteplayer" => a.use_genies.push(it.next().unwrap_or_else(|| usage())),
             "--wav" => a.wav = it.next().map(PathBuf::from),
             "--seconds" => a.seconds = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
@@ -166,6 +172,9 @@ fn render_wav(args: &Args) -> Result<()> {
     let wav = args.wav.as_ref().unwrap();
     let Some(file) = args.files.first() else { bail!("--wav needs a module file") };
     let mut e = engine::Engine::new(SAMPLE_RATE as f64);
+    e.m.os.libs_dir = args.libs.clone().or_else(default_libs_dir);
+    // (before the players load: a player without a check is loaded only when chosen by name)
+    e.only_player = args.only_player.clone();
     if let Some(dir) = args.players.clone().or_else(default_players_dir) {
         let n = e.load_players(&dir);
         eprintln!("{n} players loaded from {}", dir.display());
@@ -283,6 +292,7 @@ fn main() {
             args.players.clone().or_else(default_players_dir),
             args.eagleplayers.clone().or_else(default_eagleplayers_dir),
             args.genies.clone().or_else(default_genies_dir),
+            args.libs.clone().or_else(default_libs_dir),
             &args.use_genies,
             args.files.clone(),
             {

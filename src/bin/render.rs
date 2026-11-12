@@ -53,6 +53,8 @@ const USAGE: &str = "usage: amigaplayer-render [OPTIONS] MODULE
                     ends by itself); the other stops stay. Not listed: as without the option
   --players DIR, --eagleplayers DIR, --genies DIR
                     original 68k DeliPlayers, Eagleplayers and DeliGenies (default: none)
+  --libs DIR        LIBS:, where a library a player opens is looked for after the
+                    module's directory, its libs/ and ../libs/ (default: none)
   --68k-first       let those players take a module before the built-in replayers
 
 exit status: 0 played, 1 the module could not be played, 2 wrong usage";
@@ -74,6 +76,7 @@ struct Args {
     players: Option<PathBuf>,
     eagleplayers: Option<PathBuf>,
     genies: Option<PathBuf>,
+    libs: Option<PathBuf>,
     m68k_first: bool,
     file: PathBuf,
 }
@@ -108,6 +111,7 @@ fn parse_args() -> Args {
         players: None,
         eagleplayers: None,
         genies: None,
+        libs: None,
         m68k_first: false,
         file: PathBuf::new(),
     };
@@ -161,6 +165,7 @@ fn parse_args() -> Args {
             "--players" => a.players = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--eagleplayers" => a.eagleplayers = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--genies" => a.genies = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
+            "--libs" => a.libs = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--68k-first" => a.m68k_first = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -267,6 +272,7 @@ fn wav_header(rate: u32, data_len: u32) -> [u8; 44] {
 
 fn run(a: &Args) -> Result<()> {
     let mut e = Engine::new(a.rate as f64);
+    e.m.os.libs_dir = a.libs.clone();
     if let Some(d) = &a.players {
         e.load_players(d);
     }

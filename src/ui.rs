@@ -502,6 +502,7 @@ pub fn run(
     players: Option<PathBuf>,
     eagleplayers: Option<PathBuf>,
     genies: Option<PathBuf>,
+    libs: Option<PathBuf>,
     use_genies: &[String],
     files: Vec<PathBuf>,
     settings: crate::engine::Settings,
@@ -522,6 +523,7 @@ pub fn run(
 
     let mut engine = Engine::new(SAMPLE_RATE as f64);
     engine.settings = settings;
+    engine.m.os.libs_dir = libs;
     let players_loaded = match &players {
         Some(dir) => engine.load_players(dir),
         None => 0,

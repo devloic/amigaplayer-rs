@@ -17,18 +17,19 @@
 //! 1100 samples, so what is heard is the ring's previous lap (silence for the first 2.3 s).
 //!
 //! Choices where the specification is silent (none can panic or hang):
-//! * an arpeggio that takes a note past the pitch table (index 0x80 to 0xFF, which only notes
-//!   written with bit 7 set reach) reads the original's memory past its table; the bytes there are
-//!   the player's, not the format's, so this port does not reproduce them and plays the index
-//!   modulo 128 (SPEC section 5.3);
-//! * the fine tune (`EF`) of the notes 0x60 to 0x7F, which are on a table of their own, is not
-//!   applied; a volume above 64 is used as a factor as it is;
+//! * the notes 0x60 to 0xFF (no period: the player's own table, reached by notes 0x60 to 0x7F and
+//!   by arpeggios) use the 1455 values of `ems6_hi`, bytes of the original player taken, with the
+//!   owner's permission, by black-box measurement (see that file's header); a fine tune picks the
+//!   row, and an index past the table plays a step of 0 (silent);
+//! * a volume above 64 is used as a factor as it is (the original reads memory past its volume
+//!   table there; not reproduced);
 //! * reads outside the file give zeros; a pattern past the file ends; a sequence word past the
 //!   track's list ends the list; a row reads at most 256 bytes and a pattern change looks at most
 //!   at 64 sequence words;
 //! * a voice count `a` over 255 or a track count over 32 is refused; the start-up time for `a`
 //!   over 64 is the formula fitted to the measured ones.
 
+use super::ems6_hi;
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
 use m68k::AddressBus as _;
@@ -56,12 +57,6 @@ const PERIOD: u16 = 0xFD;
 const PCLOCK: u32 = 3_579_264;
 /// The mixing rate's divisor in the step conversion.
 const RATE_DIV: u32 = 3504;
-
-/// Steps (16.16 bytes a sample) of the notes 0x60 to 0x7F: measured frequency words (SPEC 5.2).
-const F_HI: [u32; 32] = [
-    248, 263, 278, 295, 312, 331, 351, 372, 394, 418, 442, 468, 497, 526, 557, 591, 625, 663, 702, 744, 789, 836,
-    885, 937, 994, 1052, 1115, 1182, 1251, 1327, 1404, 1488,
-];
 
 /// Colour clock of the reference's DMA start (DMACON 800F) for the voice counts 1 to 64: its
 /// start-up builds tables whose size grows with `a` (SPEC section 9).
@@ -124,11 +119,15 @@ fn s8(x: u8) -> i32 {
     x as i8 as i32
 }
 
-/// The 16.16 step of period `q`, or of note `n` 0x60..0x7F (no period).
-fn step_of(q: Option<i32>, n: usize) -> u32 {
+/// The 16.16 step of period `q`, or of note `n` 0x60..0xFF (no period: the original's table, in
+/// `ems6_hi`, of fine tune `ft`'s row and the rows after it).
+fn step_of(q: Option<i32>, n: usize, ft: usize) -> u32 {
     match q {
         Some(q) => ((PCLOCK / q.max(1) as u32) as u64 * 65536 / RATE_DIV as u64) as u32,
-        None if (0x60..0x80).contains(&n) => F_HI[n - 0x60] * 65536 / RATE_DIV,
+        None if n >= 0x60 => {
+            let f = ems6_hi::HI_F.get(ft * 97 + n - 0x60).copied().unwrap_or(0);
+            (f as u64 * 65536 / RATE_DIV as u64) as u32
+        }
         None => 0,
     }
 }
@@ -243,6 +242,10 @@ struct Track {
     pat: Option<Pat>,
     pi: usize,
     wait: i32,
+    /// Rows left of the wait and the ticks gone of the row in progress (the row length is the
+    /// current speed: a speed change by another track moves the end of a wait under way).
+    rows_left: i32,
+    sub: i32,
     dur: u32,
     inst: usize,
     env: [u8; 4],
@@ -284,6 +287,9 @@ pub struct Ems6 {
     qrows: Vec<[u16; 96]>,
     tracks: Vec<Track>,
     speed: i32,
+    /// The speed as the tick began: the rows of waits under way are counted with it (a speed change
+    /// made by an earlier track in the same tick counts from the next tick).
+    tick_speed: i32,
     tlen: u32,
     tleft: u32,
     acc: u32,
@@ -331,7 +337,7 @@ impl Ems6 {
             } else if at(0) == Some(b"SYN@") {
                 Kind::Syn
             } else {
-                Kind::Raw { len }
+                Kind::Raw { len: (len - 2).max(0) }
             };
             insts.push(Inst { start, kind });
         }
@@ -351,6 +357,7 @@ impl Ems6 {
             qrows: period_rows(),
             tracks: Vec::new(),
             speed: 6,
+            tick_speed: 6,
             tlen: 280,
             tleft: 0,
             acc: 450,
@@ -495,6 +502,8 @@ impl Ems6 {
 
     fn set_wait(&self, t: &mut Track) {
         let rows = if t.dur == 0 { 256 } else { t.dur as i32 };
+        t.rows_left = rows;
+        t.sub = 0;
         t.wait = rows * self.speed - 1;
     }
 
@@ -649,7 +658,12 @@ impl Ems6 {
         }
         let mut just = false;
         if t.wait > 0 {
-            t.wait -= 1;
+            t.sub += 1;
+            if t.sub >= self.tick_speed {
+                t.sub = 0;
+                t.rows_left -= 1;
+            }
+            t.wait = (t.rows_left * self.tick_speed - t.sub - 1).max(0);
         } else {
             self.parse(t);
             just = true;
@@ -719,8 +733,8 @@ impl Ems6 {
             }
             t.arp_last = x;
             if x != 0 || t.raw >= 0x80 {
-                // past the table (0x80..0xFF): the original's memory there; modulo 128 here
-                let m = (t.raw + x as usize) & 0x7F;
+                // 0x60..0xFF: the original's table of `ems6_hi` (rows of fine tunes, one after another)
+                let m = (t.raw + x as usize) & 0xFF;
                 if m < 0x60 {
                     let row = self.qrow(t);
                     q = Some(match q {
@@ -769,10 +783,11 @@ impl Ems6 {
                 }
             }
         }
-        t.v.step = step_of(q, n);
+        t.v.step = step_of(q, n, t.ft);
     }
 
     fn tick_tracks(&mut self) {
+        self.tick_speed = self.speed;
         let mut tracks = std::mem::take(&mut self.tracks);
         for t in tracks.iter_mut() {
             self.track_tick(t);
@@ -834,7 +849,8 @@ impl Ems6 {
                         continue;
                     }
                     let ip = v.base as i64 + (v.pos >> 16) - v.disp;
-                    let s = if ip >= 0 { d.get(ip as usize).map_or(0, |&x| s8(x)) } else { 0 };
+                    // a step of 0 (a note past the table with no entry) is silent
+                    let s = if ip >= 0 && v.step != 0 { d.get(ip as usize).map_or(0, |&x| s8(x)) } else { 0 };
                     acc += (s * v.vol) >> 6;
                     v.pos += v.step as i64;
                     if !v.hold && (v.pos >> 16) >= v.end {
@@ -901,6 +917,8 @@ impl Track {
             pat: Some(Pat::default()),
             pi: 0,
             wait: 0,
+            rows_left: 0,
+            sub: 0,
             dur: 1,
             inst: 0,
             env: [0; 4],

@@ -278,3 +278,12 @@ fn takes_no_module_of_the_corpus_lists() {
     eprintln!("{read} files read, {} taken", taken.len());
     assert!(taken.is_empty(), "{taken:?}");
 }
+
+#[test]
+fn notes_past_0x60_read_the_table_of_their_fine_tune_row() {
+    // row 0 starts at 248, a row is 97 entries and the next one follows it, row 15 on is 0
+    assert_eq!(step_of(None, 0x60, 0), 248 * 65536 / 3504);
+    assert_eq!(step_of(None, 0x60 + 97, 0), step_of(None, 0x60, 1));
+    assert_eq!(step_of(None, 0x60, 15), 0);
+    assert_eq!(step_of(None, 0xFF, 14), 0);
+}

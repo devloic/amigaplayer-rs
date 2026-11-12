@@ -65,7 +65,9 @@ fn usage() -> ! {
 
 fn parse_args() -> Args {
     let mut a = Args { players: None, eagleplayers: None, genies: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, files: Vec::new() };
-    let mut it = std::env::args().skip(1);
+    // (a file name need not be UTF-8: options are read as text, file names as given)
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
     while let Some(s) = it.next() {
         match s.as_str() {
             "--players" => a.players = it.next().map(PathBuf::from),
@@ -116,7 +118,7 @@ fn parse_args() -> Args {
             }
             "--volume" => a.volume = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
-            _ => a.files.push(PathBuf::from(s)),
+            _ => a.files.push(PathBuf::from(&raw[raw.len() - it.len() - 1])),
         }
     }
     a

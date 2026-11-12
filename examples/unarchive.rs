@@ -1,4 +1,4 @@
-//! Lists or extracts an archive with `amigaplayer_rs::archive` (LhA, zip, tar, gzip, xz), and
+//! Lists or extracts an archive with `amigaplayer_rs::archive` (LhA, LZX, zip, tar, gzip, xz), and
 //! says which entries a replayer of the library recognises (with the other entries as their
 //! companions).
 //!

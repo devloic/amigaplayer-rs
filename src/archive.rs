@@ -13,7 +13,7 @@
 //! | [`Gzip`](Format::Gzip) | `1F 8B 08` | deflate; several members are concatenated |
 //! | [`Xz`](Format::Xz)     | `FD 37 7A 58 5A 00` | LZMA2 and the xz filters lzma-rs knows |
 //! | [`Tar`](Format::Tar)   | `ustar` at offset 257 | regular files (also inside gzip and xz) |
-//! | [`Lzx`](Format::Lzx)   | `LZX` | recognised only: [`extract`] says it is not supported |
+//! | [`Lzx`](Format::Lzx)   | `LZX`, a flags byte of 0 to 3, a first file header whose CRC matches | Amiga LZX: stored and crunched (modes 0 and 2), merged-file groups, per-file CRC-32 |
 //!
 //! A gzip or xz file that does not hold a tar is a single file: [`extract`] gives one entry,
 //! named after the name kept in the gzip header, or after the archive's name without its
@@ -39,8 +39,12 @@
 //! components, but a host that writes entries to disk should still treat them as untrusted.
 //!
 //! LhA is read with the `delharc` crate (MIT or Apache-2.0), deflate with `flate2` on
-//! `miniz_oxide`, xz with `lzma-rs` (MIT). Amiga LZX is not extracted: the only free decoder
-//! source at hand derives from `unlzx.c`, whose licence is unclear.
+//! `miniz_oxide`, xz with `lzma-rs` (MIT). Amiga LZX is decoded by this crate's own code
+//! (`archive/lzx.rs`), written from the format as `unlzx.c` documents it (see the origin note
+//! in that file and `LICENSE-unlzx`). Entries whose CRC does not match are skipped, not
+//! returned.
+
+mod lzx;
 
 use std::fmt;
 use std::io::Read;
@@ -60,7 +64,7 @@ pub enum Format {
     Xz,
     /// A POSIX (ustar) or GNU tar archive.
     Tar,
-    /// Amiga LZX: recognised, not extracted.
+    /// Amiga LZX.
     Lzx,
 }
 
@@ -77,9 +81,9 @@ impl Format {
         }
     }
 
-    /// Whether [`extract`] can get files out of this format.
+    /// Whether [`extract`] can get files out of this format (every format of this release).
     pub fn supported(self) -> bool {
-        self != Format::Lzx
+        true
     }
 }
 
@@ -205,7 +209,7 @@ pub fn format(data: &[u8]) -> Option<Format> {
         Some(Format::Xz)
     } else if is_lha(data) {
         Some(Format::Lha)
-    } else if data.len() >= 10 && &data[..3] == b"LZX" {
+    } else if lzx::is_lzx(data) {
         Some(Format::Lzx)
     } else if is_tar(data) {
         Some(Format::Tar)
@@ -243,7 +247,7 @@ fn extract_as(fmt: Format, name: &str, data: &[u8], limits: &Limits) -> Result<A
                 out.push(n, || Ok(inner));
             }
         }
-        Format::Lzx => return err("Amiga LZX archives are not supported"),
+        Format::Lzx => lzx::extract(data, &mut out)?,
     }
     Ok(Archive { format: fmt, single, entries: out.entries, skipped: out.skipped })
 }

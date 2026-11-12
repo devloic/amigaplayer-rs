@@ -47,7 +47,7 @@ cargo test --release --no-default-features
 cargo build --release --no-default-features --examples
 echo "== 1b. library with host-68k (custom modules), and the headless renderer"
 cargo test --release --no-default-features --features host-68k
-echo "== 1b'. archives (LhA, zip, gzip, xz, tar in memory), and the unarchive example on a fixture"
+echo "== 1b'. archives (LhA, LZX, zip, gzip, xz, tar in memory), and the unarchive example on a fixture"
 cargo test --release --no-default-features --features archives
 cargo build --release --no-default-features --features archives --examples
 "$T/examples/unarchive" src/archive/fixtures/t-o5-h1.lha | grep -q '^ *3000  mods/tune.mod$' \

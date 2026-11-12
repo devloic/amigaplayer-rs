@@ -50,7 +50,7 @@ host-68k = []
 # `amigaplayer_rs::songdb`: song lengths and metadata from audacious-uade's song database,
 # and `--songdb` / `--stop-at songdb` of amigaplayer-render. Off by default.
 songdb = ["dep:amigaplayer-songdb"]
-# `amigaplayer_rs::archive`: LhA, zip, gzip, xz and tar archives read in memory, gzip / xz
+# `amigaplayer_rs::archive`: LhA, Amiga LZX (own code), zip, gzip, xz and tar archives read in memory, gzip / xz
 # wrappers undone by the decrunchers, and the applications' playing of archives (extracted
 # into a cache directory). Pure Rust; builds for wasm32-unknown-unknown.
 archives = ["dep:delharc", "dep:flate2", "dep:lzma-rs"]

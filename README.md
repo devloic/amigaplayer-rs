@@ -141,7 +141,8 @@ amigaplayer-rs --archive-entry NAME ARCHIVE.lha    # only that entry of the arch
 ### Archives
 
 A file given or dropped may be an archive: LhA / LZH (`-lh0-`, `-lh1-`, `-lh4-` to `-lh7-`,
-`-lhx-`, `-lz4-`, `-lz5-`, `-lzs-`, `-pm0-`; header levels 0 to 3), zip (stored and deflate),
+`-lhx-`, `-lz4-`, `-lz5-`, `-lzs-`, `-pm0-`; header levels 0 to 3), Amiga LZX (stored and
+crunched, merged-file groups, every file's CRC-32 checked), zip (stored and deflate),
 tar, or a tar in gzip or xz. Its entries play in the archive's order, as a playlist; the
 entries no player takes (companion files, texts) are skipped, and `.info` icons and texts are
 not tried. In the window the archive's line is replaced by its playable entries when it is first
@@ -149,9 +150,11 @@ played; with `--wav` they are rendered one after the other, each up to `--second
 end. `--archive-entry NAME` (amigaplayer-rs and amigaplayer-render) plays only the entry of that
 name: its path in the archive, or its file name, in any case. A gzip or xz file of a single
 module (`tune.mod.gz`) is not an archive: it plays as the module, beside its own companion files
-(the decrunchers undo gzip and xz like PowerPacker). Amiga LZX archives are recognised and
-refused: no decoder under a clear free licence was at hand (NostalgicPlayer's derives from
-`unlzx.c`, whose licence is unclear).
+(the decrunchers undo gzip and xz like PowerPacker). The LZX reader is this project's own code,
+written from the format as `unlzx.c` documents it (Unlicense, in the repository
+<https://github.com/nhoudelot/unlzx>; the file's own header names no licence: see
+`LICENSE-unlzx` and the origin note in `src/archive/lzx.rs`). An entry whose CRC does not
+match is skipped and listed, not played.
 
 Modules in archives often need their companions from the same archive (`smp.*`, `*.ins`,
 `Instruments/`, TFMX `mdat.*` with `smpl.*`). So an archive is extracted, whole, into a
@@ -882,10 +885,10 @@ song.render_i16(&mut pcm);               // repeat until song.songend() or a tim
   lists (and extracts) an archive and says which entries a replayer recognises.
 * **Archives** (feature `archives`, pure Rust, also in the WebAssembly build):
   `amigaplayer_rs::archive::extract(name, &bytes, &Limits::default())` gives the entries of an
-  LhA, zip, tar, gzip or xz archive in memory, with size caps and no panic on corrupt data;
+  LhA, Amiga LZX, zip, tar, gzip or xz archive in memory, with size caps and no panic on corrupt data;
   `Song::open_with(&entry.name, &entry.data, &archive.companions(i), rate)` plays one with the
   others as its companions. The crates it uses: `delharc` (LhA, MIT OR Apache-2.0), `flate2` on
-  `miniz_oxide` (MIT OR Apache-2.0), `lzma-rs` (MIT).
+  `miniz_oxide` (MIT OR Apache-2.0), `lzma-rs` (MIT); the LZX reader is in the crate (`LICENSE-unlzx`).
 * `tools/lib-check.sh` builds and tests all of it.
 
 The library is GPL-2.0-or-later like the rest, with the per-file attributions and `LICENSE-*`

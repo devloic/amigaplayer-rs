@@ -127,15 +127,6 @@ fn zip_names_in_cp437() {
 }
 
 #[test]
-fn lzx_is_recognised_not_extracted() {
-    let mut d = b"LZX\0\0\0\0\0\0\0".to_vec();
-    d.resize(64, 0);
-    assert_eq!(format(&d), Some(Format::Lzx));
-    assert!(!Format::Lzx.supported());
-    assert!(extract("x.lzx", &d, &Limits::default()).unwrap_err().0.contains("not supported"));
-}
-
-#[test]
 fn not_archives() {
     for d in [&b""[..], b"PK", b"plain text, nothing more", &crate::testdata::minimal_mod()] {
         assert_eq!(format(d), None);

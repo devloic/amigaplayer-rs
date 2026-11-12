@@ -39,6 +39,7 @@ pub mod digitalsoundstudio;
 pub mod dynamicsynthesizer;
 pub mod dsc;
 pub mod ems;
+pub mod ems6;
 pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod coredesign;
@@ -401,6 +402,8 @@ pub const REPLAYERS: &[Open] = &[
     dirkbialluch::OPEN,
     desire::OPEN,
     fashiontracker::OPEN,
+    // strict: `E.M.S. V6.`, a block-0 length and the voice and track counts
+    ems6::OPEN,
     ems::OPEN,
     steveturner::OPEN,
     synthdream::OPEN,

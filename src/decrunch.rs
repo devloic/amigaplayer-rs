@@ -2,13 +2,21 @@
 //! powerpacker.library / xpkmaster.library; here PowerPacker (PP20) data is
 //! unpacked natively, and so are the single-file depackers of libxmp 4.7.4
 //! (Pack-Ice, XPK SQSH, StoneCracker S404 and MMCMP, ported in the
-//! submodules with their licence notices). Anything else, and anything that
-//! only starts with a magic by chance, is passed through unchanged.
+//! submodules with their licence notices), and CrunchMania, PowerPlayer and
+//! the other XPK methods of ancient (ported from its C# port LibAncient; see
+//! LICENSE-ancient). Anything else, and anything that only starts with a
+//! magic by chance, is passed through unchanged.
 
+mod ancient;
+mod crunchmania;
 mod ice;
 mod mmcmp;
+mod powerplayer;
 mod s404;
 mod sqsh;
+mod xpk;
+#[cfg(test)]
+mod ancient_tests;
 #[cfg(test)]
 mod depack_tests;
 
@@ -56,12 +64,49 @@ pub(crate) enum Kind {
     Mmcmp,
     PackIce,
     StoneCracker,
+    CrunchMania,
+    PowerPlayer,
+    Xpk(xpk::Method),
+}
+
+pub(crate) use xpk::Method as XpkMethod;
+
+/// The ancient ports, which have no 64-byte minimum (their headers are checked instead).
+fn ancient_kind(data: &[u8]) -> Option<Kind> {
+    if crunchmania::test(data) {
+        Some(Kind::CrunchMania)
+    } else if powerplayer::test(data) {
+        Some(Kind::PowerPlayer)
+    } else {
+        xpk::test(data).map(Kind::Xpk)
+    }
+}
+
+fn ancient_depack(kind: Kind, data: &[u8]) -> Option<Vec<u8>> {
+    match kind {
+        Kind::CrunchMania => crunchmania::depack(data),
+        Kind::PowerPlayer => powerplayer::depack(data),
+        Kind::Xpk(_) => xpk::depack(data),
+        _ => None,
+    }
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::CrunchMania => "CrunchMania",
+        Kind::PowerPlayer => "PowerPlayer",
+        Kind::Xpk(m) => m.name(),
+        _ => "",
+    }
 }
 
 /// Which packer made `data`, by its header alone (nothing is unpacked).
 pub(crate) fn identify(data: &[u8]) -> Option<Kind> {
     if data.len() > 12 && &data[..4] == b"PP20" {
         return Some(Kind::PowerPacker);
+    }
+    if let Some(k) = ancient_kind(data) {
+        return Some(k);
     }
     if data.len() < MIN_PACKED {
         return None;
@@ -95,6 +140,7 @@ pub(crate) fn unpack_identified(data: &[u8]) -> Option<(Kind, Option<Vec<u8>>)> 
             }
         }
         Kind::StoneCracker => s404::depack(data),
+        Kind::CrunchMania | Kind::PowerPlayer | Kind::Xpk(_) => ancient_depack(kind, data),
     };
     Some((kind, out.filter(|d| !d.is_empty())))
 }
@@ -107,6 +153,19 @@ pub fn decrunch(data: Vec<u8>) -> Vec<u8> {
                 return d;
             }
             None => log::warn!("PowerPacker data is corrupt; using it as is"),
+        }
+    }
+    if let Some(kind) = ancient_kind(&data) {
+        let name = kind_name(kind);
+        match ancient_depack(kind, &data) {
+            Some(d) if !d.is_empty() => {
+                log::info!("{}: {} -> {} bytes", name, data.len(), d.len());
+                return d;
+            }
+            _ => {
+                log::warn!("{} data is corrupt; using it as is", name);
+                return data;
+            }
         }
     }
     match libxmp_depack(&data) {

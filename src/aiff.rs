@@ -60,6 +60,10 @@ pub trait Stream: Send {
     fn set_subsong(&mut self, n: u16);
     /// The length of the current subsong, when the file states it.
     fn duration_secs(&self) -> Option<f64>;
+    /// The composer, when the file names one.
+    fn author(&self) -> String {
+        String::new()
+    }
 }
 
 /// Decoded (or in-place) sample data of another file format (`crate::iff8svx`,
@@ -277,6 +281,11 @@ impl AiffPlayer {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The composer, for generated audio whose file names one.
+    pub fn author(&self) -> String {
+        self.stream.as_ref().map_or_else(String::new, |s| s.author())
     }
 
     /// The file's own sample rate, channels and bits per sample.

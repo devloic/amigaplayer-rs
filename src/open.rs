@@ -20,6 +20,9 @@ pub fn detect(data: &[u8]) -> Option<String> {
         return Some("AIFF".to_string());
     }
     let data = crate::decrunch::decrunch(data.to_vec());
+    if crate::replay::sndh::detect(&data) {
+        return Some("SNDH".to_string());
+    }
     #[cfg(feature = "sid")]
     if crate::sid::detect(&data) {
         return Some(if data.starts_with(b"RSID") { "RSID" } else { "PSID" }.to_string());
@@ -44,6 +47,9 @@ pub fn claimed_by_several(data: &[u8]) -> bool {
         return false;
     }
     let data = crate::decrunch::decrunch(data.to_vec());
+    if crate::replay::sndh::detect(&data) {
+        return false;
+    }
     #[cfg(feature = "sid")]
     if crate::sid::detect(&data) {
         return false;

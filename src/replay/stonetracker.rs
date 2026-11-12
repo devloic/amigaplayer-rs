@@ -21,7 +21,11 @@
 //!   channel at the voice's own period and mixes only the voices that share one; this
 //!   always mixes, at the 32-voice genie's rate;
 //! - the original gives voices 4-7 the centre position (which the genie leaves silent) or
-//!   their sides depending on a byte it reads from outside the module; they always play;
+//!   their sides depending on a byte it reads from outside the module (in the sample file, see
+//!   `sides`); the port reads that byte and leaves them out the same way, and plays voices
+//!   0-3 unmixed at their own periods (the genie's lone voices) when they are out;
+//! - the original's ticks are held back by the genie's interrupt handlers by a varying amount;
+//!   the port's tick is the player's own timer plus the mean of that (`GENIE_LATENCY`);
 //! - a sample bank of one sample plays (the original reads none of its data);
 //! - a position jump to or past the end of the list ends the song (the original reads past it);
 //! - a note when no instrument was ever given plays nothing (the original triggers an empty
@@ -50,6 +54,15 @@ const MAX_FX: usize = 16;
 /// The genie's mix (as `ptm.rs`): Paula period 245 (14477 Hz), boost 3.9.
 const MIX_PERIOD: u16 = 245;
 const MIX_BOOST: u32 = 39;
+/// The boost percent of the plain amplifier for voices alone on their channels: the level of
+/// `SPM.antarctica` 20 s against the original (-5.3 dB at 100, +1.0 at 200).
+const ALONE_GAIN: u32 = 185;
+
+/// Colour clocks the genie adds to a tick on average (see SPEC section 4): the player's timer is
+/// exact, but the genie's audio interrupt handlers hold the next timer interrupt back whenever it
+/// falls inside one. Fitted: the two modules at 125 BPM give 1543 and 2000, the same two at 60 to
+/// 200 BPM 627 to 4286 (mean 1881); the delays are a chaotic function of the genie's own timing.
+const GENIE_LATENCY: u64 = 1800;
 
 /// ProTracker's vibrato sine, the first half.
 const SINE: [u8; 32] =
@@ -97,6 +110,8 @@ struct Song {
     bpm: u8,
     chans: usize,
     npos: usize,
+    /// Voices 4-7 on the sides (else centred, which the genie does not play): see `sides`.
+    sides: bool,
     /// `lists[ch][pos]`: the pattern.
     lists: Vec<Vec<u16>>,
 }
@@ -150,6 +165,10 @@ pub struct StoneTracker {
     first: bool,
     stopped: bool,
     songend: bool,
+    /// Voices the genie leaves silent (4-7 when the song's `sides` is off).
+    muted: [bool; VOICES],
+    /// Voices the amplifier has (the muted ones are left out when it plays them unmixed).
+    amp_voices: usize,
 }
 
 /// The block offsets after the header: the info block, the songs, the patterns.
@@ -246,6 +265,17 @@ fn decode(d: &[u8], start: usize, end: usize, rows: usize) -> Vec<(u16, Row)> {
     out
 }
 
+/// Whether the original gives voices 4-7 the sides: it reads a byte outside the module on its first
+/// tick and takes the sides when it is negative. The byte is at the same address whatever the
+/// module (the song block's file offset `song` added to a constant), in the sample file that was
+/// loaded after the module: at its file offset `song + 14086`, less the module's length
+/// rounded up to 8 over 1024 (the sample file's memory starts that much later). Outside the
+/// sample file the byte is not known; the centre is assumed.
+fn sides(len: usize, song: usize, sps: &[u8]) -> bool {
+    let shift = (len.next_multiple_of(8)).saturating_sub(1024);
+    (song + 14086).checked_sub(shift).and_then(|f| sps.get(f)).is_some_and(|&b| b & 0x80 != 0)
+}
+
 fn build(d: &[u8], sps: &[u8], m: &mut Machine) -> Option<StoneTracker> {
     let o = offsets(d)?;
     let nsongs = be16(d, 0x24) as usize;
@@ -260,7 +290,7 @@ fn build(d: &[u8], sps: &[u8], m: &mut Machine) -> Option<StoneTracker> {
         let chans = d[s + 0x20] as usize;
         let npos = be16(d, s + 0x22) as usize;
         let lists = (0..chans).map(|c| (0..npos).map(|p| be16(d, s + 0x24 + 2 * (c * npos + p))).collect()).collect();
-        songs.push(Song { bpm: d[s + 0x1f], chans, npos, lists });
+        songs.push(Song { bpm: d[s + 0x1f], chans, npos, sides: sides(d.len(), s, sps), lists });
     }
     let patterns = o[1 + nsongs..].iter().map(|&s| decode(d, s, end_of(s), rows)).collect();
 
@@ -295,15 +325,18 @@ fn build(d: &[u8], sps: &[u8], m: &mut Machine) -> Option<StoneTracker> {
 
     let name = &d[4..0x24];
     let title = String::from_utf8_lossy(&name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())]).trim().to_string();
-    let pans: Vec<i16> = (0..VOICES).map(|v| if matches!(v % 4, 0 | 3) { 1 } else { -1 }).collect();
-    if !crate::amplifier::start_panned_mix(
-        m,
-        VOICES,
-        crate::eagle::epamb::DIRECT | crate::eagle::epamb::BIT8 | crate::eagle::epamb::CHIP_RAM,
-        &pans,
-        MIX_PERIOD,
-        MIX_BOOST,
-    ) {
+    let flags = crate::eagle::epamb::DIRECT | crate::eagle::epamb::BIT8 | crate::eagle::epamb::CHIP_RAM;
+    // voices 4-7 silent: voices 0-3 are alone on their Paula channels, which the genie plays at
+    // their own periods, unmixed; else all eight go through the genie's mix
+    let sides = songs.first().is_some_and(|s| s.sides);
+    let amp_voices = if sides { VOICES } else { 4 };
+    let pans: Vec<i16> = (0..amp_voices).map(|v| if matches!(v % 4, 0 | 3) { 1 } else { -1 }).collect();
+    let ok = if sides {
+        crate::amplifier::start_panned_mix(m, VOICES, flags, &pans, MIX_PERIOD, MIX_BOOST)
+    } else {
+        crate::amplifier::start_panned(m, amp_voices, flags, &pans, ALONE_GAIN)
+    };
+    if !ok {
         return None;
     }
     let mut p = StoneTracker {
@@ -328,6 +361,8 @@ fn build(d: &[u8], sps: &[u8], m: &mut Machine) -> Option<StoneTracker> {
         first: true,
         stopped: false,
         songend: false,
+        muted: [false; VOICES],
+        amp_voices,
     };
     p.init(0);
     Some(p)
@@ -343,6 +378,8 @@ impl StoneTracker {
         self.first = true;
         self.stopped = self.bpm == 0;
         self.songend = self.stopped;
+        let sides = self.songs[sub].sides;
+        self.muted = std::array::from_fn(|v| v >= 4 && !sides);
     }
 
     fn row_at(&self, c: usize) -> Option<&Row> {
@@ -743,11 +780,12 @@ impl StoneTracker {
     }
 
     fn apply(&mut self, hw: &mut Hw) {
+        let muted = self.muted;
         for v in 0..VOICES {
             let ch = &mut self.ch[v];
             let chg = std::mem::take(&mut ch.chg);
             ch.last_chg = chg;
-            if chg == 0 {
+            if chg == 0 || v >= self.amp_voices {
                 continue;
             }
             if chg & TRIG != 0 {
@@ -764,7 +802,7 @@ impl StoneTracker {
                 hw.voice_per(v, ch.out_per);
             }
             if chg & VOL != 0 {
-                hw.voice_vol(v, ch.out_vol);
+                hw.voice_vol(v, if muted[v] { 0 } else { ch.out_vol });
             }
             if chg & TRIG != 0 {
                 hw.voice_dma(1 << v, true);
@@ -805,9 +843,9 @@ impl Replayer for StoneTracker {
     }
 
     /// The player's own CIA-B timer: 1789773 / BPM less 42 E-clock ticks of 5 colour clocks,
-    /// 32 BPM the slowest.
+    /// 32 BPM the slowest, and the genie's average delay (`GENIE_LATENCY`).
     fn tick_clocks(&self) -> u64 {
-        (1_789_773 / self.bpm.max(32) as u64 - 42) * 5
+        (1_789_773 / self.bpm.max(32) as u64 - 42) * 5 + GENIE_LATENCY
     }
 
     fn tick(&mut self, hw: &mut Hw) {
@@ -942,6 +980,58 @@ mod tests {
         assert!(!detect(&bad), "offset past the end");
     }
 
+    /// A sample file of `n` zero bytes with `b` at `at`.
+    fn flagged(n: usize, at: usize, b: u8) -> Vec<u8> {
+        let mut v = vec![0u8; n];
+        v[at] = b;
+        v
+    }
+
+    #[test]
+    fn sides_of_voices_4_to_7() {
+        // a 144-byte module with its song block at 74 (measured on the original): the byte read is
+        // the sample file's at 74 + 14086
+        let f = 74 + 14086;
+        assert!(sides(144, 74, &flagged(20000, f, 0x80)));
+        assert!(sides(144, 74, &flagged(20000, f, 0xff)));
+        assert!(!sides(144, 74, &flagged(20000, f, 0x7f)));
+        assert!(!sides(144, 74, &flagged(20000, f + 1, 0x80)), "only that byte");
+        // a module up to 1024 bytes moves nothing; above, by its length rounded up to 8, less 1024
+        assert!(sides(1024, 74, &flagged(20000, f, 0x80)));
+        assert!(sides(1025, 74, &flagged(20000, f - 8, 0x80)));
+        assert!(sides(1044, 74, &flagged(20000, f - 24, 0x80)));
+        assert!(sides(6144, 74, &flagged(20000, f - 5120, 0x80)));
+        // the song block's offset moves it one for one
+        assert!(sides(144, 78, &flagged(20000, f + 4, 0x80)));
+        // outside the file, or before it: the centre
+        assert!(!sides(144, 74, &vec![0x80u8; f]));
+        assert!(!sides(60000, 74, &vec![0x80u8; 20000]));
+    }
+
+    #[test]
+    fn centred_voices_are_muted() {
+        let d = module(&[&[0xff, 0x3f]], &[vec![0]], 125);
+        // the sample file is too short for the byte: voices 4-7 centred, silent
+        let (p, _) = player(&d, &samples());
+        assert_eq!(p.muted, [false, false, false, false, true, true, true, true]);
+        assert_eq!(p.amp_voices, 4, "the four voices alone on their channels are played unmixed");
+        // with the byte negative: all play
+        let song = be32(&d, 0x30) as usize;
+        let mut s = samples();
+        s.resize(song + 14086 + 1, 0);
+        s[song + 14086] = 0x80;
+        let (p, _) = player(&d, &s);
+        assert_eq!(p.muted, [false; 8]);
+        assert_eq!(p.amp_voices, 8);
+    }
+
+    #[test]
+    fn tick_adds_the_genies_delay() {
+        let d = module(&[&[0xff, 0x3f]], &[vec![0]], 200);
+        let (p, _) = player(&d, &samples());
+        assert_eq!(p.tick_clocks(), 5 * (1_789_773 / 200 - 42) + GENIE_LATENCY);
+    }
+
     #[test]
     fn companion_names() {
         assert_eq!(companion("SPM.antarctica")[0], "SPS.antarctica");
@@ -954,7 +1044,7 @@ mod tests {
         // note 25 with sample 1, then a volume slide down 4 on the next row
         let pat: &[u8] = &[0x19, 0x01, 0xff, 0x00, 0xaf, 0x04, 0xff, 0x3d];
         let (mut p, mut m) = player(&module(&[&[0xff, 0x3f], pat], &[vec![1]], 125), &samples());
-        assert_eq!(p.tick_clocks(), 71380);
+        assert_eq!(p.tick_clocks(), 71380 + GENIE_LATENCY);
         let t = run(&mut p, &mut m, 12);
         assert_eq!(t[0][0], (TRIG | SMP | REP | FREQ | VOL, 214, 64));
         assert_eq!(t[0][1], (FREQ | VOL, 256, 0));
@@ -980,7 +1070,7 @@ mod tests {
     #[test]
     fn song_end_and_slow_bpm() {
         let (mut p, mut m) = player(&module(&[&[0xff, 0x3f]], &[vec![0, 0]], 10), &samples());
-        assert_eq!(p.tick_clocks(), (1_789_773 / 32 - 42) * 5);
+        assert_eq!(p.tick_clocks(), (1_789_773 / 32 - 42) * 5 + GENIE_LATENCY);
         run(&mut p, &mut m, 2 * 64 * 6 - 1);
         assert!(!p.songend());
         run(&mut p, &mut m, 1);

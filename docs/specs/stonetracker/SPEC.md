@@ -79,7 +79,21 @@ none (that sample is silent).
 
 The player programs CIA-B as a one-shot itself each tick. The tick period is
 `5 * (floor(1789773 / bpm) - 42)` colour clocks (checked at 32, 33, 45, 64, 77, 125 and 200 BPM);
-below 32 BPM it plays at 32; at 0 BPM no tick runs. The NotePlayer call moves by up to about 1100
+below 32 BPM it plays at 32; at 0 BPM no tick runs.
+
+The player is exact: the CIA-B interrupts of an undisturbed tick are 71380 colour clocks apart at
+125 BPM (it measures the time since the interrupt itself and shortens the next timer by it). In the
+reference (the player under the 8Voices-NotePlayer genie) a tick is often later: the genie's audio
+interrupt handlers (the writes of its channel set-up, each audio interrupt acknowledged 3000 to
+3400 colour clocks after the last) hold the timer interrupt back until the handler that straddles
+the expiry has finished, and the next period then counts from the late interrupt. Measured over
+12 to 20 s on `SPM.teinteremix22` and `SPM.antarctica` at 60, 100, 125, 150 and 200 BPM: mean tick
+longer than the formula by 1543 / 2000 (125), 1323 / 627 (60), 4286 / 1128 (100), 1466 / 970 (150),
+2333 / 3132 (200) colour clocks (0.4 to 7 %; 2.2 % and 2.8 % at 125 BPM, which is the drift the
+port had). The delays follow the genie's own interrupt timing (a chain of one handler a channel,
+3000 to 3400 colour clocks apart, started by each note), so a tick's lateness is neither a function
+of the tick's changes nor of the tempo; no formula was found. The port adds the mean of the ten
+means, 1800 colour clocks, to every tick. The NotePlayer call moves by up to about 1100
 colour clocks with the player's own time. Speed (ticks a row) starts at 6.
 
 The first tick sets every channel to period 256 and volume 0 (change bits FREQ | VOL) and plays row 0
@@ -159,13 +173,32 @@ last row the next position. After the last position the song ends and starts aga
 Channels 0-3 get the stereo positions left, right, right, left (0x8001 / 0x7FFF). Channels 4-7 get
 the same only when a byte the player reads outside the module during the first tick (at a fixed
 address plus the song block's file offset) is negative; otherwise the centre (0x8000), which the
-8Voices-NotePlayer genie does not play. `SPM.teinteremix22` gets the sides, `SPM.antarctica` the centre
+8Voices-NotePlayer genie does not play (silent).
+
+That byte lies in the sample file, which the host loads after the module: it is the sample file's
+byte at file offset `song + 14086 - max(0, round8(len) - 1024)`, `song` the song block's file
+offset and `len` the module's length (probed with modules of 144 to 12144 bytes and with
+two to six samples: the number of samples does not matter, the module's length does only above
+1024 bytes, by its length rounded up to 8; the byte is found by bisection with a sample file of
+zeros up to a point and 0x80 from it: voices 4-7 audible or silent). Negative (0x80 or above): the
+sides; else the centre. Both archive modules agree (`SPM.antarctica` 6060 bytes, song block 424:
+byte 9474 = 0x04, the centre; `SPM.teinteremix22` 824 bytes, song block 154: byte 14240 = 0xD6, the
+sides). Past the end of the sample file the byte is not known (the port assumes the centre). `SPM.teinteremix22` gets the sides, `SPM.antarctica` the centre
 (its channels 4-7 are silent under DeliTracker). The genie plays a lone voice on Paula channel
 `voice % 4` at the voice's own period and mixes the voices that share a channel.
 
 ## 8. Known differences of the port
 
-- Channels 4-7 always play, left/right as 0-3 (section 7).
+- Voices 4-7 are silent when the byte of section 7 is not negative, as the genie leaves them; the
+  port tests that byte (`sides`, of the first song) and then plays only voices 0-3, each on its own
+  channel at its own period (a lone voice on the genie), at a boost of 185 % of the amplifier's
+  default (the level of `SPM.antarctica` for 20 s within 0.1 dB of the original; refcmp bands
+  still +2.2 / +0.4 / -1.1 / +1.0 / 0.0 dB, so FILTER; the original's lone-voice path is not
+  reproduced exactly). Where the original's rule reads outside the sample
+  file the port plays the centre (silent).
+- The tick is the genie's average (section 4), not each tick's own lateness: the port's ticks are
+  all the same, the original's differ by up to 7000 colour clocks, so the audio differs at note
+  starts by up to a tick.
 - The mix is the host amplifier's NotePlayer genie mix (8 bits, 14477 Hz, wrapping), also for a lone
   voice.
 - A single-sample bank plays; a jump to or past the end of the position list ends the song and starts

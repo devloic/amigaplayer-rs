@@ -1927,6 +1927,26 @@ mod tests {
     }
 
     #[test]
+    fn stonepacker_handle_is_not_zero() {
+        let mut m = Machine::new(CpuType::M68000);
+        let base = open_library(&mut m, "stonepacker.library");
+        assert_ne!(base, 0);
+        let lib = m.os.libs.iter().position(|l| l.base == base).unwrap();
+        m.set_d0(0);
+        lib_call(&mut m, lib, 30);
+        let h = m.d(0);
+        assert!(h != 0 && h != base);
+        // another stub call of it still answers 0
+        lib_call(&mut m, lib, 42);
+        assert_eq!(m.d(0), 0);
+        // and another library's -30 too
+        let other = open_library(&mut m, "foo.library");
+        let lib = m.os.libs.iter().position(|l| l.base == other).unwrap();
+        lib_call(&mut m, lib, 30);
+        assert_eq!(m.d(0), 0);
+    }
+
+    #[test]
     fn audio_device_write_reaches_paula() {
         let mut m = Machine::new(CpuType::M68000);
         let io = m.alloc(68);

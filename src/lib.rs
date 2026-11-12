@@ -177,6 +177,9 @@ pub mod replay;
 pub mod sid;
 #[doc(hidden)]
 #[allow(missing_docs)]
+pub mod symmod;
+#[doc(hidden)]
+#[allow(missing_docs)]
 pub mod trace;
 #[doc(hidden)]
 #[allow(missing_docs)]

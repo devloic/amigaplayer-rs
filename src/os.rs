@@ -212,7 +212,8 @@ pub fn lib_call(m: &mut Machine, lib: usize, lvo: i32) {
         LibKind::CiaB => cia_call(m, 1, lvo),
         LibKind::AudioDev | LibKind::TimerDev => device_call(m, lib, lvo),
         LibKind::Intuition => intuition_call(m, lvo),
-        LibKind::Graphics | LibKind::Stub => false,
+        LibKind::Stub => stub_call(m, lib, lvo),
+        LibKind::Graphics => false,
     };
     if !handled {
         if m.os.logged.insert((lib, lvo)) {
@@ -225,6 +226,30 @@ pub fn lib_call(m: &mut Machine, lib: usize, lvo: i32) {
         m.os.console.clear();
     }
 }
+
+/// The few calls of a stub library whose answer 0 makes a player give up.
+///
+/// stonepacker.library (the StoneTracker Eagleplayer, before it loads the SPS sample file):
+/// LVO -30 takes no argument but the base and its result is a handle the player keeps and hands
+/// back to LVO -36 in a0 when the file is read; 0 is refused ("could not load additional
+/// files"). Observed black-box: with any non-zero answer the player reads the SPS through
+/// dos.library itself and plays, and it never reads or writes the handle's memory (read watch
+/// over it, its bytes unchanged at -36). So -30 answers a zeroed block of its own (not freed:
+/// -36 stays a stub returning 0, which the player ignores).
+fn stub_call(m: &mut Machine, lib: usize, lvo: i32) -> bool {
+    let name = m.os.libs[lib].name.rsplit([':', '/']).next().unwrap_or("").to_string();
+    match (name.as_str(), lvo) {
+        ("stonepacker.library", 30) => {
+            let p = m.alloc(STONEPACKER_HANDLE);
+            m.set_d0(p);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The size of the block stonepacker.library's LVO -30 answers (never touched by the player).
+const STONEPACKER_HANDLE: u32 = 0x100;
 
 // ---------------------------------------------------------------- exec ---
 

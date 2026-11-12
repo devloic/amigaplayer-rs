@@ -18,7 +18,7 @@ pub fn detect(data: &[u8]) -> bool {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Enc {
+pub enum Enc {
     Be,
     Le,
     Unsigned8,
@@ -39,8 +39,29 @@ pub struct AiffPlayer {
     step: f64,
     /// position in source frames of the next output frame
     pos: f64,
-    aifc: bool,
+    format: &'static str,
     title: String,
+    /// the frame the sample goes back to at its end, if it repeats (IFF 8SVX)
+    loop_start: Option<usize>,
+    /// a repeating sample has reached its end at least once
+    wrapped: bool,
+}
+
+/// Decoded (or in-place) sample data of another file format (`crate::iff8svx`,
+/// `crate::riffwave`), for `AiffPlayer::from_pcm` to play as it plays an AIFF's.
+pub struct Pcm {
+    pub data: Vec<u8>,
+    /// the sample bytes within `data`: interleaved frames of `bits`-bit samples in `enc`
+    pub start: usize,
+    pub frames: usize,
+    pub channels: usize,
+    pub bits: u32,
+    pub enc: Enc,
+    pub rate: f64,
+    pub format: &'static str,
+    pub title: String,
+    /// the frame a repeating sample goes back to at its end
+    pub loop_start: Option<usize>,
 }
 
 fn be16(d: &[u8], o: usize) -> u16 {
@@ -150,13 +171,51 @@ impl AiffPlayer {
             src_rate,
             step: src_rate / rate as f64,
             pos: 0.0,
-            aifc,
+            format: if aifc { "AIFF-C" } else { "AIFF" },
             title,
+            loop_start: None,
+            wrapped: false,
+        })
+    }
+
+    /// Prepares to play another decoder's sample data at `rate` Hz. What `p` promises
+    /// beyond its bytes is cut down to them.
+    pub fn from_pcm(p: Pcm, rate: u32) -> Result<AiffPlayer, String> {
+        let bytes = p.bits.div_ceil(8) as usize;
+        let sized = match p.enc {
+            Enc::F32 => p.bits == 32,
+            Enc::F64 => p.bits == 64,
+            Enc::Unsigned8 => (1..=8).contains(&p.bits),
+            Enc::Be | Enc::Le => (1..=32).contains(&p.bits),
+        };
+        if !sized || p.channels == 0 || p.channels > 64 {
+            return Err(format!("{}: {} channels of {}-bit samples", p.format, p.channels, p.bits));
+        }
+        if !(p.rate.is_finite() && (1.0..=10_000_000.0).contains(&p.rate)) {
+            return Err(format!("{}: bad sample rate", p.format));
+        }
+        let start = p.start.min(p.data.len());
+        let frames = p.frames.min((p.data.len() - start) / (bytes * p.channels));
+        Ok(AiffPlayer {
+            start,
+            frames,
+            channels: p.channels,
+            bytes,
+            bits: p.bits,
+            enc: p.enc,
+            src_rate: p.rate,
+            step: p.rate / rate.max(1) as f64,
+            pos: 0.0,
+            format: p.format,
+            title: p.title,
+            loop_start: p.loop_start.filter(|&s| s < frames),
+            wrapped: false,
+            data: p.data,
         })
     }
 
     pub fn format(&self) -> &'static str {
-        if self.aifc { "AIFF-C" } else { "AIFF" }
+        self.format
     }
 
     pub fn title(&self) -> &str {
@@ -173,8 +232,10 @@ impl AiffPlayer {
         if self.src_rate > 0.0 { self.frames as f64 / self.src_rate } else { 0.0 }
     }
 
+    /// The sample has reached its end; a repeating one plays on from its repeat part
+    /// (`render` goes on filling), as NostalgicPlayer's sample player does.
     pub fn ended(&self) -> bool {
-        self.pos >= self.frames as f64
+        self.wrapped || self.pos >= self.frames as f64
     }
 
     /// One channel of one source frame, -1..1.
@@ -199,7 +260,10 @@ impl AiffPlayer {
     }
 
     fn frame(&self, i: usize) -> (f32, f32) {
-        let i = i.min(self.frames - 1);
+        let i = match self.loop_start {
+            Some(s) if i >= self.frames => s + (i - self.frames) % (self.frames - s),
+            _ => i.min(self.frames - 1),
+        };
         let l = self.sample(i, 0);
         (l, if self.channels > 1 { self.sample(i, 1) } else { l })
     }
@@ -209,7 +273,13 @@ impl AiffPlayer {
     pub fn render(&mut self, out: &mut [f32]) -> usize {
         let mut n = 0;
         for f in out.chunks_exact_mut(2) {
-            if self.ended() {
+            if let (Some(s), true) = (self.loop_start, self.pos >= self.frames as f64) {
+                // back by whole passes of the repeat part
+                let len = (self.frames - s) as f64;
+                self.pos = (self.pos - (((self.pos - self.frames as f64) / len).floor() * len + len)).max(s as f64);
+                self.wrapped = true;
+            }
+            if self.pos >= self.frames as f64 {
                 f[0] = 0.0;
                 f[1] = 0.0;
                 continue;

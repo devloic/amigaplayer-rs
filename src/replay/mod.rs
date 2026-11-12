@@ -119,6 +119,7 @@ pub mod mcmd;
 pub mod medley;
 pub mod artandmagic;
 pub mod robhubbard;
+pub mod robhubbard2;
 pub mod robhubbardst;
 pub mod stevebarrett;
 pub mod paulshields;
@@ -393,6 +394,8 @@ pub const REPLAYERS: &[Open] = &[
     steveturner::OPEN,
     synthdream::OPEN,
     robhubbard::OPEN,
+    // strict layout rule (offsets in order, every list closed by FF, two 416-byte tables to the file's end) and a bank beside it
+    robhubbard2::OPEN,
     robhubbardst::OPEN,
     stevebarrett::OPEN,
     ashleyhogg::OPEN,

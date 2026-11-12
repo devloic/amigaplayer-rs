@@ -157,12 +157,16 @@ registers, and a queue.
   bit again. Interrupt requests raised since Paula was last brought up to date are not seen: after the
   tick's code Paula has only run to the tick's last register write.
 
-Consequence (a defect of the engine's device, not of the player): an interrupt request a stopped channel
-raised earlier stays set; the next note's `CMD_WRITE` (DMA off and on in one colour clock) is taken at
-the tick's end as the start of its pass, the real start (Paula's interrupt at the next line) as the end
-of its only pass, and DMA goes off a few colour clocks later: from a channel's third note on, most notes
-play 3 audio words. The reference's output (and so the port's) sounds of short clicks on channels that
-play notes back to back. See section 10.
+A write to an idle channel also drops the channel's interrupt request (written between its DMA off and
+DMA on). An idle channel leaves its request set (that is what lets Paula's channel run down), and the one
+a channel raised while it ran down belongs to a pass of a write that is gone. The device used to keep it:
+the next note's `CMD_WRITE` (DMA off and on in one colour clock) was then taken at the tick's end as the
+start of its pass, the real start (Paula's interrupt at the next line) as the end of its only pass, and DMA
+went off a few colour clocks later, so from a channel's third note on most notes played 3 audio words (short
+clicks on channels that play notes back to back). With the request dropped every note plays its whole sample.
+The modules in the corpus have no sample with a loop, so no loop write (`cycles` 0) reaches the device in them.
+The reference of the first version of this specification was recorded with that defect (the 92,367 writes
+and the clocks of section 10 are those of the defective device); the port was then changed with the device.
 
 ## 8. Write order
 
@@ -182,7 +186,7 @@ when a pass starts at a service; `DMACON` off when a channel ends.
 
 `src/replay/gtgamesystems.rs` follows this text and models section 7 itself. The reference's audio is
 what the engine's device makes of the requests; if the engine's device is changed, the port's model
-(and this section 7) must change with it.
+(and this section 7) must change with it (it was, once: the interrupt request dropped by a write to an idle channel).
 
 Results (write logs of the reference and of the port, same build, module base 0x45e0 on both):
 

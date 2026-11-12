@@ -404,6 +404,8 @@ impl DigitalSoundCreations {
         if !busy {
             self.latch(k, hw);
             hw.dmacon(1 << k);
+            // (the engine's device drops the interrupt request an idle channel left set)
+            hw.bus.paula.write_intreq(0x80 << k);
             hw.dmacon(0x8000 | 1 << k);
         } else if !latched {
             self.latch(k, hw);

@@ -19,9 +19,9 @@
 //! note, `CMD_WRITE` again for a loop, `AbortIO` for a rest), so what reaches Paula is what this
 //! engine's audio.device emulation (`os.rs`) makes of those requests, and the port models that device
 //! (SPEC section 7) with the moments at which the engine's device looks at the channels: the end of
-//! every output sample, every frame, and the end of a tick's code. That device has a defect the port
-//! keeps, since it is the reference's sound (SPEC section 7): an interrupt request left set by a
-//! stopped channel makes the device end the next note's only pass right after it starts.
+//! every output sample, every frame, and the end of a tick's code. A write to an idle channel drops the
+//! interrupt request the channel left set (SPEC section 7): the engine's device once kept it and took it
+//! for the start of the note's pass, so that from a channel's third note on the notes played 3 words.
 //!
 //! The times are the original's: its code's cost along the path a tick takes, in 68000 cycles as the
 //! engine counts them, with the half colour clock every library call drops (SPEC section 6), and the
@@ -282,6 +282,8 @@ impl GtGameSystems {
         if !c.busy() {
             self.latch(hw, k);
             hw.dmacon(1 << k);
+            // (the engine's device drops the interrupt request an idle channel left set)
+            hw.bus.paula.write_intreq(0x80 << k);
             hw.dmacon(0x8000 | 1 << k);
         } else if !c.latched {
             self.latch(hw, k);

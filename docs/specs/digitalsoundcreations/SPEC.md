@@ -96,7 +96,8 @@ One audio.device request a track, on channel k (unit `1 << k`). A row's note on 
    with no end.
 
 The engine's audio.device: a write to an idle channel puts the sample's pointer and length in the
-registers and writes DMA off, DMA on at the call. When the engine next looks at the channels and
+registers and writes DMA off, DMA on at the call (the channel's interrupt request is dropped between
+the two: an idle channel leaves one set, and the device must not take it for the pass's start). When the engine next looks at the channels and
 Paula has raised the channel's interrupt (after each output sample, vertical blank and tick, with
 Paula as far as it ran: it runs only at register writes and at those moments), the pass starts:
 period and volume are written; a one-cycle request leaves the registers, and at the next

@@ -772,6 +772,8 @@ impl MaxTrax {
             self.latch(hw, ch, r);
             // starting DMA loads the registers and raises the interrupt
             Self::audio_dma(hw, ch, false);
+            // (the engine's device drops the interrupt request an idle channel left set)
+            hw.bus.paula.write_intreq(0x80 << ch);
             Self::audio_dma(hw, ch, true);
         } else if self.dev[ch].latched.is_none() {
             self.latch(hw, ch, r);

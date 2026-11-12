@@ -3,14 +3,31 @@
 //! LICENSE-NostalgicPlayer).
 //!
 //! Where the original player's register writes differ from what NostalgicPlayer
-//! asks of its mixer, this follows the original (checked against the "IFF EMOD"
-//! Eagleplayer). The samples are played from the module in guest memory (the 8SMP
-//! chunk). A row's DMA goes off and on once for all its notes, after the writes
-//! of the voices' new samples, and the loop registers of all four voices follow it.
+//! asks of its mixer, this follows the original: UADE's QuadraComposer file (V1.01 of
+//! 24 Jul 1994, sha1 4276dbed...; it names itself "IFF EMOD"), observed black-box in the
+//! engine (write log, DMA log, traces; no player code read). EP206's "IFF EMOD" is another
+//! build with a DMA gap of 110 colour clocks (a voice at a period like 538 keeps its old
+//! sample) and loop registers of 0 / length 0 after a one-shot sample (Paula then plays
+//! 128 KB from address 0), and the DeliPlayer QuadraComposer (V1.4) ticks every 71050
+//! colour clocks at tempo 125 instead of 71595: neither is followed.
+//!
+//! The samples are played from the module in guest memory (the 8SMP chunk). A row's DMA
+//! goes off and on once for all its notes, after the writes of the voices' new samples
+//! (the host's wait of ten raster lines after each), and the loop registers of all four
+//! voices follow it: a sample without a loop gets a loop of one zeroed word.
+//!
+//! Every write of the original is reproduced in value, order and colour clock by a cost
+//! model of the original's pass over the voices (`cost_row`, `cost_fx`: fitted to the
+//! original's instruction counts) except where noted: effect 6 reads its wave from the
+//! original's table of effect addresses (a word of which is stood for by one constant),
+//! the tremolo is exact only up to a point, a sample number the module lacks is played
+//! as volume 0 and one word at address 0 (the original's address is not the module's),
+//! and some write times are 1 or 2 colour clocks off.
 
 use super::quadracomposer_tables::{PERIODS, VIBRATO};
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
+use m68k::AddressBus;
 
 pub const OPEN: Open = Open { name: "Quadra Composer", detect, new };
 
@@ -247,22 +264,46 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         init_counts: counts,
     };
     q.visited[0] = true;
-    // the init routine sets the LED bit of CIA-A's port: the filter is off
-    m.bus.ciaa.pra |= 2;
     // the original makes addresses of the offsets in the module's sample and pattern records
     // (measured: the module's memory after its start); a voice that runs on into the memory
     // plays them
     for f in fields {
         m.bus.w32(base + f as u32, be32(d, f).wrapping_add(base));
     }
-    // The original's init (everything before the tick timer starts) takes a fixed 14672 CPU
-    // cycles plus 191 per sample entry and 114 per pattern entry of the EMIC chunk (traced:
-    // DELI_TRACE, 16 modules, exact), less the two colour clocks the engine's per-call rounding
-    // drops. Nothing in it waits for the beam or a timer, so this alone sets the phase of the
-    // ticks against the raster. The song starts (the engine aligns Paula's output and line grids
-    // there) at the timer's start, after the init, and the timer then runs a plain period.
+    // and clears the first word of every sample (measured: the module's memory after its init)
+    for s in q.samples.iter().flatten().filter(|s| s.length != 0) {
+        m.bus.w16(s.addr, 0);
+    }
+    // What the original does before its tick timer starts, in colour clocks (traced: DELI_TRACE,
+    // 27 modules, exact). Its module check takes 902 plus 9 per sample and pattern entry of the
+    // EMIC chunk; the host then sets the volume twice, and each time the volume routine writes 0
+    // to the four voices; the init routine asks for the timer (a host call) after (3135 + 49 per
+    // sample entry) / 2, sets the LED bit of CIA-A's port 54 later (the filter is off), turns the
+    // DMA of the four voices off 272 + 62 per sample entry + 48 per pattern entry after that
+    // and writes their volumes 0, and returns 8 after the last. Nothing in it waits for the beam
+    // or a timer, so this alone sets the phase of the ticks against the raster. The song starts
+    // (the engine aligns Paula's output and line grids there) at the timer's start, after the
+    // init, and the timer then runs a plain period.
     let (ns, np) = q.init_counts;
-    m.bus.clock += (14672 + 191 * ns + 114 * np) / 2 - 2;
+    let mut hw = Hw { bus: &mut m.bus };
+    hw.wait(902 + 9 * (ns + np));
+    for _ in 0..2 {
+        for (i, w) in [157, 156, 168, 162].into_iter().enumerate() {
+            hw.wait(w);
+            hw.vol(i, 0);
+        }
+        hw.wait(692 - 643);
+    }
+    hw.wait((3135 + 49 * ns).div_ceil(2) + 54);
+    let pra = hw.bus.ciaa.pra | 2;
+    hw.bus.write_byte(0xBFE001, pra);
+    hw.wait(272 + 62 * ns + 48 * np);
+    hw.dmacon(0x000f);
+    for i in 0..4 {
+        hw.wait(10);
+        hw.vol(i, 0);
+    }
+    hw.wait(8);
     Some(Box::new(q))
 }
 
@@ -304,7 +345,7 @@ impl Replayer for QuadraComposer {
 }
 
 /// Where the original's writes fall in a tick, in CPU cycles after the voice's start, counted
-/// in its executed instructions (a trace of every instruction of the "IFF EMOD" Eagleplayer on 27
+/// in its executed instructions (a trace of every instruction of the QuadraComposer Eagleplayer on 27
 /// modules). Its pass over the four voices spends `v` on a voice and writes the voice's registers
 /// at `o[n]`. A tick that starts a row and a tick that only runs the effects are different
 /// routines; the cost of a voice depends on its cell, on its sample (a loop, the volume 64, a
@@ -352,26 +393,22 @@ struct Sched {
     widx: [u8; 4],
     cls: [Cost; 4],
     end: i64,
-    /// The colour clock and the cycle of the last call of the host (every register write is one, a
-    /// routine of the Eagleplayer's amplifier): the engine counts the guest's time from there in
-    /// whole colour clocks, so an odd cycle is lost at each.
+    /// The colour clock and the cycle of the tick's start or of the last call of the host (the
+    /// tempo effect sets the timer): the engine counts the guest's time from there in whole colour
+    /// clocks, so an odd cycle is lost at each.
     base: (u64, i64),
 }
-
-/// Raster-line phase of the first loop register write (the routine waits ten lines and then for
-/// the beam to be at this colour clock of a line).
-const LOOP_PHASE: u64 = 113;
 
 /// CPU cycles from the start of a tick to its pass over the voices, in a tick that starts a row
 /// and in one that runs the effects, and from the pass's end to the DMA going off.
 const ROW_LEAD: i64 = 464;
 const FX_LEAD: i64 = 367;
-const TAIL: i64 = 121;
+const TAIL: i64 = 17;
 
 /// What a voice's place in the pass adds to the code that fetches a sample, and to the code that
 /// writes an effect's volume.
-const POS_SAMPLE: [i64; 4] = [0, 54, 108, 116];
-const POS_VOL: [i64; 4] = [0, 23, 46, 46];
+const POS_SAMPLE: [i64; 4] = [0, 54, 108, 106];
+const POS_VOL: [i64; 4] = [0, 23, 46, 36];
 
 /// What the cost of a voice depends on besides its cell.
 #[derive(Clone, Copy, Default)]
@@ -381,6 +418,8 @@ struct Feat {
     looped: bool,
     vol64: bool,
     short: bool,
+    /// The cell names a sample number the module does not have.
+    missing: bool,
     /// The voice's volume and period, and what its tone portamento will do: nothing (no target),
     /// move, arrive.
     volume: u16,
@@ -396,61 +435,68 @@ struct Feat {
 fn cost_row(c: Cell, f: Feat, v: usize) -> Cost {
     let (e, a) = (c.effect, c.arg);
     let (s, n) = (c.sample != 0, c.note >= 0);
-    let (lp, v64, short) = (f.looped as i64, f.vol64 as i64, f.short as i64);
+    let lp = f.looped as i64;
     let mut k = Cost::default();
     // the sample's volume
-    let vol = if n { 779 } else { 737 } + 4 * v64 + 4 * lp + POS_SAMPLE[v];
+    let vol = if n { 691 } else { 649 } + 4 * lp + 4 * f.missing as i64 + POS_SAMPLE[v];
     if s {
         k.push(vol);
     }
     let mut end = match (s, n) {
         (false, false) => 197,
-        (true, false) => 1098 + 4 * v64 + 74 * lp + POS_SAMPLE[v],
+        (true, false) => 934 + 74 * lp + POS_SAMPLE[v],
         (_, true) => {
             let after = if s { vol } else { 197 };
             // a note that starts nothing now: the glide's target, a delayed note, the finetune
-            // (the last one and all three without a sample are not in the runs)
             match (e, a & 0xf0) {
-                (3 | 5, _) => return Cost { v: after + 463 + 70 * lp, ..k },
-                // a delay of no tick (and a retrigger at once, which is not in the runs): the
-                // sample starts by the effect's own code
+                (3 | 5, _) => return Cost { v: after + 387 + 70 * lp, ..k },
+                // a delay of no tick (and a retrigger at once): the sample starts by the effect's
+                // own code
                 (0xe, 0x90 | 0xd0) if f.due => {
-                    let loc = after + 629;
+                    let loc = after + 455;
                     k.push(loc);
-                    k.push(loc + 211);
-                    k.push(loc + 211 + 178);
-                    return Cost { v: loc + 211 + 178 + 94, ..k };
+                    k.push(loc + 20);
+                    k.push(loc + 40);
+                    return Cost { v: loc + 40 + 131, ..k };
                 }
-                (0xe, 0xd0) => return Cost { v: after + 525 + 70 * lp, ..k },
-                (0xe, 0x50) => return Cost { v: after + 524 + 70 * lp, ..k },
+                (0xe, 0xd0) => return Cost { v: after + 449 + 70 * lp, ..k },
+                (0xe, 0x50) => return Cost { v: after + 448 + 70 * lp, ..k },
                 _ => {}
             }
             // (a note without a sample was seen on the first voice only)
-            let loc = if s { vol + 582 + 70 * lp } else { 418 };
-            let len = loc + 211 + 4 * short;
+            let loc = if s { vol + 408 + 70 * lp } else { 320 };
             k.push(loc);
-            k.push(len);
-            k.push(len + 186);
-            len + 186 + 191
+            k.push(loc + 20);
+            k.push(loc + 40);
+            loc + 40 + 131
         }
     };
     match e {
         0 if a != 0 => {
-            end += 226;
-            k.push(end - 94);
+            end += 84;
+            k.push(end - 50);
         }
         0 => {}
         1..=7 | 0xa => end -= 23,
         // the sample offset writes the address and the length again
+        9 if s && n => {
+            // after the note's own start: the writes come later and the end earlier (fitted to
+            // 26db4185, fbca0a87, fc79472d; the argument 0 is not in them)
+            end += if a != 0 { 172 } else { 160 };
+            k.push(end - 69);
+            k.push(end - 49);
+        }
         9 => {
-            end += if a != 0 { 498 } else { 486 };
-            k.push(end - 297);
-            k.push(end - 94);
+            end += if a != 0 { 214 } else { 202 };
+            k.push(end - 160);
+            k.push(end - 140);
         }
         0xc => {
-            end += 403 + POS_VOL[v] + if a >= 64 { 8 } else { 0 };
-            k.push(end - 154);
+            end += 239 + POS_VOL[v] + if a >= 64 { 4 } else { 0 };
+            k.push(end - 78);
         }
+        // the position jump (the two seen: 42 cycles)
+        0xb => end += 42,
         0xd => end += 57,
         0xf if a >= 0x20 => {
             end += 402;
@@ -459,18 +505,16 @@ fn cost_row(c: Cell, f: Feat, v: usize) -> Cost {
         0xf => end += 59,
         0xe => match a >> 4 {
             1 | 2 => {
-                end += 266;
-                k.push(end - 94);
+                end += 124;
+                k.push(end - 50);
             }
-            // (the fine volume slides were seen on one or two voices each: the places as for
-            // the volume effect; the lower end of the range is not in the runs)
             0xa => {
-                end += 495 + POS_VOL[v] + if f.volume as i64 + (a & 0x0f) as i64 >= 64 { 8 } else { 0 };
-                k.push(end - 154);
+                end += 331 + POS_VOL[v] + if f.volume as i64 + (a & 0x0f) as i64 >= 64 { 4 } else { 0 };
+                k.push(end - 78);
             }
             0xb => {
-                end += 479 + POS_VOL[v] + if f.volume as i64 - (a & 0x0f) as i64 <= 0 { 8 } else { 0 };
-                k.push(end - 154);
+                end += 315 + POS_VOL[v] + if f.volume as i64 - ((a & 0x0f) as i64) < 0 { 8 } else { 0 };
+                k.push(end - 78);
             }
             9 => end += 116,
             _ => {}
@@ -485,17 +529,14 @@ fn cost_row(c: Cell, f: Feat, v: usize) -> Cost {
 fn cost_slide(c: Cell, f: Feat, v: usize) -> Cost {
     let up = (c.arg >> 4) as i64;
     let d = if up != 0 {
-        if f.volume as i64 + up >= 64 { 12 } else { -8 }
-    } else if f.volume as i64 - (c.arg & 0x0f) as i64 <= 0 {
+        if f.volume as i64 + up >= 64 { 8 } else { -8 }
+    } else if f.volume as i64 - ((c.arg & 0x0f) as i64) <= 0 {
         8
-    } else if f.volume == 64 && c.arg == 0 {
-        // the volume 64 takes longer to write
-        4
     } else {
         0
     };
-    let end = 595 + POS_VOL[v] + d;
-    Cost::new(end, &[end - 154])
+    let end = 431 + POS_VOL[v] + d;
+    Cost::new(end, &[end - 78])
 }
 
 /// The pass of a tick that only runs the effects.
@@ -504,42 +545,40 @@ fn cost_fx(c: Cell, f: Feat, v: usize) -> Cost {
     let k = Cost::new;
     let porta = match f.porta {
         0 => k(135, &[]),
-        1 => k(433, &[339]),
-        _ => k(450, &[312]),
+        1 => k(291, &[241]),
+        _ => k(288, &[210]),
     };
     // a note that starts in this tick: the delayed one, the retriggered one
     let start = match (a >> 4 == 9, f.due) {
-        (false, true) => k(810, &[327, 538, 716]),
+        (false, true) => k(319, &[229, 249, 269]),
         (false, false) => k(223, &[]),
-        (true, true) => k(838, &[355, 566, 744]),
+        (true, true) => k(347, &[257, 277, 297]),
         (true, false) => k(235, &[]),
     };
-    // a slide that runs into the end of the period range (seen upwards, at 113)
+    // a slide that runs into the end of the period range
     let stop = if e == 1 { (f.period as i64 - a as i64) < 113 } else { f.period as i64 + a as i64 > 856 };
-    // the vibrato takes each nibble of its argument that is not 0 (one with the depth alone is
-    // not in the runs)
-    let vib = 579 + if a != 0 { 42 + if a & 0x0f != 0 { 36 } else { 0 } + if a & 0xf0 != 0 { 36 } else { 0 } } else { 0 };
+    // the vibrato takes each nibble of its argument that is not 0
+    let vib = 437 + if a != 0 { 42 + if a & 0x0f != 0 { 36 } else { 0 } + if a & 0xf0 != 0 { 36 } else { 0 } } else { 0 };
     match e {
         0 if a != 0 => match f.count % 3 {
-            1 => k(414, &[320]),
-            2 => k(415, &[321]),
-            _ => k(361, &[267]),
+            1 => k(272, &[222]),
+            2 => k(273, &[223]),
+            _ => k(219, &[169]),
         },
         0 => k(135, &[]),
-        1 | 2 if stop => k(349, &[255]),
-        1 | 2 => k(333, &[239]),
+        1 | 2 if stop => k(207, &[157]),
+        1 | 2 => k(191, &[141]),
         3 => porta,
-        // (the tremolo is not in the runs)
-        4 | 7 => k(vib, &[vib - 94]),
-        // the slide after the glide (seen without a glide under way), and after the period
-        // write of the vibrato that has no depth
+        4 => k(vib, &[vib - 50]),
+        // (the tremolo: 246 cycles more than the vibrato, measured with arguments with both nibbles)
+        7 => k(vib + 246, &[vib + 246 - 78]),
+        // the slide after the glide, and after the period write of the vibrato that has no depth
         5 => porta.then(cost_slide(c, f, v), 135 - 23),
-        6 => k(567, &[424]).then(cost_slide(c, f, v), 135),
+        6 => k(425, &[375]).then(cost_slide(c, f, v), 135),
         0xa => cost_slide(c, f, v),
         0xe => match a >> 4 {
             9 | 0xd => start,
-            // (a note cut is not in the runs)
-            0xc if f.due => k(330, &[176]),
+            0xc if f.due => k(166, &[88]),
             _ => k(176, &[]),
         },
         _ => k(112, &[]),
@@ -554,8 +593,9 @@ impl QuadraComposer {
     fn change_tempo(&mut self) {
         if self.set_tempo {
             self.set_tempo = false;
-            // the CIA timer of a tempo: 1789773 / tempo E-clock ticks (the original's constant,
-            // measured from its logs)
+            // the CIA timer of a tempo: 1789773 / tempo E-clock ticks (the constant the engine's
+            // run of the original gives; UADE's own run, on a PAL machine, gives 1773447 / tempo
+            // = 70940 colour clocks a tick at tempo 125, measured at tempos 125 and 160)
             self.timer = Self::timer_for(self.tempo);
         }
     }
@@ -604,29 +644,39 @@ impl QuadraComposer {
             let end = self.sched.end;
             self.until(end, hw);
             hw.dmacon(m);
-            hw.wait(110);
+            // the host's dtg_WaitAudioDMA (10 raster lines from the start of the line) after the
+            // DMA goes off and after it goes on
+            hw.wait(24);
+            hw.wait_lines(10, 0);
+            hw.wait(32);
             hw.dmacon(0x8000 | m);
-            hw.wait_lines(10, LOOP_PHASE);
+            hw.wait(24);
+            hw.wait_lines(10, 0);
+            hw.wait(40);
             for i in 0..4 {
                 self.write_loop(i, hw);
             }
         }
     }
 
+    /// The voice's loop: a sample that does not loop goes on with the word at address 0, one
+    /// word long.
     fn write_loop(&mut self, i: usize, hw: &mut Hw) {
         let c = &self.ch[i];
-        let (loc, len) = if c.loop_len != 0 { (c.addr + c.loop_start, (c.loop_len / 2) as u16) } else { (0, 0) };
+        let (loc, len) = if c.loop_len != 0 { (c.addr + c.loop_start, (c.loop_len / 2) as u16) } else { (0, 1) };
+        if i > 0 {
+            hw.wait(14);
+        }
         hw.loc(i, loc);
-        // clearing the pair takes two colour clocks longer than loading it
-        hw.wait(if loc == 0 { 107 } else { 105 });
+        hw.wait(10);
         hw.len(i, len);
-        hw.wait(97);
     }
 
     /// What voice `i`'s cost depends on, for the cell `c` it is about to play or run.
     fn feat(&self, i: usize, c: Cell, new: bool) -> Feat {
         let ch = &self.ch[i];
         let s = if new && c.sample != 0 { self.samples.get(c.sample as usize - 1).and_then(|s| s.as_ref()) } else { None };
+        let missing = new && c.sample != 0 && s.is_none();
         let (looped, vol64, length) = match s {
             Some(s) => (s.looped, s.vol == 64, if s.looped { s.loop_start + s.loop_len } else { s.length }),
             None => (ch.loop_len != 0, ch.volume == 64, ch.length),
@@ -648,7 +698,7 @@ impl QuadraComposer {
                 0xd0 => ch.note_nr >= 0 && (c.arg & 0x0f) as u16 == self.speed_count,
                 _ => false,
             };
-        Feat { looped, vol64, short: length / 2 <= 1, volume: ch.volume, period: ch.period, porta, count: self.speed_count, due }
+        Feat { looped, vol64, short: length / 2 <= 1, missing, volume: ch.volume, period: ch.period, porta, count: self.speed_count, due }
     }
 
     /// Plans the tick's writes: where the original's pass over the voices is when it gets to each
@@ -677,7 +727,7 @@ impl QuadraComposer {
     /// Lets the time pass to cycle `cy` of the tick, where the original calls the host (a register
     /// write does): the colour clocks are whole from one call to the next.
     fn until(&mut self, cy: i64, hw: &mut Hw) {
-        // the calls of the host that are no register writes, up to there
+        // the calls of the host up to there
         for j in 0..4 {
             if let Some(h) = self.sched.cls[j].host {
                 let h = self.sched.vstart[j] + h;
@@ -688,7 +738,6 @@ impl QuadraComposer {
         }
         let (clock, at) = self.sched.base;
         let t = clock + ((cy - at).max(0) / 2) as u64;
-        self.sched.base = (t, cy.max(at));
         if hw.bus.clock < t {
             hw.bus.clock = t;
         }
@@ -733,8 +782,7 @@ impl QuadraComposer {
         self.at(i, hw);
         hw.loc(i, a);
         self.at(i, hw);
-        // a sample of one word or less is played with a length of 0, as the original writes it
-        hw.len(i, if words <= 1 { 0 } else { words });
+        hw.len(i, words);
     }
 
     /// Plays the voice's sample again, at its period.
@@ -758,7 +806,10 @@ impl QuadraComposer {
     fn play_note(&mut self, i: usize, c: Cell, hw: &mut Hw) {
         self.ch[i].cell = c;
         if c.sample != 0 {
-            let Some(s) = self.samples[c.sample as usize - 1].clone() else { return };
+            // a number without a sample plays what the original's table holds there: a volume 0
+            // and a word of memory (measured: the address is not one the module gives; the
+            // port's is 0)
+            let s = self.samples[c.sample as usize - 1].clone().unwrap_or(Sample { length: 2, ..Sample::default() });
             let ch = &mut self.ch[i];
             ch.volume = s.vol as u16;
             ch.length = s.length;
@@ -1048,7 +1099,8 @@ impl QuadraComposer {
         }
         ch.trem_pos = (ch.trem_pos + (ch.trem_cmd >> 4) as u16) & 0x3f;
         let v = VIBRATO[(ch.trem_wave as usize).min(2)][ch.trem_pos as usize] as i32;
-        let nv = (ch.volume as i32 + (((ch.trem_cmd & 0x0f) as i32 * v) >> 14)).clamp(0, 64) as u16;
+        // (the original's tremolo scales by one bit more than its vibrato: measured, depth 3)
+        let nv = (ch.volume as i32 + (((ch.trem_cmd & 0x0f) as i32 * v) >> 13)).clamp(0, 64) as u16;
         self.set_vol(i, hw, nv);
     }
 
@@ -1058,8 +1110,10 @@ impl QuadraComposer {
             ch.sample_offset = ch.cell.arg;
         }
         let offset = ch.sample_offset as u32 * 512;
-        if offset < ch.length {
-            ch.start = offset;
+        // (the offset adds to where the voice's sample starts now, measured: a second offset
+        // effect without a note moves on from the first one, past the end into the loop)
+        if offset < ch.length.saturating_sub(ch.start) {
+            ch.start += offset;
         } else {
             ch.start = ch.loop_start;
             ch.length = ch.loop_len;
@@ -1067,8 +1121,10 @@ impl QuadraComposer {
         if ch.length > 0 {
             self.sample_regs(i, hw);
         } else {
-            // the voice is muted
-            self.set_vol(i, hw, 0);
+            // the loop is the empty word: the original only writes its length
+            self.at(i, hw);
+            self.at(i, hw);
+            hw.len(i, 1);
         }
     }
 
@@ -1196,15 +1252,18 @@ mod tests {
         let d = module(3, &[(0, 0, cell(1, 12, 0, 0)), (0, 1, cell(2, 12, 0, 0))]);
         let (format, log) = play(d, 30);
         assert_eq!(format, "Quadra Composer");
-        assert_eq!(&reg(&log, 0xDFF0A8)[..1], &[48]);
-        assert_eq!(&reg(&log, 0xDFF0B8)[..1], &[40]);
-        // voice 0 plays its 16 words once (then no loop), voice 1 up to the end of its loop
-        assert_eq!(&reg(&log, 0xDFF0A4)[..2], &[16, 0]);
+        // (the init and each new note write the volume 0 first)
+        let vols = |a| reg(&log, a).into_iter().skip_while(|&v| v == 0).take(1).collect::<Vec<_>>();
+        assert_eq!(vols(0xDFF0A8), [48]);
+        assert_eq!(vols(0xDFF0B8), [40]);
+        // voice 0 plays its 16 words once (then the loop of one zeroed word), voice 1 up to the
+        // end of its loop
+        assert_eq!(&reg(&log, 0xDFF0A4)[..2], &[16, 1]);
         assert_eq!(&reg(&log, 0xDFF0B4)[..2], &[16, 8]);
         // note 12 of fine tune 0
         assert_eq!(&reg(&log, 0xDFF0A6)[..1], &[428]);
-        // both DMA bits go off and on together, once
-        assert_eq!(&reg(&log, 0xDFF096)[..2], &[0x0003, 0x8003]);
+        // after the init's DMA off, both DMA bits go off and on together, once
+        assert_eq!(&reg(&log, 0xDFF096)[..3], &[0x000f, 0x0003, 0x8003]);
     }
 
     #[test]
@@ -1214,8 +1273,8 @@ mod tests {
             &[(0, 0, cell(1, 12, 0xc, 0x20)), (1, 0, cell(0, -1, 1, 4)), (1, 1, cell(2, 12, 0xf, 3))],
         );
         let (_, log) = play(d, 40);
-        let vol = reg(&log, 0xDFF0A8);
-        assert_eq!(&vol[..2], &[48, 0x20]);
+        let vol: Vec<u16> = reg(&log, 0xDFF0A8).into_iter().skip_while(|&v| v == 0).take(2).collect();
+        assert_eq!(vol, [48, 0x20]);
         // slide up by 4 on each of the row's two other ticks, at speed 3
         let per = reg(&log, 0xDFF0A6);
         assert_eq!(&per[..3], &[428, 424, 420]);

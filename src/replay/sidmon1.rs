@@ -31,17 +31,22 @@
 //!   byte and word arithmetic (the note offset wraps at 128, the bend stops on
 //!   reaching its period, the phase shift rounds down, the mix rounds down);
 //! * nothing is range-checked: instruments, waveforms, samples and positions
-//!   read on in memory as the original does (a period past the table, which the
-//!   original reads past its code hunk, plays 0 here).
+//!   read on in memory as the original does. A period past the table is not the
+//!   original's own memory: its table is the last thing in its code hunk (which
+//!   ends 952 bytes into it, the rest here is zeros), so a stray finetune
+//!   (instrument 0, 32 bytes before the instruments, or one from 60 on) reads
+//!   whatever follows the hunk. With the player loaded alone that is zeros, a
+//!   period of 0, which is not written: what this plays. With a whole directory
+//!   of Eagleplayers loaded it is the next player's hunk (its header, tag list
+//!   and variables), which no port can hold.
 //!
-//! Checked against the Eagleplayer's write logs (run with an empty DELIPLAYERS
-//! directory, as the DeliPlayer Sidmon1.0_note would play these first), 37 of
-//! 52 modules write the same registers tick by tick; the other 15 differ only
-//! where a period is read past the table, mostly for instrument 0 (32 bytes
-//! before the instruments) with a stray finetune, or an instrument from 60 on.
-//! With those periods masked, all 52 are the same. The time between writes is
-//! the original's too (see `PLAY`), within a few dozen colour clocks on most
-//! code paths.
+//! Checked against the Eagleplayer's write logs with exact CPU cycles (run with
+//! an empty DELIPLAYERS directory, as the DeliPlayer Sidmon1.0_note would play
+//! these first, and the Eagleplayer alone in its directory): all 50 modules
+//! write the same registers with the same values at the same colour clock
+//! from the song's start (563,484 writes in their first 20 seconds; see `find`
+//! for the start and `VOICE` for the ticks). With all of Eagleplayer 2.06's
+//! players loaded, 15 of the 50 differ, from the first period read past the hunk on.
 
 use super::{be32, Hw, Open, Replayer};
 use crate::bus::Bus;
@@ -251,7 +256,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
 /// half colour clocks (a 68000's cycles; a register write is a call of the
 /// host, which goes on at a whole colour clock, so the sum is halved rounding
 /// down). The costs are fitted on the 199,800 voice starts of 50 modules' first
-/// 20 seconds and equal every one of them.
+/// 20 seconds (the song's loop on their first 150) and equal every one of the
+/// 1,304,880 of the first 150 seconds.
 ///
 /// From the timer interrupt to the first voice.
 const LEAD: i64 = 148;
@@ -262,10 +268,12 @@ const VOICE: i64 = 1269;
 /// The compare chains for the voice's registers, by channel.
 const VOICE_CH: [i64; 4] = [0, 31, 62, 70];
 const ROW_TICK: i64 = 76;
-/// A row with a note only, and with an instrument; a new track's first row on top.
+/// A row with a note only, and with an instrument; a new track's first row on
+/// top, and the song's first position after its last on top of that.
 const ROW_NOTE: i64 = -215;
 const ROW_INSTRUMENT: i64 = 196;
 const ROW_NEW_TRACK: i64 = 215;
+const ROW_LOOP: i64 = 20;
 /// The note: note off, no effect, a new attack, the speed, the rows, a bend.
 const NOTE_OFF: i64 = 434;
 const NOTE: i64 = 778;
@@ -393,7 +401,9 @@ impl Replayer for SidMon1 {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        // the voices play in the order of their bits 1, 2, 8, 4
+        // the voices play in the order of their bits 1, 2, 8, 4; the first finds
+        // the original's d1 as the tick's entry left it, not 1
+        self.d1_one = false;
         for ch in [0, 1, 3, 2] {
             self.play_voice(ch, hw);
         }
@@ -547,7 +557,11 @@ impl SidMon1 {
         let row = self.voices[ch].row;
         let r = |k: u32| hw.bus.r8(row + k);
         let (note, instr, effect, param, duration) = (r(0), r(1), r(2), r(3), r(4));
-        let new_track = if self.new_track { ROW_NEW_TRACK } else { 0 };
+        let new_track = match (self.new_track, self.loop_song) {
+            (false, _) => 0,
+            (true, false) => ROW_NEW_TRACK,
+            (true, true) => ROW_NEW_TRACK + ROW_LOOP,
+        };
         w.time += new_track;
         if instr != 0 {
             let inst = entry(self.instruments, instr as u16, 5);

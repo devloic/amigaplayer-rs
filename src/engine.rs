@@ -604,6 +604,12 @@ impl Engine {
             return self.start_pcm(Box::new(x), path);
         }
         let data = crate::decrunch::decrunch(data);
+        // Atari ST SNDH tunes (the ICE!-packed ones are undone above): their own 68000 code on the
+        // built-in ST machine
+        if self.only_player.is_none() && crate::replay::sndh::detect(&data) {
+            let x = crate::replay::sndh::player(&data, self.rate as u32).map_err(|e| anyhow!(e))?;
+            return self.start_pcm(Box::new(x), path);
+        }
         // C64 SID tunes (PSID/RSID) are played by the C64 emulation, from the file itself;
         // a file it refuses is an error, not a reason to try the other players
         #[cfg(feature = "sid")]
@@ -882,6 +888,7 @@ impl Engine {
         self.intena_seen = 0;
         self.next_timer = None;
         let title = x.title().to_string();
+        let author = x.author();
         let (sub_min, sub_max, sub) = x.subsongs();
         self.playing = Some(Playing {
             module_name: if title.is_empty() { file_name(path) } else { title },
@@ -890,7 +897,7 @@ impl Engine {
             sub_max,
             sub,
             backend: Backend::Pcm(x),
-            author: String::new(),
+            author,
             frames: 0,
             custom_player: false,
         });

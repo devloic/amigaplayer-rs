@@ -40,6 +40,7 @@ pub mod dynamicsynthesizer;
 pub mod dsc;
 pub mod ems;
 pub mod ems6;
+mod ems6_hi;
 pub mod deltamusic1;
 pub mod deltamusic2;
 pub mod coredesign;

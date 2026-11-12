@@ -10,8 +10,9 @@ Method: black box only. The reference is UADE's Eagleplayer `EMS-6` on this proj
 register writes with their colour clocks (`DELI_WRITE_LOG`), the bytes it writes into its output
 rings and when (a write watch), which module bytes it reads and when (a read watch), and the output
 of built modules (the layout of section 2 with edited sequences, patterns, tables and instruments:
-differential probing). The player was not disassembled or read. No code or data of it is in this
-text. The pitch values are ProTracker's period table (a public table, used from
+differential probing). The player was not disassembled or read. No code of it is in this text; the
+one table of its data that the format needs (section 5.2) is kept beside the port in
+`src/replay/ems6_hi.rs`, measured from the output, embedded by the owner's decision. The pitch values are ProTracker's period table (a public table, used from
 `crate::protracker::PERIODS`) and output step values measured from long notes.
 
 Times are colour clocks ("cc", 3 546 895 a second). All words and longs big-endian.
@@ -45,7 +46,7 @@ record's offset (the last one to the block's end).
 Block 3 is a table of longs (offsets from block 3) closed by `FFFFFFFF`; record `k` is instrument
 `k`. An instrument starting `FORM....8SVX` is an IFF 8SVX sample: one-shot length at +0x14, repeat
 length at +0x18, data at +0x68. One starting `SYN@` is a synthetic voice: 64-byte waves from +6. Any
-other is raw signed bytes from its start, its length the next offset less its own (one-shot).
+other is raw signed bytes from its start, its length the next offset less its own, less 2 (one-shot).
 
 Track `i`'s sequence is the words from block 1 + offset `i` to block 1 + offset `i+1` (the last
 track's to block 1 + L1).
@@ -103,11 +104,14 @@ ProTracker's fine-tune row (octaves 1 to 3, `PT1 PT2 PT3`): `16 PT1, 8 PT1, 4 PT
 PT3, PT3 / 2` (each 12 notes). The step (16.16 ring bytes a sample) is
 `floor(floor(3579264 / period) * 65536 / 3504)`.
 
-### 5.2 Notes 0x60 to 0x7F
+### 5.2 Notes 0x60 and up
 
-No period: a step of `F * 65536 / 3504` with `F` from 248, 263, 278, 295, 312, 331, 351, 372, 394,
-418, 442, 468, 497, 526, 557, 591, 625, 663, 702, 744, 789, 836, 885, 937, 994, 1052, 1115, 1182,
-1251, 1327, 1404, 1488 (measured by note lengths). A fine tune on them was not observed.
+No period: a step of `floor(F * 65536 / 3504)`, `F` from a table of rows of 97 entries, one row per
+fine tune (0 to 15), contiguous: index `0x60 + j` of fine tune `k` is entry `k * 97 + j` (so j >= 97
+reads the next row), row 0 starting 248, 263, 278, 295 ... (measured from the ring output of a ramp
+instrument, 1455 values, `src/replay/ems6_hi.rs`). Row 15 and past it read as 0: a step of 0, the voice
+is silent and does not advance. A plain note byte is masked to 0x7F; an arpeggio's `(raw + x) & 0xFF`
+reaches up to 0xFF.
 
 ### 5.3 Effects
 
@@ -115,9 +119,8 @@ No period: a step of `F * 65536 / 3504` with `F` from 248, 263, 278, 295, 312, 3
   the note becomes the target. No vibrato while a slide runs.
 * Arpeggio: each tick the next table byte `x`; `FF` restarts the table, `FE` repeats the last one.
   When `x` is not 0, or the note byte (with transpose) has bit 7 set, the note
-  `(raw + x) & 0xFF` plays, keeping the slide's offset from the base period. Indexes 0x80 and up read
-  the player's memory past its table (garbage: 0xEE + 0x0C gave a step of 125814): not part of the
-  format.
+  `(raw + x) & 0xFF` plays, keeping the slide's offset from the base period. Indexes 0x60 and up use
+  the table of section 5.2 with the track's fine tune.
 * Vibrato (not while an arpeggio steps or a slide runs): after the delay, a value going +1 a tick up
   to `b`, -2 a tick down to `-b`, +1 back to 0, one tick rest; the period gets
   `value * floor((period(n-1) - period(n)) / a)`.
@@ -127,8 +130,9 @@ No period: a step of `F * 65536 / 3504` with `F` from 248, 263, 278, 295, 312, 3
 Per tick: during the release (the track's remaining wait below `n`), `relsub += s` and the envelope
 stands still (neither the volume nor its counter moves: Tropical Islands' fade-out under F6 at tick
 3075 needs it); otherwise `relsub = 0` and the envelope moves the volume toward the target by its
-step every `d + 1` ticks. The voice's volume is `max(0, volume - relsub)` (a volume over 64
-is a factor as it is).
+step every `d + 1` ticks. The voice's volume is `max(0, volume - relsub)`. A volume over 64 is a
+factor as it is here; the original reads its volume table past row 64 there (mostly 0x80 bytes,
+depending on the module's layout), which is not reproduced and which no known module needs.
 
 ## 7. Timing and the sequencer
 
@@ -141,8 +145,12 @@ mix nothing.
 ### 7.2 Ticks
 
 The sequencer ticks every `tlen` samples of the mixing (at the start of the block when due): all
-tracks in order, each: the wave sweep, the row if its wait is over (else wait - 1), the retrigger, the
-volume, the pitch.
+tracks in order, each: the wave sweep, the row if its wait is over (else the wait moves on), the
+retrigger, the volume, the pitch. A wait of `dur` rows counts rows, not ticks: a tick of the wait
+adds to the row in progress and a row ends after `speed` ticks, with the speed as it was when the
+tick began (a speed change by another track moves the end of a wait under way, from the next tick
+on); the wait left is `rows_left * speed - ticks_into_row - 1`. A wait set in the tick uses the
+current speed (`dur * speed - 1`).
 
 ### 7.3 Voices
 
@@ -186,11 +194,9 @@ INTENA C080 (audio 0 interrupt enabled) is written but no audio interrupt change
 ## 10. Open
 
 * Late divergences not explained: Tropical Islands from 249.9 s of 278.6 s (a quiet difference of a
-  few units of the sum on both sides from mixer tick 12397 on, no track alone accounts for it), A
-  Sporting Chance from 254.1 s of 277.6 s, Stormlord from 158.7 s of 388.0 s.
-
-* Arpeggio indexes past the pitch table (section 5.3): Robocop 3, Stormlord (synth), Galaxy Man.
-* Galaxy Man ticks 1768-1773: track 2, which plays the `F9xx` pseudo-pattern (block 2's offset table
-  read as commands, notes 0x80 and up among them), is heard in the reference at volume 64 reading
-  0xA64 past instrument 0's start, where the port has it ended at volume 0. Not explained; the track's
-  pitch there is past the table anyway.
+  few units of the sum on both sides from mixer tick 12397 on, the reference about 1 lower on ~40% of
+  samples; voice positions and source bytes are equal, shrinking every voice's volume by 1 helps but
+  does not cure it, so the reference's volume scaling differs somewhere), A Sporting Chance from
+  254.1 s of 277.6 s (alike). Later first differences also in Stormlord (359.2 s), Stormlord (synth)
+  (318.6 s), Galaxy Man (327.2 s) and Robocop 3 (98.3 s), not analysed.
+* Volumes above 64 (section 6).

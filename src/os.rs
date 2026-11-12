@@ -1,8 +1,9 @@
 //! High-level emulation of the parts of AmigaOS that players use: exec
 //! (memory, lists, interrupts, libraries, devices), dos (files mapped to the
 //! host filesystem), utility (32-bit math, tags), cia resources and an
-//! audio.device that plays CMD_WRITE on Paula. Everything else is a stub
-//! library whose calls return 0 and are logged once.
+//! audio.device that plays CMD_WRITE on Paula. Any other library is loaded from
+//! disk when a file of it is found (see `disk_library`), else a stub library whose
+//! calls return 0 and are logged once.
 
 use crate::machine::{Machine, Trap};
 use m68k::AddressBus;
@@ -23,6 +24,9 @@ pub enum LibKind {
     AudioDev,
     TimerDev,
     Stub,
+    /// A library of 68k code loaded from disk (`disk_library`), or one guest code made and
+    /// added itself (MakeLibrary + AddLibrary): its vectors jump into that code, none traps.
+    Disk,
 }
 
 pub struct Library {
@@ -112,6 +116,9 @@ pub struct OsState {
     /// read, looked up or created, whatever name guest code asks dos.library for. Set for
     /// code that comes with the module (a custom module played by the library's `Song`).
     pub no_host_files: bool,
+    /// The LIBS: directory: where a disk library is looked for after the module's own
+    /// directories (see `disk_library`). None: there is no LIBS: of the host's.
+    pub libs_dir: Option<PathBuf>,
     logged: HashSet<(usize, i32)>,
     pub console: String,
 }
@@ -187,9 +194,25 @@ fn find_lib(m: &Machine, name: &str) -> Option<u32> {
     m.os.libs.iter().find(|l| l.name == n).map(|l| l.base)
 }
 
+/// The lower-case file name of library name `name` ("LIBS:replayers/X.library" ->
+/// "x.library"): what the host's list of libraries knows it by.
+fn lib_key(name: &str) -> String {
+    name.rsplit([':', '/']).next().unwrap_or(name).to_ascii_lowercase()
+}
+
+#[cfg(test)]
 fn open_library(m: &mut Machine, name: &str) -> u32 {
-    if let Some(b) = find_lib(m, name) {
-        return b;
+    open_library_version(m, name, 0)
+}
+
+/// exec OpenLibrary(name, version): a library the host emulates; else one loaded from disk
+/// (`disk_library`), opened through its Open vector each time, as exec does; else a stub
+/// whose calls answer 0.
+fn open_library_version(m: &mut Machine, name: &str, version: u32) -> u32 {
+    let key = lib_key(name);
+    if let Some(l) = m.os.libs.iter().find(|l| l.name == key && l.kind != LibKind::Stub) {
+        let (base, kind) = (l.base, l.kind);
+        return if kind == LibKind::Disk { open_disk_library(m, name, base, version) } else { base };
     }
     let lname = name.to_ascii_lowercase();
     // Decrunchers are refused so players fall back to plain data.
@@ -197,8 +220,344 @@ fn open_library(m: &mut Machine, name: &str) -> u32 {
         log::info!("OpenLibrary(\"{name}\") refused");
         return 0;
     }
+    if let Some(base) = disk_library(m, name) {
+        return open_disk_library(m, name, base, version);
+    }
+    if let Some(b) = find_lib(m, name) {
+        return b;
+    }
     log::info!("OpenLibrary(\"{name}\") -> stub library");
     make_library(m, &lname, LibKind::Stub, 200, 0x100, 40)
+}
+
+// ------------------------------------------------------- disk libraries ---
+//
+// A library a player opens that the host does not emulate is looked for as a file, as
+// ramlib would in LIBS:, and run: LoadSeg, the RomTag (RTC_MATCHWORD) found in its segments,
+// InitResident (RTF_AUTOINIT: MakeLibrary with the vector table, the InitStruct table and the
+// init routine; else the RomTag's init routine, which makes the library itself), AddLibrary,
+// then its Open vector. Where it is looked for, in order (the name as given, with any volume
+// dropped, then its file name alone; names in any case):
+//   1. the module's directory
+//   2. `libs/` in the module's directory
+//   3. `libs/` in the directory above it (an archive's modules/ beside its libs/)
+//   4. LIBS: (`OsState::libs_dir`: $AMIGAPLAYER_LIBS, ~/.config/amigaplayer-rs/Libs)
+// The libraries the host emulates are never loaded (they are in the list before any file is
+// looked for), nor are the system libraries of `NEVER_FROM_DISK`: their stubs' answers are what
+// players are known to work with.
+
+/// System libraries a player may open that are never loaded from disk.
+const NEVER_FROM_DISK: &[&str] = &[
+    "exec.library", "dos.library", "graphics.library", "utility.library", "intuition.library",
+    "reqtools.library", "req.library", "asl.library", "gadtools.library", "layers.library",
+    "icon.library", "workbench.library", "diskfont.library", "commodities.library",
+    "locale.library", "keymap.library", "expansion.library", "mathffp.library",
+    "mathtrans.library", "mathieeesingbas.library", "mathieeesingtrans.library",
+    "mathieeedoubbas.library", "mathieeedoubtrans.library", "datatypes.library",
+    "iffparse.library", "rexxsyslib.library", "cybergraphics.library", "identify.library",
+];
+/// The largest library file loaded.
+const DISK_LIB_MAX: u64 = 4 << 20;
+/// The most vectors MakeLibrary takes from a table, and the most InitStruct commands run.
+const VECTORS_MAX: u32 = 1024;
+const INITSTRUCT_MAX: u32 = 4096;
+const RTC_MATCHWORD: u16 = 0x4AFC;
+const RTF_AUTOINIT: u8 = 0x80;
+
+/// The directories a disk library is looked for in, in order.
+fn lib_dirs(os: &OsState) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    // (a module named without a directory is in the current one)
+    let d = if os.module_dir.as_os_str().is_empty() { Path::new(".") } else { &os.module_dir };
+    v.push(d.to_path_buf());
+    v.push(d.join("libs"));
+    let up = d.parent().filter(|p| !p.as_os_str().is_empty() && d.file_name().is_some());
+    v.push(up.map_or_else(|| d.join(".."), Path::to_path_buf).join("libs"));
+    v.extend(os.libs_dir.clone());
+    v
+}
+
+/// The file of library `name`, if one is found (see above).
+fn find_disk_library(os: &OsState, name: &str) -> Option<(PathBuf, Vec<u8>)> {
+    let rel = name.split_once(':').map_or(name, |x| x.1).trim_start_matches('/');
+    let file = rel.rsplit('/').next().unwrap_or(rel);
+    if file.is_empty() || rel.split('/').any(|c| c == "..") {
+        return None;
+    }
+    for dir in lib_dirs(os) {
+        for r in [rel, file] {
+            let p = os.host_path(r, Some(&dir));
+            if !os.no_host_files && !std::fs::metadata(&p).is_ok_and(|md| md.is_file() && md.len() <= DISK_LIB_MAX) {
+                continue;
+            }
+            if let Ok(d) = os.read_file(&p) {
+                if crate::hunk::is_hunk_file(&d) {
+                    return Some((p, d));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Loads library `name` from disk and initialises it (see above): its base, before any
+/// Open. None: no file, or it would not load or initialise.
+fn disk_library(m: &mut Machine, name: &str) -> Option<u32> {
+    let key = lib_key(name);
+    if NEVER_FROM_DISK.contains(&key.as_str()) {
+        return None;
+    }
+    let (path, data) = find_disk_library(&m.os, name)?;
+    let (seg, _) = match crate::deli::load_seg(m, &data) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("{}: {e}", path.display());
+            return None;
+        }
+    };
+    let Some(rt) = find_romtag(m, seg) else {
+        log::warn!("{}: no RomTag", path.display());
+        return None;
+    };
+    let base = match init_resident(m, rt, seg) {
+        Ok(b) if b != 0 => b,
+        Ok(_) => {
+            log::warn!("{}: its init answered 0", path.display());
+            return None;
+        }
+        Err(e) => {
+            log::warn!("{}: init: {e}", path.display());
+            return None;
+        }
+    };
+    // (known by the name it was asked for too, should its own name be another)
+    if !m.os.libs.iter().any(|l| l.base == base && l.name == key) {
+        m.os.libs.push(Library { name: key, base, kind: LibKind::Disk });
+    }
+    log::info!("OpenLibrary(\"{name}\"): {} loaded, base ${base:06x}", path.display());
+    Some(base)
+}
+
+/// The library's Open vector (a6 = base, d0 = version): what OpenLibrary answers. A library
+/// older than `version` is not opened.
+fn open_disk_library(m: &mut Machine, name: &str, base: u32, version: u32) -> u32 {
+    let have = m.bus.r16(base + 20) as u32;
+    if have < version {
+        log::info!("OpenLibrary(\"{name}\", {version}): version {have} only");
+        return 0;
+    }
+    let mut r = [0u32; 16];
+    r[0] = version;
+    r[14] = base;
+    match m.call(base.wrapping_sub(6), &r) {
+        Ok(o) => o[0],
+        Err(e) => {
+            log::warn!("OpenLibrary(\"{name}\"): its Open: {e}");
+            0
+        }
+    }
+}
+
+/// The disk library at `base`, if it is one: its Close vector, as exec CloseLibrary calls it
+/// (what it answers, a segment list to unload when the library is expunged, is ignored: the
+/// library stays loaded, as one that is not expunged does).
+fn close_disk_library(m: &mut Machine, base: u32) {
+    if base == 0 || !m.os.libs.iter().any(|l| l.base == base && l.kind == LibKind::Disk) {
+        return;
+    }
+    let mut r = [0u32; 16];
+    r[14] = base;
+    if let Err(e) = m.call(base.wrapping_sub(12), &r) {
+        log::warn!("CloseLibrary(${base:06x}): its Close: {e}");
+    }
+}
+
+/// The first RomTag in segment list `seg`: RTC_MATCHWORD at an even address followed by
+/// rt_MatchTag pointing at it, as InitResident's callers find one.
+fn find_romtag(m: &Machine, seg: u32) -> Option<u32> {
+    let mut s = seg;
+    for _ in 0..256 {
+        if s == 0 {
+            break;
+        }
+        let a = s << 2; // the segment's next pointer; its size is the long before it
+        let end = (a - 4).wrapping_add(m.bus.r32(a.wrapping_sub(4)));
+        let mut p = a + 4;
+        while p + 26 <= end && (p as usize) < crate::bus::RAM_SIZE {
+            if m.bus.r16(p) == RTC_MATCHWORD && m.bus.r32(p + 2) == p {
+                return Some(p);
+            }
+            p += 2;
+        }
+        s = m.bus.r32(a);
+    }
+    None
+}
+
+/// exec InitResident(resident, segList): the library's base, 0 when it refuses.
+fn init_resident(m: &mut Machine, rt: u32, seg: u32) -> Result<u32, String> {
+    let flags = m.bus.r8(rt + 10);
+    let init = m.bus.r32(rt + 22);
+    if init == 0 {
+        return Ok(0);
+    }
+    if flags & RTF_AUTOINIT == 0 {
+        // the init routine makes and adds the library itself
+        let mut r = [0u32; 16];
+        r[8] = seg;
+        r[14] = m.os.exec_base;
+        return m.call(init, &r).map(|o| o[0]);
+    }
+    let (dsize, vectors, structure, initf) = (m.bus.r32(init), m.bus.r32(init + 4), m.bus.r32(init + 8), m.bus.r32(init + 12));
+    let base = make_lib(m, vectors, structure, initf, dsize, seg)?;
+    if base != 0 && m.bus.r8(rt + 12) == NT_LIBRARY {
+        add_library(m, base);
+    }
+    Ok(base)
+}
+
+/// exec MakeLibrary(vectors, structure, init, dataSize, segList): the library (its vectors
+/// before it, `dataSize` bytes from it, cleared), its node filled by `structure` (InitStruct)
+/// when there is one, then `init` called (d0 = library, a0 = segList, a6 = exec), whose d0 is
+/// the answer; without one, the library.
+fn make_lib(m: &mut Machine, vectors: u32, structure: u32, init: u32, dsize: u32, seg: u32) -> Result<u32, String> {
+    let (rel, mut a) = if m.bus.r16(vectors) == 0xFFFF { (true, vectors + 2) } else { (false, vectors) };
+    let mut n = 0;
+    while n < VECTORS_MAX && if rel { m.bus.r16(a) != 0xFFFF } else { m.bus.r32(a) != 0xFFFF_FFFF } {
+        n += 1;
+        a += if rel { 2 } else { 4 };
+    }
+    let negsize = (n * 6 + 3) & !3;
+    let dsize = dsize.clamp(34, 0xFFFF);
+    let mem = m.alloc(negsize + dsize);
+    if mem == 0 {
+        return Ok(0);
+    }
+    let base = mem + negsize;
+    make_functions(m, base, if rel { vectors + 2 } else { vectors }, if rel { vectors } else { 0 });
+    m.bus.w16(base + 16, negsize as u16);
+    m.bus.w16(base + 18, dsize as u16);
+    if structure != 0 {
+        init_struct(m, structure, base, 0);
+    }
+    if init == 0 {
+        return Ok(base);
+    }
+    let mut r = [0u32; 16];
+    r[0] = base;
+    r[8] = seg;
+    r[14] = m.os.exec_base;
+    m.call(init, &r).map(|o| o[0])
+}
+
+/// exec MakeFunctions(target, functionArray, funcDispBase): a JMP to each function before
+/// `target`, the first at -6. With `disp` the array holds word offsets from it, else
+/// addresses; -1 ends it. Answers the size of the vectors.
+fn make_functions(m: &mut Machine, target: u32, array: u32, disp: u32) -> u32 {
+    let mut a = array;
+    let mut n = 0;
+    while n < VECTORS_MAX {
+        let f = if disp != 0 {
+            let w = m.bus.r16(a);
+            if w == 0xFFFF {
+                break;
+            }
+            a += 2;
+            disp.wrapping_add(w as i16 as i32 as u32)
+        } else {
+            let l = m.bus.r32(a);
+            if l == 0xFFFF_FFFF {
+                break;
+            }
+            a += 4;
+            l
+        };
+        n += 1;
+        let v = target.wrapping_sub(n * 6);
+        m.bus.w16(v, 0x4EF9); // jmp f
+        m.bus.w32(v + 2, f);
+    }
+    n * 6
+}
+
+/// exec InitStruct(initTable, memory, size): `size` bytes of `memory` cleared, then the
+/// table's commands run. A command byte: bits 7-6 the destination (0 the next bytes, copied;
+/// 1 the next bytes, one value repeated; 2 a byte offset follows; 3 a 24-bit offset follows),
+/// bits 5-4 the size (long, word, byte), bits 3-0 the count less one. Word and long data
+/// start at an even address of the table, and each command does.
+fn init_struct(m: &mut Machine, table: u32, mem: u32, size: u32) {
+    for i in 0..size.min(0x1_0000) {
+        m.bus.w8(mem + i, 0);
+    }
+    let mut t = table;
+    let mut dst = mem;
+    for _ in 0..INITSTRUCT_MAX {
+        let cmd = m.bus.r8(t);
+        if cmd == 0 {
+            break;
+        }
+        t += 1;
+        let (dest, sz, cnt) = (cmd >> 6, (cmd >> 4) & 3, (cmd & 15) as u32 + 1);
+        match dest {
+            2 => {
+                dst = mem + m.bus.r8(t) as u32;
+                t += 1;
+            }
+            3 => {
+                dst = mem + ((m.bus.r8(t) as u32) << 16 | m.bus.r16(t + 1) as u32);
+                t += 3;
+            }
+            _ => {}
+        }
+        let w = match sz {
+            0 => 4,
+            1 => 2,
+            2 => 1,
+            _ => break,
+        };
+        if w > 1 {
+            t = (t + 1) & !1;
+        }
+        let rd = |m: &Machine, a: u32| match w {
+            4 => m.bus.r32(a),
+            2 => m.bus.r16(a) as u32,
+            _ => m.bus.r8(a) as u32,
+        };
+        let wr = |m: &mut Machine, a: u32, v: u32| match w {
+            4 => m.bus.w32(a, v),
+            2 => m.bus.w16(a, v as u16),
+            _ => m.bus.w8(a, v as u8),
+        };
+        if dest == 1 {
+            let v = rd(m, t);
+            t += w;
+            for _ in 0..cnt {
+                wr(m, dst, v);
+                dst += w;
+            }
+        } else {
+            for _ in 0..cnt {
+                let v = rd(m, t);
+                t += w;
+                wr(m, dst, v);
+                dst += w;
+            }
+        }
+        t = (t + 1) & !1;
+    }
+}
+
+/// exec AddLibrary(library): the host knows it by its name (ln_Name), and OpenLibrary of
+/// that name opens it.
+fn add_library(m: &mut Machine, base: u32) {
+    let np = m.bus.r32(base + 10);
+    if np == 0 || m.os.libs.iter().any(|l| l.base == base) {
+        return;
+    }
+    let name = lib_key(&m.bus.read_cstr(np));
+    if !name.is_empty() {
+        m.os.libs.push(Library { name, base, kind: LibKind::Disk });
+    }
 }
 
 pub fn lib_call(m: &mut Machine, lib: usize, lvo: i32) {
@@ -213,7 +572,7 @@ pub fn lib_call(m: &mut Machine, lib: usize, lvo: i32) {
         LibKind::AudioDev | LibKind::TimerDev => device_call(m, lib, lvo),
         LibKind::Intuition => intuition_call(m, lvo),
         LibKind::Stub => stub_call(m, lib, lvo),
-        LibKind::Graphics => false,
+        LibKind::Graphics | LibKind::Disk => false,
     };
     if !handled {
         if m.os.logged.insert((lib, lvo)) {
@@ -290,8 +649,8 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
         "Disable" | "Enable" | "Forbid" | "Permit" | "UserState" | "CacheClearU" | "CacheClearE"
         | "InitSemaphore" | "ObtainSemaphore" | "ReleaseSemaphore" | "ObtainSemaphoreShared"
         | "ObtainSemaphoreList" | "ReleaseSemaphoreList" | "AddPort" | "RemPort" | "AddTask"
-        | "CloseLibrary" | "CloseDevice" | "CachePreDMA"
-        | "CachePostDMA" | "SumLibrary" | "AddResource" | "AddLibrary" | "AddDevice"
+        | "CloseDevice" | "CachePreDMA"
+        | "CachePostDMA" | "SumLibrary" | "AddResource" | "AddDevice"
         | "AddSemaphore" | "RemSemaphore" | "Debug" | "DeletePrivatePool" => m.set_d0(0),
         "SuperState" => m.set_d0(0),
         "SetSR" => {
@@ -493,8 +852,40 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
         "AttemptSemaphore" | "AttemptSemaphoreShared" => m.set_d0(1),
         "OldOpenLibrary" | "OpenLibrary" => {
             let n = m.bus.read_cstr(a1);
-            let b = open_library(m, &n);
+            let b = open_library_version(m, &n, if name == "OpenLibrary" { d0 } else { 0 });
             m.set_d0(b);
+        }
+        "CloseLibrary" => {
+            close_disk_library(m, a1);
+            m.set_d0(0);
+        }
+        "AddLibrary" => {
+            add_library(m, a1);
+            m.set_d0(0);
+        }
+        "MakeLibrary" => {
+            let (a2, seg) = (m.a(2), d1);
+            let r = make_lib(m, a0, a1, a2, d0, seg).unwrap_or_else(|e| {
+                log::warn!("MakeLibrary: its init: {e}");
+                0
+            });
+            m.set_d0(r);
+        }
+        "MakeFunctions" => {
+            let a2 = m.a(2);
+            let r = make_functions(m, a0, a1, a2);
+            m.set_d0(r);
+        }
+        "InitStruct" => {
+            let a2 = m.a(2);
+            init_struct(m, a1, a2, d0);
+        }
+        "InitResident" => {
+            let r = init_resident(m, a1, d1).unwrap_or_else(|e| {
+                log::warn!("InitResident: {e}");
+                0
+            });
+            m.set_d0(r);
         }
         "OpenResource" => {
             let n = m.bus.read_cstr(a1);
@@ -1924,6 +2315,255 @@ mod tests {
         assert_eq!(at("sub/SAMPLES"), dir.join("Sub/Samples"));
         assert_eq!(at("smp.none"), dir.join("smp.none"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hunk executable of one code hunk holding `code`, its longs at `relocs` relocated
+    /// to the hunk itself.
+    fn hunk_file(code: &[u8], relocs: &[u32]) -> Vec<u8> {
+        let mut c = code.to_vec();
+        c.resize(code.len().div_ceil(4) * 4, 0);
+        let n = (c.len() / 4) as u32;
+        let mut v = Vec::new();
+        let mut l = |x: u32| v.extend_from_slice(&x.to_be_bytes());
+        for x in [0x3F3, 0, 1, 0, 0, n, 0x3E9, n] {
+            l(x);
+        }
+        v.extend_from_slice(&c);
+        let mut l = |x: u32| v.extend_from_slice(&x.to_be_bytes());
+        l(0x3EC);
+        l(relocs.len() as u32);
+        l(0);
+        for &r in relocs {
+            l(r);
+        }
+        l(0);
+        l(0x3F2);
+        v
+    }
+
+    /// A small RTF_AUTOINIT library of our own 68k code, "test.library" version 3: vectors
+    /// Open (open count + 1, answers the base), Close (count - 1), Expunge, ExtFunc, then
+    /// -30 (d0 * 2 + 1) and -36 (exec OpenLibrary("test.library", 0) from inside it). Its
+    /// InitStruct table sets the node's type, name, version and flags; its init routine keeps
+    /// the segment list at 34 of the base.
+    fn test_library() -> Vec<u8> {
+        let mut c: Vec<u8> = Vec::new();
+        let mut relocs = Vec::new();
+        let w = |c: &mut Vec<u8>, x: u16| c.extend_from_slice(&x.to_be_bytes());
+        let l = |c: &mut Vec<u8>, x: u32| c.extend_from_slice(&x.to_be_bytes());
+        w(&mut c, 0x70FF); // moveq #-1,d0
+        w(&mut c, 0x4E75); // rts
+        let rt = c.len() as u32;
+        w(&mut c, 0x4AFC);
+        relocs.push(c.len() as u32);
+        l(&mut c, rt); // rt_MatchTag
+        let endskip = c.len();
+        relocs.push(c.len() as u32);
+        l(&mut c, 0); // rt_EndSkip (patched)
+        c.extend_from_slice(&[0x80, 3, 9, 0]); // RTF_AUTOINIT, version 3, NT_LIBRARY, pri 0
+        let name_at = [c.len(), c.len() + 4, c.len() + 8];
+        for _ in 0..3 {
+            relocs.push(c.len() as u32);
+            l(&mut c, 0); // rt_Name, rt_IdString, rt_Init (patched)
+        }
+        let name = c.len() as u32;
+        c.extend_from_slice(b"test.library\0");
+        if c.len() % 2 == 1 {
+            c.push(0);
+        }
+        let init_tab = c.len() as u32;
+        l(&mut c, 40); // dataSize
+        let tab_ptrs = [c.len(), c.len() + 4, c.len() + 8];
+        for _ in 0..3 {
+            relocs.push(c.len() as u32);
+            l(&mut c, 0); // vectors, structure, init (patched)
+        }
+        let vectors = c.len() as u32;
+        w(&mut c, 0xFFFF);
+        let offs_at = c.len();
+        for _ in 0..6 {
+            w(&mut c, 0); // patched
+        }
+        w(&mut c, 0xFFFF);
+        let structure = c.len() as u32;
+        c.extend_from_slice(&[0xA0, 8, 9, 0]); // INITBYTE LN_TYPE, NT_LIBRARY
+        c.extend_from_slice(&[0x80, 10]); // INITLONG LN_NAME, name
+        relocs.push(c.len() as u32);
+        l(&mut c, name);
+        c.extend_from_slice(&[0x90, 20, 0, 3]); // INITWORD LIB_VERSION, 3
+        c.extend_from_slice(&[0xA0, 14, 6, 0]); // INITBYTE LIB_FLAGS, 6
+        c.extend_from_slice(&[0, 0]);
+        let init = c.len() as u32;
+        for x in [0x2240, 0x2348, 0x0022, 0x4E75] {
+            w(&mut c, x); // movea.l d0,a1; move.l a0,34(a1); rts
+        }
+        let open = c.len() as u32;
+        for x in [0x526E, 0x0020, 0x200E, 0x4E75] {
+            w(&mut c, x); // addq.w #1,32(a6); move.l a6,d0; rts
+        }
+        let close = c.len() as u32;
+        for x in [0x536E, 0x0020, 0x7000, 0x4E75] {
+            w(&mut c, x); // subq.w #1,32(a6); moveq #0,d0; rts
+        }
+        let nothing = c.len() as u32;
+        for x in [0x7000, 0x4E75] {
+            w(&mut c, x); // moveq #0,d0; rts
+        }
+        let f30 = c.len() as u32;
+        for x in [0xD080, 0x5280, 0x4E75] {
+            w(&mut c, x); // add.l d0,d0; addq.l #1,d0; rts
+        }
+        let f36 = c.len() as u32;
+        let disp = (name as i32 - (f36 as i32 + 2)) as u16;
+        // lea name(pc),a1; moveq #0,d0; movea.l 4.w,a6; jsr -552(a6); rts
+        for x in [0x43FA, disp, 0x7000, 0x2C78, 0x0004, 0x4EAE, 0xFDD8, 0x4E75] {
+            w(&mut c, x);
+        }
+        let end = c.len() as u32;
+        let put = |c: &mut Vec<u8>, at: usize, v: u32| c[at..at + 4].copy_from_slice(&v.to_be_bytes());
+        put(&mut c, endskip, end);
+        put(&mut c, name_at[0], name);
+        put(&mut c, name_at[1], name);
+        put(&mut c, name_at[2], init_tab);
+        put(&mut c, tab_ptrs[0], vectors);
+        put(&mut c, tab_ptrs[1], structure);
+        put(&mut c, tab_ptrs[2], init);
+        for (i, f) in [open, close, nothing, nothing, f30, f36].into_iter().enumerate() {
+            let o = (f - vectors) as u16;
+            c[offs_at + i * 2..offs_at + i * 2 + 2].copy_from_slice(&o.to_be_bytes());
+        }
+        hunk_file(&c, &relocs)
+    }
+
+    #[test]
+    fn disk_library_is_loaded_initialised_and_called() {
+        let mut m = Machine::new(CpuType::M68000);
+        m.os.no_host_files = true;
+        m.os.module_dir = PathBuf::from("/songs/modules");
+        m.os.mem_files.insert(PathBuf::from("/songs/libs/test.library"), test_library());
+        let base = open_library_version(&mut m, "test.library", 2);
+        assert_ne!(base, 0);
+        // InitStruct and MakeLibrary filled the node; the init routine kept the segment list
+        assert_eq!(m.bus.r8(base + 8), NT_LIBRARY);
+        assert_eq!(m.bus.r8(base + 14), 6);
+        let st = (0..40).map(|i| format!("{:02x}", m.bus.r8(base + i))).collect::<Vec<_>>().join(" "); assert_eq!(m.bus.r8(base + 14), 6, "{st}");
+        assert_eq!(m.bus.r16(base + 16), 36); // 6 vectors of 6 bytes
+        assert_eq!(m.bus.r16(base + 18), 40);
+        assert_eq!(m.bus.r16(base + 20), 3);
+        assert_ne!(m.bus.r32(base + 34), 0);
+        // Open ran once
+        assert_eq!(m.bus.r16(base + 32), 1);
+        // a function of its own
+        let mut r = [0u32; 16];
+        r[0] = 20;
+        r[14] = base;
+        assert_eq!(m.call(base - 30, &r).unwrap()[0], 41);
+        // the library opening a library (itself) goes through exec, and Open runs again
+        assert_eq!(m.call(base - 36, &r).unwrap()[0], base);
+        assert_eq!(m.bus.r16(base + 32), 2);
+        // a later OpenLibrary by another path finds it loaded; one asking a newer version fails
+        assert_eq!(open_library(&mut m, "LIBS:Test.Library"), base);
+        assert_eq!(m.bus.r16(base + 32), 3);
+        assert_eq!(open_library_version(&mut m, "test.library", 4), 0);
+        // CloseLibrary calls its Close
+        m.cpu.dar[9] = base;
+        exec_call(&mut m, -(lvo_of("CloseLibrary")));
+        assert_eq!(m.bus.r16(base + 32), 2);
+    }
+
+    /// The LVO of exec function `name` (negated).
+    fn lvo_of(name: &str) -> i32 {
+        -(EXEC_NAMES.iter().position(|&n| n == name).unwrap() as i32 * 6 + 30)
+    }
+
+    #[test]
+    fn disk_library_search_path() {
+        let lib = test_library();
+        let dirs = |files: &[&str], want: &str| {
+            let mut m = Machine::new(CpuType::M68000);
+            crate::os::init(&mut m);
+            m.os.no_host_files = true;
+            m.os.module_dir = PathBuf::from("/a/modules");
+            m.os.libs_dir = Some(PathBuf::from("/sys/libs"));
+            for f in files {
+                m.os.mem_files.insert(PathBuf::from(f), lib.clone());
+            }
+            let base = open_library(&mut m, want);
+            let kind = m.os.libs.iter().find(|l| l.base == base).map(|l| l.kind);
+            (base != 0, kind)
+        };
+        // the module's directory, its libs/, ../libs/ (with a path under it), LIBS:
+        for f in ["/a/modules/test.library", "/a/modules/libs/test.library", "/a/libs/test.library", "/sys/libs/test.library"] {
+            assert_eq!(dirs(&[f], "test.library"), (true, Some(LibKind::Disk)), "{f}");
+        }
+        assert_eq!(dirs(&["/a/libs/replayers/test.library"], "replayers/test.library"), (true, Some(LibKind::Disk)));
+        // nothing found: the stub, as before
+        assert_eq!(dirs(&[], "test.library"), (true, Some(LibKind::Stub)));
+        // an emulated or system library is never loaded from disk, nor a decruncher
+        let mut m = Machine::new(CpuType::M68000);
+        m.os.no_host_files = true;
+        m.os.module_dir = PathBuf::from("/a/modules");
+        for n in ["dos.library", "reqtools.library", "xpkmaster.library"] {
+            m.os.mem_files.insert(PathBuf::from("/a/modules").join(n), lib.clone());
+        }
+        let dos = open_library(&mut m, "dos.library");
+        assert_eq!(m.os.libs.iter().find(|l| l.base == dos).unwrap().kind, LibKind::Dos);
+        let req = open_library(&mut m, "reqtools.library");
+        assert_eq!(m.os.libs.iter().find(|l| l.base == req).unwrap().kind, LibKind::Stub);
+        assert_eq!(open_library(&mut m, "xpkmaster.library"), 0);
+    }
+
+    #[test]
+    fn malformed_disk_library_falls_back_to_the_stub() {
+        let good = test_library();
+        // no RomTag (the match word broken), truncated, not an executable, a RomTag whose init
+        // table points nowhere sensible
+        let mut no_rt = good.clone();
+        let p = no_rt.windows(2).position(|w| w == [0x4A, 0xFC]).unwrap();
+        no_rt[p] = 0;
+        let mut bad_tab = good.clone();
+        // dataSize huge and the vector table endless: bounded, no panic
+        let t = bad_tab.windows(4).position(|w| w == 40u32.to_be_bytes()).unwrap();
+        bad_tab[t..t + 4].copy_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+        for (i, data) in [no_rt, good[..good.len() / 2].to_vec(), b"not a library".to_vec(), bad_tab].into_iter().enumerate() {
+            let mut m = Machine::new(CpuType::M68000);
+            crate::os::init(&mut m);
+            m.os.no_host_files = true;
+            m.os.module_dir = PathBuf::from("/m");
+            m.os.mem_files.insert(PathBuf::from("/m/test.library"), data);
+            let base = open_library(&mut m, "test.library");
+            assert_ne!(base, 0, "case {i}");
+        }
+    }
+
+    #[test]
+    fn init_struct_commands() {
+        let mut m = Machine::new(CpuType::M68000);
+        let t = m.alloc(64);
+        let mem = m.alloc(0x100);
+        m.bus.w8(mem + 0x50, 0xEE); // cleared by the size given
+        let table: &[u8] = &[
+            0x21, 0x11, 0x22, // 2 bytes copied at 0
+            0x00, // (even)
+            0x51, 0x12, 0x34, // repeat word $1234 twice (at 2, 4)
+            0x80, 0x10, 0xDE, 0xAD, 0xBE, 0xEF, // long at $10 (data even)
+            0xE0, 0x00, 0x00, 0x40, 0x77, 0x00, // byte at 24-bit offset $40
+            0x00,
+        ];
+        // (the repeat command at an odd address: its word aligned to the next even one)
+        let table: Vec<u8> = {
+            let mut v = table[..4].to_vec();
+            v.extend_from_slice(&[0x51, 0x00, 0x12, 0x34]);
+            v.extend_from_slice(&table[7..]);
+            v
+        };
+        m.bus.write_bytes(t, &table);
+        init_struct(&mut m, t, mem, 0x60);
+        assert_eq!((m.bus.r8(mem), m.bus.r8(mem + 1)), (0x11, 0x22));
+        assert_eq!((m.bus.r16(mem + 2), m.bus.r16(mem + 4)), (0x1234, 0x1234));
+        assert_eq!(m.bus.r32(mem + 0x10), 0xDEAD_BEEF);
+        assert_eq!(m.bus.r8(mem + 0x40), 0x77);
+        assert_eq!(m.bus.r8(mem + 0x50), 0);
     }
 
     #[test]

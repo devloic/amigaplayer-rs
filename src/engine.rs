@@ -428,7 +428,9 @@ impl Engine {
                 continue;
             }
             match deli::load_player(&mut self.m, &data, &f) {
-                Ok(p) if p.is_player() || (std::env::var_os("DELI_CHECKLESS").is_some() && (p.has(tag::INTERRUPT) || p.has(tag::START_INT))) => {
+                // a player without a check (BFB Master) takes any module: it is loaded only
+                // when chosen by name (`only_player`), or with DELI_CHECKLESS
+                Ok(p) if p.is_player() || (self.checkless_wanted(&p.name) && (p.has(tag::INTERRUPT) || p.has(tag::START_INT))) => {
                     let kind = if p.eagle { "eagleplayer" } else { "player" };
                     log::info!("{kind}: {} v{}.{} ({})", p.name, p.version >> 16, p.version & 0xFFFF, f.display());
                     if let Some(pp) = deli::PlayerProc::new(&p.tags) {
@@ -742,6 +744,13 @@ impl Engine {
     }
 
     #[cfg(feature = "host-68k")]
+    /// Whether player `name`, which has no module check, is to take modules: it is the one
+    /// chosen (`only_player`), or DELI_CHECKLESS is set.
+    fn checkless_wanted(&self, name: &str) -> bool {
+        std::env::var_os("DELI_CHECKLESS").is_some() || self.only_player.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(name))
+    }
+
+    #[cfg(feature = "host-68k")]
     fn check_player(&mut self, idx: usize) -> Result<bool> {
         // every player is checked from the start phase with Paula just reset, so the one that
         // takes the module runs on the same timeline whatever was checked before it (and the
@@ -752,7 +761,7 @@ impl Engine {
             log::debug!("{e}");
             return Ok(false);
         }
-        let Some(chk) = self.players[idx].check() else { return Ok(std::env::var_os("DELI_CHECKLESS").is_some()) };
+        let Some(chk) = self.players[idx].check() else { return Ok(self.checkless_wanted(&self.players[idx].name)) };
         match deli::call_fn(&mut self.m, self.players[idx].globals, chk, None) {
             Ok(r) => Ok(r[0] == 0),
             Err(e) => {

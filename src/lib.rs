@@ -135,6 +135,9 @@ pub mod heap;
 pub mod hunk;
 #[doc(hidden)]
 #[allow(missing_docs)]
+pub mod iff8svx;
+#[doc(hidden)]
+#[allow(missing_docs)]
 pub mod machine;
 #[doc(hidden)]
 #[allow(missing_docs)]
@@ -157,6 +160,9 @@ pub mod protracker;
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod prowizard;
+#[doc(hidden)]
+#[allow(missing_docs)]
+pub mod riffwave;
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod replay;

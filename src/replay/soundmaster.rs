@@ -53,6 +53,9 @@ struct Lay {
     /// table from `g`.
     ho: isize,
     tb: usize,
+    /// The byte, `led` from `g`, that keeps the LED on when not 0 (the init clears the LED bit,
+    /// then sets it unless that byte is set); `None` when the init has no such test.
+    led: Option<usize>,
 }
 
 /// The first word `w` at an even offset in `from..to`.
@@ -116,7 +119,9 @@ fn scan(d: &[u8]) -> Option<Lay> {
     if g < 0x80 || g + need > d.len() || periods + 2 * n > d.len() {
         return None;
     }
-    Some(Lay { build, g, periods, ho, tb })
+    let led = find(d, lea, rts, &[0x08B9, 0x0001, 0x00BF, 0xE001, 0x4A2B])
+        .map(|o| be16(d, o + 10) as usize);
+    Some(Lay { build, g, periods, ho, tb, led })
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -1056,8 +1061,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let n = if lay.build == Build::B { 64 } else { 46 };
     let periods = (0..n).map(|k| be16(d, lay.periods + 2 * k)).collect();
     let title = m.bus.read_cstr(m.deli.file_buf);
-    // the init routine sets the LED bit of CIA-A's port: the filter is off
-    m.bus.ciaa.pra |= 2;
+    // the init routine clears the LED bit of CIA-A's port, then sets it (the filter is off)
+    // unless a flag byte of the module's variables is set
+    let keep = lay.led.map_or(false, |o| d.get(lay.g + o).map_or(false, |&b| b != 0));
+    if keep {
+        m.bus.ciaa.pra &= !2;
+    } else {
+        m.bus.ciaa.pra |= 2;
+    }
     // the host's start (DMA off, the audio modulation off) comes before the song start
     let t0 = m.bus.clock;
     m.bus.write_word(0xDFF096, 0x000F);

@@ -36,9 +36,9 @@ pub fn detect(data: &[u8]) -> Option<String> {
 }
 
 /// Whether more than one open replayer's check takes `data` (unpacked as [`detect`] does,
-/// which names the first of them). Which one plays it is then decided by which accepts it
-/// with its companion files, as the engine tries them in order: an Infogrames module and a
-/// Rob Hubbard 2 one pass both checks, and the bank beside the module tells them apart.
+/// which names the first of them). Which format plays it may then depend on its companion
+/// files: Infogrames and Rob Hubbard 2 modules are one format and pass both checks, and
+/// Infogrames hands a module with no bank of its own name (`rh.ins` beside it) to Rob Hubbard 2.
 pub fn claimed_by_several(data: &[u8]) -> bool {
     if crate::aiff::detect(data) {
         return false;

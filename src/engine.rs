@@ -669,11 +669,9 @@ impl Engine {
         if self.open_replayers {
             // (the format recognised by its file name needs it to be told)
             crate::replay::adpcmmono::set_name(&file_name(path));
-            // every replayer whose check takes the module, in order: one that declines it leaves
-            // it to the next (Infogrames a Rob Hubbard 2 module, which has no bank of its name)
-            let found: Vec<_> = crate::replay::REPLAYERS.iter().filter(|o| (o.detect)(&data)).collect();
+            let found = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data));
             crate::replay::adpcmmono::set_name("");
-            for o in found {
+            if let Some(o) = found {
                 // a replayer's InitSound may write Paula's registers, as the 68k
                 // players' do after start_deli's reset; it starts at the same phase
                 self.align_start();

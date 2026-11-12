@@ -38,9 +38,9 @@
 //!   [`format`](Song::format).
 //! * [`unpack`]: recognise and undo the file-level packers (PowerPacker, Pack-Ice, XPK SQSH,
 //!   MMCMP, StoneCracker) without playing anything.
-//! * `archive` (feature `archives`): recognise LhA, zip, gzip, xz and tar archives and extract
+//! * `archive` (feature `archives`): recognise LhA, LZX, zip, gzip, xz and tar archives and extract
 //!   their files in memory, with size caps; play an entry with [`Song::open_with`], the other
-//!   entries as its companions. (Amiga LZX is recognised, not extracted.)
+//!   entries as its companions.
 //! * `songdb` (feature `songdb`): song lengths, authors, albums and years from the song
 //!   database of audacious-uade, looked up by a key of the file's bytes. The database is not
 //!   included (it is CC BY-NC-SA 4.0): its directory is given at run time.
@@ -56,7 +56,7 @@
 //! | `host-68k` | yes     | loading and running the original 68k DeliPlayers, Eagleplayers and DeliGenies (the application's mode of operation); in the library, custom modules through `Song::open_opts` (`Options::allow_custom`), and nothing else |
 //! | `ui`       | yes     | the SDL3 player window and the `amigaplayer-rs` binary (implies `host-68k`) |
 //! | `songdb`   | no      | `amigaplayer_rs::songdb`: lengths and metadata from audacious-uade's song database (code vendored in `crates/songdb`; the data is not included), and `--songdb` of `amigaplayer-render` |
-//! | `archives` | yes     | `amigaplayer_rs::archive` (LhA, zip, gzip, xz, tar; pure Rust: delharc, flate2, lzma-rs), and gzip / xz wrappers undone like the other packers |
+//! | `archives` | yes     | `amigaplayer_rs::archive` (LhA, LZX, zip, gzip, xz, tar; pure Rust: delharc, flate2, lzma-rs, and its own LZX), and gzip / xz wrappers undone like the other packers |
 //! | `native`   | yes     | the players recompiled to Rust, when generated from the user's own player files (implies `host-68k`) |
 //!
 //! A library user wants `default-features = false` (plus `features = ["host-68k"]` to play

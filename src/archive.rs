@@ -447,6 +447,18 @@ fn span(d: &[u8], o: u64, n: u64) -> Option<&[u8]> {
     d.get(o..e)
 }
 
+/// The upper half of code page 437, the encoding of zip names without the UTF-8 flag.
+const CP437_HIGH: &str = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■\u{a0}";
+
+/// A zip entry's name: UTF-8 when its flag (bit 11) says so or it is valid UTF-8, else CP437.
+fn zip_text(b: &[u8], flags: u16) -> String {
+    if flags & 0x800 != 0 || std::str::from_utf8(b).is_ok() {
+        return String::from_utf8_lossy(b).into_owned();
+    }
+    let high: Vec<char> = CP437_HIGH.chars().collect();
+    b.iter().map(|&c| if c < 0x80 { c as char } else { high.get(c as usize - 0x80).copied().unwrap_or('_') }).collect()
+}
+
 struct ZipEntry {
     name: String,
     flags: u16,
@@ -510,7 +522,7 @@ fn zip_central(data: &[u8]) -> Option<Vec<ZipEntry>> {
         let name = span(data, p + 46, nlen)?;
         let extra = span(data, p + 46 + nlen, xlen)?;
         let mut e = ZipEntry {
-            name: text(name),
+            name: zip_text(name, u16le(data, q + 8)?),
             flags: u16le(data, q + 8)?,
             method: u16le(data, q + 10)?,
             crc: u32le(data, q + 16)?,
@@ -550,7 +562,7 @@ fn zip_local(data: &[u8]) -> Vec<ZipEntry> {
         }
         let (nlen, xlen) = (nlen as u64, xlen as u64);
         let (Some(name), Some(extra)) = (span(data, p + 30, nlen), span(data, p + 30 + nlen, xlen)) else { break };
-        let mut e = ZipEntry { name: text(name), flags, method, crc, csize: csize as u64, usize_: usz as u64, local: p };
+        let mut e = ZipEntry { name: zip_text(name, flags), flags, method, crc, csize: csize as u64, usize_: usz as u64, local: p };
         if [e.csize, e.usize_].contains(&(u32::MAX as u64)) {
             let mut local = 0;
             if zip64_extra(extra, [&mut e.usize_, &mut e.csize, &mut local]).is_none() {

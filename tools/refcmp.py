@@ -609,7 +609,9 @@ REFUSED_NO_FALLBACK = {'hippel7v'}
 # through the player's own first hunk (which the port models) and 43 KB further. In the full
 # directory that is Pokeynoise's hunk (200 of the wave's 295 reads past the buffers, 197 of them
 # not zero); loaded alone, zeros follow.
-ALONE = {'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2'),
+SOAMC = SCRATCH + '/soamc/x'
+ALONE = {'gtgamesystems': ('soamc', 'G&T_Game_Systems/1.0_(08.Aug.2008)/G&T Game Systems'),
+         'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2'),
          # SidMon 1.0 (EP206): a finetuned period read past the table lands in the next player's hunk
          'sidmon10': ('ep206', 'SIDMon 1.0'),
          'pretracker': ('uade', 'PreTracker')}
@@ -618,10 +620,10 @@ ALONE = {'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'so
 def alone_dir(ctx, src, name):
     d = os.path.join(ctx.cache, 'alone-' + re.sub(r'[^A-Za-z0-9]', '_', name))
     os.makedirs(d, exist_ok=True)
-    link = os.path.join(d, name)
+    link = os.path.join(d, os.path.basename(name))
     if not os.path.lexists(link):
         try:
-            os.symlink(os.path.join(EP206 if src == 'ep206' else UADE_PLAYERS, name), link)
+            os.symlink(os.path.join({'ep206': EP206, 'uade': UADE_PLAYERS, 'soamc': SOAMC}[src], name), link)
         except FileExistsError:   # another job of the same run made it first
             pass
     return d

@@ -79,6 +79,8 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Funktracker", test: loaders::fnk::test, load: loaders::fnk::load },
     Loader { name: "Magnetic Fields Packer", test: loaders::mfp::test, load: loaders::mfp::load },
     Loader { name: "Astroidea XMF", test: loaders::xmf::test, load: loaders::xmf::load },
+    // not a libxmp loader: Symphonie plays on `crate::symmod` (XmpPlayer hands it there)
+    Loader { name: "Symphonie", test: crate::symmod::test, load: |_, _| Err(()) },
 ];
 
 /// The loader that claims `data`, if any.
@@ -107,6 +109,14 @@ pub fn detect_open(data: &[u8]) -> Option<&'static Loader> {
     detect(data).filter(|l| !LEFT_TO_OTHER_PLAYERS.contains(&l.name))
 }
 
+/// The format name of the module in `data` that the open chain plays here, if it loads.
+pub fn format_of(data: &[u8]) -> Option<String> {
+    if crate::symmod::test(data) {
+        return crate::symmod::Symmod::new(data, 48000).map(|s| s.format().to_string());
+    }
+    load_module(data).map(|c| c.m.module.type_)
+}
+
 /// `xmp_load_module`: the module in `data`, checked and scanned.
 pub fn load_module(data: &[u8]) -> Option<Context> {
     load_module_at(data, None)
@@ -128,15 +138,13 @@ pub fn load_module_at(data: &[u8], path: Option<&std::path::Path>) -> Option<Con
     Some(ctx)
 }
 
-/// A module playing through libxmp's player and mixer.
-pub struct XmpPlayer {
-    ctx: Context,
-    rate: i32,
-    /// The rest of the last tick, interleaved stereo.
-    pending: Vec<i16>,
-    at: usize,
-    ended: bool,
-    subsong: usize,
+/// A module playing through libxmp's player and mixer, or, for Symphonie, through
+/// `crate::symmod`'s own player and mixer.
+pub struct XmpPlayer(Core);
+
+enum Core {
+    Xmp(LibXmp),
+    Sym(Box<crate::symmod::Symmod>),
 }
 
 impl XmpPlayer {
@@ -147,50 +155,161 @@ impl XmpPlayer {
 
     /// `new` for a module read from `path` (companion files are looked for there).
     pub fn open(data: &[u8], rate: u32, path: Option<&std::path::Path>) -> Option<XmpPlayer> {
+        if crate::symmod::test(data) {
+            return crate::symmod::Symmod::new(data, rate).map(|s| XmpPlayer(Core::Sym(Box::new(s))));
+        }
+        LibXmp::open(data, rate, path).map(|x| XmpPlayer(Core::Xmp(x)))
+    }
+
+    /// Sets the mixer's interpolation and whether its resonant filter runs
+    /// (libxmp's `XMP_INTERP_*` and `XMP_DSP_LOWPASS`; Symphonie: nearest or linear, and its
+    /// filter always runs).
+    pub fn set_mixer(&mut self, interp: mixer::Interp, filter: bool) {
+        match &mut self.0 {
+            Core::Xmp(x) => x.set_mixer(interp, filter),
+            Core::Sym(s) => s.set_nearest(matches!(interp, mixer::Interp::Nearest)),
+        }
+    }
+
+    /// Whether the module sets libxmp's filter quirk (IT, Liquid, Imago).
+    pub fn uses_resonant_filter(&self) -> bool {
+        match &self.0 {
+            Core::Xmp(x) => x.uses_resonant_filter(),
+            Core::Sym(_) => false,
+        }
+    }
+
+    /// libxmp's module type ("Composer 669", "MultiTracker 1.00 MTM"...).
+    pub fn format(&self) -> &str {
+        match &self.0 {
+            Core::Xmp(x) => x.format(),
+            Core::Sym(s) => s.format(),
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        match &self.0 {
+            Core::Xmp(x) => x.title(),
+            Core::Sym(s) => s.title(),
+        }
+    }
+
+    /// The sequences libxmp's scan found.
+    pub fn subsongs(&self) -> usize {
+        match &self.0 {
+            Core::Xmp(x) => x.subsongs(),
+            Core::Sym(_) => 1,
+        }
+    }
+
+    pub fn subsong(&self) -> usize {
+        match &self.0 {
+            Core::Xmp(x) => x.subsong(),
+            Core::Sym(_) => 0,
+        }
+    }
+
+    /// The scanned duration of a sequence, in milliseconds.
+    pub fn duration_ms(&self, seq: usize) -> i32 {
+        match &self.0 {
+            Core::Xmp(x) => x.duration_ms(seq),
+            Core::Sym(s) if seq == 0 => s.duration_ms(),
+            Core::Sym(_) => 0,
+        }
+    }
+
+    /// Starts sequence `seq` from its beginning.
+    pub fn start(&mut self, seq: usize) {
+        match &mut self.0 {
+            Core::Xmp(x) => x.start(seq),
+            Core::Sym(s) => s.start(),
+        }
+    }
+
+    /// True once the module ended or looped.
+    pub fn ended(&self) -> bool {
+        match &self.0 {
+            Core::Xmp(x) => x.ended(),
+            Core::Sym(s) => s.ended(),
+        }
+    }
+
+    /// Fills `out` (interleaved stereo) and returns the frames written: fewer
+    /// than asked only at the end of the module.
+    pub fn render(&mut self, out: &mut [i16]) -> usize {
+        match &mut self.0 {
+            Core::Xmp(x) => x.render(out),
+            Core::Sym(s) => s.render(out),
+        }
+    }
+
+    /// The order, pattern and row playing (for display).
+    pub fn position(&self) -> (i32, i32, i32) {
+        match &self.0 {
+            Core::Xmp(x) => x.position(),
+            Core::Sym(s) => s.position(),
+        }
+    }
+}
+
+/// The libxmp port playing a module.
+struct LibXmp {
+    ctx: Context,
+    rate: i32,
+    /// The rest of the last tick, interleaved stereo.
+    pending: Vec<i16>,
+    at: usize,
+    ended: bool,
+    subsong: usize,
+}
+
+impl LibXmp {
+    /// `new` for a module read from `path` (companion files are looked for there).
+    fn open(data: &[u8], rate: u32, path: Option<&std::path::Path>) -> Option<LibXmp> {
         let ctx = load_module_at(data, path)?;
-        let mut p = XmpPlayer { ctx, rate: rate as i32, pending: Vec::new(), at: 0, ended: false, subsong: 0 };
+        let mut p = LibXmp { ctx, rate: rate as i32, pending: Vec::new(), at: 0, ended: false, subsong: 0 };
         p.start(0);
         Some(p)
     }
 
     /// Sets the mixer's interpolation and whether its resonant filter runs
     /// (libxmp's `XMP_INTERP_*` and `XMP_DSP_LOWPASS`).
-    pub fn set_mixer(&mut self, interp: mixer::Interp, filter: bool) {
+    fn set_mixer(&mut self, interp: mixer::Interp, filter: bool) {
         self.ctx.s.interp = interp;
         self.ctx.s.dsp = if filter { mixer::XMP_DSP_LOWPASS } else { 0 };
     }
 
     /// Whether the module sets libxmp's filter quirk (IT, Liquid, Imago).
-    pub fn uses_resonant_filter(&self) -> bool {
+    fn uses_resonant_filter(&self) -> bool {
         self.ctx.m.quirk & module::QUIRK_FILTER != 0
     }
 
     /// libxmp's module type ("Composer 669", "MultiTracker 1.00 MTM"...).
-    pub fn format(&self) -> &str {
+    fn format(&self) -> &str {
         &self.ctx.m.module.type_
     }
 
-    pub fn title(&self) -> &str {
+    fn title(&self) -> &str {
         &self.ctx.m.module.name
     }
 
     /// The sequences libxmp's scan found.
-    pub fn subsongs(&self) -> usize {
+    fn subsongs(&self) -> usize {
         self.ctx.m.num_sequences.max(1)
     }
 
-    pub fn subsong(&self) -> usize {
+    fn subsong(&self) -> usize {
         self.subsong
     }
 
     /// The scanned duration of a sequence, in milliseconds.
-    pub fn duration_ms(&self, seq: usize) -> i32 {
+    fn duration_ms(&self, seq: usize) -> i32 {
         self.ctx.m.seq_data.get(seq).map_or(0, |s| s.duration)
     }
 
     /// `xmp_start_player`, then `xmp_set_position` to the sequence's entry
     /// point (what `xmp_set_subsong`... the player's sequence selection does).
-    pub fn start(&mut self, seq: usize) {
+    fn start(&mut self, seq: usize) {
         let seq = seq.min(self.subsongs() - 1);
         // a fresh player state that keeps what the load-time scan found
         let old = std::mem::take(&mut self.ctx.p);
@@ -209,14 +328,14 @@ impl XmpPlayer {
     }
 
     /// True once the module ended or looped.
-    pub fn ended(&self) -> bool {
+    fn ended(&self) -> bool {
         self.ended
     }
 
     /// Fills `out` (interleaved stereo) and returns the frames written: fewer
     /// than asked only at the end of the module, which is where libxmp's frame
     /// loop stops (`-XMP_END`) or the loop counter reaches 1.
-    pub fn render(&mut self, out: &mut [i16]) -> usize {
+    fn render(&mut self, out: &mut [i16]) -> usize {
         let want = out.len() / 2;
         let mut done = 0;
         while done < want {
@@ -246,7 +365,7 @@ impl XmpPlayer {
     }
 
     /// The order, pattern and row playing (for display).
-    pub fn position(&self) -> (i32, i32, i32) {
+    fn position(&self) -> (i32, i32, i32) {
         let p = &self.ctx.p;
         let pat = self.ctx.m.module.xxo.get(p.ord.max(0) as usize).copied().unwrap_or(0) as i32;
         (p.ord, pat, p.row)

@@ -32,7 +32,7 @@ pub fn detect(data: &[u8]) -> Option<String> {
         return Some(o.name.to_string());
     }
     crate::xmp::detect_open(&data)?;
-    crate::xmp::load_module(&data).map(|c| c.m.module.type_)
+    crate::xmp::format_of(&data)
 }
 
 /// Whether `data` (after decrunching) is a custom module: an AmigaOS executable with a

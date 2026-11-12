@@ -583,6 +583,8 @@ REFUSED_NO_FALLBACK = {'hippel7v'}
 # directory that is Pokeynoise's hunk (200 of the wave's 295 reads past the buffers, 197 of them
 # not zero); loaded alone, zeros follow.
 ALONE = {'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2'),
+         # SidMon 1.0 (EP206): a finetuned period read past the table lands in the next player's hunk
+         'sidmon10': ('ep206', 'SIDMon 1.0'),
          'pretracker': ('uade', 'PreTracker')}
 
 

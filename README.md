@@ -509,13 +509,15 @@ project; Eagleplayer's main program and engines are GPL since 2.04, but its
 external Eagleplayers are not ("The external Eagleplayers are not released under
 the GPL", Eagleplayer 2.04 sources), and most of them hold the composers' own
 replay routines.
-`--open-replayers` plays the formats they know with them instead of the 68k
-players. They write Paula's registers as the original players do, and are
-checked against the Eagleplayers, not against NostalgicPlayer:
+The formats they know are played with them, not with the 68k players: that is the
+default (`--open-replayers` is still accepted and changes nothing; `--68k-players`
+plays them with the 68k players, as `--player NAME` always does). They write
+Paula's registers as the original players do, and are checked against the
+Eagleplayers, not against NostalgicPlayer:
 
 ```sh
 DELI_WRITE_LOG=ep.log amigaplayer-rs --player 'Pumatracker 1.0' --wav ep.wav MODULE
-DELI_WRITE_LOG=rs.log amigaplayer-rs --open-replayers --wav rs.wav MODULE
+DELI_WRITE_LOG=rs.log amigaplayer-rs --wav rs.wav MODULE
 python3 -I tools/replay-cmp.py ep.log rs.log   # tick by tick; first difference
 ```
 

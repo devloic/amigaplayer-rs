@@ -10,7 +10,7 @@ settings, WAV for WAV:
 
   port       amigaplayer-rs --open-replayers, with every player directory empty
              (so no 68k player stands in for the port)
-  reference  the ORIGINAL player: the same binary without --open-replayers,
+  reference  the ORIGINAL player: the same binary with --68k-players,
              running the real Eagleplayer/DeliPlayer on the emulated Amiga with
              the same output stage (first of EP206, then the Eagleplayers UADE
              ships, whose player runs on the 68k); for the formats the libxmp
@@ -497,7 +497,7 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None, fast_c
     if fast_cpu:
         # the port says its original's code does not fit a 68000's time (see needs_fast_reference_cpu)
         env['DELI_CPU_SPEED'] = '8'
-    cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else []), *ctx.flags, *extra,
+    cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else ['--68k-players']), *ctx.flags, *extra,
            '--wav', '@WAV@', '--seconds', str(ctx.secs), mod]
     wav, lines = _run_cached(ctx, mod, cmd, env, os.path.dirname(mod), None)
     play = next((l for l in lines if l.startswith('playing')), None)

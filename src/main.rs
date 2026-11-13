@@ -33,7 +33,7 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: amigaplayer-rs [--players DIR] [--eagleplayers DIR] [--player NAME] [--open-replayers]\n\
+        "usage: amigaplayer-rs [--players DIR] [--eagleplayers DIR] [--player NAME] [--68k-players]\n\
          \x20                 [--genies DIR] [--genie NAME]... [--noteplayer NAME] [--libs DIR]\n\
          \x20                 [--wav OUT.wav [--seconds N] [--subsong N] [--volume V]]\n\
          \x20                 [--filter a500|a1200|none|auto] [--led auto|on|off|force]\n\
@@ -54,9 +54,11 @@ fn usage() -> ! {
          ~/.config/amigaplayer-rs/DeliGenies, ./DeliGenies); --genie NAME runs one, and a\n\
          NotePlayer genie (--noteplayer NAME) plays the notes of _note players\n\
          (default: 4Voices-NotePlayer when installed; --noteplayer builtin has the\n\
-         built-in renderer play them). --open-replayers plays the formats the\n\
-         open replayers (Rust ports of NostalgicPlayer's players) know with them\n\
-         instead of the 68k players. --led off renders with the LED filter\n\
+         built-in renderer play them). The formats the open replayers\n\
+         (Rust ports of NostalgicPlayer's players and clean-room ports) know are\n\
+         played with them, not with the 68k players: that is the default\n\
+         (--open-replayers is accepted and changes nothing); --68k-players\n\
+         plays them with the 68k players instead (--player NAME always does). --led off renders with the LED filter\n\
          ignored (UADE's start state; an Amiga starts with it on); auto (the\n\
          default, also spelled on) follows the player's LED; force switches it on\n\
          whatever the player does. --filter picks the Amiga filter model (auto:\n\
@@ -76,7 +78,7 @@ fn usage() -> ! {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { players: None, eagleplayers: None, genies: None, libs: None, use_genies: Vec::new(), only_player: None, open_replayers: false, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
+    let mut a = Args { players: None, eagleplayers: None, genies: None, libs: None, use_genies: Vec::new(), only_player: None, open_replayers: true, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
     // (a file name need not be UTF-8: options are read as text, file names as given)
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
@@ -85,7 +87,9 @@ fn parse_args() -> Args {
             "--players" => a.players = it.next().map(PathBuf::from),
             "--eagleplayers" => a.eagleplayers = it.next().map(PathBuf::from),
             "--player" => a.only_player = it.next(),
+            // (the open replayers are the default; the flag stays accepted)
             "--open-replayers" => a.open_replayers = true,
+            "--68k-players" => a.open_replayers = false,
             "--genies" => a.genies = it.next().map(PathBuf::from),
             "--libs" => a.libs = it.next().map(PathBuf::from),
             "--genie" | "--noteplayer" => a.use_genies.push(it.next().unwrap_or_else(|| usage())),

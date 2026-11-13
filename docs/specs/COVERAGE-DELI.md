@@ -172,7 +172,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Art of Noise | Art of Noise 0.0 | Art of Noise 4V / 8V | open `Art of Noise 4V`, `8V` | 17 S; 7 S, 1 N (ref 23) | A | V |
 | AYPlayers/ZXAYAMAD, ZXAYEMUL, ZXAYST11, ZXAYSTRC | not DeliTracker players (sub-players PlayAY loads) | see PlayAY | | | | |
 | Benn Daglish | Benn Daglish 0.1 | Ben Daglish | open `Ben Daglish` | 8 S (ref 8) | A | V |
-| BFB Master | (loaded as a genie by the engine; "BFBPlayMaster.Library 1.0") | BFB music disks played through `bfbplaymaster.library` and its `bfbplay*.library` replayers | none: the six `modules/N` files of the BFB disk in `dl-modules/BFB/` are unknown to the default path | none | N | X |
+| BFB Master | (loaded as a genie by the engine; "BFBPlayMaster.Library 1.0") | BFB music disks played through `bfbplaymaster.library` and its `bfbplay*.library` replayers | the disk in `dl-modules/BFB/` (lqs-liquidation_o1) holds six AHX/THX modules, played by open `AHX` (the `modules/N` files seen first were fonts); its BMOD and GMOD replayers have no sample file | none | N | U |
 | Chiptracker | Chiptracker 0.3 | Chiptracker (KRIS) | ProWizard `chiptracker.rs` + built-in ProTracker (libxmp `chip` loader too) | 10 S | P | V |
 | Datatype | (loaded as a genie by the engine; "Datatype Eagleplayer V0.85") | any sound the system datatypes decode | built-in 8SVX, AIFF, RIFF WAVE decoders only | none | N | U (partial) |
 | David Hanney | David Hanney 1.1 | David Hanney | open `David Hanney` | 8 S (ref 8) | A | V |
@@ -289,13 +289,12 @@ PlayAY is counted under U (EMUL and AMAD play). The two Datatype players are cou
 partial (only 8SVX, AIFF and WAV).
 
 PlaySid is counted under X in the table above but is covered by builds with `--features sid`
-(C64 PSID, GPL-2.0-only, so not in the default build): 11 player files are really not covered.
+(C64 PSID, GPL-2.0-only, so not in the default build): BFB Master's only disk holds AHX modules, which play. 10 player files are really not covered.
 
-Formats that are not covered (11 player files):
+Formats that are not covered (10 player files):
 
 - NES: NESA (`NESA_note`) and NSF (`NSF`);
 - Bryan Ford's MultiPlayer formats GMOD (`PlayerStore/GMOD`, `Eagleplayers/GMOD`) and XMOD;
-- BFB (`BFB Master`, bfbplaymaster.library music disks);
 - MPEG audio (`MPEGAudio`);
 - Wizard of Sound;
 - formats not identified from any file: `GlueMaster`, `M. Grouleff` (not the EarAche modules),

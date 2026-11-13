@@ -19,6 +19,10 @@ pub fn detect(data: &[u8]) -> Option<String> {
     if crate::aiff::detect(data) {
         return Some("AIFF".to_string());
     }
+    // an NSF that needs an expansion chip does not play: not claimed
+    if crate::replay::nsf::detect(data) {
+        return crate::replay::nsf::check(data).ok().map(|_| "NSF".to_string());
+    }
     let data = crate::decrunch::decrunch(data.to_vec());
     if crate::replay::sndh::detect(&data) {
         return Some("SNDH".to_string());
@@ -43,7 +47,7 @@ pub fn detect(data: &[u8]) -> Option<String> {
 /// files: Infogrames and Rob Hubbard 2 modules are one format and pass both checks, and
 /// Infogrames hands a module with no bank of its own name (`rh.ins` beside it) to Rob Hubbard 2.
 pub fn claimed_by_several(data: &[u8]) -> bool {
-    if crate::aiff::detect(data) {
+    if crate::aiff::detect(data) || crate::replay::nsf::detect(data) {
         return false;
     }
     let data = crate::decrunch::decrunch(data.to_vec());

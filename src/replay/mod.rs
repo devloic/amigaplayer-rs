@@ -93,6 +93,7 @@ pub mod musicline;
 pub mod oktalyzer;
 pub mod onescapee;
 pub mod ntspsystem;
+pub mod nsf;
 pub mod dariuszendeh;
 pub mod audiosculpture;
 pub mod earache;

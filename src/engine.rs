@@ -702,6 +702,12 @@ impl Engine {
             let x = crate::replay::ay::player(&data, self.rate as u32).map_err(|e| anyhow!(e))?;
             return self.start_pcm(Box::new(x), path);
         }
+        // NES Sound Format tunes (NESM): the built-in 2A03 CPU and APU; a tune that needs an expansion
+        // chip is an error, not a reason to try the other players
+        if self.only_player.is_none() && crate::replay::nsf::detect(&data) {
+            let x = crate::replay::nsf::player(&data, self.rate as u32).map_err(|e| anyhow!(e))?;
+            return self.start_pcm(Box::new(x), path);
+        }
         let data = crate::decrunch::decrunch(data);
         // Atari ST SNDH tunes (the ICE!-packed ones are undone above): their own 68000 code on the
         // built-in ST machine

@@ -283,28 +283,26 @@ fn loops_and_calls() {
 }
 
 #[test]
-fn period_index_outside_the_table_reads_the_player_words_or_clamps() {
+fn period_index_outside_the_table_clamps() {
     let d = mk([&[0x08, 0, 0x2C, 0xC0, 0, 0x18], STOP, STOP, STOP], &[&[0x00, 0, 1, 0x00, 0x7E, 1, 0x20]]);
     let mut r = rig(&d);
     let log = r.run(6);
     let per: Vec<u16> = log.iter().filter(|x| x.0 == 0xDFF0A6).map(|x| x.1).collect();
-    // index -30 lies before the 16 embedded words: zero; index 33 is in the table
-    assert_eq!(per[0], 0);
-    assert!(per.iter().all(|p| *p == 0 || *p == 2 || PERIODS.contains(p)));
+    // index -30 lies before the table: the first entry; index 33 is in the table
+    assert_eq!(per[0], PERIODS[0]);
+    assert!(per.iter().all(|p| *p == 2 || PERIODS.contains(p)));
 }
 
 #[test]
-fn period_index_before_the_table_reads_the_embedded_words() {
-    assert_eq!(PERIOD_BELOW.len(), 32);
-    // transposition -6 puts note 0 at index -1, the last of the 16 words; -8 at index -2
+fn period_index_before_the_table_reads_the_first_entry() {
+    // transposition -6 puts note 0 at index -1, -8 at index -2: the original reads its own code
+    // words there, the port the table's first entry
     let d = mk([&[0x08, 0, 0x2C, 0xFA, 0, 0x2C, 0xF8, 0, 0x18], STOP, STOP, STOP], &[&[0x00, 0, 1, 0x20]]);
     let mut r = rig(&d);
     let log = r.run(12);
     let per: Vec<u16> = log.iter().filter(|x| x.0 == 0xDFF0A6).map(|x| x.1).collect();
     // each note start is followed by the period write of the silence loop (2)
-    assert_eq!(per[0], be16(PERIOD_BELOW, 30));
-    assert_eq!(per[2], be16(PERIOD_BELOW, 28));
-    assert_eq!(per[0], 0x4E75);
+    assert_eq!((per[0], per[2]), (PERIODS[0], PERIODS[0]));
 }
 
 #[test]

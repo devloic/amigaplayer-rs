@@ -4,6 +4,7 @@
   it, which modules made for a different table actually read (Overlander), are code words of the player.
   They are in `data/period_below.bin` (32 bytes) and nowhere else. The lead decides whether a port may
   embed them. Without them, Overlander subsongs 0 and 1 differ in a few period writes (values 0x4E75 etc.).
+  The port does not embed them (they are instructions): an index before the table reads entry 0.
 - Real modules: none with the `mco` prefix exists in the archive. The four distinct `mcs.*` data files of
   the newer format's engine O are this format exactly and were used renamed. The two synthetic
   modules cover the commands the real files never use (0x04 period, 0x10 rest, 0x34 loop to mark).

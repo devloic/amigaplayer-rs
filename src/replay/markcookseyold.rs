@@ -14,13 +14,12 @@
 //! and the two waits of a note start (for a number of changes of the raster line, modelled from
 //! the beam phase). Volumes are written raw (four times the byte, unmasked and unscaled).
 //!
-//! Embedded data (taken from the original player on the project owner's decision): the original's
-//! period table sits behind 16 words of the player's own code, which a module made for another
-//! period table (Overlander's two first subsongs, with a transposition of -24) reads. Those 32
-//! bytes are in `markcookseyold_period_below.bin`; an index before the table reads them.
+//! The original's period table sits behind 16 words of the player's own code, which a module made
+//! for another period table (Overlander's two first subsongs, with a transposition of -24) reads
+//! as periods. Those code words are not embedded: an index before the table uses the first entry.
 //!
 //! Choices where the specification is silent (all safe, none can panic or hang): an index
-//! after the table uses the last entry; an odd index offset rounds down; a note before any
+//! before the table uses the first entry, an index after it the last; an odd index offset rounds down; a note before any
 //! instrument command plays one word of the silence buffer; an invalid command byte, a stack
 //! overflow past 40 bytes, a return, loop end or loop to mark on an empty stack or on an entry
 //! of the wrong kind, or more than 2^20 commands in one visit make the voice dead (a loop end
@@ -50,8 +49,6 @@ const PERIODS: [u16; 40] = [
     856, 808, 762, 720, 678, 640, 604, 570, 538, 508, 480, 453, 428, 404, 381, 360, 339, 320, 302, 285, 269, 254,
     240, 226, 214, 202, 190, 180, 169, 160, 151, 142, 134, 127, 120, 113, 107, 101, 95, 90,
 ];
-/// The 16 words in front of the period table (index -16 first), big-endian; see the header.
-static PERIOD_BELOW: &[u8; 32] = include_bytes!("markcookseyold_period_below.bin");
 /// Table index of the centre (offset 0).
 const CENTRE: i32 = 2;
 /// Volume words of the voices before any volume command.
@@ -198,13 +195,8 @@ impl MarkCookseyOld {
     fn period(&self, ch: usize, x: u8, next: bool) -> u16 {
         let off = self.v[ch].ptab + x as i32;
         let i = CENTRE + off.div_euclid(2) + next as i32;
-        if i < 0 {
-            // before the table: the player's own code words (index -16 first); further back is
-            // not specified and reads zero
-            let k = i + 16;
-            return if k >= 0 { be16(PERIOD_BELOW, 2 * k as usize) } else { 0 };
-        }
-        PERIODS[i.min(39) as usize]
+        // before the table the original reads its own code: the first entry, see the header
+        PERIODS[i.clamp(0, 39) as usize]
     }
 
     fn pattern(&self, x: u8) -> usize {

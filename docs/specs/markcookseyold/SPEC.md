@@ -108,7 +108,7 @@ Out-of-range indices read whatever lies around the table in the player:
   `data/period_below.bin` (16 big-endian words, index -16 first). Overlander (written for its own
   `mcr` period table) does reach indices -6, -5, -3 and -1 with transposition -24. The reference then
   writes these words as periods (e.g. 0x4E75 for index -1), and a port must use the same values to
-  match the log;
+  match the log (this port does not embed code words and reads entry 0 instead);
 - index 40 and up read voice 0's live state (counter, track pointer, ...). This is not reproducible,
   and no test module reaches it.
 Command 0x04 also reads the entry after the indexed one (4.3).

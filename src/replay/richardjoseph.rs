@@ -16,7 +16,7 @@
 //! table, and a pitch slide; all sound is Paula DMA, started in three steps over
 //! three ticks (stop, enable, install the loop). The tick is 50 Hz.
 
-use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
+use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
 use m68k::AddressBus;
 
@@ -115,15 +115,15 @@ pub struct Rjp {
     first: bool,
     /// When that tick is due (colour clocks, absolute): at once.
     tick_at: Option<u64>,
-    /// The tick after the start-up tick: when it falls (absolute).
+    /// The tick after the start-up tick: when it falls (absolute), and the timer's grid point it is.
     next_at: std::cell::Cell<Option<u64>>,
-    due: u64,
+    grid: u64,
     /// A tick has run since the song was loaded (the host's timer is running).
     ticked: bool,
-    /// The time the tick spends on the voices without a pattern before the first one that has
-    /// one, until that voice's first write (taken by a write that the gaps model keys without
-    /// its channel, a DMA stop or start; the others' start gaps hold it).
-    lead: u64,
+    /// The tick's start (colour clocks, absolute) and the original's time into it so far, in
+    /// half colour clocks (68000 cycles): each write falls at `t0 + h / 2`.
+    t0: u64,
+    h: u64,
 }
 
 /// The name the sample companion has: `smp.NAME` for `rjp.NAME` (the prefix in any
@@ -143,7 +143,7 @@ fn companion(file: &str) -> Vec<String> {
     v
 }
 
-fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+fn new(d: &[u8], module: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect(d) {
         return None;
     }
@@ -152,11 +152,17 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // the two known-bad files are repaired, as the reference player does, by the
     // size of the song
     let size = blk[6].0 + blk[6].1;
+    let mut repair = None;
     if size == 9506 && be16(&d, 2650) == 2 {
-        d[2650..2652].fill(0);
+        repair = Some(2650..2652);
     }
     if size == 2989 && be32(&d, 1192) == 0x0805_0706 {
-        d[1192..1196].fill(0);
+        repair = Some(1192..1196);
+    }
+    if let Some(r) = repair.clone() {
+        d[r.clone()].fill(0);
+        // in memory too
+        m.bus.write_bytes(module + r.start as u32, &d[r]);
     }
     let file = m.bus.read_cstr(m.deli.file_buf);
     let mut sample = None;
@@ -178,11 +184,15 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         reach = reach.max((o + 2 * words).min(pristine.len() + 0x40000));
     }
     pristine.resize(reach, 0);
-    let base = m.alloc((pristine.len() as u32).max(4));
-    if base == 0 {
+    // the sample file lies whole in memory, its area after its four header bytes
+    let at = m.alloc(pristine.len() as u32 + 4);
+    if at == 0 {
         return None;
     }
+    let base = at + 4;
+    m.bus.write_bytes(at, sample.get(..4).unwrap_or(&[]));
     m.bus.write_bytes(base, &pristine);
+    relocate(&d, &blk, module, base, m);
     let subsongs = ((blk[2].1 / 4) as u16).max(1);
     let mut r = Rjp {
         d,
@@ -200,15 +210,37 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         first: false,
         tick_at: None,
         next_at: std::cell::Cell::new(None),
-        due: 0,
+        grid: 0,
         ticked: false,
-        lead: 0,
+        t0: 0,
+        h: 0,
     };
     r.title = file;
     let mut hw = Hw { bus: &mut m.bus };
     hw.dmacon(0x000F);
     r.start(0, &mut hw, false);
     Some(Box::new(r))
+}
+
+/// The song in memory as the original leaves it after its set-up: the tag reads `MODS`, and each
+/// instrument record holds the address of its sample (the area's address added to its offset, and to
+/// its vibrato and tremolo table offsets when they are set) and its first segment's start in bytes
+/// (measured on the memory of the reference runs: a voice whose sample lies in the song plays these
+/// bytes).
+fn relocate(d: &[u8], blk: &[(usize, usize); 7], module: u32, base: u32, m: &mut Machine) {
+    m.bus.write_bytes(module + 4, b"MODS");
+    for i in 0..blk[0].1 / 32 {
+        let r = blk[0].0 + 32 * i;
+        let a = module + r as u32;
+        m.bus.w32(a, be32(d, r).wrapping_add(base));
+        for o in [4, 8] {
+            let v = be32(d, r + o);
+            if v != 0 {
+                m.bus.w32(a + o as u32, v.wrapping_add(base));
+            }
+        }
+        m.bus.w16(a + 0x10, be16(d, r + 0x10).wrapping_mul(2));
+    }
 }
 
 impl Rjp {
@@ -243,7 +275,6 @@ impl Rjp {
         self.songend = false;
         self.first = change;
         self.tick_at = change.then_some(hw.bus.clock);
-        self.due = hw.bus.clock;
         // a new start finds the samples as loaded
         self.area.copy_from_slice(&self.pristine);
         hw.bus.write_bytes(self.base, &self.pristine);
@@ -275,6 +306,7 @@ impl Rjp {
     fn list_end(&mut self, ch: usize) {
         self.flags &= !(1 << ch);
         if self.flags == 0 {
+            self.h += H_SONG_END;
             self.songend = true;
             self.flags = self.flags0;
         }
@@ -328,15 +360,23 @@ impl Rjp {
         v.d = e[2];
         v.phase = 4;
         let s = v.sample.wrapping_add(start);
-        hw.wait(std::mem::take(&mut self.lead));
+        self.h += H_NOTE;
+        self.at(hw);
         hw.dmacon(1 << ch);
+        self.h += H_NOTE_DAT;
+        self.at(hw);
         hw.bus.write_word(0xDFF0AA + 16 * ch as u32, 0);
         if (s as usize) + 2 <= self.area.len() {
             self.area[s as usize..s as usize + 2].fill(0);
             hw.bus.write_bytes(self.base + s, &[0, 0]);
         }
+        self.h += H_NOTE_LOC;
+        self.at(hw);
         hw.loc(ch, self.base.wrapping_add(s));
+        self.h += H_LEN;
+        self.at(hw);
         hw.len(ch, len);
+        self.h += H_NOTE_END[ch];
         self.v[ch].dma = true;
     }
 
@@ -352,6 +392,11 @@ impl Rjp {
             }
             self.list_end(ch);
             let c = self.rb(p + 1);
+            if c == 0 {
+                self.h += H_LIST_STOP[ch];
+                return None;
+            }
+            self.h += H_LIST_JUMP[ch];
             match c {
                 0 => return None,
                 1..=0x7F => self.v[ch].lst = (p + 1).wrapping_sub(c as usize),
@@ -380,6 +425,7 @@ impl Rjp {
                     return;
                 }
                 0x80 => {
+                    self.h += H_PAT_END;
                     self.v[ch].repeat = 1;
                     match self.next_pattern(ch) {
                         Some(q) => self.v[ch].pat = Some(q),
@@ -392,6 +438,7 @@ impl Rjp {
                 }
                 0x81 => {
                     let rel = self.v[ch].env.map(|e| self.rb(e + 5));
+                    self.h += if rel.is_some() { H_RELEASE } else { H_RELEASE_NONE };
                     if let Some(rel) = rel {
                         let v = &mut self.v[ch];
                         v.end = 0;
@@ -403,25 +450,33 @@ impl Rjp {
                     return;
                 }
                 0x82 => {
+                    self.h += H_SPEED;
                     self.v[ch].speed = self.rb(p + 1);
                     self.v[ch].pat = Some(p + 2);
                 }
                 0x83 => {
+                    self.h += H_REPEAT_CMD;
                     self.v[ch].repeat = self.rb(p + 1);
                     self.v[ch].pat = Some(p + 2);
                 }
                 0x84 => {
                     let n = self.rb(p + 1);
                     self.v[ch].pat = Some(p + 2);
-                    if n != 0 && self.select(ch, n) {
-                        hw.wait(NEW_INSTRUMENT);
-                    }
+                    self.h += if n == 0 {
+                        H_INSTRUMENT_NONE
+                    } else if self.select(ch, n) {
+                        H_INSTRUMENT_NEW
+                    } else {
+                        H_INSTRUMENT_SAME
+                    };
                 }
                 0x85 => {
+                    self.h += H_VOLUME_CMD;
                     self.v[ch].ivol = self.rb(p + 1) as u16;
                     self.v[ch].pat = Some(p + 3);
                 }
                 0x86 => {
+                    self.h += H_SLIDE_CMD;
                     let v = &mut self.v[ch];
                     v.slide = self.d.get(p + 1).copied().unwrap_or(0);
                     v.rate = be32(&self.d, p + 2);
@@ -429,9 +484,12 @@ impl Rjp {
                     v.keep = true;
                     v.pat = Some(p + 6);
                 }
-                0x87 => return,
+                0x87 => {
+                    self.h += H_ROW_END;
+                    return;
+                }
                 // undefined commands: skipped
-                _ => {}
+                _ => self.h += H_UNDEFINED,
             }
         }
         self.v[ch].active = false;
@@ -445,6 +503,8 @@ impl Rjp {
         }
         v.rep = v.rep.wrapping_sub(1);
         if v.rep != 0 {
+            self.h += H_REPEAT;
+            let v = &mut self.v[ch];
             v.cnt = v.speed;
             return;
         }
@@ -456,13 +516,20 @@ impl Rjp {
 
     /// The envelope, tremolo and scaling; the volume to write.
     fn volume(&mut self, ch: usize) -> u16 {
+        let mut h = H_VOLUME[ch];
         let v = &mut self.v[ch];
         let mut refresh = true;
         if v.phase != 0 {
+            h += H_ENVELOPE;
             let q = if v.d == 0 { 0 } else { v.delta as i32 * v.c as i32 / v.d as i32 };
             v.level = (v.end as i32).wrapping_sub(q) as u8;
             v.c = v.c.wrapping_sub(1);
             if v.c == 255 {
+                h += match v.phase {
+                    4 => H_DECAY,
+                    2 => H_SUSTAIN,
+                    _ => H_RELEASED,
+                };
                 match v.phase {
                     4 => {
                         let env = v.env.unwrap_or(0);
@@ -487,40 +554,49 @@ impl Rjp {
             v.work = v.level as i16;
         }
         if v.trem != 0 {
+            h += H_TREMOLO;
             let t = self.area.get(v.trem as usize + v.tpos as usize).copied().unwrap_or(0) as i8 as i32;
             let w = v.work as i32;
             v.work = (w + ((t * w) >> 7)) as i16;
             v.tpos = v.tpos.wrapping_add(1);
             if v.tpos == v.trem_len.wrapping_mul(2) {
+                h += H_TABLE_WRAP;
                 v.tpos = v.trem_restart.wrapping_mul(2);
             }
         }
         let w = ((v.work as i32 * v.ivol as i32) as i16) >> 6;
         let w = ((w as i32 * 64) as i16) >> 6;
         v.work = w;
+        self.h += h;
         w.clamp(0, 64) as u16
     }
 
     /// The period to write: vibrato, then the slide.
     fn period(&mut self, ch: usize) -> u16 {
+        let mut h = H_PERIOD[ch];
         let v = &mut self.v[ch];
         if v.vib != 0 {
+            h += H_VIBRATO;
             let t = self.area.get(v.vib as usize + v.ppos as usize).copied().unwrap_or(0) as i8 as i32;
             let x = (t * v.base_per as i32) >> 7;
             let mut y = (-x) as i16;
             if y < 0 {
+                h += H_VIBRATO_DOWN;
                 y >>= 1;
             }
             v.per = v.base_per.wrapping_add(y as u16);
             v.ppos = v.ppos.wrapping_add(1);
             if v.ppos == v.vib_len.wrapping_mul(2) {
+                h += H_TABLE_WRAP;
                 v.ppos = v.vib_restart.wrapping_mul(2);
             }
         }
         if v.slide != 0 {
+            h += H_SLIDE;
             v.acc = v.acc.wrapping_add(v.rate);
             v.slide -= 1;
         }
+        self.h += h;
         ((v.acc >> 16) as u16).wrapping_add(v.per)
     }
 
@@ -531,80 +607,96 @@ impl Rjp {
             let v = &self.v[ch];
             let a = self.base.wrapping_add(v.sample).wrapping_add(2 * v.loop_start as u32);
             let len = v.loop_len;
-            self.lead = 0;
+            self.at(hw);
             hw.loc(ch, a);
+            self.h += H_LEN;
+            self.at(hw);
             hw.len(ch, len);
+            self.h += H_INSTALL_END;
         }
         if self.v[ch].dma {
             self.v[ch].dma = false;
-            hw.wait(std::mem::take(&mut self.lead));
+            self.h += H_DMA_ON;
+            self.at(hw);
             hw.dmacon(0x8200 | 1 << ch);
+            self.h -= H_DMA_ON_BACK;
             self.v[ch].install = true;
         }
         self.sequence(ch, hw);
         let vol = self.volume(ch);
-        self.lead = 0;
+        self.at(hw);
         hw.vol(ch, vol);
         let per = self.period(ch);
+        self.at(hw);
         hw.per(ch, per);
+        self.h += H_NEXT_VOICE[ch];
+    }
+
+    /// The write that follows falls at the original's time into the tick.
+    fn at(&self, hw: &mut Hw) {
+        hw.bus.clock = hw.bus.clock.max(self.t0 + self.h / 2);
     }
 }
 
-/// Where the writes of a tick fall in the original's runs, by the previous write (see `WriteGaps`):
-/// the voices' work between two writes, and the tick's first write (the first write of a tick sits at its start
-/// gap).
-static GAPS: WriteGaps = WriteGaps::new(
-    &[
-        (0, 4, 10), // LOC0 -> LEN0 x628
-        (1, 5, 10), // LOC1 -> LEN1 x494
-        (2, 6, 10), // LOC2 -> LEN2 x602
-        (3, 7, 10), // LOC3 -> LEN3 x270
-        (4, 12, 575), // LEN0 -> VOL0 x628
-        (5, 13, 583), // LEN1 -> VOL1 x494
-        (6, 14, 660), // LEN2 -> VOL2 x602
-        (7, 15, 682), // LEN3 -> VOL3 x270
-        (8, 1, 204), // PER0 -> LOC1 x249
-        (8, 13, 729), // PER0 -> VOL1 x3413
-        (8, 16, 500), // PER0 -> DMA_OFF x241
-        (8, 20, 232), // PER0 -> DMA_ON x240
-        (9, 2, 220), // PER1 -> LOC2 x302
-        (9, 14, 748), // PER1 -> VOL2 x2821
-        (9, 16, 515), // PER1 -> DMA_OFF x297
-        (9, 20, 247), // PER1 -> DMA_ON x295
-        (10, 3, 236), // PER2 -> LOC3 x135
-        (10, 15, 777), // PER2 -> VOL3 x2820
-        (10, 16, 531), // PER2 -> DMA_OFF x132
-        (10, 20, 263), // PER2 -> DMA_ON x131
-        (12, 8, 137), // VOL0 -> PER0 x4439
-        (13, 9, 152), // VOL1 -> PER1 x4173
-        (14, 10, 167), // VOL2 -> PER2 x3724
-        (15, 11, 172), // VOL3 -> PER3 x3231
-        (16, 0, 44), // DMA_OFF -> LOC0 x310
-        (16, 1, 44), // DMA_OFF -> LOC1 x243
-        (16, 2, 44), // DMA_OFF -> LOC2 x298
-        (16, 3, 44), // DMA_OFF -> LOC3 x133
-        (20, 12, 512), // DMA_ON -> VOL0 x309
-        (20, 13, 521), // DMA_ON -> VOL1 x242
-        (20, 14, 525), // DMA_ON -> VOL2 x297
-        (20, 15, 538), // DMA_ON -> VOL3 x133
-    ],
-    &[(0, 44), (1, 204), (2, 220), (3, 235), (4, 10), (5, 10), (6, 10), (7, 10), (8, 137), (9, 152), (10, 167), (11, 172), (12, 552), (13, 729), (14, 748), (15, 682), (16, 530), (20, 247)],
-    &[(0, 0), (1, 89), (2, 177), (3, 266), (12, 516), (13, 613), (14, 705), (15, 807), (16, (START_FIRST - NEW_INSTRUMENT) as u16), (20, 28)],
-);
+// The original's time in a tick, in half colour clocks (68000 cycles), measured on the half-cycle
+// write logs of the reference runs of 85 modules (every in-tick gap of 567,000 writes): each piece of
+// work the voices do between two writes costs a fixed time by its path, and the voice's channel.
 
-/// What a voice without a pattern takes of the tick before the next voice's writes (the start gaps
-/// of the first write by channel: LOC 0, 89, 177, 266).
-const LEAD_SKIP: u64 = 89;
-
-/// The tick's first write falls this far into it when it is a note's stop of DMA with a new
-/// instrument (the start gap of a stop of DMA above is this less `NEW_INSTRUMENT`).
-const START_FIRST: u64 = 576;
-
-/// An instrument command that selects another instrument than the voice's: the voice's next write
-/// (its note's stop of DMA) comes this much later. Measured on three modules' notes against the
-/// reference: 243-318 colour clocks later with a new instrument than with the same one (most often
-/// 281), at the tick's start and between voices alike.
-const NEW_INSTRUMENT: u64 = 281;
+/// From the tick's start to the first voice's work.
+const H_START: u64 = 1;
+/// A voice without a pattern, skipped.
+const H_SKIP: u64 = 177;
+/// From a voice's period write to the next voice's work, by the voice's channel.
+const H_NEXT_VOICE: [u64; 4] = [409, 440, 471, 0];
+/// The install of a sample's loop: from its location write to its length write, and after it.
+const H_LEN: u64 = 20;
+const H_INSTALL_END: u64 = 72;
+/// The DMA start: to its write, and what the work after it takes less (55 - 7).
+const H_DMA_ON: u64 = 55;
+const H_DMA_ON_BACK: u64 = 7;
+/// The sequencer's repeat count running down (its row counter at zero, the repeat not).
+const H_REPEAT: u64 = 45;
+/// Row commands: speed, repeat, instrument (none, the voice's, another), volume, slide.
+const H_SPEED: u64 = 75;
+const H_REPEAT_CMD: u64 = 75;
+const H_INSTRUMENT_NONE: u64 = 76;
+const H_INSTRUMENT_SAME: u64 = 131;
+const H_INSTRUMENT_NEW: u64 = 562;
+/// Not seen in the runs: as a speed command.
+const H_VOLUME_CMD: u64 = 75;
+const H_UNDEFINED: u64 = 75;
+const H_SLIDE_CMD: u64 = 139;
+/// A pattern's end with the next list entry read; a list end with a jump, by channel; a list end
+/// that stops the voice (its row's end included), by channel (voice 0's not seen: as voice 1's
+/// less the step of the others); the last voice's end (the song's end).
+const H_PAT_END: u64 = 188;
+const H_LIST_JUMP: [u64; 4] = [235, 268, 297, 316];
+const H_LIST_STOP: [u64; 4] = [258, 291, 320, 339];
+const H_SONG_END: u64 = 87;
+/// A row's end without a note: the release (with an envelope, without), the end-of-row command.
+const H_RELEASE: u64 = 309;
+const H_RELEASE_NONE: u64 = 213;
+const H_ROW_END: u64 = 144;
+/// A note: the row to its stop of DMA, then to the data, location and length writes, and from
+/// the length write to the volume work, by channel.
+const H_NOTE: u64 = 515;
+const H_NOTE_DAT: u64 = 44;
+const H_NOTE_LOC: u64 = 44;
+const H_NOTE_END: [u64; 4] = [175, 220, 265, 281];
+/// The volume work to its write, by channel; the envelope step, its segment ends (attack to decay,
+/// decay to sustain, release to silence); the tremolo (not seen in the runs) and a table's wrap.
+const H_VOLUME: [u64; 4] = [702, 719, 726, 753];
+const H_ENVELOPE: u64 = 330;
+const H_DECAY: u64 = 202;
+const H_SUSTAIN: u64 = 89;
+const H_RELEASED: u64 = 13;
+const H_TREMOLO: u64 = 210;
+const H_TABLE_WRAP: u64 = 24;
+/// The period work to its write, by channel; the vibrato (its downward half), the slide.
+const H_PERIOD: [u64; 4] = [273, 304, 335, 343];
+const H_VIBRATO: u64 = 210;
+const H_VIBRATO_DOWN: u64 = 8;
+const H_SLIDE: u64 = 56;
 
 /// Colour clocks from the song's start to the host's timer start, beyond the first period (the
 /// song starts without a start-up routine: the reference's first tick follows the song start by
@@ -614,19 +706,11 @@ const TIMER_DELAY: u64 = 376;
 /// A change of subsong: the start-up routine's first stop of DMA follows this long after the change.
 const CHANGE_FIRST: u64 = 234;
 
-/// The tick after the start-up one falls this much later than a period after the change.
-const CHANGE_EXTRA: u64 = 380;
-
 /// A change of subsong after ticks: from the start-up routine's second stop of DMA to the song's
-/// start (the host's change returns), this much plus `CHANGE_SETTLE_VOICE` for each voice of the
-/// new subsong after its first. Measured on the empty-subsong skips of 39 reference runs: 1561 with
-/// one voice, 1840 with two, 2329-2431 with four (the four-voice spread is not modelled).
-const CHANGE_SETTLE: u64 = 1561;
-const CHANGE_SETTLE_VOICE: u64 = 279;
-
-/// The first tick after such a change is already due at the song's start and runs at once; its
-/// first DMA write falls this far into it (990 in 30 of the 39 runs, 952 in the others).
-const CHANGE_FIRST_DMA: u64 = 990;
+/// start (the host's change returns), by the voices of the new subsong (1 to 4). Measured on the
+/// subsong changes of 43 reference runs: 1561 with one voice, 1840 with two, 2399 with four in 13
+/// of 26 runs (2329-2431 in the others: not modelled), three voices not seen.
+const CHANGE_SETTLE: [u64; 4] = [1561, 1840, 2120, 2399];
 
 /// The start-up routine of a change of subsong, from `CHANGE_FIRST` after it: all voices off,
 /// the volumes cleared, the DMA stopped again.
@@ -634,8 +718,8 @@ fn startup(hw: &mut Hw) {
     hw.wait(CHANGE_FIRST);
     hw.dmacon(0x000F);
     for ch in 0..4 {
-        hw.vol(ch, 0);
         hw.wait(6);
+        hw.vol(ch, 0);
     }
     hw.wait(4648);
     hw.dmacon(0x000F);
@@ -668,11 +752,22 @@ impl Replayer for Rjp {
             // reference the host's change returns only after it and the voices' set-up: the song
             // starts 1,561-2,431 colour clocks after its second stop of DMA, and the first notes
             // come 990 after that, not 8,257 after the change as when the start-up ran in the tick)
+            //
+            // the host's timer runs on through the change: a tick that falls due within it runs
+            // at the song's start (after the timer's own delay), and the next one comes on the
+            // timer's old grid (measured on 43 runs, changes after 1 to 45 ticks)
+            let grid = self.t0 + self.tick_clocks();
             self.start(n, hw, true);
             startup(hw);
-            let voices = self.flags0.count_ones() as u64;
-            hw.wait(CHANGE_SETTLE + CHANGE_SETTLE_VOICE * voices.saturating_sub(1));
-            self.tick_at = Some(hw.bus.clock);
+            let voices = self.flags0.count_ones() as usize;
+            hw.wait(CHANGE_SETTLE[voices.clamp(1, 4) - 1]);
+            if grid <= hw.bus.clock {
+                self.tick_at = Some(hw.bus.clock + TIMER_DELAY);
+                self.grid = grid + self.tick_clocks();
+            } else {
+                self.first = false;
+                self.tick_at = Some(grid);
+            }
         } else {
             // a change before the host's timer has run (a subsong chosen at the start): the
             // start-up routine runs at once, and the first tick comes a period after the song's
@@ -695,24 +790,23 @@ impl Replayer for Rjp {
 
     fn tick(&mut self, hw: &mut Hw) {
         self.ticked = true;
+        self.t0 = hw.bus.clock;
         if self.flags0 == 0 {
             // a subsong without voices ends at every tick
             self.songend = true;
             return;
         }
+        self.h = H_START;
         if self.first {
-            // the tick after a change of subsong (its start-up routine ran in the change): due at the
-            // song's start, its first DMA write CHANGE_FIRST_DMA into it; the tick after it keeps
-            // its distance from the change
+            // the tick that fell due within a change of subsong: the next one is on the timer's grid
             self.first = false;
-            self.next_at.set(Some(self.due + self.tick_clocks() + CHANGE_EXTRA));
-            hw.wait(CHANGE_FIRST_DMA - START_FIRST);
+            self.next_at.set(Some(self.grid));
         }
-        hw.gaps(&GAPS);
-        self.lead = LEAD_SKIP * self.v.iter().take_while(|v| !v.active).count() as u64;
         for ch in 0..4 {
             if self.v[ch].active {
                 self.step(ch, hw);
+            } else {
+                self.h += H_SKIP;
             }
         }
     }
@@ -867,13 +961,15 @@ mod tests {
         assert_eq!(vols.len(), 4);
         assert!(vols.iter().all(|&t| t > start && t <= song_start), "{vols:?} {start} {song_start}");
         // the voices before voice 3 have no pattern: its first write of the tick (the stop of DMA)
-        // waits for them
+        // follows their skips and its row's commands
         let off = at(0xDFF096, Some(0x0008)).unwrap();
-        assert_eq!(off, song_start + DT_TICK + TIMER_DELAY + START_FIRST + 3 * LEAD_SKIP);
+        let h = H_START + 3 * H_SKIP + H_INSTRUMENT_NEW + H_SPEED + H_REPEAT_CMD + H_NOTE;
+        assert_eq!(off, song_start + DT_TICK + TIMER_DELAY + h / 2);
     }
 
     /// A note whose instrument command selects another instrument than the voice's has its stop of
-    /// DMA `NEW_INSTRUMENT` later than one whose command repeats the voice's instrument.
+    /// DMA later than one whose command repeats the voice's instrument, by the difference of their
+    /// costs (`H_INSTRUMENT_NEW`, `H_INSTRUMENT_SAME`, in half colour clocks).
     #[test]
     fn a_new_instrument_delays_the_note() {
         let off = |second: u8| {
@@ -891,14 +987,16 @@ mod tests {
             let log = e.m.bus.write_log.take().unwrap();
             log.iter().filter(|w| w.0 == 0xDFF096 && w.1 == 0x0001).map(|w| w.2).nth(1).unwrap()
         };
-        assert_eq!(off(2) - off(1), NEW_INSTRUMENT);
+        let d = off(2) - off(1);
+        let h = (H_INSTRUMENT_NEW - H_INSTRUMENT_SAME) / 2;
+        assert!(d == h || d == h + 1, "{d}");
     }
 
     /// The empty first subsong is skipped once it has ticked (the reference's change after ticks):
     /// the start-up routine runs within the change, the song starts a voice-dependent time after
-    /// its second stop of DMA, and the first tick's first DMA write comes CHANGE_FIRST_DMA after
-    /// that (refcmp rows 1676 and 1688: the notes came 7,267 colour clocks late when the start-up
-    /// ran in the tick after the song's start).
+    /// its second stop of DMA (`CHANGE_SETTLE`), and the tick that fell due within the change runs
+    /// the timer's delay after that (refcmp rows 1676 and 1688: the notes came 7,267 colour clocks
+    /// late when the start-up ran in the tick after the song's start).
     #[test]
     fn a_change_after_ticks_runs_the_start_up_before_the_song_start() {
         let dir = Path::new("/rjp-test");
@@ -919,6 +1017,7 @@ mod tests {
         let stops: Vec<u64> = log.iter().filter(|w| w.0 == 0xDFF096 && w.1 == 0x000F).map(|w| w.2).collect();
         let second = *stops.last().unwrap();
         let first_dma = log.iter().find(|w| w.0 == 0xDFF096 && w.1 == 0x0001).unwrap().2;
-        assert_eq!(first_dma, second + CHANGE_SETTLE + CHANGE_FIRST_DMA);
+        let h = H_START + H_INSTRUMENT_NEW + H_SPEED + H_REPEAT_CMD + H_NOTE;
+        assert_eq!(first_dma, second + CHANGE_SETTLE[0] + TIMER_DELAY + h / 2);
     }
 }

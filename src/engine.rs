@@ -933,13 +933,16 @@ impl Engine {
         self.intena_seen = 0;
         self.next_timer = None;
         let name = if pt.title.is_empty() { file_name(path) } else { pt.title.clone() };
+        // PTK-Prowiz's subsongs of a ProWizard conversion follow its own conversion, not this one
+        // (The Player 4.x: p4x.unused 7 against 8 here, p4x.Ingame_21 1 against 3), so it gets one
+        let sub_max = if self.prowizard_converted { 0 } else { pt.subsongs() as u16 - 1 };
         self.playing = Some(Playing {
             backend: Backend::Native(Box::new(pt)),
             module_name: name,
             format: fmt.to_string(),
             author: String::new(),
             sub_min: 0,
-            sub_max: 0,
+            sub_max,
             sub: 0,
             frames: 0,
             custom_player: false,
@@ -1240,7 +1243,18 @@ impl Engine {
         let Some(p) = &self.playing else { return Ok(()) };
         let Backend::Deli(idx) = p.backend else {
             match &mut self.playing {
-                Some(Playing { backend: Backend::Native(pt), .. }) => pt.jump(delta),
+                // a module of one subsong steps through its patterns instead
+                Some(Playing { backend: Backend::Native(pt), sub_max: 0, .. }) => pt.jump(delta),
+                Some(Playing { backend: Backend::Native(pt), sub, sub_max, frames, .. }) => {
+                    let n = *sub as i32 + delta;
+                    if n < 0 || n > *sub_max as i32 {
+                        return Ok(());
+                    }
+                    self.m.bus.paula.write_dmacon(0x000F);
+                    pt.start_subsong(n as usize);
+                    (*sub, *frames) = (n as u16, 0);
+                    self.song_starts();
+                }
                 Some(Playing { backend: Backend::Replay(r), sub, frames, .. }) => {
                     let (lo, hi, cur) = r.subsongs();
                     let n = cur as i32 + delta;

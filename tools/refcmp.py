@@ -31,7 +31,11 @@ settings, WAV for WAV:
              original is the reference of a port that is silent too. The formats
              no Amiga player plays here (BLACKBOX_REF: 8SVX, AIFF, WAV, MPEG audio,
              ZX AY, NSF, Symphonie) are checked against sox, ffmpeg, libgme or
-             openmpt123 instead.
+             openmpt123 instead. uade123's
+             PTK-Prowiz clears every sample's first long before it plays (ProTracker
+             2.3D, the port's original, only a one-shot sample's first word): where
+             that changes what plays, both sides render a copy with it cleared
+             (PTK_CLEAR_NOTE in the row's note).
 
 The two sample streams are compared and each file gets a class:
 
@@ -739,6 +743,50 @@ def render_uade123(ctx, mod, po, want):
     return dict(kind='uade123', wav=raw, data=data, out='uade123 ' + info, led='', player='uade123: ' + info, o={}, note='')
 
 
+# UADE's PTK-Prowiz ("Protracker and family", the uade123 reference of plain ProTracker modules) clears the
+# first long of every sample before it plays, looped or not: in UADE's DMA fetch log of the 26 corpus
+# modules it is the uade123 reference of (20 s each), all 182 samples fetched read 0000 0000 at their first
+# 4 bytes, 79 of them not zero in the file (54 with a loop start above 0, 16 with a loop from the start, 112
+# one-shot). ProTracker 2.3D, which the port follows, clears only the first word of a sample that does not
+# loop (mt_init). A loop from the sample's start then plays 4 zero bytes on each pass in the reference: on
+# 16-32 byte loops a different timbre (MOD.Albatrossen: DIFF). Such a module is compared on a copy with
+# the first long of each sample cleared, on BOTH sides: the port stays 2.3D-correct and the reference's
+# quirk leaves the comparison. Only the 31-sample layouts (the tags the measured files have).
+PTK_CLEAR_TAGS = (b'M.K.', b'M!K!', b'M&K!', b'N.T.')
+PTK_CLEAR_NOTE = 'PTK-Prowiz clears each sample\'s first long: both sides on a copy with it cleared'
+
+
+def ptk_cleared_copy(ctx, mod):
+    """A copy of the 31-sample ProTracker module `mod` with each sample's first 4 bytes cleared, or None when
+    the port already plays the same bytes as PTK-Prowiz (every first long zero, but the first word of a
+    one-shot sample, which the port clears too)."""
+    try:
+        with open(mod, 'rb') as fh:
+            d = bytearray(fh.read())
+    except OSError:
+        return None
+    if len(d) < 1084 or bytes(d[1080:1084]) not in PTK_CLEAR_TAGS:
+        return None
+    off = 1084 + (max(d[952:1080]) + 1) * 1024
+    differs = False
+    for i in range(31):
+        h = 20 + 30 * i
+        ln, rep, rl = (int.from_bytes(d[h + k:h + k + 2], 'big') for k in (22, 26, 28))
+        if ln:
+            first = range(2 if rep + max(rl, 1) <= 1 else 0, 4)   # the port clears the first word of a one-shot
+            differs |= any(off + k < len(d) and d[off + k] for k in first)
+            d[off:min(off + 4, len(d))] = bytes(max(0, min(4, len(d) - off)))
+        off += ln * 2
+    if not differs:
+        return None
+    dst = os.path.join(ctx.cache, 'ptkclr-' + hashlib.sha1(mod.encode()).hexdigest()[:12])
+    os.makedirs(dst, exist_ok=True)
+    out = os.path.join(dst, os.path.basename(mod))
+    with open(out, 'wb') as fh:
+        fh.write(d)
+    return out
+
+
 # Atari ST SNDH: the port's reference is AtariAudio 1.30 (README), built in the scratch dir from its
 # repository (fixround/port-sndh/mkref.sh: `ref FILE OUT.wav LOG SUBSONG SECONDS`, 48 kHz mono, its
 # first line `... subsongs=N default=D ...`). Its level is the engine's at volume 0.8 (measured: the 5
@@ -1247,9 +1295,21 @@ def process(ctx, f):
         if ref['kind'] == 'hvl-ticks':
             row.update(cls=ref['cls'], note=ref['note'], ref_player='hvl_replay 1.9 (BSD-3) tick dump')
             return row
+        cut_note = ''
+        if ref['kind'] == 'uade123' and ref['player'].startswith('uade123: player=Protracker_and_family'):
+            clr = ptk_cleared_copy(ctx, mod)
+            if clr:
+                cw, cplay, cout, cled, _ = render_engine(ctx, clr, True, None)
+                co = parse_output(cout)
+                cref = render_uade123(ctx, clr, co, _norm(co.get('format', ''))) if cw and cplay and co == po else None
+                if cref:
+                    rb, ref = read_wav(cw), cref
+                    row['led_port'] = cled or ''
+                    cut_note = PTK_CLEAR_NOTE
+                else:
+                    cut_note = 'PTK-Prowiz clears each sample\'s first long; the cleared copy did not render'
         row.update(out_ref=ref['out'], led_ref=ref['led'], ref_player=ref['player'])
         ra, oref = ref['data'], ref['o']
-        cut_note = ''
         if ra[0] != rb[0]:
             row['note'] = f'rates {ra[0]} vs {rb[0]}'
             return row

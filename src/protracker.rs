@@ -169,6 +169,43 @@ pub struct ProTracker {
     /// original (UADE's PTK-Prowiz, a ProTracker 3.0b replay) plays on through the pattern and
     /// ends the song at the wrap (The Player 4 modules `p4x.Col30.mod`, `p4x.ingame_7`).
     pub f00_ends: bool,
+    /// The first position of each subsong (see `subsong_starts`).
+    starts: Vec<u8>,
+    /// The subsong playing, an index into `starts`.
+    sub: usize,
+}
+
+/// Effect B in the pattern long `l`, and its parameter.
+fn pos_jump_of(l: u32) -> Option<u8> {
+    ((l >> 8) & 0xF == 0xB).then_some(l as u8)
+}
+
+/// The first position of each subsong, as UADE's PTK-Prowiz ("Protracker and family") counts them
+/// (ProTracker 2.3D itself has none): measured black box, on synthetic modules and the subsong
+/// counts uade123 reports for the corpus's ProTracker modules (7,741 of 7,750 the same; the other
+/// 9 have 1 or 2 more there, from forward jumps it counts in a way not pinned down). A position of the song whose
+/// pattern holds a position jump (Bxx, any row, any voice, reached or not) to itself or back
+/// ends a subsong; each one that does starts a subsong at the next position, the first at
+/// position 0, and the position after the last such jump starts none (what follows it is no
+/// subsong: it never jumps back). Jumps forward (to a later position, or past the song's end)
+/// end none. A module whose patterns (all of them, up to the highest in the order table, as
+/// mt_init counts them) hold 127 position jumps or more has one subsong only.
+fn subsong_starts(orders: &[u8; 128], song_len: usize, patterns: &[u32]) -> Vec<u8> {
+    if patterns.iter().filter(|&&l| pos_jump_of(l).is_some()).count() >= 127 {
+        return vec![0];
+    }
+    let mut starts = vec![0u8];
+    let ends: Vec<usize> = (0..song_len.min(128))
+        .filter(|&p| {
+            let pat = orders[p] as usize;
+            patterns.get(pat * 256..pat * 256 + 256).unwrap_or(&[]).iter().any(|&l| pos_jump_of(l).is_some_and(|t| t as usize <= p))
+        })
+        .collect();
+    // the end of the last subsong starts nothing
+    for &p in ends.iter().take(ends.len().saturating_sub(1)) {
+        starts.push(p as u8 + 1);
+    }
+    starts
 }
 
 fn word(d: &[u8], o: usize) -> u16 {
@@ -282,12 +319,14 @@ impl ProTracker {
             addr += length as u32 * 2;
         }
         let title: String = d[..20].iter().take_while(|&&c| c != 0).map(|&c| c as char).collect();
+        let patterns: Vec<u32> = patterns.collect();
+        let starts = subsong_starts(&orders, song_len, &patterns);
         let mut pt = ProTracker {
             title: title.trim().to_string(),
             samples,
             orders,
             song_len,
-            patterns: patterns.collect(),
+            patterns,
             ch: Default::default(),
             speed: 6,
             counter: 0,
@@ -305,6 +344,8 @@ impl ProTracker {
             songend: false,
             filter: false,
             f00_ends: true,
+            starts,
+            sub: 0,
         };
         pt.restart_song();
         Some(pt)
@@ -315,7 +356,7 @@ impl ProTracker {
         self.speed = 6;
         self.counter = 0;
         self.bpm = 125;
-        self.song_pos = 0;
+        self.song_pos = self.starts[self.sub];
         self.row = 0;
         self.pbreak_pos = 0;
         self.pbreak_flag = false;
@@ -325,6 +366,19 @@ impl ProTracker {
         self.low_mask = 0xFF;
         self.visited.clear();
         self.songend = false;
+    }
+
+    /// How many subsongs the module has (`subsong_starts`).
+    pub fn subsongs(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// Restarts at subsong `n` (from 0), if there is one.
+    pub fn start_subsong(&mut self, n: usize) {
+        if n < self.starts.len() {
+            self.sub = n;
+            self.restart_song();
+        }
     }
 
     pub fn position(&self) -> (usize, usize, usize) {
@@ -420,8 +474,12 @@ impl ProTracker {
         self.song_pos = self.song_pos.wrapping_add(1) & 127;
         if self.song_pos as usize >= self.song_len {
             self.song_pos = 0;
-            self.songend = true;
-            self.visited.clear();
+            // a later subsong plays on past the wrap, to the first row it plays again (as
+            // PTK-Prowiz's subsongs do: measured on synthetic modules in uade123)
+            if self.starts[self.sub] == 0 {
+                self.songend = true;
+                self.visited.clear();
+            }
         }
     }
 
@@ -1090,6 +1148,75 @@ mod tests {
         let i = w[5].iter().position(|&x| x == (0xDFF096, 1)).unwrap();
         assert_eq!(&w[5][i + 1..i + 5], &[(0xDFF0A4, 0), (0xDFF0A0, 0), (0xDFF0A2, 0), (0xDFF0A4, 1)]);
         assert!(w[5].ends_with(&[(0xDFF0A0, 0), (0xDFF0A2, 0), (0xDFF0A4, 1)]));
+    }
+
+    /// Subsong starts of a song of `orders` whose patterns hold the B commands `jumps`
+    /// ((pattern, row, parameter)), as uade123 reported them for the same synthetic modules.
+    fn starts_of(orders: &[u8], jumps: &[(usize, usize, u8)]) -> Vec<u8> {
+        let mut o = [0u8; 128];
+        o[..orders.len()].copy_from_slice(orders);
+        let npat = *orders.iter().max().unwrap() as usize + 1;
+        let mut pats = vec![0u32; npat * 256];
+        for (k, &(p, r, prm)) in jumps.iter().enumerate() {
+            // on voice 1, or 2 when two share a row
+            let v = 1 + jumps[..k].iter().filter(|j| j.0 == p && j.1 == r).count();
+            pats[p * 256 + r * 4 + v] = 0xB00 | prm as u32;
+        }
+        subsong_starts(&o, orders.len(), &pats)
+    }
+
+    #[test]
+    fn subsongs_start_after_each_jump_back_but_the_last() {
+        // no jump; one back at position 1 (what follows never jumps back: no subsong)
+        assert_eq!(starts_of(&[0, 1, 2], &[]), [0]);
+        assert_eq!(starts_of(&[0, 1, 2, 3], &[(1, 10, 0)]), [0]);
+        // back at 1 and 3; to itself counts; three of them
+        assert_eq!(starts_of(&[0, 1, 2, 3], &[(1, 10, 0), (3, 5, 2)]), [0, 2]);
+        assert_eq!(starts_of(&[0, 1, 2, 3], &[(1, 10, 1), (3, 10, 0)]), [0, 2]);
+        assert_eq!(starts_of(&[0, 1, 2, 3, 4, 5], &[(1, 10, 0), (3, 10, 2), (5, 10, 4)]), [0, 2, 4]);
+        // forward jumps (also past the song's end) end nothing
+        assert_eq!(starts_of(&[0, 1, 2, 3, 4], &[(1, 10, 0), (2, 10, 4), (4, 10, 0)]), [0, 2]);
+        assert_eq!(starts_of(&[0, 1, 2, 3], &[(1, 10, 0x7f), (3, 10, 0)]), [0]);
+        // a jump nothing reaches still counts; a pattern counts at each position that plays it
+        assert_eq!(starts_of(&[0, 1, 2, 3], &[(0, 20, 0), (3, 10, 2)]), [0, 1]);
+        assert_eq!(starts_of(&[0, 1, 0, 2], &[(0, 10, 0)]), [0, 1]);
+        assert_eq!(starts_of(&[0, 1, 2, 1, 3], &[(1, 10, 0), (3, 0, 0)]), [0, 2, 4]);
+        // 126 B commands in the patterns are counted, 127 give up
+        let many = |n3: usize| -> Vec<(usize, usize, u8)> { (0..64).map(|r| (1, r, 0)).chain((0..n3).map(|r| (3, r, 0))).collect() };
+        assert_eq!(starts_of(&[0, 1, 2, 3], &many(62)), [0, 2]);
+        assert_eq!(starts_of(&[0, 1, 2, 3], &many(63)), [0]);
+    }
+
+    #[test]
+    fn a_later_subsong_plays_past_the_wrap_to_a_row_played_again() {
+        // positions 0..5, row 10 of 1: B00, of 2: B05, of 3: B02 (uade123: subsong 2 plays 2.0-10,
+        // 5.0-63, 0.0-63, 1.0-10 and ends on 0.0)
+        let mut d = module(100, 0, 1, 0, &[]);
+        d.truncate(1084);
+        d[950] = 6;
+        d[952..958].copy_from_slice(&[0, 1, 2, 3, 4, 5]);
+        let mut pats = vec![0u8; 6 * 1024];
+        for (p, b) in [(1usize, 0xB00), (2, 0xB05), (3, 0xB02)] {
+            pats[p * 1024 + 10 * 16 + 4..p * 1024 + 10 * 16 + 8].copy_from_slice(&note(0, 0, b).to_be_bytes());
+        }
+        d.extend(pats);
+        let mut pt = ProTracker::new(&d, BASE).unwrap();
+        assert_eq!(pt.subsongs(), 2);
+        pt.start_subsong(1);
+        assert_eq!(pt.position().0, 2);
+        let mut b = bus();
+        // 11 + 64 rows to the wrap, which is no end
+        run(&mut pt, &mut b, 6 * 75);
+        assert!(!pt.songend);
+        assert_eq!(pt.position(), (0, 6, 0));
+        // 64 + 11 more, and the jump's row 0.0 played again
+        run(&mut pt, &mut b, 6 * 75);
+        assert!(!pt.songend);
+        run(&mut pt, &mut b, 6);
+        assert!(pt.songend);
+        // subsong 1 ends at the wrap as before
+        pt.start_subsong(0);
+        assert_eq!(pt.position().0, 0);
     }
 
     #[test]

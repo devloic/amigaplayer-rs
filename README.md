@@ -539,6 +539,24 @@ starting a portamento a tick later than 2.3D does; others are 0-length
 samples, which PTK-Prowiz does not play. Its DMA waits are 10 raster lines,
 2.3D's 1515 colour clocks.
 
+Subsongs follow PTK-Prowiz's (2.3D has none), measured black box: a position
+of the song whose pattern holds a Bxx (any row or voice, reached or not) to
+itself or back ends a subsong, each such position but the last starts one at
+the next position, and a module whose patterns hold 127 B commands or more
+has one subsong. A later subsong plays on past the wrap to the first row it
+plays again. Of the 7,750 corpus modules (AMP, The Mod Archive, UnExoticA)
+uade123 plays with PTK-Prowiz on the built-in replayer, 7,741 get uade123's
+subsong count (98 of the 107 with several); the other 9 (`oriental_level-*`,
+`dojo_dan_*`, `delirious_v`, `gameplus`, `tskweeks`) have 1 or 2 more there, from
+forward jumps it also counts in a way not pinned down (minimal case: orders
+0 1 2 3 2, B00 in pattern 1, B01 in 2, B04 in 3: 4 subsongs, 3 here). A
+ProWizard conversion keeps one subsong: PTK-Prowiz counts on its own
+conversion, which differs (The Player 4.x `p4x.unused`: 7 there, 8 by the rule
+on this conversion). The subsong keys step through the patterns of a module
+of one subsong, as before. (refcmp: PTK-Prowiz also clears the first long of
+every sample, 2.3D only the first word of a one-shot sample; refcmp compares
+such modules on a copy with it cleared on both sides.)
+
 8-channel MODs (`CD81`, `8CHN`, `FLT8`) are not ProTracker's: DeliTracker's
 TakeTracker and PS3M players take them and mix in software, so the built-in
 replayer leaves them alone.

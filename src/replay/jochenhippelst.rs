@@ -28,11 +28,12 @@
 //! files built from them for the cases they do not hold (a companion sample file, a table word
 //! of $100 in a raw module, sample ends before their starts, the Amiga shape of a pitch
 //! program, the old command set with the MMME code and samples).
+//! (Counted while the code bytes behind the volume table were embedded; a module with a volume
+//! index above 17 now differs in those volume values.)
 //!
-//! Embedded data: `jochenhippelst_data.bin` (52 bytes) is the volume table together with the bytes
-//! that follow it in the original player, which a volume index above 17 reads. It is taken from the
-//! original player on the project owner's decision; the 18 table entries are written out in the
-//! specification and the rest are the bytes real modules reach. `jochenhippelst_noise.bin` (1024
+//! Embedded data: the volume table (`VOL_TABLE`, 18 values) as the specification writes it out. A
+//! volume index above 17 reads the original player's own code behind the table there; those bytes
+//! are not in this port, which reads 0 (see the choices below). `jochenhippelst_noise.bin` (1024
 //! bytes) is the noise buffer and `PULSE` the 4-byte pulse, both read from the original player's
 //! memory while it plays (it fills them at its start-up, the same bytes in every run, and does not
 //! change them afterwards), also on the project owner's decision: with them a tone or the noise is
@@ -41,7 +42,7 @@
 //! Choices where the specification is silent (all safe, none can panic or hang):
 //! * the prefix's pointer to the module is found as the first PC-relative address load in the first
 //!   128 words whose target holds a module tag; failing that the module is not recognised;
-//! * a volume index past the 52 known values reads as 0;
+//! * a volume index past the 18-entry volume table reads as 0 (the original reads its own code);
 //! * a digital sample number past the sample table reads the bytes that follow it in the module
 //!   (zero past the module's end), and the sample command plays what the bytes at the table's
 //!   place say when no table is there, as the original does;
@@ -80,8 +81,8 @@ fn st_layout(h: &[u8]) -> bool {
 
 /// Colour clocks between two ticks.
 const TICK: u64 = 70940;
-/// The volume table (18 values) and the 34 bytes after it.
-static VOL_TABLE: &[u8] = include_bytes!("jochenhippelst_data.bin");
+/// The volume table (18 values, specification 9.2).
+static VOL_TABLE: &[u8] = &[0, 1, 2, 3, 4, 6, 8, 10, 13, 16, 20, 24, 30, 38, 48, 64, 32, 0];
 /// The noise buffer (1024 bytes) as the original player holds it while it plays: the same bytes in
 /// every run and for every module, never changed after the player's start-up.
 static NOISE: &[u8] = include_bytes!("jochenhippelst_noise.bin");

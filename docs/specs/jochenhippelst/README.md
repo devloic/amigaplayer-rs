@@ -14,7 +14,8 @@ Unknowns / caveats:
   memory is zero; host-dependent quirk.
 * Header reads on raw modules with digital samples under $E7 depend on memory layout; unmatchable.
 * Volume indices above 17 read player code bytes (data/volume-table-overread.bin, indices 0..51); indices
-  past ~51 unknown. The 52-byte volume table is embedded in the port (project owner decision)..
+  past ~51 unknown. The port embeds only the 18 table values; an index above 17 reads 0 (code bytes are not
+  embedded).
 * Two-file (LSMP) modules: write-compare of my model with the reference failed at tick 2 (model lacks
   correct sample-pointer handling for the companion); values for that path are unverified.
 * Raw-pattern conversion (section 3) is described behaviourally; the interpreter may read raw patterns directly.

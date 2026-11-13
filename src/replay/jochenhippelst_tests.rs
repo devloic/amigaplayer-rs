@@ -72,7 +72,8 @@ fn run(d: &[u8], ticks: usize) -> Option<Vec<(u32, u16, u64)>> {
 
 #[test]
 fn tables_have_their_sizes() {
-    assert_eq!(VOL_TABLE.len(), 52);
+    assert_eq!(VOL_TABLE.len(), 18);
+    assert_eq!((vol_table(15), vol_table(17), vol_table(18), vol_table(51)), (64, 0, 0, 0));
     assert_eq!(YM_PERIODS.len(), 96);
 }
 

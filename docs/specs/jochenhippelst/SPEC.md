@@ -414,7 +414,8 @@ Index = the YM volume byte (0..$3F expected). Values for indices 0..17:
 0, 1, 2, 3, 4, 6, 8, 10, 13, 16, 20, 24, 30, 38, 48, 64, 32, 0. For larger indices the table is read
 beyond its end and returns bytes of the player's code; the first 52 entries (indices 0..51)
 are 52 bytes long in total (the values for indices 18..51 are not a designed table). Real modules do not exceed volume index $3F normally; fuzzed modules showed that values
-above $10 occur only with deliberately large volumes. The port embeds those 52 bytes.
+above $10 occur only with deliberately large volumes. The port does not embed those code bytes: an index above
+17 reads 0.
 
 ### 9.3 note-start sequence (exact write order)
 

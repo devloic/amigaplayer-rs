@@ -133,7 +133,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Music-Ass_note | Music-Assembler 1.30 | Music Assembler | open `Music Assembler` | 16 I | A | V |
 | MusicMaker_note | MusicMaker 1.30 | MusicMaker 4V/8V, by name; it refused the corpus's single-file `MM8.` modules | open `MusicMaker 4V`, `8V` | 4V 1 S; 8V 9 N | N | V |
 | NESA_note | NESA 1.23 ("NESA - NES Audio", Morgan Johansson) | NES music (no file found) | none | none | N | X |
-| NSF | NSF 1.0 (Eagleplayer; "based on CoolNESs") | NES Sound Format (`NESM`; none in the header index) | none | none | N | X |
+| NSF | NSF 1.0 (Eagleplayer; "based on CoolNESs") | NES Sound Format (`NESM`) | built-in 6502 + 2A03 APU (`src/replay/nsf.rs`, 67cc1e6); expansion-chip tunes refused | none (4 files in `dl-modules/NSF/`, unit tests; checked against libgme, not sample-exact) | N | U |
 | OctaMED | OctaMED 1.20 | OctaMED SoundStudio (MMD3) | open `OctaMED SoundStudio` | 4 I | A | V |
 | Paul Shields | Paul Shields 0.2 (an Eagleplayer) | Paul Shields | open `Paul Shields` | 8 S | A | V |
 | PierreAdane | Pierre Adane Packer 0.1 (an Eagleplayer) | Pierre Adane Packer (`pap.`) | open `Pierre Adane Packer` | 10 S | R | V |
@@ -219,7 +219,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | M. Grouleff | M. Grouleff 2.0 | unidentified Morten Grouleff format: it refused all 8 EarAche corpus files | none found | none | N | X |
 | M.O.N. | M.O.N. 2.0 | Maniacs of Noise | open `Maniacs of Noise` | 10 S (ref 10) | A | V |
 | M.O.N. Old | Maniacs of Noise 1.1 (a DeliPlayer) | old Maniacs of Noise (it took the Jeroen Tel and Art And Magic files) | open `Jeroen Tel` | 5 S, 1 D, 1 Q | A | V |
-| MPEGAudio | MPEGAudio 0.79 (needs mpega.library) | MPEG audio layers 1-3 (its check took two `.mp2` files) | none: `src/riffwave.rs` leaves MPEG to "other players" | none | R | X |
+| MPEGAudio | MPEGAudio 0.79 (needs mpega.library) | MPEG audio layers 1-3 | built-in decoder `src/mpegaudio.rs` (symphonia-bundle-mp3, MPL-2.0; 171478b): .mp1/.mp2/.mp3 and WAV tags 0x50/0x55 | none (unit-test fixtures) | R | U |
 | Music Assembler | Music Assembler 2.1 | Music Assembler | open `Music Assembler` | 16 I (ref 16) | A | V |
 | MusiclineEditor | MusiclineEditor 1.2 | Musicline Editor | open `Musicline Editor` | 28 I (ref 28) | A | V |
 | MusicMaker4 | MusicMaker4 0.4 | MusicMaker 4V, by name (refused the corpus files) | open `MusicMaker 4V` | 1 S | N | V |
@@ -289,13 +289,12 @@ PlayAY is counted under U (EMUL and AMAD play). The two Datatype players are cou
 partial (only 8SVX, AIFF and WAV).
 
 PlaySid is counted under X in the table above but is covered by builds with `--features sid`
-(C64 PSID, GPL-2.0-only, so not in the default build): BFB Master's only disk holds AHX modules, which play. 10 player files are really not covered.
+(C64 PSID, GPL-2.0-only, so not in the default build): BFB Master's only disk holds AHX modules, which play. NSF and MPEGAudio are covered since 67cc1e6 and 171478b. 8 player files are really not covered.
 
-Formats that are not covered (10 player files):
+Formats that are not covered (8 player files):
 
-- NES: NESA (`NESA_note`) and NSF (`NSF`);
+- NES: NESA (`NESA_note`, `.nsa` rips of the A/NES emulator; no file found);
 - Bryan Ford's MultiPlayer formats GMOD (`PlayerStore/GMOD`, `Eagleplayers/GMOD`) and XMOD;
-- MPEG audio (`MPEGAudio`);
 - Wizard of Sound;
 - formats not identified from any file: `GlueMaster`, `M. Grouleff` (not the EarAche modules),
   `SUNtronic Custom` (not the `.sun` modules);

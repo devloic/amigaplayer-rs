@@ -1758,13 +1758,26 @@ fn cia_call(m: &mut Machine, cia: usize, lvo: i32) -> bool {
 fn intuition_call(m: &mut Machine, lvo: i32) -> bool {
     match lvo {
         588 => {
-            // EasyRequestArgs: answer the first gadget
+            // EasyRequestArgs: answer the first gadget, except that with an "Ignore"
+            // gadget there is the one that is answered (nobody is there to rename or
+            // choose a file: ST-NT-PT_Song's "Can't load instrument" offers
+            // Rename|Ignore|Cancel, and Rename goes on to open a file requester).
+            // Intuition numbers the gadgets 1, 2, ... and the last (rightmost) 0.
             let es = m.a(1);
+            let mut answer = 1;
             if es != 0 {
                 let t = m.bus.r32(es + 12);
                 log::info!("EasyRequest: {}", m.bus.read_cstr(t));
+                let g = m.bus.r32(es + 16);
+                if g != 0 {
+                    let gadgets = m.bus.read_cstr(g);
+                    let all: Vec<&str> = gadgets.split('|').collect();
+                    if let Some(i) = all.iter().position(|x| x.trim().eq_ignore_ascii_case("ignore")) {
+                        answer = if i + 1 == all.len() { 0 } else { i as u32 + 1 };
+                    }
+                }
             }
-            m.set_d0(1);
+            m.set_d0(answer);
             true
         }
         _ => false,
@@ -2307,6 +2320,29 @@ mod tests {
         m.bus.paula.sync(m.bus.clock, &m.bus.ram);
     }
     use m68k::CpuType;
+
+    /// ST-NT-PT_Song's "Can't load instrument" requester offers Rename|Ignore|Cancel; the
+    /// first gadget (Rename) opens an asl.library file requester the host has not got and the
+    /// player returned through a null library base ("unbalanced stack"). The host answers
+    /// Ignore (gadget 2: the song plays without that instrument); with no Ignore it answers 1.
+    #[test]
+    fn easy_request_answers_ignore() {
+        let mut m = Machine::new(CpuType::M68000);
+        let ask = |m: &mut Machine, gadgets: &str| {
+            let es = m.alloc(20);
+            let text = m.alloc_cstr("Can't load instrument");
+            let g = m.alloc_cstr(gadgets);
+            m.bus.w32(es + 12, text);
+            m.bus.w32(es + 16, g);
+            m.cpu.dar[8 + 1] = es;
+            assert!(intuition_call(m, 588));
+            m.d(0)
+        };
+        assert_eq!(ask(&mut m, "Rename|Ignore|Cancel"), 2);
+        assert_eq!(ask(&mut m, "Retry|Ignore"), 0);
+        assert_eq!(ask(&mut m, "Ok|Cancel"), 1);
+        assert_eq!(ask(&mut m, "Ok"), 1);
+    }
 
     #[test]
     fn host_path_ignores_case() {

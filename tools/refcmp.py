@@ -43,6 +43,13 @@ Outputs (in --out): refcmp.tsv, summary.txt, report.html. The baseline
 NEW inconsistencies (bad now, good or absent before) and FIXED ones, and exits 1
 on a new one. Renders are cached (--cache) by binary mtime and size, settings,
 module and player directories.
+
+The baseline is measured with a binary that has NO recompiled players (crates/players-native/gen
+absent, or its `gen` feature off). With gen compiled in (a clean build in a checkout that has
+gen/, e.g. a fresh CARGO_TARGET_DIR) the machine's heap ends at NATIVE_LO instead of the top of
+RAM, the reference's allocations land at other addresses, and 18 rows move (Musicline
+IDENTICAL -> SIMILAR, several MED/SoundFactory/ArtOfNoise rows): not a regression of the port.
+Check the binary is the right kind: it is about 10 MB without gen, about 33 MB with.
 """
 import argparse, concurrent.futures as cf, hashlib, html, json, lzma, os, re, shutil, subprocess, sys, wave
 import numpy as np

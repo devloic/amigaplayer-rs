@@ -1,12 +1,23 @@
-//! Titanics Player, ported from NostalgicPlayer's TitanicsPlayerFormat: a
-//! 15-sample module.
+//! Titanics Player, ported from NostalgicPlayer's TitanicsPlayerFormat.
 //!
-//! 15 sample entries (data address, length, volume word, loop start and length),
-//! then a pattern offset per position up to 0xffff, and the patterns: four bytes
-//! an entry, the first one's bit 7 ending the pattern and its low bits the rows
-//! from the previous entry (the first entry is on row 0), then the voice and the
-//! note, and the ProTracker sample/effect byte and effect value. A note n plays
-//! the table's period n (not n - 1), as the C# converter has it.
+//! 15 sample entries (data address, length, volume word, loop start in bytes and
+//! loop length), then a pattern offset per position up to 0xffff, and the patterns:
+//! four bytes an entry, its first byte's bit 7 ending the pattern and its low bits
+//! the rows from the previous entry (from row 0 for the first), then the voice and
+//! the note (0-35, 63 none), and the ProTracker sample/effect byte and effect value.
+//! A note n plays the table's period n (not n - 1), as the C# converter has it.
+//!
+//! Where NostalgicPlayer differs, this follows the original (UADE's Titanics
+//! Packer, its write logs): note 0 is C-1 (856), not an empty note; the first
+//! entry's rows count too (a pattern starting with $20 plays from row 32); and the
+//! result is a 31-sample ProTracker module, not a 15-sample SoundTracker one, as the
+//! original plays ProTracker's effects (Fxx speeds, Cxx volumes clamped at 64) at
+//! 50 Hz, not a SoundTracker's tempo byte and unchecked volumes. (It plays a loop
+//! from its start, as SoundTrackers do; the ProTracker module plays the words
+//! before it first.) Not followed: the original plays one module of the 12 known,
+//! `New A500 Demo`, at 25 Hz from its first interrupt, for no field of the format
+//! (the rate changes with the file's length and its last sample's address and
+//! length, not with its pattern or sample data).
 
 use super::core::*;
 
@@ -29,9 +40,6 @@ impl Format for Titanics {
     }
     fn base(&mut self) -> &mut Base {
         &mut self.base
-    }
-    fn fifteen(&self) -> bool {
-        true
     }
     fn check(&mut self, s: &mut Stream) -> bool {
         if s.len() < 180 {
@@ -104,7 +112,8 @@ impl Format for Titanics {
             self.sample_addresses[i] = s.read_b_u32();
             let length = s.read_b_u16();
             let volume = s.read_b_u16() as u8;
-            let loop_start = s.read_b_u16();
+            // (in bytes: the original plays a loop from the sample's address plus it)
+            let loop_start = s.read_b_u16() / 2;
             let loop_length = s.read_b_u16();
             push!(v, SampleInfo { name: None, length, loop_start, loop_length, volume, fine_tune: 0 }, s);
         }
@@ -112,9 +121,6 @@ impl Format for Titanics {
     }
     fn position_list(&mut self, _s: &mut Stream) -> Option<Vec<u8>> {
         Some(self.position_list.clone())
-    }
-    fn restart(&mut self, _s: &mut Stream) -> u8 {
-        0x78
     }
     fn patterns(&mut self, s: &mut Stream) -> Option<Vec<Vec<u8>>> {
         let mut out = Vec::new();
@@ -125,15 +131,18 @@ impl Format for Titanics {
                 let mut pat = vec![0u8; 1024];
                 s.seek(self.pattern_offsets[i] as i64);
                 let mut next = s.read_u8();
-                let mut row = 0usize;
-                loop {
+                // the first entry's rows count from row 0 too: the original plays a pattern
+                // whose first byte is $20 from row 32 (UADE's Titanics Packer, write log)
+                let mut row = (next & 0x7f) as usize;
+                while row < 64 {
                     let c1 = next;
                     let c2 = s.read_u8();
                     let c3 = s.read_u8();
                     let c4 = s.read_u8();
                     let o = row * 16 + ((c2 >> 6) & 3) as usize * 4;
+                    // note 0 is C-1 (856, as the original writes it); 63 is no note
                     let note = (c2 & 0x3f) as usize;
-                    if note > 0 && note <= 36 {
+                    if note <= 36 {
                         pat[o] = PERIODS[note][0];
                         pat[o + 1] = PERIODS[note][1];
                     }
@@ -174,19 +183,13 @@ mod tests {
     use crate::prowizard::core::PERIODS;
     use crate::prowizard::tests::*;
 
-    /// The song without what Titanics cannot hold: fine tune, and the period at
-    /// note 0 (856), which becomes 808.
+    /// The song without what Titanics cannot hold (fine tune), its second pattern
+    /// starting at row 32 (the first entry's rows count from row 0).
     fn song() -> Song {
         let mut song = Song::new(3);
         song.samples[1].1 = 0;
-        for p in &mut song.patterns {
-            for row in p.iter_mut() {
-                for n in row.iter_mut() {
-                    if n.1 == 856 {
-                        n.1 = 808;
-                    }
-                }
-            }
+        for row in &mut song.patterns[1][..32] {
+            *row = [(0, 0, 0, 0); 4];
         }
         song
     }
@@ -200,15 +203,18 @@ mod tests {
             let mut entries: Vec<(usize, usize, (u8, u16, u8, u8))> = Vec::new();
             for (r, row) in p.iter().enumerate() {
                 for (v, &n) in row.iter().enumerate() {
-                    if n != (0, 0, 0, 0) || (r == 0 && v == 0) {
+                    if n != (0, 0, 0, 0) {
                         entries.push((r, v, n));
                     }
                 }
             }
+            if entries.is_empty() {
+                entries.push((0, 0, (0, 0, 0, 0)));
+            }
             let mut prev = 0;
             for (i, &(r, v, (smp, per, fx, val))) in entries.iter().enumerate() {
                 let last = if i + 1 == entries.len() { 0x80 } else { 0 };
-                let note = if per == 0 { 0 } else { PERIODS.iter().position(|x| u16::from_be_bytes(*x) == per).unwrap() };
+                let note = if per == 0 { 63 } else { PERIODS.iter().position(|x| u16::from_be_bytes(*x) == per).unwrap() };
                 pats.extend([last | (r - prev) as u8, (v << 6) as u8 | note as u8, (smp << 4) | fx, val]);
                 prev = r;
             }
@@ -223,7 +229,7 @@ mod tests {
             d.extend((addr as u32).to_be_bytes());
             d.extend(s.0.to_be_bytes());
             d.extend((s.2 as u16).to_be_bytes());
-            d.extend(s.3.to_be_bytes());
+            d.extend((s.3 * 2).to_be_bytes());
             d.extend(s.4.to_be_bytes());
             if i < song.samples.len() {
                 sdata.extend(song.sample_data(i));
@@ -238,22 +244,12 @@ mod tests {
         d
     }
 
-    /// The 15-sample module: the 31-sample one without samples 16-31 and the mark,
-    /// with Titanics' restart 0x78.
-    fn module15(song: &Song) -> Vec<u8> {
-        let m = song.module(0x78);
-        let mut st = m[..20 + 15 * 30].to_vec();
-        st.extend(&m[950..1080]);
-        st.extend(&m[1084..]);
-        st
-    }
-
     #[test]
     fn titanics() {
         let song = song();
         let (f, m) = convert_any(&pack(&song)).expect("Titanics");
         assert_eq!(f, "Titanics Player");
-        assert_eq!(m, module15(&song));
+        assert_eq!(m, song.module(0x7f));
     }
 
     /// A pattern offset pointing at the end of the data must not loop for ever.

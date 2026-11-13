@@ -660,18 +660,18 @@ ALONE = {'emsv6': ('uade', 'EMS-6'),   # with all of UADE's players loaded the o
 #   ADPCM2/3: EP206's ADPCM plays silent in the engine (the host lacks its refill call on channel 0's
 #     audio interrupt, README); ADPCM-Player (SOAMC, 1995) decodes the same files
 #   Hippel COSO: EP206's Hippel-COSO plays some modules silent; UADE's Jochen Hippel COSO plays them
-#   Master / Ultimate SoundTracker: the port plays a Titanics Player module through ProWizard's
-#     conversion; its original is UADE's Titanics Packer. A plain Ultimate SoundTracker module plays
-#     on UADE's Ultimate Soundtracker, which also takes Titanics modules (and plays them wrong), so
-#     Titanics Packer is asked first
+#   ProTracker: the port plays a Titanics Player module through ProWizard's conversion (a 31-sample
+#     module on the built-in ProTracker); its original is UADE's Titanics Packer, which no name the
+#     built-in's search asks for runs. Its check refuses plain modules (they are not Titanics')
+#   Ultimate SoundTracker: a plain module plays on UADE's Ultimate Soundtracker
 ALT_ORIGINALS = {
     'maxtrax': [('soamc', 'MaxTrax_(Music-X_Compatible)/1.1_(20.Sep.2007)/MaxTrax', None, True)],
     'frededitor': [('soamc', 'FredEditor_also_called_Fredmonitor_and_Fredmon/1.1_(30.Aug.1993)/Fred', None, True)],
     'adpcm2': [('soamc', 'ADPCM_mono/x.x_(xx.xxx.1995)/ADPCM-Player', None, True)],
     'adpcm3': [('soamc', 'ADPCM_mono/x.x_(xx.xxx.1995)/ADPCM-Player', None, True)],
     'hippelcoso': [('uade', None, 'Jochen Hippel COSO', True)],
-    'mastersoundtracker': [('uade', None, 'Titanics Packer', False)],
-    'ultimatesoundtracker10': [('uade', None, 'Titanics Packer', False), ('uade', None, 'Ultimate Soundtracker', False)],
+    'protracker': [('uade', None, 'Titanics Packer', False)],
+    'ultimatesoundtracker10': [('uade', None, 'Ultimate Soundtracker', False)],
 }
 
 # Formats whose original is UADE's player as uade123 runs it (README), which the engine's host does

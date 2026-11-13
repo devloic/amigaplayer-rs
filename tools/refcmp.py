@@ -625,7 +625,8 @@ REFUSED_NO_FALLBACK = {'hippel7v'}
 # can hold; loaded alone, zeros follow and the original is one a port can equal.
 # PreTracker (UADE): a wave at a note of octave 9 (prt.m065's wave 2) is generated from an
 # oscillator index that runs away, up to 64K past the oscillator buffers in the player's BSS hunk:
-# through the player's own first hunk (which the port models) and 43 KB further. In the full
+# through the player's own first hunk (of which the port holds its computed tables and 4 table bytes,
+# not the bytes of its code) and 43 KB further. In the full
 # directory that is Pokeynoise's hunk (200 of the wave's 295 reads past the buffers, 197 of them
 # not zero); loaded alone, zeros follow.
 SOAMC = SCRATCH + '/soamc/x'

@@ -26,16 +26,15 @@
 //! the machine's stack; in a full Eagleplayer directory another player's hunk
 //! lies there, which no port can hold: tools/refcmp.py runs the original alone).
 //!
-//! Embedded data: `pretracker_player.bin` (246 bytes: 82 records of an offset
+//! Embedded data: `pretracker_player.bin` (12 bytes: 4 records of an offset
 //! in the hunk, a big-endian word, and the byte there) is taken from the first
 //! hunk of UADE's PreTracker player file ("PreTracker for UADE 0.1-1" by Arnaud
 //! Neny & Pink/Abyss, $LICENSE: GNU LGPL), on the project owner's decision:
-//! only the 82 bytes that the reads above fetch from the part of the hunk that
-//! is as in the file. They are single bytes, no two of them closer than 12
-//! bytes: 78 between $E8 and $43A4, where the player's code lies (one of them
-//! in its version string), and 4 in its tables behind that. The rest of that
-//! part is 0 here, so a wave that reads other bytes of it differs from the
-//! reference. What the player computes in the hunk is not taken but built: the
+//! of the 82 bytes that the reads above fetch from the part of the hunk that
+//! is as in the file, only the 4 that lie in its tables behind the code. The
+//! other 78 (between $221 and $4331) are bytes of the player's instructions,
+//! which are not embedded: they read 0 here, as does the rest of that part, so
+//! a wave that reads them differs from the reference. What the player computes in the hunk is not taken but built: the
 //! two relocated pointers of its tag list that are read (2 bytes), the fine
 //! period table and the table of the multiples of 3 behind it (7 bytes read).
 
@@ -1616,7 +1615,7 @@ const BSS_OSC: usize = 0x1268;
 const PLAYER_SIZE: usize = 0x4d54;
 const PLAYER_PERIODS: usize = 0x46d0;
 /// Bytes of the reference player's first hunk: (offset, byte) records. See the file header.
-static PLAYER_BYTES: &[u8; 246] = include_bytes!("pretracker_player.bin");
+static PLAYER_BYTES: &[u8; 12] = include_bytes!("pretracker_player.bin");
 /// The relocated pointers of the player's tag list that are read: where they lie in the
 /// hunk and what they point to in it (the player's name and its creator's).
 const PLAYER_POINTERS: [(usize, u32); 2] = [(0x6c, 0xac), (0x74, 0xb7)];

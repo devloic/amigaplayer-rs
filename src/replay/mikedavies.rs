@@ -51,6 +51,10 @@ const END_WORDS: [u16; 5] = [0x0094, 0x00FE, 0x00FF, 0x01FE, 0x01FF];
 /// loop write are 2,094 and 2,018 (medians, Die Hard 2 song 1).
 const WAIT_ON: i64 = 4400;
 const WAIT_LOOP: i64 = 4150;
+/// From one DMA-on write to the next, in cycles, and the more for each channel between them that
+/// does not start (measured: 36-39, 57-68 and 77-78 colour clocks for 0, 1 and 2 between).
+const ON_NEXT: i64 = 75;
+const ON_SKIP: i64 = 40;
 /// From the period write to the volume write of a voice, in cycles (the mean of the two builds' paths).
 const PER_VOL: [i64; 4] = [481, 504, 527, 517];
 /// The cost in cycles of the sequencer paths (fitted), by path counter.
@@ -647,14 +651,14 @@ impl MikeDavies {
         }
         // the original waits for the raster before it starts the voices: the mean wait is used
         cy += WAIT_ON;
-        let mut first = true;
+        let mut prev: Option<usize> = None;
         for ch in 0..4 {
             let v = &self.v[ch];
             if v.trig && (!self.lay.rest || v.note != 0) {
-                if !first {
-                    cy += 85;
+                if let Some(p) = prev {
+                    cy += ON_NEXT + ON_SKIP * (ch - p - 1) as i64;
                 }
-                first = false;
+                prev = Some(ch);
                 at!();
                 hw.dmacon(0x8000 | 1 << ch);
             }

@@ -222,19 +222,26 @@ fn locate(d: &[u8]) -> Result<Lay, &'static str> {
 
 // ------------------------------------------------------------------ the player
 
-/// The waits between writes, in colour clocks.
+/// The waits between writes, in colour clocks. Stage 2's (`T_PER_VOL` by voice, `T_VOL_DMA`,
+/// `T_NEXT`) and the note's DMA off to LOC and LOC to LEN are the reference's, measured on the
+/// engine's 68k run of the original over every tick of the six corpus modules: the same in every
+/// tick to a colour clock or two (PER to VOL 206-208, 188-191, 168-171, 143-146 for voices 3 to 0).
+/// They set the voices' start times relative to each other, which decide how voices playing the
+/// same sound add up. Where stage 2 starts is not: the original starts it on the beam (its first
+/// write at the same horizontal position in every tick), and the beam's position relative to the
+/// song's start is the reference's start-up time, which the port cannot know (README).
 const T_PRE: u64 = 290;
 const T_VOICE: u64 = 480;
-const T_NOTE_LOC: u64 = 116;
-const T_LOC_LEN: u64 = 6;
+const T_NOTE_LOC: u64 = 125;
+const T_LOC_LEN: u64 = 11;
 /// Stage 2 starts this long after the tick's start with nothing to do in stage 1, plus
 /// the costs per note start and per loop write (the means of the reference runs).
 const T_BURST: u64 = 3290;
 const T_BURST_NOTE: u64 = 420;
 const T_BURST_LOOP: u64 = 40;
-const T_PER_VOL: [u64; 4] = [112, 132, 150, 162];
-const T_VOL_DMA: u64 = 4;
-const T_NEXT: u64 = 34;
+const T_PER_VOL: [u64; 4] = [144, 169, 189, 207];
+const T_VOL_DMA: u64 = 12;
+const T_NEXT: u64 = 38;
 
 #[derive(Clone, Copy, Default)]
 struct Voice {

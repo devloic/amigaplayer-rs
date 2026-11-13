@@ -164,3 +164,17 @@ fn the_engine_plays_it_to_its_end() {
     let x = AiffPlayer::from_pcm(p, 44100).unwrap();
     assert!((x.duration_secs() - p_secs).abs() < 0.01);
 }
+
+#[test]
+fn digital_sound_creations_modules_are_not_mpeg() {
+    // their data holds three frame headers in a row by chance (refcmp rows 105-109)
+    let dir = std::path::Path::new("/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch11/mods/dsc");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut n = 0;
+    for e in rd.flatten() {
+        let d = std::fs::read(e.path()).unwrap();
+        assert!(!detect(&d), "{} taken for MPEG audio", e.path().display());
+        n += 1;
+    }
+    assert!(n > 0);
+}

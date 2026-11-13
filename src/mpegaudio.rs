@@ -25,8 +25,9 @@ use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 
 /// How far into the data the first frame of a stream may lie.
 const SEARCH: usize = 4096;
-/// Frames in a row that make a stream.
-const RUN: usize = 3;
+/// Frames in a row that make a stream (all of one version, layer and sample rate: three in a
+/// row also turned up by chance in the data of some Amiga modules, e.g. Digital Sound Creations).
+const RUN: usize = 4;
 
 /// kbit/s by bit rate index 1..=14: MPEG 1 layers 1, 2, 3; MPEG 2 / 2.5 layer 1, layers 2 and 3.
 const KBPS: [[u32; 14]; 5] = [
@@ -37,8 +38,8 @@ const KBPS: [[u32; 14]; 5] = [
     [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
 ];
 
-/// The header at `o`: (layer, frame length in bytes), or `None`.
-fn frame(d: &[u8], o: usize) -> Option<(u8, usize)> {
+/// The header at `o`: (layer, frame length in bytes, version and sample-rate key), or `None`.
+fn frame(d: &[u8], o: usize) -> Option<(u8, usize, u8)> {
     let h = d.get(o..o + 4)?;
     if h[0] != 0xFF || h[1] & 0xE0 != 0xE0 {
         return None;
@@ -63,7 +64,7 @@ fn frame(d: &[u8], o: usize) -> Option<(u8, usize)> {
         3 if version != 3 => 72 * bps / rate + pad,
         _ => 144 * bps / rate + pad,
     };
-    (len >= 4).then_some((layer, len))
+    (len >= 4).then_some((layer, len, version << 2 | sr))
 }
 
 /// The length of an ID3v2 tag at the start of `d` (0 when there is none).
@@ -81,17 +82,30 @@ fn raw_stream(d: &[u8]) -> Option<(usize, u8)> {
     let start = skip_id3(d);
     let end = d.len().min(start.saturating_add(SEARCH));
     for o in start..end {
-        let Some((layer, mut len)) = frame(d, o) else { continue };
+        let Some((layer, mut len, key)) = frame(d, o) else { continue };
         let mut at = o;
         let mut n = 1;
         while n < RUN {
             at += len;
             match frame(d, at) {
-                Some((l, nl)) if l == layer => (len, n) = (nl, n + 1),
+                Some((l, nl, k)) if l == layer && k == key => (len, n) = (nl, n + 1),
                 _ => break,
             }
         }
-        if n == RUN {
+        if n < RUN {
+            continue;
+        }
+        // a real stream runs on to (nearly) the end of the data; module data that happens to
+        // hold a few headers in a row (Digital Sound Creations' dsc.start: four MPEG 1 layer 1
+        // headers of 64 bytes in 74 KB) stops at once
+        loop {
+            at += len;
+            match frame(d, at) {
+                Some((l, nl, k)) if l == layer && k == key => len = nl,
+                _ => break,
+            }
+        }
+        if (at.min(d.len()) - o) * 4 >= (d.len() - o) * 3 {
             return Some((o, layer));
         }
     }

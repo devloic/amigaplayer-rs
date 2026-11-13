@@ -413,11 +413,8 @@ const POS_VOL: [i64; 4] = [0, 23, 46, 36];
 /// What the cost of a voice depends on besides its cell.
 #[derive(Clone, Copy, Default)]
 struct Feat {
-    /// The sample the cell names (or, without one, the voice's) loops, has the volume 64, is at
-    /// most a word long.
+    /// The sample the cell names (or, without one, the voice's) loops.
     looped: bool,
-    vol64: bool,
-    short: bool,
     /// The cell names a sample number the module does not have.
     missing: bool,
     /// The voice's volume and period, and what its tone portamento will do: nothing (no target),
@@ -679,9 +676,9 @@ impl QuadraComposer {
         let ch = &self.ch[i];
         let s = if new && c.sample != 0 { self.samples.get(c.sample as usize - 1).and_then(|s| s.as_ref()) } else { None };
         let missing = new && c.sample != 0 && s.is_none();
-        let (looped, vol64, length) = match s {
-            Some(s) => (s.looped, s.vol == 64, if s.looped { s.loop_start + s.loop_len } else { s.length }),
-            None => (ch.loop_len != 0, ch.volume == 64, ch.length),
+        let looped = match s {
+            Some(s) => s.looped,
+            None => ch.loop_len != 0,
         };
         // what the tone portamento of this tick will do (`actual_tone_portamento`)
         let speed = if c.effect == 3 && c.arg != 0 { c.arg as u16 } else { ch.port_speed };
@@ -700,7 +697,7 @@ impl QuadraComposer {
                 0xd0 => ch.note_nr >= 0 && (c.arg & 0x0f) as u16 == self.speed_count,
                 _ => false,
             };
-        Feat { looped, vol64, short: length / 2 <= 1, missing, volume: ch.volume, period: ch.period, porta, count: self.speed_count, due }
+        Feat { looped, missing, volume: ch.volume, period: ch.period, porta, count: self.speed_count, due }
     }
 
     /// Plans the tick's writes: where the original's pass over the voices is when it gets to each

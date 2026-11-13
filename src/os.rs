@@ -2872,7 +2872,6 @@ mod tests {
             steps(&mut m, 500);
             // 20 words, and the first of the restart, fetched before the device turns DMA off
             assert!((20..=21).contains(&(words(&m, 2) - seen)), "note {n} plays 40 bytes, played {}", words(&m, 2) - seen);
-            seen = words(&m, 2);
             assert_eq!(drain(&mut m, p), vec![w], "note {n} is replied at its end");
             assert_eq!(m.bus.r8(w + 31), 0);
             assert_eq!(m.bus.paula.dmacon & 4, 0, "nothing follows: DMA off");

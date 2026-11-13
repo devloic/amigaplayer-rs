@@ -15,9 +15,12 @@
 //! 50 Hz, not a SoundTracker's tempo byte and unchecked volumes. (It plays a loop
 //! from its start, as SoundTrackers do; the ProTracker module plays the words
 //! before it first.) Not followed: the original plays one module of the 12 known,
-//! `New A500 Demo`, at 25 Hz from its first interrupt, for no field of the format
-//! (the rate changes with the file's length and its last sample's address and
-//! length, not with its pattern or sample data).
+//! `New A500 Demo`, at 25 Hz (CIA timer 28375, twice the 14188 of the others) from
+//! its first interrupt, for no field of the format: measured on modified copies the
+//! rate is 25 Hz only when the end of the last sample entry (address + 2 x length)
+//! is exactly 126346 and the file is at least that long, whatever the pattern or
+//! sample data, so it is the player's constant for that one demo (see REF_NOTES in
+//! tools/refcmp.py). A ProTracker module cannot express 25 Hz exactly.
 
 use super::core::*;
 

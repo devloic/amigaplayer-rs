@@ -796,6 +796,20 @@ PTK_CLEAR_NOTE = 'PTK-Prowiz clears each sample\'s first long: both sides on a c
 #    mutated copies show PTK-Prowiz drops the note whenever the A parameter is >= 0x80.
 # libxmp 4.6.3's p40.c (MIT, Asle's ProWizard like PTK-Prowiz) also keeps B as stored; it does not drop the note.
 REF_NOTES = {
+    # UADE's Titanics Packer runs this one module at 25 Hz (CIA-A timer period 28375 CIA clocks = 2 x 14187 + 1,
+    # every interrupt from the first) and the other 11 at 50 Hz (14188 = the DeliTracker default 14187 + 1). The
+    # rate is keyed to ONE value: the end address (address + 2 x length) of the last sample entry being exactly
+    # 126346, with the file at least that long. Measured on copies (tools: UADE_WRITE_LOG, INTREQ bit 3 spacing):
+    # every other end from 126300 to 126398 (step 2) gives 50 Hz, as does end 126346 in a file cut 1 byte short;
+    # appending 1..200000 bytes, changing any pattern/sample data, any other entry's fields, or splitting the
+    # same end as another address/length keeps 25 Hz; Deluxe View with its last sample lengthened to end at
+    # 126346 turns 25 Hz (and at 126344 or its own end 144102 stays 50 Hz). So it is the player's own
+    # identification of this demo (a constant), not a field of the format and not a read past the file's end.
+    # The module is meant for it: its first row is F04 (speed 4), 187 BPM at 50 Hz and 94 BPM at 25 Hz, where
+    # the other 11 files set no speed (6 ticks, 125 BPM). The port's conversion plays it at 50 Hz (twice too
+    # fast; a ProTracker module cannot express 25 Hz exactly: F3E = 24.8 Hz, F3F = 25.2 Hz) and is not changed.
+    'Titanics Player/New A500 Demo.tip': 'reference runs at 25 Hz by a constant in the original player (last '
+                                         'sample end = 126346), port converts to a 50 Hz module: twice too fast',
     # its track data is mostly 68k replay code and period tables (only 0x106-0x18b is track rows, duplicated): the
     # tracks of 8 of its 9 patterns point into code. PTK-Prowiz decodes the four voices row by row, ends the pattern
     # for all four at the first fresh B/D row, and keeps each voice's pending repeat / empty-row count into the next

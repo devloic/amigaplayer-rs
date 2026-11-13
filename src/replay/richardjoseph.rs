@@ -111,7 +111,7 @@ pub struct Rjp {
     flags: u8,
     flags0: u8,
     songend: bool,
-    /// The next tick follows a change of subsong (the original's start-up routine runs in it).
+    /// The next tick is the first after a change of subsong.
     first: bool,
     /// When that tick is due (colour clocks, absolute): at once.
     tick_at: Option<u64>,
@@ -280,9 +280,10 @@ impl Rjp {
         }
     }
 
-    fn select(&mut self, ch: usize, n: u8) {
+    /// Selects instrument `n` for the voice; whether it is another than the voice's.
+    fn select(&mut self, ch: usize, n: u8) -> bool {
         if self.v[ch].ins == n as u16 && self.v[ch].rec.is_some() {
-            return;
+            return false;
         }
         let r = self.record(n as u16);
         let d = &self.d;
@@ -303,6 +304,7 @@ impl Rjp {
         v.trem_len = w(0x1E);
         v.ppos = 0;
         v.tpos = 0;
+        true
     }
 
     /// A note of period `p`: stop the channel and set up its first segment.
@@ -411,8 +413,8 @@ impl Rjp {
                 0x84 => {
                     let n = self.rb(p + 1);
                     self.v[ch].pat = Some(p + 2);
-                    if n != 0 {
-                        self.select(ch, n);
+                    if n != 0 && self.select(ch, n) {
+                        hw.wait(NEW_INSTRUMENT);
                     }
                 }
                 0x85 => {
@@ -587,15 +589,22 @@ static GAPS: WriteGaps = WriteGaps::new(
         (20, 15, 538), // DMA_ON -> VOL3 x133
     ],
     &[(0, 44), (1, 204), (2, 220), (3, 235), (4, 10), (5, 10), (6, 10), (7, 10), (8, 137), (9, 152), (10, 167), (11, 172), (12, 552), (13, 729), (14, 748), (15, 682), (16, 530), (20, 247)],
-    &[(0, 0), (1, 89), (2, 177), (3, 266), (12, 516), (13, 613), (14, 705), (15, 807), (16, 576), (20, 28)],
+    &[(0, 0), (1, 89), (2, 177), (3, 266), (12, 516), (13, 613), (14, 705), (15, 807), (16, (START_FIRST - NEW_INSTRUMENT) as u16), (20, 28)],
 );
 
 /// What a voice without a pattern takes of the tick before the next voice's writes (the start gaps
 /// of the first write by channel: LOC 0, 89, 177, 266).
 const LEAD_SKIP: u64 = 89;
 
-/// The tick's first write falls this far into it (the start gap of a stop of DMA below).
+/// The tick's first write falls this far into it when it is a note's stop of DMA with a new
+/// instrument (the start gap of a stop of DMA above is this less `NEW_INSTRUMENT`).
 const START_FIRST: u64 = 576;
+
+/// An instrument command that selects another instrument than the voice's: the voice's next write
+/// (its note's stop of DMA) comes this much later. Measured on three modules' notes against the
+/// reference: 243-318 colour clocks later with a new instrument than with the same one (most often
+/// 281), at the tick's start and between voices alike.
+const NEW_INSTRUMENT: u64 = 281;
 
 /// Colour clocks from the song's start to the host's timer start, beyond the first period (the
 /// song starts without a start-up routine: the reference's first tick follows the song start by
@@ -607,6 +616,17 @@ const CHANGE_FIRST: u64 = 234;
 
 /// The tick after the start-up one falls this much later than a period after the change.
 const CHANGE_EXTRA: u64 = 380;
+
+/// A change of subsong after ticks: from the start-up routine's second stop of DMA to the song's
+/// start (the host's change returns), this much plus `CHANGE_SETTLE_VOICE` for each voice of the
+/// new subsong after its first. Measured on the empty-subsong skips of 39 reference runs: 1561 with
+/// one voice, 1840 with two, 2329-2431 with four (the four-voice spread is not modelled).
+const CHANGE_SETTLE: u64 = 1561;
+const CHANGE_SETTLE_VOICE: u64 = 279;
+
+/// The first tick after such a change is already due at the song's start and runs at once; its
+/// first DMA write falls this far into it (990 in 30 of the 39 runs, 952 in the others).
+const CHANGE_FIRST_DMA: u64 = 990;
 
 /// The start-up routine of a change of subsong, from `CHANGE_FIRST` after it: all voices off,
 /// the volumes cleared, the DMA stopped again.
@@ -644,7 +664,15 @@ impl Replayer for Rjp {
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
         if self.ticked {
+            // the start-up routine runs within the change, before the song's start (in the
+            // reference the host's change returns only after it and the voices' set-up: the song
+            // starts 1,561-2,431 colour clocks after its second stop of DMA, and the first notes
+            // come 990 after that, not 8,257 after the change as when the start-up ran in the tick)
             self.start(n, hw, true);
+            startup(hw);
+            let voices = self.flags0.count_ones() as u64;
+            hw.wait(CHANGE_SETTLE + CHANGE_SETTLE_VOICE * voices.saturating_sub(1));
+            self.tick_at = Some(hw.bus.clock);
         } else {
             // a change before the host's timer has run (a subsong chosen at the start): the
             // start-up routine runs at once, and the first tick comes a period after the song's
@@ -673,14 +701,12 @@ impl Replayer for Rjp {
             return;
         }
         if self.first {
-            // the start-up routine of the tick after a change of subsong: all voices off, the volumes cleared, the
-            // DMA stopped again (measured in the reference runs: the first voice's stop comes some
-            // 8,000 colour clocks into the tick, which fixes how long the channels stay in the
-            // state the data-register write leaves them in)
+            // the tick after a change of subsong (its start-up routine ran in the change): due at the
+            // song's start, its first DMA write CHANGE_FIRST_DMA into it; the tick after it keeps
+            // its distance from the change
             self.first = false;
             self.next_at.set(Some(self.due + self.tick_clocks() + CHANGE_EXTRA));
-            startup(hw);
-            hw.wait(3351 - START_FIRST);
+            hw.wait(CHANGE_FIRST_DMA - START_FIRST);
         }
         hw.gaps(&GAPS);
         self.lead = LEAD_SKIP * self.v.iter().take_while(|v| !v.active).count() as u64;
@@ -712,8 +738,13 @@ mod tests {
 
     /// `song` with these subsongs (the list number of each voice).
     fn song_with(subsongs: &[[u8; 4]]) -> Vec<u8> {
+        song_pattern(subsongs, &[0x84, 1, 0x82, 1, 0x83, 1, 38, 0x87, 0x81, 0x80])
+    }
+
+    /// `song_with` playing pattern 1 = `pat`; instrument 2 is a copy of instrument 1.
+    fn song_pattern(subsongs: &[[u8; 4]], pat: &[u8]) -> Vec<u8> {
         let mut d = b"RJP1SMOD".to_vec();
-        let mut ins = vec![0u8; 64];
+        let mut ins = vec![0u8; 96];
         // record 0: the empty instrument
         ins[0x12 + 1] = 1;
         ins[0x16 + 1] = 1;
@@ -725,6 +756,7 @@ mod tests {
         ins[r + 0x12 + 1] = 8;
         ins[r + 0x14 + 1] = 4;
         ins[r + 0x16 + 1] = 4;
+        ins.copy_within(32..64, 64);
         block(&mut d, &ins);
         block(&mut d, &[64, 64, 254, 64, 254, 254]);
         block(&mut d, subsongs.concat().as_slice());
@@ -733,7 +765,7 @@ mod tests {
         block(&mut d, &[1, 0, 0, 0]);
         // pattern 1: instrument 1, speed 1, repeat 1, note index 19 (period 339),
         // rest, note off, end of pattern
-        block(&mut d, &[0x84, 1, 0x82, 1, 0x83, 1, 38, 0x87, 0x81, 0x80]);
+        block(&mut d, pat);
         // fix up the tables: list 1 at block 6 offset 0, pattern 1 at offset 0
         let b = blocks(&d).unwrap();
         d[b[3].0 + 4..b[3].0 + 8].copy_from_slice(&0u32.to_be_bytes());
@@ -838,5 +870,55 @@ mod tests {
         // waits for them
         let off = at(0xDFF096, Some(0x0008)).unwrap();
         assert_eq!(off, song_start + DT_TICK + TIMER_DELAY + START_FIRST + 3 * LEAD_SKIP);
+    }
+
+    /// A note whose instrument command selects another instrument than the voice's has its stop of
+    /// DMA `NEW_INSTRUMENT` later than one whose command repeats the voice's instrument.
+    #[test]
+    fn a_new_instrument_delays_the_note() {
+        let off = |second: u8| {
+            let dir = Path::new("/rjp-test");
+            let mut smp = b"RJP1".to_vec();
+            smp.extend_from_slice(&[0x40; 64]);
+            let mut e = Engine::new(48000.0);
+            e.m.os.mem_files.insert(dir.join("SMP.test"), smp);
+            e.open_replayers = true;
+            e.m.bus.write_log = Some(Vec::new());
+            let pat = [0x84, 1, 0x82, 1, 0x83, 1, 38, 0x84, second, 38, 0x87, 0x81, 0x80];
+            e.play_data(&dir.join("rjp.test"), song_pattern(&[[1, 0, 0, 0]], &pat)).unwrap();
+            let mut out = vec![0f32; 2 * 960 * 6];
+            e.render(&mut out);
+            let log = e.m.bus.write_log.take().unwrap();
+            log.iter().filter(|w| w.0 == 0xDFF096 && w.1 == 0x0001).map(|w| w.2).nth(1).unwrap()
+        };
+        assert_eq!(off(2) - off(1), NEW_INSTRUMENT);
+    }
+
+    /// The empty first subsong is skipped once it has ticked (the reference's change after ticks):
+    /// the start-up routine runs within the change, the song starts a voice-dependent time after
+    /// its second stop of DMA, and the first tick's first DMA write comes CHANGE_FIRST_DMA after
+    /// that (refcmp rows 1676 and 1688: the notes came 7,267 colour clocks late when the start-up
+    /// ran in the tick after the song's start).
+    #[test]
+    fn a_change_after_ticks_runs_the_start_up_before_the_song_start() {
+        let dir = Path::new("/rjp-test");
+        let mut smp = b"RJP1".to_vec();
+        smp.extend_from_slice(&[0x40; 64]);
+        let path = dir.join("rjp.test");
+        let mut e = Engine::new(48000.0);
+        e.m.os.mem_files.insert(dir.join("SMP.test"), smp);
+        e.open_replayers = true;
+        e.play_data(&path, song_with(&[[0, 0, 0, 0], [1, 0, 0, 0]])).unwrap();
+        e.m.bus.write_log = Some(Vec::new());
+        // the skip is checked after each render
+        let mut out = vec![0f32; 2 * 960 * 10];
+        e.render(&mut out);
+        assert_eq!(e.playing.as_ref().unwrap().sub, 1);
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let stops: Vec<u64> = log.iter().filter(|w| w.0 == 0xDFF096 && w.1 == 0x000F).map(|w| w.2).collect();
+        let second = *stops.last().unwrap();
+        let first_dma = log.iter().find(|w| w.0 == 0xDFF096 && w.1 == 0x0001).unwrap().2;
+        assert_eq!(first_dma, second + CHANGE_SETTLE + CHANGE_FIRST_DMA);
     }
 }

@@ -264,7 +264,8 @@ in place, because the open replayers load their modules and companion files thro
 ## Command line without SDL: `amigaplayer-render`
 
 ```text
-cargo build --release --no-default-features --features host-68k --bin amigaplayer-render
+cargo build --release --no-default-features --features "custom-modules songdb sid" --bin amigaplayer-render
+# the original 68k players too (--players, --eagleplayers, --genies, --libs, --68k-first): add host-68k
 amigaplayer-render [--out FILE|-] [--format wav|raw] [--rate HZ] [--subsong N|first|default]
                    [--seconds S] [--silence S] [--no-songend] [--volume V] [--info]
                    [--songdb DIR] [--songlengths FILE] [--stop-at songdb|songlengths|default] MODULE

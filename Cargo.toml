@@ -96,13 +96,14 @@ path = "src/main.rs"
 required-features = ["ui"]
 
 # Headless renderer (module to WAV / raw PCM on a file or standard output), no SDL:
-#   cargo build --release --no-default-features --features host-68k --bin amigaplayer-render
-# With the song database (`--songdb DIR`, `--stop-at songdb`):
-#   cargo build --release --no-default-features --features "host-68k songdb" --bin amigaplayer-render
+#   cargo build --release --no-default-features --features custom-modules --bin amigaplayer-render
+# With the song database (`--songdb DIR`, `--stop-at songdb`) and C64 tunes:
+#   cargo build --release --no-default-features --features "custom-modules songdb sid" --bin amigaplayer-render
+# Add `host-68k` for the original 68k players (--players, --eagleplayers, --genies, --libs, --68k-first).
 [[bin]]
 name = "amigaplayer-render"
 path = "src/bin/render.rs"
-required-features = ["host-68k"]
+required-features = ["custom-modules"]
 
 [[example]]
 name = "make_demo_songdb"

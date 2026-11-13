@@ -2,8 +2,9 @@
 //! No window, no sound card, no SDL: for servers and pipes (`amigaplayer-render x.mod | ffmpeg ...`).
 //!
 //! Unlike the library's `Song` it hosts 68k code, so custom modules (`CUST.*`, which carry
-//! their own player) play, and so do the formats of original DeliPlayers / Eagleplayers when
-//! their directories are given. Nothing is read from the user's configuration directories.
+//! their own player) play (feature `custom-modules`, in the default build), and, in a build
+//! with `host-68k`, so do the formats of original DeliPlayers / Eagleplayers when their
+//! directories are given. Nothing is read from the user's configuration directories.
 //!
 //! Standard output carries only audio (or the `--info` line), and only once the module has
 //! started: a file that is missing or not recognised gives exit status 1 and no output.
@@ -209,9 +210,30 @@ fn parse_args() -> Args {
     if a.songdb.is_some() {
         eprintln!(
             "amigaplayer-render: --songdb needs a build with the songdb feature:\n  \
-             cargo build --release --no-default-features --features \"host-68k songdb\" --bin amigaplayer-render"
+             cargo build --release --no-default-features --features \"custom-modules songdb\" --bin amigaplayer-render"
         );
         std::process::exit(2);
+    }
+    #[cfg(not(feature = "host-68k"))]
+    {
+        let given: Vec<&str> = [
+            (a.players.is_some(), "--players"),
+            (a.eagleplayers.is_some(), "--eagleplayers"),
+            (a.genies.is_some(), "--genies"),
+            (a.libs.is_some(), "--libs"),
+            (a.m68k_first, "--68k-first"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, n)| *n)
+        .collect();
+        if !given.is_empty() {
+            eprintln!(
+                "amigaplayer-render: {}: built without 68k player support; rebuild with --features host-68k",
+                given.join(", ")
+            );
+            std::process::exit(2);
+        }
     }
     a
 }
@@ -329,15 +351,18 @@ struct Started {
 
 fn run(a: &Args) -> Result<()> {
     let mut e = Engine::new(a.rate as f64);
-    e.m.os.libs_dir = a.libs.clone();
-    if let Some(d) = &a.players {
-        e.load_players(d);
-    }
-    if let Some(d) = &a.eagleplayers {
-        e.load_eagleplayers(d);
-    }
-    if let Some(d) = &a.genies {
-        e.load_genies(d);
+    #[cfg(feature = "host-68k")]
+    {
+        e.m.os.libs_dir = a.libs.clone();
+        if let Some(d) = &a.players {
+            e.load_players(d);
+        }
+        if let Some(d) = &a.eagleplayers {
+            e.load_eagleplayers(d);
+        }
+        if let Some(d) = &a.genies {
+            e.load_genies(d);
+        }
     }
     e.open_replayers = !a.m68k_first;
     if let Some(v) = a.volume {

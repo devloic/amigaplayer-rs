@@ -68,7 +68,8 @@
 //! (`new_early`), as UADE's TFMX player does, which differs from the
 //! Eagleplayer's in three ways found by comparing its write log: the song starts
 //! at master volume $40 (no fade to $3F), SetNote adds the note's detune, and
-//! DMA on goes out at the macro's command.
+//! DMA on goes out at the macro's command. It also reports the song end, at the
+//! start of every tick while no track has a pattern and at a track step `EFFE 0000`.
 //!
 //! All three space their writes as the originals do: each code path costs the
 //! colour clocks fitted by least squares to the Eagleplayers' write logs
@@ -2694,8 +2695,12 @@ impl V15 {
                 let a0 = a0 + 4;
                 match if c < 5 { c } else { 0 } {
                     0 => {
-                        // stops without telling DeliTracker
+                        // stops without telling DeliTracker; UADE's player (an early
+                        // module) reports the song end here
                         self.g.sw(H_PLAYING, 0);
+                        if self.early {
+                            self.songend = true;
+                        }
                         return;
                     }
                     1 => {
@@ -3325,6 +3330,12 @@ impl V15 {
     fn interrupt(&mut self, hw: &mut Hw) {
         self.flush(hw, "t");
         self.at(B::Tick);
+        // UADE's player (an early module) reports the song end at the start of every tick
+        // while all eight tracks have no pattern (a step of FE/FF tracks), the Eagleplayer
+        // never does: seen in the reference's song-end calls, the tick after the stop
+        if self.early && (self.g.w(H_START) as i16) < 0 && (0..8).all(|k| self.p.b(0x48 + 4 * k) == 0xff) {
+            self.songend = true;
+        }
         if (self.g.w(H_START) as i16) >= 0 {
             self.start_song(hw);
         } else if self.g.w(H_ON) == 0 || self.g.w(H_PLAYING) == 0 {

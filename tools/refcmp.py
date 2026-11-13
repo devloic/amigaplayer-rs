@@ -682,6 +682,9 @@ ALT_ORIGINALS = {
     'hippelcoso': [('uade', None, 'Jochen Hippel COSO', True)],
     'protracker': [('uade', None, 'Titanics Packer', False)],
     'ultimatesoundtracker10': [('uade', None, 'Ultimate Soundtracker', False)],
+    # (FastTracker 4ch, a `4CHN` module on the built-in ProTracker, has none: PTK-Prowiz and uade123
+    # refuse it (MOD_PC); PS3M plays it through its own mixer, 13 dB under the port and openmpt123,
+    # which agree within 1.3 dB as on a plain ProTracker module: another output stage, no reference)
 }
 
 # Formats whose original is UADE's player as uade123 runs it (README), which the engine's host does
@@ -967,6 +970,21 @@ def special_reference(mod, fmt):
                  ('--player', 'XTracker'))]
     if fmt in DELI_REF and os.path.isdir(DELI_STORE):
         return [('deli', ('deli', DELI_STORE), ('--player', DELI_REF[fmt]))]
+    if fmt == 'tfmx15':
+        # an early TFMX-SONG module of the fixed tables (nothing at $1D0) with one smpl.set and no
+        # smpl.NAME (Einmal Kanzler sein): the TFMX_1.5 Eagleplayer refuses it, and the port follows
+        # UADE's TFMX player (README), which the generic search does not reach (Soundtracker IV
+        # takes the file first and plays it silent)
+        try:
+            with open(mod, 'rb') as fh:
+                d = fh.read(0x1d4)
+        except OSError:
+            return None
+        base, name = os.path.dirname(mod), os.path.basename(mod)
+        stem = name[5:] if name[:5].lower() == 'mdat.' else name
+        if (d[:10] == b'TFMX-SONG ' and d[0x1d0:0x1d4] == b'\0\0\0\0' and os.path.exists(os.path.join(base, 'smpl.set'))
+                and not os.path.exists(os.path.join(base, 'smpl.' + stem))):
+            return [('uade+early', UADE_PLAYERS, ('--player', 'TFMX'))]
     if fmt == 'digitalsoundstudio':
         try:
             with open(mod, 'rb') as fh:

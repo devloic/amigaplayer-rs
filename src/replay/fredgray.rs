@@ -232,15 +232,17 @@ struct Cpu68 {
     cpu: CpuCore,
     sp: u32,
     x: &'static Extra,
+    /// The module's image: code outside it (and outside the return routine) is not the module's.
+    img: std::ops::Range<u32>,
     /// The time of the last DMA-enable store of an init run.
     l: Option<u64>,
 }
 
 impl Cpu68 {
-    fn new(sp: u32, x: &'static Extra) -> Cpu68 {
+    fn new(sp: u32, x: &'static Extra, img: std::ops::Range<u32>) -> Cpu68 {
         let mut cpu = CpuCore::new();
         cpu.set_cpu_type(CpuType::M68000);
-        Cpu68 { cpu, sp, x, l: None }
+        Cpu68 { cpu, sp, x, img, l: None }
     }
 
     /// Runs the routine at `entry` until it returns, from `start`, with `d0` in D0 and A5 at the
@@ -265,6 +267,15 @@ impl Cpu68 {
         loop {
             let pc = self.cpu.pc;
             if pc == ret && self.cpu.dar[15] == ret {
+                return Ok((cycles, ended));
+            }
+            if play && pc != stop && !self.img.contains(&pc) {
+                // the routine returned to somewhere that is not the module's: a restore of the
+                // status register without its store (a module edited to have no 0x40E7 word,
+                // which the wrapper's patch does not find either) takes the high word of the
+                // return address as the status register, and the return then pops what lies
+                // behind. The reference goes on with whatever is there until the next timer
+                // interrupt, which starts a new tick as usual; the tick's writes are done
                 return Ok((cycles, ended));
             }
             if pc == stop {
@@ -444,7 +455,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     let subs = (be32(h, 0x14) as u16).max(1);
     let mut s = FredGray {
-        cpu: Cpu68::new(stack + 0x1000, if absolute_stores(h) { &EXTRA_B } else { &EXTRA_A }),
+        cpu: Cpu68::new(stack + 0x1000, if absolute_stores(h) { &EXTRA_B } else { &EXTRA_A }, img..img + 4 * words as u32),
         h: h.to_vec(),
         img,
         stop,
@@ -614,6 +625,19 @@ mod tests {
         assert_eq!(log.iter().map(|&(a, v, _)| (a, v)).collect::<Vec<_>>(), vec![(0xDFF0A6, 0x123)]);
         // section 0 was reached through the jump table
         assert!(r.songend());
+    }
+
+    /// A play routine that leaves the module's code (a return popped from a misaligned stack) is
+    /// a finished tick, not an error and not a song end.
+    #[test]
+    fn a_return_outside_the_module_ends_the_tick() {
+        let mut d = module();
+        // the play routine's first instruction becomes `jmp $60000000.l`
+        let o = 0x20 + 0x30;
+        d[o..o + 6].copy_from_slice(&[0x4E, 0xF9, 0x60, 0x00, 0x00, 0x00]);
+        let (mut m, mut r) = start(&d);
+        r.tick(&mut Hw { bus: &mut m.bus });
+        assert!(!r.songend());
     }
 
     #[test]

@@ -228,7 +228,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Oktalyzer | Oktalyzer 1.45 | Oktalyzer | open `Oktalyzer` | 50 S (ref 50) | A | V |
 | PierreAdane | Pierre Adane Packer 0.1 | Pierre Adane Packer | open `Pierre Adane Packer` | 10 S | R | V |
 | PlayAY | PlayAY 2.1 (+ AYPlayers) | ZX Spectrum / CPC AY: ZXAYEMUL, ZXAYAMAD, ST11, STRC | built-in Z80 + AY (`src/replay/ay.rs`): EMUL and AMAD; ST11 and STRC not played | none (13 test files in `dl-modules/PlayAY/`, used by unit tests only) | P | U (ST11/STRC: X) |
-| PlaySid | PlaySID 0.1 | C64 PSID | none in the default build: `src/sid` (C64 + SID emulation) is behind the `sid` feature, off by default (GPL-2.0-only) | none | E | X |
+| PlaySid | PlaySID 0.1 | C64 PSID | `src/sid` (C64 + SID emulation) with `--features sid` (used by the AzuraCast renderer build); left out of the default build only for its licence (GPL-2.0-only) | none | E | U |
 | Polytracker | PolyTracker 0.90 (a DeliPlayer) | PolyTracker | open `PolyTracker` | 20 S (ref 20) | A | V |
 | Profiteam-Soundfactory | Profiteam-Soundfactory 0.1 | Sound Factory | open `Sound Factory` | 8 I, 1 D, 1 F (ref 8) | A | V |
 | Promizer 0.1 | Promizer 0.1a 1.1 | Promizer 0.1 | ProWizard `promizer.rs` + built-in ProTracker | none | P | U |
@@ -288,13 +288,15 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 PlayAY is counted under U (EMUL and AMAD play). The two Datatype players are counted under U as
 partial (only 8SVX, AIFF and WAV).
 
-Formats that are not covered (12 player files):
+PlaySid is counted under X in the table above but is covered by builds with `--features sid`
+(C64 PSID, GPL-2.0-only, so not in the default build): 11 player files are really not covered.
+
+Formats that are not covered (11 player files):
 
 - NES: NESA (`NESA_note`) and NSF (`NSF`);
 - Bryan Ford's MultiPlayer formats GMOD (`PlayerStore/GMOD`, `Eagleplayers/GMOD`) and XMOD;
 - BFB (`BFB Master`, bfbplaymaster.library music disks);
 - MPEG audio (`MPEGAudio`);
-- C64 PSID (`PlaySid`): only with `--features sid`, which is GPL-2.0-only and off by default;
 - Wizard of Sound;
 - formats not identified from any file: `GlueMaster`, `M. Grouleff` (not the EarAche modules),
   `SUNtronic Custom` (not the `.sun` modules);

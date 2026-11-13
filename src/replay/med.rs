@@ -166,6 +166,23 @@ const FLAG2_MIX: u8 = 0x80;
 /// one silent word (passed as length 0, so 65536 words, as the original does).
 const SILENCE_SIZE: u32 = 0x20000;
 
+/// What Paula plays from that loop in the original. Its loop starts at the MED Eagleplayer's own
+/// last hunk (8 bytes) and, with length 0, runs on for 128 KB through the player's memory: in the
+/// reference run (EP206's `Eagleplayers/MED`, 18576 bytes, md5 a4ae0abf9e1a9514f5615a13541b3e73;
+/// hunks: code 11548 bytes at file offset 44, data 5896 at 12276, bss 4776, data 8 at 18564) the
+/// loop's AUDxLC is 0xa507a8, the start of hunk 3, which the engine's loader placed below the bss
+/// (0xa507b8), data (0xa51a68) and code
+/// (0xa53178) hunks, each after its 8-byte segment header. These are those 22252 bytes, 0xa507a8 to
+/// the code hunk's end at 0xa55e94: the player file's hunks relocated to those addresses (its
+/// reloc32 tables), the segment headers as the reference's memory holds them, and the 60 words of
+/// the player's variables that Paula read with one value in every reference run (MED rows of
+/// tools/refcmp.py, the DMA fetch log) set to that value; the variables it read with several values
+/// (the song's state) keep the file's. Every word of the range is fetched in at least one of those
+/// runs; past it lie other Eagleplayers, which the port plays as 0. The bytes depend on where the
+/// reference loads the player (the same address for every MED module there). Embedding the
+/// original player's bytes is the owner's decision; no player logic is taken from them.
+static PLAYER_MEMORY: &[u8; 22252] = include_bytes!("med/player_memory.bin");
+
 /// Colour clocks the original's code spends between its register writes, measured on its runs
 /// (one colour clock is two CPU cycles; the code's cycle costs are fixed, so only the path taken
 /// matters). Sizes by the tracks of the block (N): 1, 2, 3, 4, 5, 6, 8, 12 and 16.
@@ -463,6 +480,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if silence == 0 {
         return None;
     }
+    m.bus.write_bytes(silence, PLAYER_MEMORY);
     let periods = periods();
     let mut p = Med {
         base,

@@ -18,7 +18,11 @@ settings, WAV for WAV:
              ships, whose player runs on the 68k); for the formats the libxmp
              port plays, libxmp 4.7.4 itself (the C harness `render`, 48 kHz
              s16, its defaults); for Atari ST SNDH, AtariAudio 1.30 (SNDH_ORACLE,
-             at volume 0.8). When no original gives a reference (none runs
+             at volume 0.8); for HivelyTracker (no Amiga player plays HVL), Pete Gordon's C
+             replayer hvl_replay 1.9 (BSD-3-Clause, HVL_REF_DIR) compared TICK BY TICK
+             (volume, period, pan and a hash of each voice's waveform loop; see
+             render_hvl_ticks), not by audio: the port plays through the Eagleplayer amplifier,
+             the C tool through its own mixer, so their audio is not comparable. When no original gives a reference (none runs
              the module, or the one that runs is silent and the port is not), a
              second-choice original of the format (ALT_ORIGINALS: another build
              that runs the module, marked REF-FALLBACK where the port has a
@@ -484,6 +488,7 @@ class Ctx:
             except Exception as e:  # noqa
                 print('listen.py staging unavailable:', e, file=sys.stderr)
         self.oracle = a.oracle
+        self.hvl_testbin = a.hvl_testbin
 
 
 def _run_cached(ctx, key, cmd, env, cwd, wav):
@@ -867,6 +872,9 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
         return dict(kind='libxmp', wav=raw, data=read_raw(raw), out='libxmp 4.7.4 ' + info.replace('\t', ' '),
                     led='', player='libxmp 4.7.4 (oracle)', o={}, note='')
     want = _norm(po.get('format', ''))
+    if want == 'hivelytracker':
+        ref = render_hvl_ticks(ctx, mod, pplay)
+        return ref if isinstance(ref, dict) else dict(none, note=ref)
     if want in NO_AMIGA_PLAYER:
         return dict(none, note='no Amiga player plays this format (README)')
     if want == 'sndh':
@@ -953,6 +961,93 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
         return alternative_reference(ctx, mod, po, want, why) or dict(none, note=why)
     return fallback
 
+# HivelyTracker (HVL): no Amiga player plays it (the THX Eagleplayer refuses it), so the reference is the
+# original C replayer, hvl_replay 1.9 by Pete Gordon (BSD-3-Clause, LICENSE-hivelytracker), built in the
+# scratch dir with a harness that prints, tick by tick, every voice's volume, period, pan and an FNV hash
+# of its 640-byte waveform loop (ports/hvl/ref/dump.c: `dump FILE SUBSONG MAXTICKS`). The port prints the
+# same lines from its replay core (the ignored test replay::hvl::tests::dump). Audio is not compared: the
+# port plays through the Eagleplayer amplifier, the C tool through its own mixer. Two runs of the C tool:
+#   tables=port  USEWAVES = the port's waveform tables (rwaves.bin): the full lines must be identical
+#   tables=own   the C replayer's own tables, whose noise ($7F, AHX has $80) and floating-point filters
+#                differ: volume, period and pan only (the control state) must be identical
+HVL_REF_DIR = SCRATCH + '/ports/hvl'
+HVL_REF = HVL_REF_DIR + '/ref/dump'
+HVL_TICKS_MAX = 100000
+_HVL_BUILD_LOCK = __import__('threading').Lock()
+
+
+def hvl_testbin(ctx):
+    """The unit-test executable that holds the port's tick dump."""
+    with _HVL_BUILD_LOCK:
+        if ctx.hvl_testbin is None:
+            r = subprocess.run(['cargo', 'test', '--release', '-j', '4', '--lib', '--no-run', '--message-format=json'],
+                               cwd=os.path.join(HERE, '..'), capture_output=True, text=True)
+            exe = None
+            for l in r.stdout.splitlines():
+                try:
+                    j = json.loads(l)
+                except ValueError:
+                    continue
+                if j.get('executable') and j.get('target', {}).get('kind') == ['lib'] and j.get('profile', {}).get('test'):
+                    exe = j['executable']
+            ctx.hvl_testbin = exe or ''
+    return ctx.hvl_testbin
+
+
+def _hvl_run(cmd, env, out):
+    r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
+    if out is None:
+        return r.stdout
+    return open(out).read() if os.path.exists(out) else ''
+
+
+def render_hvl_ticks(ctx, mod, pplay):
+    """Compares the port's per-tick voice state with hvl_replay's. Returns a result dict
+    (kind 'hvl-ticks', cls, note) or a NOREF note (str)."""
+    if not (os.path.exists(HVL_REF) and os.path.exists(HVL_REF_DIR + '/rwaves.bin')):
+        return 'no hvl_replay reference build'
+    tb = hvl_testbin(ctx)
+    if not tb or not os.path.exists(tb):
+        return 'no unit-test binary for the port tick dump'
+    m = re.search(r'\(current (\d+)\)', pplay or '')
+    sub = m.group(1) if m else '0'
+    key = hashlib.sha1(json.dumps([mod, sub, int(os.path.getmtime(HVL_REF)), int(os.path.getmtime(tb)),
+                                   os.path.getsize(tb)]).encode()).hexdigest()[:20]
+    res = os.path.join(ctx.cache, key + '.hvl.txt')
+    if not os.path.exists(res):
+        pout = os.path.join(ctx.cache, key + '.hvl.port')
+        env = dict(os.environ, HVL_FILE=mod, HVL_SUB=sub, HVL_TICKS=str(HVL_TICKS_MAX), HVL_OUT=pout)
+        subprocess.run([tb, 'replay::hvl::tests::dump', '--exact', '--ignored'], env=env, capture_output=True, text=True, timeout=600)
+        port = open(pout).read().split('\n') if os.path.exists(pout) else []
+        os.path.exists(pout) and os.unlink(pout)
+        refp = _hvl_run([HVL_REF, mod, sub, str(HVL_TICKS_MAX)], dict(os.environ, USEWAVES=HVL_REF_DIR + '/rwaves.bin'), None).split('\n')
+        refo = _hvl_run([HVL_REF, mod, sub, str(HVL_TICKS_MAX)], dict(os.environ), None).split('\n')
+
+        def ctl(lines):
+            return [' |'.join(','.join(v.split(',')[:3]) if i else v for i, v in enumerate(l.split(' |'))) for l in lines]
+
+        def first_diff(a, b):
+            for i, (x, y) in enumerate(zip(a, b)):
+                if x != y:
+                    return i
+            return None if len(a) == len(b) else min(len(a), len(b))
+        if len(refp) < 3 or not port or port[0].startswith('nosub'):
+            text = 'FAIL\tthe reference or the port dump produced nothing: ' + (refp[0] if refp else '')[:60]
+        else:
+            d1, d2 = first_diff(refp, port), first_diff(ctl(refo), ctl(port))
+            n = len(port) - 2
+            if d1 is None:
+                text = f'IDENTICAL\t{n} ticks, every voice state equal (tables=port)' + (
+                    '' if d2 is None else f'; with the reference own tables: control state differs at line {d2}')
+            elif d2 is None:
+                text = f'SIMILAR\t{n} ticks: volume, period and pan equal with the reference own tables; waveform hashes differ from line {d1} with the port tables'
+            else:
+                x, y = refp[d1][:90], port[d1][:90] if d1 < len(port) else '(port ended)'
+                text = f'DIFF\tfirst difference at line {d1} (tables=port): ref {x} port {y}'
+        open(res, 'w').write(text)
+    cls, note = open(res).read().split('\t', 1)
+    return dict(kind='hvl-ticks', cls=cls, note='hvl_replay 1.9 tick dump: ' + note)
+
 
 def process(ctx, f):
     """One file: renders, comparison, class. Returns the result row (a dict)."""
@@ -983,6 +1078,9 @@ def process(ctx, f):
         if ref['kind'] == 'none':
             row['cls'] = 'NOREF' if ref['noref'] else 'FAIL'
             row['note'] = ref['note']
+            return row
+        if ref['kind'] == 'hvl-ticks':
+            row.update(cls=ref['cls'], note=ref['note'], ref_player='hvl_replay 1.9 (BSD-3) tick dump')
             return row
         row.update(out_ref=ref['out'], led_ref=ref['led'], ref_player=ref['player'])
         ra, oref = ref['data'], ref['o']
@@ -1102,6 +1200,8 @@ def main():
     ap.add_argument('--update-baseline', action='store_true')
     ap.add_argument('--listen', default=LISTEN_PY, help='listen.py, for its staging of modules with companions')
     ap.add_argument('--oracle', default=XMP_ORACLE)
+    ap.add_argument('--hvl-testbin', default=None, help='the lib unit-test executable (has replay::hvl::tests::dump); '
+                    'default: built with `cargo test --release --lib --no-run` (honours CARGO_TARGET_DIR / CARGO_BUILD_BUILD_DIR)')
     a = ap.parse_args()
     # the reference side needs the 68k hosting: a default build refuses --68k-players (with
     # --wav so that a build that has it does not open a window)

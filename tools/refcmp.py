@@ -45,7 +45,8 @@ The two sample streams are compared and each file gets a class:
   TEMPO       the loudness envelopes' alignment drifts by TEMPO_DRIFT_S or more over the render
               (tempo_drift_s, positive: the port lags further behind the original as it goes)
   DIFF        anything else
-  NOREF       no original available (neutral: not counted as an inconsistency)
+  NOREF       no original available (neutral: not counted as an inconsistency); also a file the
+              port does not render when no original plays it either
 
 Outputs (in --out): refcmp.tsv, summary.txt, report.html. The baseline
 (tools/refcmp-baseline.tsv) holds each file's class and numbers; a run reports
@@ -964,6 +965,13 @@ def process(ctx, f):
         row['led_port'] = pled or ''
         if not pw or not pplay:
             row['note'] = 'port: ' + (plines[-1] if plines else 'no output')[:120]
+            # a file no original plays either (a TFMX song without its sample file: TFMX_Pro cannot load
+            # the companion, the generic search finds only a player that stays silent) is no failure of
+            # the port: nothing to compare it with
+            ref = find_reference(ctx, mod, {})
+            if ref['kind'] == 'none' and ref['noref']:
+                row['cls'] = 'NOREF'
+                row['note'] += '; ' + ref['note']
             return row
         row['player'] = pplay
         po = parse_output(pout)

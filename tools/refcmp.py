@@ -1049,6 +1049,16 @@ def render_hvl_ticks(ctx, mod, pplay):
     return dict(kind='hvl-ticks', cls=cls, note='hvl_replay 1.9 tick dump: ' + note)
 
 
+def coso_twin(path):
+    """A Hippel 7V module in the COSO container ("NAME (COSO).hip7[.xz]") has, in the corpus, the
+    same tune as the game stores it ("NAME.hip7[.xz]"): its path, if that exists."""
+    m = re.match(r'^(.*) \(COSO\)(\.hip7(?:\.xz)?)$', path)
+    if not m:
+        return None
+    twin = m.group(1) + m.group(2)
+    return twin if os.path.exists(twin) else None
+
+
 def process(ctx, f):
     """One file: renders, comparison, class. Returns the result row (a dict)."""
     row = {'id': f['id'], 'fmt': f['fmt'], 'path': f['path'], 'cls': 'FAIL', 'note': ''}
@@ -1075,6 +1085,17 @@ def process(ctx, f):
             port_short = w.getnframes() < w.getframerate() // 4
         rb = read_wav(pw)
         ref = find_reference(ctx, mod, po, port_short, port_silent=not rb[1].any(), pplay=pplay)
+        if ref['kind'] == 'none' and _norm(po.get('format', '')) == 'hippel7v':
+            twin = coso_twin(path)
+            if twin:
+                # the Eagleplayer refuses the COSO container of a 7-voice module: its TFMX twin
+                # (the same tune as the game stores it) is the original's reference (README)
+                tmod = ctx.stage(twin) if ctx.stage else _fallback_stage(twin, ctx.cache)
+                tref = find_reference(ctx, tmod, po, port_short, port_silent=not rb[1].any(), pplay=pplay)
+                if tref['kind'] != 'none':
+                    tref['note'] = ''
+                    tref['player'] += ' (on the TFMX twin ' + os.path.basename(twin) + ')'
+                    ref = tref
         if ref['kind'] == 'none':
             row['cls'] = 'NOREF' if ref['noref'] else 'FAIL'
             row['note'] = ref['note']

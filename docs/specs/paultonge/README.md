@@ -21,6 +21,8 @@ songs reference two of its tables:
   reads after the wrapper's load-time patch; entries 49..51 and 117..119 would be an address inside the
   host's wrapper and are not reproducible (unpatched driver bytes are stored; no song uses them).
 The driver file itself is not needed by a port and is not included.
+The port embeds only the table parts (the 15 curve words and the 36 periods): the words past them are the
+driver's code, and an index past either table reads its last entry in the port.
 
 ## Unknowns and caveats
 - Timing: all costs in SPEC 6 come from the reference CPU's per-instruction costs. Paths that no song executes are

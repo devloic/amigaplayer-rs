@@ -70,9 +70,9 @@ fn one_note() -> Vec<u8> {
 #[test]
 fn tables() {
     assert_eq!((0..15).map(volume).collect::<Vec<_>>(), [0, 2, 3, 4, 6, 8, 10, 13, 17, 22, 28, 35, 40, 51, 64]);
-    assert_eq!(volume(16), 0x37);
-    assert_eq!(volume(17), 0);
+    assert_eq!((volume(15), volume(16), volume(17), volume(1000)), (64, 64, 64, 64));
     assert_eq!((period_of(0), period_of(35)), (856, 113));
+    assert_eq!((period_of(36), period_of(53), period_of(127)), (113, 113, 113));
 }
 
 #[test]
@@ -122,7 +122,8 @@ fn bank_names() {
 fn start_tick_and_a_note() {
     let (w, ended) = play("PAT.t", one_note(), Some(("SMP.set", bank())), 2);
     let regs: Vec<(u32, u16)> = w.iter().map(|x| (x.0, x.1)).collect();
-    // tick 1: the empty accumulators, the start, the voice's first writes (index 16 of the curve)
+    // tick 1: the empty accumulators, the start, the voice's first writes (index 16, past the
+    // curve: its last entry, 64)
     assert_eq!(
         &regs[..9],
         [
@@ -132,8 +133,8 @@ fn start_tick_and_a_note() {
             (0xDFF09A, 0x0780),
             (0xDFF09E, 0x00FF),
             (0xDFF0A6, 0),
-            (0xDFF0A8, 0x37),
-            (0xDFF0A8, 0x37),
+            (0xDFF0A8, 64),
+            (0xDFF0A8, 64),
             (0xDFF0A0, 0)
         ]
     );
@@ -145,9 +146,9 @@ fn start_tick_and_a_note() {
     assert_eq!(regs[10], (0xDFF0A4, 8));
     assert_eq!(&regs[11..14], [(0xDFF09A, 0x0080), (0xDFF096, 0x0001), (0xDFF09C, 0x0080)]);
     // the next tick: DMA and interrupt on for the voice, the note's period, the volume (index
-    // 15 of the curve reads a driver word: 0x4A28 scaled to 0x228)
+    // 15 is past the curve: its last entry, 64)
     assert_eq!(&regs[14..17], [(0xDFF096, 0x8201), (0xDFF09C, 0x0080), (0xDFF09A, 0x8080)]);
-    assert_eq!(&regs[17..20], [(0xDFF0A6, period_of(5)), (0xDFF0A8, 0x228), (0xDFF0A8, 0x228)]);
+    assert_eq!(&regs[17..20], [(0xDFF0A6, period_of(5)), (0xDFF0A8, 64), (0xDFF0A8, 64)]);
     // the audio interrupt swaps the loop part in: LC, LEN 4, then INTREQ and INTENA clear
     let i = regs.iter().position(|x| *x == (0xDFF0A4, 4)).expect("loop LEN");
     assert_eq!(&regs[i + 1..i + 3], [(0xDFF09C, 0x0080), (0xDFF09A, 0x0080)]);

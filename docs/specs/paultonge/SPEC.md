@@ -147,6 +147,9 @@ Addresses written to AUDxLC are absolute: bank base + offset.
   load time (the file holds the patched value). Indices 49, 50, 51 and 117, 118, 119 are the wrapper's patch (an absolute address of
   the host's code) and are not reproducible; the file holds the driver's unpatched bytes there. No module uses them.
 
+The port embeds entries 0..14 of the curve and 0..35 of the period table only (the rest are driver code words)
+and reads the last entry for a larger index (volume 64, period 113).
+
 ## 4. State
 
 Global:

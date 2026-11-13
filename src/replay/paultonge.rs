@@ -11,15 +11,16 @@
 //! cycle count of the specification's ledger (the tick, the pattern read and the audio interrupt
 //! handler that swaps the loop part in once Paula has latched the attack part).
 //!
-//! Two tables of the original driver are needed and are embedded: the volume curve (17 words) and
-//! the period table (128 words, of which the first 36 are the table proper and the rest are the
-//! words the driver reads past its end). The data is taken from the original player on the
-//! project owner's decision.
+//! Two tables of the original driver are needed and are embedded: the volume curve (15 words) and
+//! the period table (36 words, three octaves). The data is taken from the original player on the
+//! project owner's decision. The driver has no bound check on either: a volume index of 15 or more
+//! and a note index of 36 or more read the driver's own code behind the table, which is not
+//! embedded; the port clamps such an index to the table's last entry (volume 64, period 113).
 //!
 //! Choices where the specification leaves the behaviour open: a pattern byte 0x9A..0x9F and the
 //! unspecified command 0x98 end the voice (it goes inactive, no song-end mark); chord bytes
-//! (0xA0..0xAF) take no argument bytes; a volume index above 16 gives volume 0; a pattern or list
-//! that runs off the known memory reads zero bytes; a pattern read of more than 4096 bytes in one
+//! (0xA0..0xAF) take no argument bytes; a volume or note index past its table reads the table's
+//! last entry (above); a pattern or list that runs off the known memory reads zero bytes; a pattern read of more than 4096 bytes in one
 //! tick, or more than 8 position-list restarts in a row, ends the voice; a start request of 2 or
 //! more stops the song without cost. Memory past the song file is the sample bank at the
 //! offset the reference's host put it (0x800, 0x810 or 0xC08 from the song start by the song's
@@ -32,8 +33,8 @@ use m68k::AddressBus as _;
 
 pub const OPEN: Open = Open { name: "Paul Tonge", detect, new };
 
-static VOLUMES: &[u8; 34] = include_bytes!("paultonge_volumes.bin");
-static PERIODS: &[u8; 256] = include_bytes!("paultonge_periods.bin");
+static VOLUMES: &[u8; 30] = include_bytes!("paultonge_volumes.bin");
+static PERIODS: &[u8; 72] = include_bytes!("paultonge_periods.bin");
 
 /// The delay of the engine's first tick that puts the first call of the play routine at colour
 /// clock 98306 (the reference's value for a file name of nine characters in a directory path of
@@ -59,14 +60,15 @@ const VOL1: [u64; 4] = [432, 480, 518, 553];
 const VOL2: [u64; 4] = [137, 168, 199, 207];
 const INTENA_COST: [u64; 4] = [241, 272, 303, 311];
 
+/// The volume curve; an index past it (the original reads its code there) gives the last entry.
 fn volume(i: usize) -> u16 {
-    if i > 16 {
-        return 0;
-    }
+    let i = i.min(VOLUMES.len() / 2 - 1);
     u16::from_be_bytes([VOLUMES[2 * i], VOLUMES[2 * i + 1]])
 }
 
+/// The period table; an index past it (the original reads its code there) gives the last entry.
 fn period_of(i: usize) -> u16 {
+    let i = i.min(PERIODS.len() / 2 - 1);
     u16::from_be_bytes([PERIODS[2 * i], PERIODS[2 * i + 1]])
 }
 

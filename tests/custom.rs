@@ -306,3 +306,35 @@ fn damaged_custom_modules_do_not_take_the_host_down() {
         }
     }
 }
+
+/// Game modules that carry their own 68000 replay code, found in the project's scratch corpus
+/// (the test is skipped where it is not): the library plays them on its own host, from the
+/// module's code alone, with no DeliPlayer or Eagleplayer file anywhere (`Song` loads none).
+/// Each is (path under the corpus, first subsong, last subsong). The application's Paula write
+/// log of each, with the 68k players loaded, was compared with `--open-replayers` and every
+/// player directory empty: identical for 30 s.
+#[test]
+fn real_custom_modules_play_on_the_hosts_own_code() {
+    const ROOT: &str = "/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/";
+    let files = [
+        ("Pieket_Weeserik_Ronald/Rodland/Rodland/cust.Rodland", 1, 9),
+        ("Cuomo_Jim/Defender_of_the_Crown/Defender_of_the_Crown/cust.Defender_of_the_Crown", 0, 8),
+        ("van_der_Valk_Paul/Hybris/Hybris/Custom_Version/cust.ingame", 0, 5),
+    ];
+    for (rel, first, last) in files {
+        let Ok(data) = std::fs::read(format!("{ROOT}{rel}")) else {
+            eprintln!("{rel}: not here, skipped");
+            continue;
+        };
+        let name = rel.rsplit('/').next().unwrap();
+        assert!(detect_custom(&data), "{name}");
+        assert_eq!(Song::open(name, &data, RATE).err(), Some(Error::NotRecognised), "{name}: only when asked for");
+        let mut song = Song::open_opts(name, &data, &[], RATE, &custom()).unwrap();
+        assert_eq!(song.format(), "Custom", "{name}");
+        let s = song.subsongs();
+        assert_eq!((s.first, s.last), (first, last), "{name}");
+        let pcm = render(&mut song, 5.0);
+        assert!(song.error().is_none(), "{name}: {:?}", song.error());
+        assert!(pcm.iter().any(|&x| x.abs() > 0.05), "{name}: silence");
+    }
+}

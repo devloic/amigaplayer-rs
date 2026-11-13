@@ -277,15 +277,40 @@ mod ins {
     pub const ARP_COUNT: u32 = 0x33;
 }
 
+/// The same references in the later version of the editor's replayer (a module that has a
+/// word `$FFFF` after the four jumps and init at `$14`): the code between them grew, so
+/// the offsets from the init routine differ. Found by aligning the two replayers' code
+/// word by word and checking each opcode (the order is that of `REFS`).
+const REFS_V2: [(u16, u16); 14] = [
+    (0x066, 0x47fa),
+    (0x074, 0x47fa),
+    (0x06c, 0x47fa),
+    (0x07c, 0x47fa),
+    (0x1dc, 0x45fa),
+    (0x00e, 0x47fa),
+    (0x004, 0x123a),
+    (0x018, 0x49fa),
+    (0x014, 0x45fa),
+    (0x1a6, 0xdbfa),
+    (0x04a, 0xd7fa),
+    (0x10e, 0x45fa),
+    (0x026, 0x41fa),
+    (0x034, 0x43fa),
+];
+
 /// Offsets in the module of the original's targets, and of its init routine.
 fn refs(d: &[u8]) -> Option<(u16, [u32; 14])> {
+    refs_with(d, &REFS).or_else(|| refs_with(d, &REFS_V2))
+}
+
+fn refs_with(d: &[u8], table: &[(u16, u16); 14]) -> Option<(u16, [u32; 14])> {
     // EP_Check: four jumps, and no fifth
     if (0..4).any(|i| be16(d, 4 * i) != 0x4efa) || be16(d, 16) == 0x4efa {
         return None;
     }
     let init = be16(d, 2).wrapping_add(2);
     let mut a = [0; 14];
-    for (t, &(off, op)) in a.iter_mut().zip(&REFS) {
+    for (t, &(off, op)) in a.iter_mut().zip(table) {
         // the original indexes the module with words, sign extended
         let o = off.wrapping_add(init) as i16 as i64;
         if o < 0 || be16(d, o as usize) != op {
@@ -310,6 +335,11 @@ pub struct Fred {
     sub: u16,
     last_subsong: u16,
     songend: bool,
+    /// What the offsets the module keeps (tracks, instruments, samples) are relative to: the
+    /// module's start, and in the later replayer (`REFS_V2`) a point 0x44 bytes before it.
+    base: u32,
+    /// Where the byte that enables the voices lies (after the later replayer's extra word).
+    voice_mask_at: u32,
 }
 
 /// What the voice loop does after a voice.
@@ -330,7 +360,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     let last_subsong = b.r8(base.wrapping_add(a[LAST_SUBSONG])) as u16;
     let p = a.map(|o| base.wrapping_add(o));
-    let mut f = Fred { module: base, p, dma: 0, sub: 0, last_subsong, songend: false };
+    let v2 = refs_with(d, &REFS).is_none();
+    let mut f = Fred { module: base, p, dma: 0, sub: 0, last_subsong, songend: false, base: if v2 { base.wrapping_sub(0x44) } else { base }, voice_mask_at: if v2 { 0x12 } else { 0x10 } };
     f.init_sound(0, &mut Hw { bus: b });
     Some(Box::new(f))
 }
@@ -395,7 +426,7 @@ impl Fred {
             let list = self.p[POSITIONS];
             let pos = list.wrapping_add(b.r16(list + 8 * n as u32 + 2 * ch as u32) as i16 as u32);
             b.w32(va + v::POSITIONS, pos);
-            let tracks = self.module.wrapping_add(b.r32(self.p[TRACKS]));
+            let tracks = self.base.wrapping_add(b.r32(self.p[TRACKS]));
             b.w32(va + v::TRACK, tracks.wrapping_add(b.r16(pos) as i16 as u32));
             b.w8(va + v::LOOP_DONE, 0xff);
         }
@@ -451,7 +482,7 @@ impl Fred {
                 hw.len(ch, 0x32);
                 at(hw, At::LoopEnd);
             } else if repeat & 0x8000 == 0 {
-                let mut a = self.module.wrapping_add(b.r32(inst + ins::SAMPLE)).wrapping_add(repeat as u32);
+                let mut a = self.base.wrapping_add(b.r32(inst + ins::SAMPLE)).wrapping_add(repeat as u32);
                 let len = b.r16(inst + ins::LENGTH).wrapping_sub(repeat);
                 if b.r8(inst + ins::TYPE) != 0 {
                     a = va + v::WAVE;
@@ -503,7 +534,7 @@ impl Fred {
                 // instrument
                 0x83 => {
                     let n = b.r8(t) as u32;
-                    inst = self.module.wrapping_add(b.r32(self.p[INSTRUMENTS])).wrapping_add(n << 6);
+                    inst = self.base.wrapping_add(b.r32(self.p[INSTRUMENTS])).wrapping_add(n << 6);
                     b.w32(va + v::INSTRUMENT, inst);
                     *inst_change = true;
                     b.w32(va + v::TRACK, t + 1);
@@ -567,7 +598,7 @@ impl Fred {
                 continue;
             }
             b.w16(va + v::POSITION, off as u16);
-            let tracks = self.module.wrapping_add(b.r32(self.p[TRACKS]));
+            let tracks = self.base.wrapping_add(b.r32(self.p[TRACKS]));
             b.w32(va + v::TRACK, tracks.wrapping_add(e as u32));
             b.w16(va + v::DURATION, 1);
             return Next::Again;
@@ -598,7 +629,7 @@ impl Fred {
         let tempo = self.tempo(hw);
         let b = &mut *hw.bus;
         b.w16(va + v::DURATION, tempo);
-        let mut a = self.module.wrapping_add(b.r32(inst + ins::SAMPLE));
+        let mut a = self.base.wrapping_add(b.r32(inst + ins::SAMPLE));
         if kind != 0 {
             a = va + v::WAVE;
         }
@@ -622,7 +653,7 @@ impl Fred {
             b.w16(va + v::PORT_COUNTER, 1);
             b.w16(va + v::PORT_START, period);
         }
-        if b.r8(self.module + 0x10) & bit as u8 == 0 {
+        if b.r8(self.module + self.voice_mask_at) & bit as u8 == 0 {
             // a voice the module does not enable: no DMA, no effects
             return Some(Next::Voice);
         }
@@ -666,7 +697,7 @@ impl Fred {
         b.w16(va + v::BLEND_POS, 1);
         b.w8(va + v::BLEND_SHOT, b.r8(inst + ins::BLEND_SHOT));
         b.w8(va + v::BLEND_DELAY, b.r8(inst + ins::BLEND_DELAY));
-        let s = self.module.wrapping_add(b.r32(inst + ins::SAMPLE));
+        let s = self.base.wrapping_add(b.r32(inst + ins::SAMPLE));
         for i in 0..32 {
             b.w8(va + v::WAVE + i, b.r8(s + i));
         }
@@ -903,7 +934,7 @@ impl Fred {
         let b = &mut *hw.bus;
         // the sample's first half, plus the second half (read as words) times
         // the position, shifted down logically by the blend
-        let s = self.module.wrapping_add(b.r32(inst + ins::SAMPLE));
+        let s = self.base.wrapping_add(b.r32(inst + ins::SAMPLE));
         for i in 0..32 {
             let p = (pos as i16 as i32).wrapping_mul(b.r16(s + 0x20 + 2 * i) as i16 as i32) as u32;
             let p = p.checked_shr(blend & 63).unwrap_or(0) as u8;
@@ -922,37 +953,79 @@ mod tests {
     /// end. The position list then jumps back to its start (a song end).
     /// Instrument 0 is a 16-word sample repeating from byte 8, at period 428.
     fn module() -> Vec<u8> {
-        let targets = [0x7fe, 0x7ff, 0x800, 0x802, 0x804, 0x894, 0x895, 0x896, 0x897, 0x8a2, 0x8a6, 0x8aa, 0x90e, 0xb0e];
-        let mut d = vec![0u8; 0xc60];
+        build(false)
+    }
+
+    /// The same song in the later replayer's layout (`REFS_V2`): a word `$FFFF` after the
+    /// four jumps, init at $14, the voices' mask after it, the code 0x46 bytes longer, and
+    /// the offsets of tracks, instruments and samples counted from 0x44 bytes before the
+    /// module.
+    fn module_v2() -> Vec<u8> {
+        build(true)
+    }
+
+    fn build(v2: bool) -> Vec<u8> {
+        let (shift, bias, init) = if v2 { (0x46usize, 0x44u32, 0x14usize) } else { (0, 0, 0x12) };
+        let targets = [0x7fe, 0x7ff, 0x800, 0x802, 0x804, 0x894, 0x895, 0x896, 0x897, 0x8a2, 0x8a6, 0x8aa, 0x90e, 0xb0e].map(|t| t + shift);
+        let mut d = vec![0u8; 0xc60 + shift];
         for i in 0..4 {
             d[4 * i..4 * i + 2].copy_from_slice(&0x4efau16.to_be_bytes());
         }
-        d[2..4].copy_from_slice(&0x10u16.to_be_bytes()); // init at $12
-        d[0x10] = 0x0f; // all voices enabled
-        for (&(off, op), &t) in super::REFS.iter().zip(&targets) {
-            let o = 0x12 + off as usize;
+        d[2..4].copy_from_slice(&((init - 2) as u16).to_be_bytes());
+        if v2 {
+            d[0x10..0x12].copy_from_slice(&[0xff, 0xff]);
+        }
+        d[init - 2] = 0x0f; // all voices enabled
+        for (&(off, op), &t) in (if v2 { &super::REFS_V2 } else { &super::REFS }).iter().zip(&targets) {
+            let o = init + off as usize;
             d[o..o + 2].copy_from_slice(&op.to_be_bytes());
             d[o + 2..o + 4].copy_from_slice(&((t - o - 2) as u16).to_be_bytes());
         }
-        d[0x804 + 72..0x804 + 74].copy_from_slice(&1024u16.to_be_bytes()); // note 36
-        d[0x897] = 3; // start tempo
-        d[0x8a2..0x8a6].copy_from_slice(&0xc00u32.to_be_bytes()); // instruments
-        d[0x8a6..0x8aa].copy_from_slice(&0xb40u32.to_be_bytes()); // tracks
+        let list = 0xb0e + shift;
+        d[0x804 + shift + 72..0x804 + shift + 74].copy_from_slice(&1024u16.to_be_bytes()); // note 36
+        d[0x897 + shift] = 3; // start tempo
+        let (ins_at, tracks_at) = (0xc00 + shift, 0xb40 + shift);
+        d[0x8a2 + shift..0x8a6 + shift].copy_from_slice(&(ins_at as u32 + bias).to_be_bytes()); // instruments
+        d[0x8a6 + shift..0x8aa + shift].copy_from_slice(&(tracks_at as u32 + bias).to_be_bytes()); // tracks
         for i in 0..4 {
-            d[0xb0e + 2 * i + 1] = 8; // each voice's position list at +8
+            d[list + 2 * i + 1] = 8; // each voice's position list at +8
         }
-        d[0xb16..0xb1a].copy_from_slice(&[0x00, 0x00, 0x80, 0x00]); // track 0, jump to 0
-        d[0xb40..0xb44].copy_from_slice(&[0x83, 0, 36, 0x80]);
-        let ins = &mut d[0xc00..0xc40];
-        ins[0..4].copy_from_slice(&0xc40u32.to_be_bytes());
+        d[list + 8..list + 12].copy_from_slice(&[0x00, 0x00, 0x80, 0x00]); // track 0, jump to 0
+        d[tracks_at..tracks_at + 4].copy_from_slice(&[0x83, 0, 36, 0x80]);
+        let ins = &mut d[ins_at..ins_at + 0x40];
+        ins[0..4].copy_from_slice(&(ins_at as u32 + 0x40 + bias).to_be_bytes());
         ins[4..10].copy_from_slice(&[0, 8, 0, 16, 0x01, 0xac]); // repeat 8, 16 words, period 428
         ins[0x0e..0x11].copy_from_slice(&[64, 64, 255]); // volume 64, attack by 64 to 255
         ins[0x26] = 1; // arpeggio speed
         ins[0x33] = 1; // arpeggio count
-        for (i, b) in d[0xc40..].iter_mut().enumerate() {
+        for (i, b) in d[ins_at + 0x40..].iter_mut().enumerate() {
             *b = (i as u8) << 3;
         }
         d
+    }
+
+    #[test]
+    fn the_later_replayer_plays_what_the_first_does() {
+        assert!(super::detect(&module()));
+        assert!(super::detect(&module_v2()));
+        let play = |m: Vec<u8>| {
+            let mut e = Engine::new(48000.0);
+            e.open_replayers = true;
+            e.m.bus.write_log = Some(Vec::new());
+            e.play_data(Path::new("test.frd"), m).unwrap();
+            assert_eq!(e.playing.as_ref().unwrap().format, "Fred Editor");
+            let mut out = vec![0f32; 2 * 4800];
+            e.render(&mut out);
+            // the registers but the locations (the module's two layouts are not at one address)
+            let log = e.m.bus.write_log.take().unwrap();
+            let regs: Vec<(u32, u32)> =
+                log.iter().filter(|w| !(0xDFF0A0..0xDFF0E0).contains(&w.0) || !matches!(w.0 & 0xf, 0 | 2)).map(|w| (w.0, w.1 as u32)).collect();
+            (out, regs)
+        };
+        let (a, la) = play(module());
+        let (b, lb) = play(module_v2());
+        assert_eq!(la, lb, "the same register writes");
+        assert!(a.iter().any(|&s| s != 0.0) && b.iter().any(|&s| s != 0.0), "no sound");
     }
 
     #[test]

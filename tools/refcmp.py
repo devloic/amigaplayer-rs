@@ -28,7 +28,10 @@ settings, WAV for WAV:
              that runs the module, marked REF-FALLBACK where the port has a
              verified original), else for the formats checked in uade123
              (UADE123_REF) uade123 itself with the port's output stage. A silent
-             original is the reference of a port that is silent too.
+             original is the reference of a port that is silent too. The formats
+             no Amiga player plays here (BLACKBOX_REF: 8SVX, AIFF, WAV, MPEG audio,
+             ZX AY, NSF, Symphonie) are checked against sox, ffmpeg, libgme or
+             openmpt123 instead.
 
 The two sample streams are compared and each file gets a class:
 
@@ -609,10 +612,11 @@ NO_AMIGA_PLAYER = {'hivelytracker'}
 # routines: they play on; so does the Jesper Olsen Eagleplayer: 25 modules looped for 120 s each without
 # one, and the port's write log equals the original's over 30-40 s once the CLI ignores its song end;
 # AProSys never tells the host, the original then goes on silently past the song end; the Rob Hubbard 2
-# DeliPlayer never reports a song end)
+# DeliPlayer never reports a song end; nor does EP206's A.M.Composer 1.2: amc.jingle_1 and amc.jingle_2
+# loop in it for 30 s, the first pass alike the port's up to its song end)
 # while the port signals one at the song's end (README), which stops
 # the CLI render there. The original is compared over the port's length.
-ORIGINAL_PLAYS_ON = {'pretracker', 'scumm', 'jesperolsen', 'aprosys', 'robhubbard2'}
+ORIGINAL_PLAYS_ON = {'pretracker', 'scumm', 'jesperolsen', 'aprosys', 'robhubbard2', 'amcomposer'}
 
 
 # Formats whose original refuses some modules the port plays (Hippel 7V: the five COSO modules, README):
@@ -771,6 +775,122 @@ def render_sndh_oracle(ctx, mod, po, pplay):
                 player=f'AtariAudio 1.30 (oracle): subsong {sub} ' + info[:60], o={}, note='')
 
 
+# Formats no Amiga player gives a reference for in the engine (README: the Eagleplayers are silent or
+# crash under this hosting), checked against an installed black-box decoder or emulator, which is the
+# reference the README names for them: normalised port format -> tool.
+#   sox: IFF 8SVX (PCM), AIFF, RIFF WAVE (PCM, float, Microsoft ADPCM), decoded at the file's own
+#     rate (sox 14.4.2, no dither, 32-bit float), then brought to 48 kHz by the port's documented rate
+#     conversion (src/aiff.rs: linear interpolation up, the mean of the source frames under each
+#     output frame down), the port's recorded-audio stage (no filter, no separation, gain volume/0.8).
+#     Calibration: on the 44.1 kHz and 48 kHz files the decoded samples agree to 1 LSB; the README
+#     checked the decoders sample for sample against sox and ffmpeg at the file's rate. sox does not
+#     read Fibonacci-delta 8SVX and ffmpeg decodes it low nibble first (README), so those stay NOREF.
+#   ffmpeg: MPEG audio layers 1-3, decoded by ffmpeg 6 at the file's rate (float), then as for sox
+#     (the port decodes with symphonia-bundle-mp3 onto the same recorded-audio stage).
+#   gme: ZX Spectrum AY (ZXAYEMUL) and NSF through ffmpeg's libgme, 48 kHz, the port's subsong. GME is
+#     another emulation (its own AY level curve and output filters): no file plays alike, the class
+#     says how far the port is from it, not whether it is exact.
+#   openmpt123: Symphonie / Symphonie Pro (the port follows libopenmpt 0.8.7; openmpt123 0.7.3, 48 kHz,
+#     linear interpolation, 16-bit, no dither). Calibration: the X-Tracker port, which follows the same
+#     libopenmpt, is SIMILAR against it on 4 of 4 modules (level 0.00 dB, 39-77 % of frames equal).
+SOX = '/usr/bin/sox'
+FFMPEG = '/usr/bin/ffmpeg'
+OPENMPT123 = '/usr/bin/openmpt123'
+BLACKBOX_REF = {'iff8svx': 'sox', 'aiff': 'sox', 'riffwave': 'sox', 'riffwaveadpcm': 'sox',
+                'iff8svxfibonacci': None, 'zxayemul': 'gme', 'nsf': 'gme',
+                'symphonie': 'openmpt123', 'symphoniepro': 'openmpt123',
+                'mpegaudiolayer1': 'ffmpeg', 'mpegaudiolayer2': 'ffmpeg', 'mpegaudiolayer3': 'ffmpeg'}
+
+
+def port_rate_conversion(x, src, dst=48000):
+    """src/aiff.rs's rate conversion of float frames x (n, ch) from src to dst Hz: the position steps
+    by src/dst from 0 (f64, added up frame by frame); upwards linear interpolation in f32, downwards
+    the mean of the source frames from the position's frame to that of position + step."""
+    step = src / float(dst)
+    n = len(x)
+    xf = x.astype(np.float32)
+    pos = np.concatenate([[0.0], np.cumsum(np.full(int(n / step) + 3, step))])
+    pos = pos[pos < n]
+    i = pos.astype(np.int64)
+    if step > 1.0:
+        end = np.minimum(np.maximum((pos + step).astype(np.int64), i + 1), n)
+        cs = np.concatenate([np.zeros((1, xf.shape[1])), np.cumsum(xf.astype(np.float64), axis=0)])
+        return ((cs[end] - cs[i]) / (end - i)[:, None]).astype(np.float32)
+    t = (pos - i).astype(np.float32)[:, None]
+    a, b = xf[i], xf[np.minimum(i + 1, n - 1)]
+    return np.where(t == 0, a, a + (b - a) * t)
+
+
+def render_blackbox(ctx, mod, po, pplay, tool):
+    """The black-box reference of a BLACKBOX_REF format (dict), or a NOREF note (str)."""
+    if tool is None:
+        return 'no black-box decoder reads it (sox does not, ffmpeg decodes Fibonacci low nibble first: README)'
+    exe = {'sox': SOX, 'ffmpeg': FFMPEG, 'gme': FFMPEG, 'openmpt123': OPENMPT123}[tool]
+    if not os.path.exists(exe):
+        return f'{exe} not installed'
+    if po.get('volume') != '0.80' or po.get('mono', '0') != '0' or po.get('interp', 'linear') != 'linear':
+        return f'{tool} is compared at the default output stage only (volume 0.80, stereo, linear interpolation)'
+    m = re.search(r'\(current (\d+)\)', pplay or '')
+    sub = int(m.group(1)) if m else 0
+    h = hashlib.sha1(json.dumps([tool, int(os.path.getmtime(exe)), mod, sub, ctx.secs]).encode()).hexdigest()[:20]
+    wav = os.path.join(ctx.cache, h + '.' + tool + '.wav')
+    inf = wav + '.txt'
+    cwd = os.path.dirname(mod)
+    if not os.path.exists(inf):
+        text = ''
+        try:
+            if tool in ('sox', 'ffmpeg'):
+                raw = wav + '.f32'
+                if tool == 'sox':
+                    q = lambda o: subprocess.run(['soxi', o, mod], capture_output=True, text=True, timeout=60).stdout.strip()
+                    rate, ch = int(float(q('-r'))), int(q('-c'))
+                    cmd = [SOX, '-D', mod, '-t', 'f32', '-e', 'floating-point', '-b', '32', raw]
+                else:
+                    pr = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries',
+                                         'stream=sample_rate,channels', '-of', 'csv=p=0', mod],
+                                        capture_output=True, text=True, timeout=60).stdout.split()[0].split(',')
+                    rate, ch = int(pr[0]), int(pr[1])
+                    cmd = [FFMPEG, '-nostdin', '-loglevel', 'error', '-y', '-i', mod, '-f', 'f32le', '-c:a', 'pcm_f32le', raw]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if r.returncode == 0:
+                    x = np.fromfile(raw, dtype='<f4')
+                    x = x[:len(x) // ch * ch].reshape(-1, ch)
+                    x = np.repeat(x, 2, axis=1) if ch == 1 else x[:, :2]
+                    y = port_rate_conversion(x, rate) if rate != 48000 else x
+                    y = y[:ctx.secs * 48000]
+                    s = np.clip(np.round(y.astype(np.float32) * np.float32(32768.0)), -32768, 32767).astype('<i2')
+                    with wave.open(wav, 'wb') as w:
+                        w.setnchannels(2)
+                        w.setsampwidth(2)
+                        w.setframerate(48000)
+                        w.writeframes(s.tobytes())
+                    text = f'{"sox 14.4.2" if tool == "sox" else "ffmpeg"} at {rate} Hz, {ch} channel(s), port rate conversion to 48000'
+                else:
+                    text = f'{tool}: ' + r.stderr.strip()[:80]
+                if os.path.exists(raw):
+                    os.unlink(raw)
+            elif tool == 'gme':
+                r = subprocess.run([FFMPEG, '-nostdin', '-loglevel', 'error', '-y', '-f', 'libgme', '-track_index', str(sub),
+                                    '-sample_rate', '48000', '-i', mod, '-t', str(ctx.secs), '-c:a', 'pcm_s16le', wav],
+                                   capture_output=True, text=True, cwd=cwd, timeout=ctx.secs * 4 + 120)
+                text = f'libgme (ffmpeg) track {sub}' if r.returncode == 0 else 'ffmpeg libgme: ' + r.stderr.strip()[:80]
+            else:
+                r = subprocess.run([OPENMPT123, '-q', '--batch', '--force', '--no-float', '--dither', '0', '--filter', '2',
+                                    '--samplerate', '48000', '--subsong', str(sub), '--end-time', str(ctx.secs), '-o', wav, mod],
+                                   capture_output=True, text=True, cwd=cwd, timeout=ctx.secs * 4 + 120)
+                text = f'openmpt123 0.7.3 subsong {sub}' if r.returncode == 0 else 'openmpt123: ' + (r.stderr or r.stdout).strip()[:80]
+        except (subprocess.TimeoutExpired, ValueError) as e:
+            text = f'{tool}: {type(e).__name__}'
+        open(inf, 'w').write(text)
+    info = open(inf).read()
+    if not os.path.exists(wav) or not os.path.getsize(wav):
+        return info or f'{tool} rendered nothing'
+    data = read_wav(wav)
+    if not data[1].any():
+        return f'{tool} renders it silent ({info})'
+    return dict(kind=tool, wav=wav, data=data, out=info, led='', player=f'{tool} (black box): {info}', o={}, note='')
+
+
 def alternative_reference(ctx, mod, po, want, why):
     """A second-choice original (ALT_ORIGINALS, then uade123) for a module the search found no
     usable reference for, or None. `why`: what the search found."""
@@ -863,6 +983,9 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
     `playing` line): dict(kind 'engine'|'libxmp'|'uade123'|'atariaudio'|'none', wav (path),
     data ((rate, samples)), out, led, player, o, note, noref)."""
     none = dict(kind='none', note='', noref=True)
+    if _norm(po.get('format', '')) in BLACKBOX_REF:
+        ref = render_blackbox(ctx, mod, po, pplay, BLACKBOX_REF[_norm(po['format'])])
+        return ref if isinstance(ref, dict) else dict(none, note=ref)
     if po.get('backend') == 'libxmp-port' and not _norm(po.get('format', '')).startswith('delusiondigitalmusicformat'):
         if not os.path.exists(ctx.oracle):
             return dict(none, note='no libxmp oracle')
@@ -1116,6 +1239,9 @@ def process(ctx, f):
                 and len(ra[1]) > len(rb[1])):
             ra = (ra[0], ra[1][:len(rb[1])])
             cut_note = 'port song end; original plays on, cut to the port length'
+        if ref['kind'] in ('sox', 'ffmpeg') and len(rb[1]) > len(ra[1]) and not rb[1][len(ra[1]):].any():
+            # the CLI renders in 0.1 s blocks: past the sample's end the port's last block holds silence
+            ra = (ra[0], np.concatenate([ra[1], np.zeros((len(rb[1]) - len(ra[1]), 2), dtype=ra[1].dtype)]))
         r = compare(ra[1], rb[1], ra[0])
         row.update({k: r[k] for k in ('identical', 'first_diff', 'first_diff_s', 'pct_identical', 'maxabs',
                                       'level_db', 'lag', 'lag_pct', 'len_a', 'len_b', 'silent_a', 'silent_b',

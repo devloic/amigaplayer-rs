@@ -75,7 +75,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | FTM | FaceTheMusic 2.70 | Face The Music | open `Face The Music` | 20 S | A | V |
 | Hippel | Hippel 1.50 | Jochen Hippel (TFMX-type) | open `Hippel TFMX` | 3 S | A | V |
 | Hippel-COSO_note | Hippel-COSO 2.10 | Hippel COSO (also took a 7V file) | open `Hippel COSO`, `Hippel 7V` | COSO 6 S, 2 N; 7V 16 S, 7 N | A | V |
-| IFF-8SVX | IFF-8SVX 2.90 | IFF 8SVX sample | built-in decoder `src/iff8svx.rs` (PCM, Fibonacci) | none | P | U |
+| IFF-8SVX | IFF-8SVX 2.90 | IFF 8SVX sample | built-in decoder `src/iff8svx.rs` (PCM, Fibonacci) | PCM 2 I, 6 NE against sox 14.4.2; Fibonacci 4 N (no black-box decoder reads it right) | P | V |
 | IFF-SMUS | IFF-SMUS 1.10 | IFF SMUS + instruments | open `IFF-SMUS` | 17 S | R | V |
 | JamCracker_note | JamCracker 2.40 | JamCracker | open `JamCracker` | 9 S | A | V |
 | MarkII_note | Mark_II 1.70 | Mark II | open `Mark II` | 8 I | A | V |
@@ -83,7 +83,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | M.O.N | M.O.N. 1.40 | Maniacs of Noise | open `Maniacs of Noise` | 10 S | A | V |
 | Oktalyzer | Oktalyzer 1.90 | Oktalyzer | open `Oktalyzer` | 50 S | A | V |
 | SAplayer_note | SonicArranger 3.10 | Sonic Arranger | open `Sonic Arranger` | 9 S | A | V |
-| ScreamTracker3 | ScreamTracker_3.0 1.62 | Scream Tracker 3 (S3M) | libxmp port, S3M loader | none | E | U |
+| ScreamTracker3 | ScreamTracker_3.0 1.62 | Scream Tracker 3 (S3M) | libxmp port, S3M loader | 8 I (against libxmp 4.7.4 as oracle) | E | V |
 | Sidmon1.0_note | Sidmon_1.0 1.60 | SidMon 1.0 | open `SidMon 1.0` | 9 I | A | V |
 | Sidmon2.0_note | Sidmon_2.0 2.20 | SidMon 2.0 | open `SidMon 2.0` | 10 S | A | V |
 | SoundFX13_note | SoundFX_1.3 1.30 | SoundFX 1.3 | open `SoundFX1.3` | 10 I | A | V |
@@ -99,11 +99,11 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 
 | File | Name, version | Format | Default-build path | refcmp classes | Evidence | Status |
 |---|---|---|---|---|---|---|
-| 669 | Composer669 0.80 | Composer 669 | libxmp port, 669 loader | none | E | U |
+| 669 | Composer669 0.80 | Composer 669 | libxmp port, 669 loader | 8 I (against libxmp 4.7.4 as oracle) | E | V |
 | Actionamics | Actionamics 1.0 | Actionamics | open `Actionamics` | 3 S | A | V |
 | AHX-DeliPlayerII020 | AHX v2 2.33 | AHX / THX 1.x and 2.x | open `AHX` | 11 S | A | V |
-| AIFF | IFF-AIFF 1.30 | AIFF / AIFF-C sample | built-in decoder `src/aiff.rs` | none | P | U |
-| AMComposer | A.M.Composer 1.2 0.2 (an Eagleplayer) | A.M.Composer (`amc.`) | open `A.M.Composer` | none | E | U |
+| AIFF | IFF-AIFF 1.30 | AIFF / AIFF-C sample | built-in decoder `src/aiff.rs` | 5 I, 3 NE against sox 14.4.2 | P | V |
+| AMComposer | A.M.Composer 1.2 0.2 (an Eagleplayer) | A.M.Composer (`amc.`) | open `A.M.Composer` | 4 S (EP206 A.M.Composer 1.2) | E | V |
 | Amos | AmosMusicBank 0.80 | AMOS Music Bank | open `AMOS Music Bank` | 10 I (ref 10) | A | V |
 | ArtOfNoise | ArtOfNoise 1.20 | Art of Noise 4V / 8V | open `Art of Noise 4V`, `8V` | 4V 17 S; 8V 7 S, 1 N | A | V |
 | DataType | DataType 1.20 | any sound the system datatypes decode | built-in 8SVX, AIFF and RIFF WAVE decoders only | none | N (its check crashes in the engine, which disables it) | U (partial) |
@@ -114,13 +114,13 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | DigiMugi | Digital_Mugician 1.30 | Digital Mugician 1 / 2 | open `Digital Mugician 1`, `2` | 1: 8 S, 1 I; 2: 1 NE | A | V |
 | DSS | DSS 1.40 | Digital Sound Studio | open `Digital Sound Studio` | 30 I | A | V |
 | EarAche | EarAche 1.10 | EarAche (it took 3 of the 8 corpus files) | open `EarAche` | 8 I | A | V |
-| EMS | EMS 1.20 | EMS before v6 (`ems.`); it refuses the EMS v6 files | open `EMS` | none (EMS v6 has 10 I, another format) | E | U |
+| EMS | EMS 1.20 | EMS before v6 (`ems.`); it refuses the EMS v6 files | open `EMS` | 5 S (EP206 EMS; EMS v6 has 10 I, another format) | E | V |
 | FutureComposer | FutureComposer 0.80 ("FutureComposer V1.02") | Future Composer BSI (it took those files) | open `Future Composer BSI` | 8 I | A | V |
 | GlueMon | GlueMon 1.30 | GlueMon | open `GlueMon` | 5 I | A | V |
 | GMOD | GMOD 0.80 (Bryan Ford's MultiPlayer code) | GMOD (no file found) | none | none | N | X |
 | Hippel-ST_note | Hippel-ST 1.10 | Jochen Hippel ST | open `Jochen Hippel ST` | 8 I | A | V |
 | HolyNoise | TheHolyNoise 0.50 ("The Holy Noise V2.01") | Major Tom's format (it took the MajorTom files) | open `MajorTom` | 8 I | A | V |
-| Impulse | ImpulseTracker 0.98 | Impulse Tracker (IT), by name; it refused the 4 IT files tried | libxmp port, IT loader | none | N | U |
+| Impulse | ImpulseTracker 0.98 | Impulse Tracker (IT), by name; it refused the 4 IT files tried | libxmp port, IT loader | 8 I (against libxmp 4.7.4 as oracle) | N | V |
 | JasonPage_note | JasonPage 1.20 | Jason Page (`jpn.` + samples) | open `Jason Page` | 10 S | R | V |
 | JasonPageOld | Jason Page Old 0.3 (an Eagleplayer) | Jason Page old (`jpo.`) | open `Steve Turner` | 4 S | A | V |
 | JesperOlsen_note | JesperOlsen 1.10 | Jesper Olsen (took 1 of 10 files) | open `Jesper Olsen` | 18 I | A | V |
@@ -129,22 +129,22 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Medley | Medley 0.95 | Medley | open `Medley` | 8 I | A | V |
 | Mline | MusicLineEditor 1.3 | Musicline Editor | open `Musicline Editor` | 28 I | A | V |
 | Mon_old | Maniacs of Noise 1.3 | old Maniacs of Noise (it took the Jeroen Tel files) | open `Jeroen Tel` | 5 S, 1 D, 1 Q | A | V |
-| MultiTracker | MultiTracker 1.0 | MultiTracker (MTM) | libxmp port, MTM loader | none | E | U |
+| MultiTracker | MultiTracker 1.0 | MultiTracker (MTM) | libxmp port, MTM loader | 8 I (against libxmp 4.7.4 as oracle) | E | V |
 | Music-Ass_note | Music-Assembler 1.30 | Music Assembler | open `Music Assembler` | 16 I | A | V |
-| MusicMaker_note | MusicMaker 1.30 | MusicMaker 4V/8V, by name; it refused the corpus's single-file `MM8.` modules | open `MusicMaker 4V`, `8V` | 4V 1 S; 8V 9 N | N | V |
+| MusicMaker_note | MusicMaker 1.30 | MusicMaker 4V/8V, by name; it refused the corpus's single-file `MM8.` modules | open `MusicMaker 4V`, `8V` | 4V 1 S; 8V 9 S (against uade123's MusicMaker8) | N | V |
 | NESA_note | NESA 1.23 ("NESA - NES Audio", Morgan Johansson) | NES music (no file found) | none | none | N | X |
-| NSF | NSF 1.0 (Eagleplayer; "based on CoolNESs") | NES Sound Format (`NESM`) | built-in 6502 + 2A03 APU (`src/replay/nsf.rs`, 67cc1e6); expansion-chip tunes refused | none (4 files in `dl-modules/NSF/`, unit tests; checked against libgme, not sample-exact) | N | U |
+| NSF | NSF 1.0 (Eagleplayer; "based on CoolNESs") | NES Sound Format (`NESM`) | built-in 6502 + 2A03 APU (`src/replay/nsf.rs`, 67cc1e6); expansion-chip tunes refused | 4 F against libgme (ffmpeg): another emulation, highs 3-5 dB apart above 10 kHz; not sample-exact | N | V |
 | OctaMED | OctaMED 1.20 | OctaMED SoundStudio (MMD3) | open `OctaMED SoundStudio` | 4 I | A | V |
 | Paul Shields | Paul Shields 0.2 (an Eagleplayer) | Paul Shields | open `Paul Shields` | 8 S | A | V |
 | PierreAdane | Pierre Adane Packer 0.1 (an Eagleplayer) | Pierre Adane Packer (`pap.`) | open `Pierre Adane Packer` | 10 S | R | V |
 | Poly | PolyTracker 0.90 | PolyTracker | open `PolyTracker` | 20 S | A | V |
 | PowerTracker | PowerTracker 1.20 | PowerTracker | open `PowerTracker` | 2 I (ref 2) | A | V |
-| ProRunner21 | ProRunner_2.1 0.90 | ProRunner 2 | ProWizard `prorunner.rs` + built-in ProTracker | none (`ports/prowizard.txt` lists 32 `pru2.` files, no refcmp row) | P | U |
+| ProRunner21 | ProRunner_2.1 0.90 | ProRunner 2 | ProWizard `prorunner.rs` + built-in ProTracker | 8 S (UADE PTK-Prowiz in the engine, as the chiptracker rows) | P | V |
 | PSA | PSA 1.0 | Professional Sound Artists | open `Professional Sound Artists` | 8 I | A | V |
-| PumaTracker | PumaTracker 1.10 | PumaTracker | open `PumaTracker` | none | E | U |
+| PumaTracker | PumaTracker 1.10 | PumaTracker | open `PumaTracker` | 8 S (EP206 Pumatracker 1.0) | E | V |
 | QuadraComposer | QuadraComposer 1.40 | Quadra Composer (EMOD) | open `Quadra Composer` | 18 T, 2 S | A | V |
 | Quartet | Quartet 0.90 | Quartet (`qpa.` + samples) | open `Quartet` | 13 I | R | V |
-| RIFF-WAV | RIFF-WAV 2.30 | RIFF WAVE | built-in decoder `src/riffwave.rs` (PCM, IEEE float, Microsoft ADPCM; not A-law, µ-law, IMA ADPCM, MPEG) | none | P | U |
+| RIFF-WAV | RIFF-WAV 2.30 | RIFF WAVE | built-in decoder `src/riffwave.rs` (PCM, IEEE float, Microsoft ADPCM; not A-law, µ-law, IMA ADPCM, MPEG) | PCM 2 I, 4 NE; Microsoft ADPCM 4 NE; against sox 14.4.2 | P | V |
 | RobHubbard_2 | RobHubbard_2 1.31 | Rob Hubbard 2 and Infogrames | open `Rob Hubbard 2`, `Infogrames` | RH2 9 S (ref 9); Infogrames 8 I | A | V |
 | SCUMM | SCUMM_Player 1.0 | SCUMM | open `SCUMM` | 6 I, 4 S | A | V |
 | SoundControl | Soundcontrol 3.0-5.0 0.1 (an Eagleplayer) | SoundControl 3.x / 5.0 | open `SoundControl` | 3.x 1 S; 5.0 6 S | A | V |
@@ -154,19 +154,19 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Synthesis | Synthesis 0.80 | Synthesis | open `Synthesis` | 19 I | A | V |
 | SynTracker | SynTracker 0.50 | SynTracker | open `SynTracker` | 8 S | A | V |
 | TimFollin_note | FollinPlayer_II 1.20 | Tim Follin II | open `Tim Follin II` | 10 I | A | V |
-| TME | TME 1.40 | The Musical Enlightenment | open `The Musical Enlightenment` | none (one file in `ident/tme/`) | E | U |
+| TME | TME 1.40 | The Musical Enlightenment | open `The Musical Enlightenment` | 8 S (EP206 TME) | E | V |
 | VSSDeliPlayer | VSS 1.50 | Voodoo Supreme Synthesizer | open `Voodoo Supreme Synthesizer` | 8 I | A | V |
 
 ## Eagleplayers (`Eagleplayers/`, 114, the EP206 set)
 
 | File | Name, version | Format | Default-build path | refcmp classes | Evidence | Status |
 |---|---|---|---|---|---|---|
-| 669 | Composer669 0.80 (a DeliPlayer) | Composer 669 | libxmp port, 669 loader | none | E | U |
+| 669 | Composer669 0.80 (a DeliPlayer) | Composer 669 | libxmp port, 669 loader | 8 I (against libxmp 4.7.4 as oracle) | E | V |
 | Action Amics | Action Amics 0.2 | Actionamics | open `Actionamics` | 3 S (ref 3) | A | V |
 | Activision Pro | Activision Pro 1.8 | Activision Pro / Martin Walker | open `ActivisionPro` | 19 S (ref 19) | A | V |
-| ADPCM | ADPCM 0.0 | ADPCM2 / ADPCM3 | open `ADPCM2 / ADPCM3` | 2 N, 1 N (UADE's headerless ADPCM mono, 8 I, is another format that this player refused) | A | U |
-| AIFF | AIFF 0.1 | AIFF sample | built-in decoder `src/aiff.rs` | none | P | U |
-| A.M.Composer 1.2 | A.M.Composer 1.2 0.1 | A.M.Composer | open `A.M.Composer` | none | E | U |
+| ADPCM | ADPCM 0.0 | ADPCM2 / ADPCM3 | open `ADPCM2 / ADPCM3` | 3 S (REF-FALLBACK: SOAMC ADPCM-Player; EP206 ADPCM is silent here); UADE's headerless ADPCM mono, 8 I, is another format that this player refused | A | V |
+| AIFF | AIFF 0.1 | AIFF sample | built-in decoder `src/aiff.rs` | 5 I, 3 NE against sox 14.4.2 | P | V |
+| A.M.Composer 1.2 | A.M.Composer 1.2 0.1 | A.M.Composer | open `A.M.Composer` | 4 S (ref 4) | E | V |
 | AProSys | AProSys 0.1 | AProSys | open `AProSys` | 8 I (ref 8) | A | V |
 | Art&Magic | Art&Magic 0.51 (a DeliPlayer) | Art And Magic | open `Art And Magic` | 8 I (ref 8) | A | V |
 | Art of Noise | Art of Noise 0.0 | Art of Noise 4V / 8V | open `Art of Noise 4V`, `8V` | 17 S; 7 S, 1 N (ref 23) | A | V |
@@ -180,11 +180,11 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | DeltaMusic 1.0 | DeltaMusic 1.0 2.1 | Delta Music 1.0 | open `Delta Music 1.0` | 13 S (ref 13) | A | V |
 | DeltaMusic 2.0 | Deltamusic 2.0 2.2 | Delta Music 2.0 | open `Delta Music 2.0` | 9 S, 1 I (ref 10) | A | V |
 | Digibooster | Digibooster 1.1 | DigiBooster 1.x | open `Digibooster` | 26 S (ref 26) | A | V |
-| DigiBoosterPRO | DigiBoosterPRO 1.14 | DigiBooster Pro (DBM0) | libxmp port, DigiBooster Pro loader | none (the one "DigiBooster Pro XM" row, 1 I, is an XM file) | E | U |
+| DigiBoosterPRO | DigiBoosterPRO 1.14 | DigiBooster Pro (DBM0) | libxmp port, DigiBooster Pro loader | 8 I (against libxmp 4.7.4 as oracle; the one "DigiBooster Pro XM" row, 1 I, is an XM file) | E | V |
 | Digital Mugician | Digital Mugician 2.7 | Digital Mugician 1 / 2 | open `Digital Mugician 1`, `2` | 8 S, 1 I; 1 NE (ref 10) | A | V |
 | DSS | DSS 0.8 | Digital Sound Studio | open `Digital Sound Studio` | 30 I (ref 23) | A | V |
 | Dynamic Synthesizer | Dynamic Synthesizer 0.1 | Dynamic Synthesizer | open `Dynamic Synthesizer` | 2 I | A | V |
-| EMS | EMS 2.1 | EMS before v6 (`ems.`); it refuses the EMS v6 files | open `EMS` | none | E | U |
+| EMS | EMS 2.1 | EMS before v6 (`ems.`); it refuses the EMS v6 files | open `EMS` | 5 S (ref 5) | E | V |
 | Face The Music | Face The Music 0.7 | Face The Music | open `Face The Music` | 20 S (ref 20) | A | V |
 | Fasttracker II | Fasttracker II 1.3 | FastTracker 2 XM | libxmp port, Fast Tracker II loader | 5 I (against libxmp as oracle) | A | V |
 | Fred | Fred 2.3 | Fred Editor | open `Fred Editor` | 9 S, 1 N (ref 9) | A | V |
@@ -197,11 +197,11 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Hippel_7V | Hippel_7V 1.0 (a DeliPlayer) | Hippel 7 voices | open `Hippel 7V` | 16 S, 7 N | A | V |
 | Hippel-COSO | Hippel-COSO 2.12 | Hippel COSO (and a 7V file) | open `Hippel COSO` | 6 S, 2 N (ref 6) | A | V |
 | Hippel-ST_note | Hippel-ST 1.10 (a DeliPlayer) | Jochen Hippel ST | open `Jochen Hippel ST` | 8 I | A | V |
-| IFF 8SVX | IFF 8SVX 0.2 | IFF 8SVX sample | built-in decoder `src/iff8svx.rs` | none | P | U |
+| IFF 8SVX | IFF 8SVX 0.2 | IFF 8SVX sample | built-in decoder `src/iff8svx.rs` | PCM 2 I, 6 NE against sox 14.4.2; Fibonacci 4 N | P | V |
 | IFF EMOD | IFF EMOD 0.1 | Quadra Composer (EMOD) | open `Quadra Composer` | 18 T, 2 S | A | V |
 | IFF-SMUS | IFF-SMUS 2.2 | IFF SMUS + instruments | open `IFF-SMUS` | 17 S (ref 17) | A | V |
 | In Stereo 1.0 | In Stereo 1.0 5.0 | InStereo! 1.0 | open `InStereo! 1.0` | 4 I, 1 S (ref 5) | A | V |
-| In Stereo 2.0 | In Stereo 2.0 2.1 | InStereo! 2.0 | open `InStereo! 2.0` | none | E | U |
+| In Stereo 2.0 | In Stereo 2.0 2.1 | InStereo! 2.0 | open `InStereo! 2.0` | 5 I, 1 S (ref 6) | E | V |
 | JamCracker | JamCracker 1.33 | JamCracker | open `JamCracker` | 9 S (ref 9) | A | V |
 | Jason Page New | Jason Page New 0.3 | Jason Page (`jpn.`) | open `Jason Page` | 10 S (ref 10) | A | V |
 | Jason Page Old | Jason Page Old 0.2 | Jason Page old (`jpo.`) | open `Steve Turner` | 4 S | A | V |
@@ -219,25 +219,25 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | M. Grouleff | M. Grouleff 2.0 | unidentified Morten Grouleff format: it refused all 8 EarAche corpus files | none found | none | N | X |
 | M.O.N. | M.O.N. 2.0 | Maniacs of Noise | open `Maniacs of Noise` | 10 S (ref 10) | A | V |
 | M.O.N. Old | Maniacs of Noise 1.1 (a DeliPlayer) | old Maniacs of Noise (it took the Jeroen Tel and Art And Magic files) | open `Jeroen Tel` | 5 S, 1 D, 1 Q | A | V |
-| MPEGAudio | MPEGAudio 0.79 (needs mpega.library) | MPEG audio layers 1-3 | built-in decoder `src/mpegaudio.rs` (symphonia-bundle-mp3, MPL-2.0; 171478b): .mp1/.mp2/.mp3 and WAV tags 0x50/0x55 | none (unit-test fixtures) | R | U |
+| MPEGAudio | MPEGAudio 0.79 (needs mpega.library) | MPEG audio layers 1-3 | built-in decoder `src/mpegaudio.rs` (symphonia-bundle-mp3, MPL-2.0; 171478b): .mp1/.mp2/.mp3 and WAV tags 0x50/0x55 | 5 NE, 2 S, 1 PITCH against ffmpeg 6 (decoded at the file's rate; the PITCH row, fl10.mp2, is ffmpeg dropping the first frame: libmad agrees with the port) | R | V |
 | Music Assembler | Music Assembler 2.1 | Music Assembler | open `Music Assembler` | 16 I (ref 16) | A | V |
 | MusiclineEditor | MusiclineEditor 1.2 | Musicline Editor | open `Musicline Editor` | 28 I (ref 28) | A | V |
 | MusicMaker4 | MusicMaker4 0.4 | MusicMaker 4V, by name (refused the corpus files) | open `MusicMaker 4V` | 1 S | N | V |
-| MusicMaker8 | MusicMaker8 0.4 | MusicMaker 8V, by name (refused the corpus files) | open `MusicMaker 8V` | 9 N | N | U |
+| MusicMaker8 | MusicMaker8 0.4 | MusicMaker 8V, by name (refused the corpus files) | open `MusicMaker 8V` | 9 S (against uade123's MusicMaker8) | N | V |
 | OctaMED | OctaMED 0.1 | OctaMED | open `OctaMED` | 7 S (ref 7) | A | V |
 | Oktalyzer | Oktalyzer 1.45 | Oktalyzer | open `Oktalyzer` | 50 S (ref 50) | A | V |
 | PierreAdane | Pierre Adane Packer 0.1 | Pierre Adane Packer | open `Pierre Adane Packer` | 10 S | R | V |
-| PlayAY | PlayAY 2.1 (+ AYPlayers) | ZX Spectrum / CPC AY: ZXAYEMUL, ZXAYAMAD, ST11, STRC | built-in Z80 + AY (`src/replay/ay.rs`): EMUL and AMAD; ST11 and STRC not played | none (13 test files in `dl-modules/PlayAY/`, used by unit tests only) | P | U (ST11/STRC: X) |
+| PlayAY | PlayAY 2.1 (+ AYPlayers) | ZX Spectrum / CPC AY: ZXAYEMUL, ZXAYAMAD, ST11, STRC | built-in Z80 + AY (`src/replay/ay.rs`): EMUL and AMAD; ST11 and STRC not played | EMUL: 10 L, 1 D against libgme (ffmpeg; another emulation, 2-3 dB louder, its own level curve); 13 files in `dl-modules/PlayAY/`, 11 in refcmp | P | V (EMUL vs GME only; AMAD U; ST11/STRC X) |
 | PlaySid | PlaySID 0.1 | C64 PSID | `src/sid` (C64 + SID emulation) with `--features sid` (used by the AzuraCast renderer build); left out of the default build only for its licence (GPL-2.0-only) | none | E | U |
 | Polytracker | PolyTracker 0.90 (a DeliPlayer) | PolyTracker | open `PolyTracker` | 20 S (ref 20) | A | V |
 | Profiteam-Soundfactory | Profiteam-Soundfactory 0.1 | Sound Factory | open `Sound Factory` | 8 I, 1 D, 1 F (ref 8) | A | V |
-| Promizer 0.1 | Promizer 0.1a 1.1 | Promizer 0.1 | ProWizard `promizer.rs` + built-in ProTracker | none | P | U |
-| Promizer 1.x | Promizer 1.x 0.2 | Promizer 1.x | ProWizard `promizer.rs` + built-in ProTracker | none | P | U |
-| Promizer 4.0 | Promizer 4.0 0.1 | Promizer 4.0 | ProWizard `promizer.rs` + built-in ProTracker | none | P | U |
+| Promizer 0.1 | Promizer 0.1a 1.1 | Promizer 0.1 | ProWizard `promizer.rs` + built-in ProTracker | 5 S (UADE PTK-Prowiz in the engine) | P | V |
+| Promizer 1.x | Promizer 1.x 0.2 | Promizer 1.x | ProWizard `promizer.rs` + built-in ProTracker | 5 S (UADE PTK-Prowiz in the engine) | P | V |
+| Promizer 4.0 | Promizer 4.0 0.1 | Promizer 4.0 | ProWizard `promizer.rs` + built-in ProTracker | 2 S (UADE PTK-Prowiz in the engine) | P | V |
 | Protracker4 | Protracker4 1.0 | ProTracker 4 (IFF MODL) | open `Protracker4` | 10 S (ref 10) | A | V |
-| PS3M | PS3M 2.4 | S3M, MTM and multichannel MOD | libxmp S3M/MTM loaders, open `Multichannel MOD` | Multichannel MOD 18 S, 1 F (ref 19); S3M and MTM none | A | V |
+| PS3M | PS3M 2.4 | S3M, MTM and multichannel MOD | libxmp S3M/MTM loaders, open `Multichannel MOD` | Multichannel MOD 18 S, 1 F (ref 19); S3M 8 I and MTM 8 I against libxmp 4.7.4 | A | V |
 | PSA | PSA 1.1 | Professional Sound Artists | open `Professional Sound Artists` | 8 I | A | V |
-| Pumatracker 1.0 | Pumatracker 1.0 1.1 | PumaTracker | open `PumaTracker` | none | E | U |
+| Pumatracker 1.0 | Pumatracker 1.0 1.1 | PumaTracker | open `PumaTracker` | 8 S (ref 8) | E | V |
 | Rob Hubbard | Rob Hubbard 0.3 | Rob Hubbard | open `Rob Hubbard` | 7 S, 1 I (ref 4) | A | V |
 | Rob Hubbard 2 | Rob Hubbard 2 2.0 | Infogrames (taken), Rob Hubbard 2 (check passes, banks not loaded) | open `Infogrames`, `Rob Hubbard 2` | 8 I; 9 S | A | V |
 | RonKlaren | RonKlaren 2.1 | Ron Klaren | open `Ron Klaren` | 13 I (ref 13) | A | V |
@@ -260,7 +260,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Stonetracker | StoneTracker 1.60 (a DeliPlayer) | StoneTracker | open `StoneTracker` | 1 F, 1 D (ref 2) | A | V |
 | SUNtronic | SUNtronic 0.1 | SUN-Tronic | open `SUN-Tronic` (+ `SUN-Tronic driver`) | 8 S | A | V |
 | SUNtronic Custom | SUNTronic Custom 1.2 ("Suntronic CustomPlayer amplifier module") | unidentified: it refused the 8 corpus and 7 `dl-modules/SUNtronic` `.sun` files | none found | none | N | X |
-| Symphonie Pro | Symphonie 3.1 0.4 | Symphonie / Symphonie Pro (`.symmod`) | `src/symmod` (behind the libxmp loader list) | none (4 files in `dl-modules/Symphonie/`) | R (crashes after its check) | U |
+| Symphonie Pro | Symphonie 3.1 0.4 | Symphonie / Symphonie Pro (`.symmod`) | `src/symmod` (behind the libxmp loader list) | 4 S against openmpt123 0.7.3 (the 4 files of `dl-modules/Symphonie/`) | R (crashes after its check) | V |
 | Synth 4.0 | Synth 4.0 0.11 | Synthesis | open `Synthesis` | 19 I (ref 19) | A | V |
 | SynTracker | Syntracker 0.2 | SynTracker | open `SynTracker` | 8 S (ref 8) | A | V |
 | TFMX_1.5 | TFMX_1.5 0.6 | TFMX 1.5 | open `TFMX 1.5` | 5 S, 3 N (ref 5) | A | V |
@@ -269,11 +269,11 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | THX | THX 2.1 | AHX / THX (it refuses HivelyTracker) | open `AHX` | 11 S | A | V |
 | Tim Follin II | Tim Follin II 0.0 | Tim Follin II (and a CustomMade file) | open `Tim Follin II` | 10 I (ref 10) | A | V |
 | Tiny Williams | Tiny Williams 0.1 (a DeliPlayer) | Tony Williams' format (`tw.`) | open `Sound Images` | 31 S, 2 I | A | V |
-| TME | TME 1.1 | The Musical Enlightenment | open `The Musical Enlightenment` | none | E | U |
+| TME | TME 1.1 | The Musical Enlightenment | open `The Musical Enlightenment` | 8 S (ref 8) | E | V |
 | Tronic | Tronic 2.2 | Tronic | open `Tronic` | 7 I, 1 S | A | V |
 | Vectordean | Vectordean 4.2 | Richard Joseph Player | open `Richard Joseph Player` | 81 S, 1 I, 1 N, 2 D | A | V |
 | VSS | VSS 0.1 | Voodoo Supreme Synthesizer | open `Voodoo Supreme Synthesizer` | 8 I | A | V |
-| WAVE | WAVE 0.1 | RIFF WAVE | built-in decoder `src/riffwave.rs` | none | P | U |
+| WAVE | WAVE 0.1 | RIFF WAVE | built-in decoder `src/riffwave.rs` | PCM 2 I, 4 NE; Microsoft ADPCM 4 NE; against sox 14.4.2 | P | V |
 | Wizard of Sound | Wizard of Sound 1.3 (needs `EP-WOS.cfg` and instruments) | Wizard of Sound (no file found) | none | none | N | X |
 | XMOD | XMOD 0.1 (Bryan Ford's MultiPlayer) | XMOD (no file found) | none | none | N | X |
 
@@ -281,15 +281,39 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 
 | | DeliPlayers | PlayerStore | Eagleplayers | All 199 |
 |---|---|---|---|---|
-| V: covered, a corpus file with a refcmp class | 26 | 43 | 87 | **156** |
-| U: covered, unverified | 2 | 11 | 18 | **31** |
-| X: not covered | 0 | 3 | 9 | **12** |
+| V: covered, a corpus file with a refcmp class | 28 | 54 | 105 | **187** |
+| U: covered, unverified | 0 | 1 | 3 | **4** |
+| X: not covered | 0 | 2 | 6 | **8** |
 
-PlayAY is counted under U (EMUL and AMAD play). The two Datatype players are counted under U as
-partial (only 8SVX, AIFF and WAV).
+The 4 U are the two Datatype players (partial: only 8SVX, AIFF and WAV, which are verified), BFB Master
+(its one disk holds AHX modules, which play and are verified; its BMOD and GMOD replayers have no file)
+and PlaySid (`--features sid` only: C64 PSID, GPL-2.0-only, so not in the default build). PlayAY is
+counted under V for ZXAYEMUL (against GME only, see below); its AMAD type has no refcmp row, ST11 and
+STRC are not played.
 
-PlaySid is counted under X in the table above but is covered by builds with `--features sid`
-(C64 PSID, GPL-2.0-only, so not in the default build): BFB Master's only disk holds AHX modules, which play. NSF and MPEGAudio are covered since 67cc1e6 and 171478b. 8 player files are really not covered.
+Verification of 2026-11-13 (`claude-scratch/deliplayerrust/fixround/unverified/`: `newrows.json` holds
+the 148 refcmp rows 1735-1882 that the list `listen/files.json` lacks, their files copied under
+`mods/` from the archive by the header index, `dl-modules/` and `ident/tme/`; `out/run2/` the run).
+Where the engine runs no original, `tools/refcmp.py` (`BLACKBOX_REF`) now takes an installed program:
+
+| Format | Rows | Reference | Calibration | Result |
+|---|---|---|---|---|
+| S3M, IT, MTM, 669, DBM0 | 8 each | libxmp 4.7.4 (the existing oracle of the libxmp port) | XM rows already IDENTICAL against it | 40 I |
+| IFF 8SVX (PCM) | 8 | sox 14.4.2 at the file's rate, then the port's rate conversion (`src/aiff.rs`) | 44.1 kHz files 2 I | 2 I, 6 NE (1 LSB: f32 rounding) |
+| IFF 8SVX Fibonacci | 4 | none: sox does not read it, ffmpeg takes the low nibble first (README) | | 4 N |
+| AIFF | 8 | sox, as above | | 5 I, 3 NE |
+| RIFF WAVE PCM / MS ADPCM | 6 / 4 | sox, as above | | 2 I, 4 NE / 4 NE |
+| MPEG audio layers 2, 3 | 8 | ffmpeg 6 at the file's rate, then the port's rate conversion | | 5 NE, 2 S, 1 PITCH: `fl10.mp2`, where ffmpeg drops the first frame and libmad (mpg321) agrees with the port |
+| Symphonie / Symphonie Pro | 4 | openmpt123 0.7.3, 48 kHz, linear, no dither | the X-Tracker port (same libopenmpt) is 4 S against it, level 0.00 dB | 4 S, level within 0.03 dB |
+| ZX Spectrum AY (EMUL) | 11 | libgme through ffmpeg | none possible: GME is another emulation | 10 L, 1 D: the port 0.8-3.3 dB quieter, every band 3.3-5.9 dB below GME |
+| NSF | 4 | libgme through ffmpeg | none possible, as above | 4 F: 3.3-5.2 dB less at 10-20 kHz, 1.4-3.1 dB at 5-10 kHz |
+| ProRunner 2, Promizer 0.1 / 1.x / 4.0 | 8, 5, 5, 2 | UADE's PTK-Prowiz in the engine (the existing ProWizard reference) | the Chiptracker rows: 10 S against it | 20 S |
+| PumaTracker, InStereo! 2.0, TME | 8, 6, 8 | EP206's Pumatracker 1.0, In Stereo 2.0, TME (the generic search) | | 8 S; 5 I, 1 S; 8 S |
+| A.M.Composer, EMS before v6 | 4, 5 | EP206's A.M.Composer 1.2, EMS | | 4 S (the two jingles loop in the original, which reports no song end: `ORIGINAL_PLAYS_ON`), 5 S |
+
+The rows count as V here; until the lead adds them to the list and the baseline, the corpus itself has
+none of these formats. The AY and NSF rows are inconsistency classes against an emulation that is not
+the port's model: the gate would carry them as LEVEL/DIFF/FILTER.
 
 Formats that are not covered (8 player files):
 
@@ -301,17 +325,8 @@ Formats that are not covered (8 player files):
 - also ZX AY types ST11 and STRC (PlayAY), which `src/replay/ay.rs` does not play;
 - also the formats the Datatype players get from system datatypes beyond 8SVX, AIFF and WAV.
 
-Covered but unverified (no corpus file, or NOREF rows only):
-
-- PC trackers on the libxmp port: S3M, IT, MTM, Composer 669, DigiBooster Pro DBM0. Corpus S3M/MTM
-  files exist only as PS3M's multichannel MODs;
-- samples: IFF 8SVX, AIFF, RIFF WAVE;
-- AY (ZXAYEMUL/AMAD), unit-tested on 13 files outside the corpus;
-- Symphonie / Symphonie Pro;
-- ProWizard paths: ProRunner 2, Promizer 0.1, 1.x, 4.0;
-- Amiga formats: A.M.Composer, EMS before v6, PumaTracker, The Musical Enlightenment (TME),
-  InStereo! 2.0;
-- NOREF only: MusicMaker 8V, ADPCM2/3.
+Covered but unverified: the Datatype players beyond 8SVX, AIFF and WAV; ZX AY type AMAD (no refcmp
+row); BFB Master's BMOD and GMOD replayers (no file); PSID outside the default build.
 
 ## Name collisions found by the runs
 

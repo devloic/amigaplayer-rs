@@ -1435,6 +1435,32 @@ mod tests {
         }
     }
 
+    /// UADE's SoundMaster offers a second song for 3 of the 44 modules of the second corpus
+    /// (`uade123 -g`: max subsong 1): rackney'sisland 1 (A-8) and the two build D modules whose
+    /// variables name one. The other 41, among them every module of builds A, A+8, B and C
+    /// (the Future Shock, Doofus and rackney'sisland 3..8 files, the .smpro family), have
+    /// one song, whatever their header bytes hold: no second-song rule exists for those builds.
+    #[test]
+    fn songs_offered_match_uade_over_the_corpus() {
+        const TWO: [&str; 3] =
+            ["rackney'sisland 1.sm", "necromania-loader fixed.sm3", "x-out-loader & jingle.sm3"];
+        let root = Path::new("/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/SoundMasterII2/files");
+        let mut seen = 0;
+        for a in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            for b in std::fs::read_dir(a.path()).into_iter().flatten().flatten() {
+                for f in std::fs::read_dir(b.path()).into_iter().flatten().flatten() {
+                    let name = f.file_name().to_string_lossy().into_owned();
+                    let Ok(d) = std::fs::read(f.path()) else { continue };
+                    let e = play(d, &format!("/sm-test/{name}"), 960).expect(&name);
+                    let want = TWO.contains(&name.as_str()) as u16;
+                    assert_eq!(e.playing.as_ref().unwrap().sub_max, want, "{name}");
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen == 0 || seen == 44, "{seen} corpus modules");
+    }
+
     #[test]
     fn subsongs_of_builds_d_and_a8() {
         // x-out-loader & jingle: a second song named by the variables

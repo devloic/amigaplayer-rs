@@ -1,4 +1,4 @@
-# Sound Master (`sm.*`, `sm3.*`, `smpro.*`) replayer: behaviour spec
+# Sound Master (`sm.*`, `sm2.*`, `sm3.*`, `smpro.*`) replayer: behaviour spec
 
 *Behaviour only: no code or data of the original.*
 
@@ -64,7 +64,10 @@ need `G + 0x1200`.
 
 - Build D: one song, or two when the three bytes above are not 0, 0, 1; song 1 starts at its start
   step with its loop and end. Build A-8: two songs when the loop step is not 0, song 1 playing from
-  the loop step. The rule of A, A+8, B and C is not known: one song is offered.
+  the loop step. Builds A, A+8, B and C have one song: UADE's SoundMaster player reports one subsong
+  (`uade123 -g`: max subsong 0) for every module of those builds in the second corpus (rackney'sisland 2..8,
+  Doofus, Future Shock, the `.smpro` family: 41 of the 44 files; only rackney'sisland 1 and two build D modules
+  report two), whatever their header's loop step holds, so the corpus shows no rule to implement.
 - Starting a song (host): DMA off, the audio modulation register `ADKCON = 0x00FF`; a subsong change
   first writes DMACON `0x000F`, volumes 0, DMACON `0x000F`.
 - Build A's init runs in the host's start call: per voice the silent loop, length 1, period 0xA0,
@@ -125,8 +128,8 @@ not 0x40 (and the voice is not exempt: instrument offset bit 7).
 
 - The WAVs differ from the reference in write timing and phase (refcmp class SIMILAR), not in the
   sound; the reference's AUDxDAT writes and absolute times are not reproduced.
-- A and A+8 use of the speed and break words, and the second-song rule of A, A+8, B and C, were not
-  observed; build D's second-song semantics were inferred from three files.
+- A and A+8 use of the speed and break words were not observed (no module in the corpus has them);
+  A, A+8, B and C offer one song (section 2); build D's second-song semantics were inferred from three files.
 - Build A's sound-effect entry points are not offered (the host never calls them); the 80 bytes
   of effect sample records its init copies to sample records 16..23 are reproduced for the A build
   itself.

@@ -148,6 +148,9 @@ pub struct Engine {
     pub m: Machine,
     pub players: Vec<Player>,
     pub playing: Option<Playing>,
+    /// The CPU's vector table (the low 1 KB of the guest's RAM) as the first module found it: a
+    /// player may rewrite vectors, and the next module's checks would run through them.
+    vec_snap: Vec<u8>,
     pub rate: f64,
     pub settings: Settings,
     pub paused: bool,
@@ -239,6 +242,7 @@ impl Engine {
             m,
             players: Vec::new(),
             playing: None,
+            vec_snap: Vec::new(),
             rate,
             settings: Settings::default(),
             paused: false,
@@ -654,6 +658,17 @@ impl Engine {
 
     fn start_module(&mut self, path: &Path, data: Vec<u8>) -> Result<()> {
         self.stop();
+        // Every module starts on the vector table the machine booted with. After a 68k player
+        // has run, some vector words differ (the reset PC, divide, CHK, line-A, format-error
+        // and spurious ones, found by comparing the low RAM) and the next module's checks
+        // then jumped into the low RAM: each ran to its whole instruction budget (11 s) before
+        // its player was disabled, so an archive of many non-music entries (Eagleplayer.lha)
+        // took longer than any timeout.
+        if self.vec_snap.is_empty() {
+            self.vec_snap = self.m.bus.ram[..0x400].to_vec();
+        } else {
+            self.m.bus.ram[..0x400].copy_from_slice(&self.vec_snap);
+        }
         self.last_error = None;
         self.m.deli.songend = false;
         // a gzip / xz wrapper first, whatever it holds (a recording as well as a module)
@@ -1852,7 +1867,6 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "host-68k")]
     use super::*;
 
     #[test]
@@ -1863,5 +1877,21 @@ mod tests {
         assert!(!by_name_only("TME", Path::new("x/OSS.Mighty Dub Players")));
         assert!(!by_name_only("TME", Path::new("x/agi.ingame_17")));
         assert!(by_name_only("OctaMED", Path::new("x/OSS.Mighty Dub Players")));
+    }
+
+    /// Every module starts on the vector table the machine booted with: what a player (or a
+    /// wild guest call) left in the low RAM does not reach the next module's checks.
+    #[test]
+    fn each_module_starts_on_the_booted_vector_table() {
+        let mut e = Engine::new(48000.0);
+        let junk = vec![0x55u8; 64];
+        assert!(e.play_data(Path::new("/vec-test/a.bin"), junk.clone()).is_err());
+        let boot = e.m.bus.ram[..0x400].to_vec();
+        for o in [0usize, 5, 22, 41, 62, 0x3FC] {
+            e.m.bus.ram[o] ^= 0xFF;
+        }
+        assert_ne!(e.m.bus.ram[..0x400], boot[..]);
+        assert!(e.play_data(Path::new("/vec-test/b.bin"), junk).is_err());
+        assert_eq!(e.m.bus.ram[..0x400], boot[..]);
     }
 }

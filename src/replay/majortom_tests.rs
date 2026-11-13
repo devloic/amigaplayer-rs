@@ -75,7 +75,11 @@ fn period_table_edges() {
     assert_eq!(table(87), 0x0070);
     assert_eq!(table(88), 0x4246);
     assert_eq!(table(89), u16::from_be_bytes([OVERRUN[0], OVERRUN[1]]));
-    assert_eq!(table(103), u16::from_be_bytes([OVERRUN[28], OVERRUN[29]]));
+    assert_eq!(table(94), u16::from_be_bytes([OVERRUN[10], OVERRUN[11]]));
+    assert_eq!((table(95), table(96)), (0, 0));
+    assert_eq!(table(97), u16::from_be_bytes([OVERRUN[12], OVERRUN[13]]));
+    assert_eq!(table(103), u16::from_be_bytes([OVERRUN[24], OVERRUN[25]]));
+    assert_eq!(table(103), 0x2456);
     assert_eq!(table(180), 0x0076);
     assert_eq!(table(104), 0);
     assert_eq!(table(390), 0);

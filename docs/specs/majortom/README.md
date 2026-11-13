@@ -27,7 +27,8 @@ Tom" directory holds ProTracker modules by an artist of that name, a different f
   followed by the host's allocation padding and the start of the next player it loaded (another
   Eagleplayer). Only king_of_games uses them (indices 89, 93, 96, 103; 96 and 103 give 0x4E75 and 0x2456,
   the others 0), in 390 period writes. Not embedding them changes those writes only. On a real Amiga or
-  in UADE the values would differ.
+  in UADE the values would differ. Words 95 and 96 (0x70FF 0x4E75, `moveq #-1,d0; rts` of the next player)
+  are instructions: the port does not embed them and reads 0 for indices 95 and 96.
 - Index 88 (0x4246, the last word of the player's code) and index 180 (0x0076, host memory, the high
   word of an address) are given as values in SPEC 4.8. Index 180 matters at every voice's first note when
   that note uses porta (the porta starts from 0x0076) and for the idle-voice writes every 256 ticks.

@@ -192,7 +192,8 @@ The period table (word values, index 0..87):
 ```
 
 Indices past 87 read whatever follows the table in the player's memory: index 88 = 0x4246; indices
-89..103 = the 15 words of `data/period-overrun.bin` (reference host); index 180 = 0x0076 (reference
+89..103 = the 15 words of `data/period-overrun.bin` (reference host; the port reads 0 for 95 and 96, which
+are instruction words there); index 180 = 0x0076 (reference
 host); any other index: unknown, use 0. Index 180 is what a voice computes before its first note (note
 byte 0, arpeggio 0); it matters because the portamento target takes this value (4.9). Indices up to 390
 are reachable.

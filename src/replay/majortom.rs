@@ -11,13 +11,15 @@
 //!
 //! Two small tables that belong to the original player rather than to the format are embedded on
 //! the project owner's decision, taken from the original player/reference host: the 3000-byte
-//! noise block (`majortom_noise.bin`, played for waveform value 0xFF) and the 15 words the
-//! original reads past the end of its period table (`majortom_overrun.bin`).
+//! noise block (`majortom_noise.bin`, played for waveform value 0xFF) and 13 of the 15 words the
+//! original reads past the end of its period table (`majortom_overrun.bin`: indices 89 to 94 and 97
+//! to 103). Indices 95 and 96 are two instructions there (the start of the next player in the
+//! reference host's memory), which are not embedded: they read as zero.
 //!
 //! Choices where the specification is silent (all safe, none can panic or hang): a file whose
 //! first twelve offsets do not lie inside it is not a module; bytes asked for beyond the end of
 //! the file read as zero; period table indices that the specification does not know (104..390
-//! other than 180) read as zero; pattern numbers of 32 and over address memory before the
+//! other than 180) and indices 95 and 96 read as zero; pattern numbers of 32 and over address memory before the
 //! patterns as the specification says (bytes outside the file read as zero); speed 0 gives a
 //! 65536-tick row; the next/previous-position functions the host never calls are not provided.
 
@@ -32,7 +34,8 @@ const TICK: u64 = 70940;
 const INIT_AT: u64 = 1600;
 
 const NOISE: &[u8; 3000] = include_bytes!("majortom_noise.bin");
-const OVERRUN: &[u8; 30] = include_bytes!("majortom_overrun.bin");
+/// The words for period table indices 89..=94 and 97..=103 (95 and 96 are not embedded).
+const OVERRUN: &[u8; 26] = include_bytes!("majortom_overrun.bin");
 
 const PERIODS: [u16; 88] = [
     0x0D40, 0x0C80, 0x0BD0, 0x0B20, 0x0A80, 0x09F0, 0x0960, 0x08D0, 0x0850, 0x07E0, 0x0770, 0x0700, 0x06A0,
@@ -73,8 +76,8 @@ fn table(i: u32) -> u16 {
     match i {
         0..=87 => PERIODS[i as usize],
         88 => 0x4246,
-        89..=103 => {
-            let k = 2 * (i - 89) as usize;
+        89..=94 | 97..=103 => {
+            let k = 2 * (i - if i < 95 { 89 } else { 91 }) as usize;
             u16::from_be_bytes([OVERRUN[k], OVERRUN[k + 1]])
         }
         180 => 0x0076,

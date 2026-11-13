@@ -1976,6 +1976,10 @@ impl OsState {
             return self.progdir.join(rest);
         }
         match current {
+            // a relative module path: the player builds its names from the directory it was
+            // given ("dir/smp01"), which is the current directory's, not the module's, so a
+            // name that already starts with that directory is not joined onto it a second time
+            Some(c) if c.is_relative() && Path::new(name).starts_with(c) => PathBuf::from(name),
             Some(c) => c.join(name),
             None => PathBuf::from(name),
         }
@@ -2342,6 +2346,20 @@ mod tests {
         assert_eq!(ask(&mut m, "Retry|Ignore"), 0);
         assert_eq!(ask(&mut m, "Ok|Cancel"), 1);
         assert_eq!(ask(&mut m, "Ok"), 1);
+    }
+
+    #[test]
+    fn host_path_does_not_double_a_relative_module_directory() {
+        let os = OsState::default();
+        let rel = Path::new("songs/x");
+        // the player's own name already carries the directory it was given
+        assert_eq!(os.host_path("songs/x/smp01", Some(rel)), PathBuf::from("songs/x/smp01"));
+        // a bare name is still relative to the module's directory
+        assert_eq!(os.host_path("smp01", Some(rel)), PathBuf::from("songs/x/smp01"));
+        // a module in the current directory
+        assert_eq!(os.host_path("smp01", Some(Path::new(""))), PathBuf::from("smp01"));
+        // an absolute directory is joined as before
+        assert_eq!(os.host_path("smp01", Some(Path::new("/m"))), PathBuf::from("/m/smp01"));
     }
 
     #[test]

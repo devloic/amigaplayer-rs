@@ -275,6 +275,8 @@ fn a_stop_byte_switches_every_channel_off_and_ends_the_writes() {
     let t = run(&mut p, 5);
     assert!(t[2].contains(&(0xDFF096, 0x000F)));
     assert!(t[3].is_empty() && t[4].is_empty());
+    // the original reports the song's end at the stop (refcmp row 1602, mon.ingame: 3.2 s)
+    assert!(p.songend());
 }
 
 #[test]

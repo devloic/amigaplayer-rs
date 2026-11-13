@@ -31,7 +31,8 @@
 //! * The prefix cell takes its duration from the class byte that follows it.
 //! * Wave cycling writes the sample address plus the index, and the index wraps to 0 at 32.
 //! * The sequencing loops are bounded (a corrupt order list cannot hang the player).
-//! * A song-end event sets a flag that stays set; the player carries on, as the logs do.
+//! * A song-end event sets a flag that stays set; the player carries on, as the logs do. The
+//!   stop event sets it too (the original reports the end there).
 //! * The host's start-up writes (before the first tick) are not made.
 
 use super::m68kdec::{decode, Ea, Insn, K};
@@ -324,8 +325,11 @@ impl JeroenTel {
         self.enabled = true;
     }
 
+    /// The stop event: the voices off, the sequencing halted, and the song's end reported (the
+    /// original reports it here: UADE's player ends `mon.ingame` subsong 0 at its stop, 3.2 s).
     fn stop(&mut self, hw: &mut Hw) {
         self.enabled = false;
+        self.songend = true;
         hw.dmacon(0x000F);
     }
 

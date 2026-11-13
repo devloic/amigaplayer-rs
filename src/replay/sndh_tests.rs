@@ -502,16 +502,20 @@ fn ym_register_masks() {
 }
 
 #[test]
-fn mix_model_is_near_the_measured_levels() {
-    // one channel at the 16 volumes: the first and the last, and the saturation of three
+fn mix_table_is_the_measured_one() {
+    // one channel through its 32 levels, as AtariAudio's table comment lists them
     let t = super::ym::mix_table();
-    let one = |l: usize| t[l] as f32;
-    assert!((one(31) - 17344.0).abs() < 1500.0, "{}", one(31));
-    assert!(one(31) > 15.0 * one(15));
-    let two = t[31 | 31 << 5] as f32;
-    let three = t[31 | 31 << 5 | 31 << 10] as f32;
-    assert!(two > 1.4 * one(31) && two < 1.8 * one(31), "{two}");
-    assert!(three > two && three <= 32767.0);
+    let one: Vec<u16> = (0..32).map(|l| t[l]).collect();
+    assert_eq!(
+        one,
+        [
+            0x0000, 0x0000, 0x001e, 0x003c, 0x0056, 0x007e, 0x009b, 0x00c1, 0x00f0, 0x012c, 0x0163, 0x01a6, 0x0204, 0x0279,
+            0x02e4, 0x0363, 0x041b, 0x04fc, 0x05d7, 0x06d8, 0x0852, 0x0a1f, 0x0bd8, 0x0ddd, 0x10ce, 0x1460, 0x1835, 0x1cc3,
+            0x2401, 0x2d12, 0x3742, 0x43c0
+        ]
+    );
+    // three channels at full volume saturate at the top of the range
+    assert_eq!(t[32767], 32767);
 }
 
 #[test]
@@ -657,6 +661,97 @@ fn corpus_register_streams_match_the_reference() {
         let got: Vec<(u8, u8)> = w.iter().take(want.len()).map(|x| (x.1, x.2)).collect();
         assert_eq!(got, want, "{name}");
     }
+}
+
+/// The first second at 48 kHz of two tunes is sample for sample the reference player's
+/// (AtariAudio 1.30's render, 48 kHz mono; FNV-1a 64 of its 16-bit samples).
+#[test]
+fn corpus_audio_is_the_references() {
+    let files = corpus();
+    if files.is_empty() {
+        eprintln!("skipped: no SNDH corpus");
+        return;
+    }
+    for (name, d) in &files {
+        let want: u64 = match name.as_str() {
+            "Thrust.sndh" => 0x5b76_4b72_264b_a89d,
+            "Gem_X.sndh" => 0x7d30_a3cb_a4b4_4b68,
+            _ => continue,
+        };
+        let mut p = SndhPlayer::new(d, 48000).unwrap();
+        let mut out = vec![0f32; 2 * 48000];
+        p.render(&mut out);
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for f in out.chunks_exact(2) {
+            assert_eq!(f[0], f[1], "{name}: a YM-only tune is mono");
+            let s = (f[0] * 32768.0).round() as i16;
+            h = (h ^ s as u16 as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        assert_eq!(h, want, "{name}");
+    }
+}
+
+// ------------------------------------------------------------------ the blitter, unmodelled I/O
+
+/// Sets the blitter's registers through the bus (word writes at $FF8A00 + offset).
+fn blit_regs(b: &mut StBus, regs: &[(u32, u16)]) {
+    for &(o, v) in regs {
+        b.write_word(0xFF8A00 + o, v);
+    }
+}
+
+#[test]
+fn blitter_copies_with_skew_and_end_masks() {
+    let mut b = StBus::new(48000);
+    for (i, w) in [0x1234u16, 0x5678, 0x9ABC].into_iter().enumerate() {
+        b.w16(0x20000 + 2 * i as u32, w);
+        b.w16(0x30000 + 2 * i as u32, 0xFFFF);
+    }
+    // source / destination X increment 2, Y increment 10; 3 words, 1 line; HOP source, op
+    // source; skew 4; end masks $0FFF, $FFFF, $FFF0; then BUSY
+    blit_regs(
+        &mut b,
+        &[(0x20, 2), (0x22, 10), (0x24, 2), (0x26, 0), (0x28, 0x0FFF), (0x2A, 0xFFFF), (0x2C, 0xFFF0)],
+    );
+    blit_regs(&mut b, &[(0x2E, 2), (0x30, 10), (0x32, 3), (0x34, 0), (0x36, 3), (0x38, 1), (0x3A, 0x0203)]);
+    blit_regs(&mut b, &[(0x3C, 0x8004)]);
+    let got: Vec<u16> = (0..3).map(|i| b.r16(0x30000 + 2 * i)).collect();
+    assert_eq!(got, [0xF123, 0x4567, 0x89AF]);
+    // the addresses end where the transfer stopped (the last word takes no X increment), the
+    // Y count is 0 and BUSY is clear
+    let rd = |b: &mut StBus, o: u32| b.read_word(0xFF8A00 + o);
+    assert_eq!((rd(&mut b, 0x24), rd(&mut b, 0x26), rd(&mut b, 0x32), rd(&mut b, 0x34)), (2, 0x000E, 3, 0x000E));
+    assert_eq!(rd(&mut b, 0x38), 0);
+    assert_eq!(b.read_byte(0xFF8A3C) & 0x80, 0);
+}
+
+#[test]
+fn blitter_writes_the_sound_chip() {
+    // two words a line to $FF8800 / $FF8802 (select, data), the destination stepping back a line
+    let mut b = StBus::new(48000);
+    b.log = Some(Vec::new());
+    for (i, w) in [0x0800u16, 0x0F00, 0x0100, 0x0500].into_iter().enumerate() {
+        b.w16(0x20000 + 2 * i as u32, w);
+    }
+    blit_regs(&mut b, &[(0x20, 2), (0x22, 2), (0x24, 2), (0x26, 0), (0x28, 0xFFFF), (0x2A, 0xFFFF), (0x2C, 0xFFFF)]);
+    blit_regs(&mut b, &[(0x2E, 2), (0x30, 0xFFFE), (0x32, 0xFF), (0x34, 0x8800), (0x36, 2), (0x38, 2), (0x3A, 0x0203)]);
+    blit_regs(&mut b, &[(0x3C, 0x8000)]);
+    assert_eq!(b.log.take().unwrap(), [(0, 8, 15), (0, 1, 5)]);
+}
+
+#[test]
+fn blitmode_says_there_is_a_blitter_and_unhandled_accesses_are_collected() {
+    // init: Blitmode(-1) into $1000; XBIOS 99 (not answered); a write to $FF8E21 (not there)
+    let init = [
+        0x3F, 0x3C, 0xFF, 0xFF, 0x3F, 0x3C, 0x00, 0x40, 0x4E, 0x4E, 0x58, 0x8F, 0x31, 0xC0, 0x10, 0x00, // Blitmode
+        0x3F, 0x3C, 0x00, 0x63, 0x4E, 0x4E, 0x54, 0x8F, // XBIOS 99
+        0x13, 0xFC, 0x00, 0x01, 0x00, 0xFF, 0x8E, 0x21, // move.b #1,$ff8e21
+    ];
+    let d = sndh(b"##01\0", &init, &[0x4E, 0x75]);
+    let p = SndhPlayer::new(&d, 48000).unwrap();
+    assert!(!p.dead());
+    assert_eq!(p.m.bus.r16(0x1000), 3);
+    assert_eq!(p.unhandled(), [(Access::Write8, 0xFF8E21), (Access::Xbios, 99)]);
 }
 
 /// A deterministic stream of numbers (xorshift) for the damage tests.

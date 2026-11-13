@@ -20,48 +20,27 @@
 //! restarts when the handler ends (the "sync-square" effect: the handler's write is the sync).
 //!
 //! The levels of the three channels are summed by an analogue stage that saturates, so the output
-//! is not the sum of the channels' own levels. The reference player takes it from a table measured
-//! on an ST (16 x 16 x 16 levels, interpolated to 32 per channel); this one does not copy that
-//! table but a model fitted to its behaviour. The reference's table is, seen from outside, two
-//! tables: when any of the three channels is at an odd level (the volume registers' levels 2 v + 1)
-//! every even level among them acts as the next odd one, and when all three are at even levels
-//! (an envelope, a silent channel being level 0) they act as themselves. Each of the two is a
-//! 16 x 16 x 16 grid, modelled as `(w[a] + w[b] + w[c]) * exp(-(k[a] + k[b] + k[c]))` for the
-//! channels' nodes a, b, c, w the node's own output and k its share of the saturation (the output
-//! units are the reference's: a single channel at full volume is about 17,100 of 32,768). The
-//! constants below are the fit; its error against the reference's table is 1.0 % rms of the table's
-//! rms (0.8 % for the all-even grid), 1,000 at the worst.
+//! is not the sum of the channels' own levels. The output is taken from a table measured on an ST:
+//! the mixing table of AtariAudio 1.30 by Arnaud Carre (MIT, see `LICENSE-AtariAudio`; data
+//! measured by Paulo Simoes on real hardware as 16 x 16 x 16 levels, log-interpolated to 32 per
+//! channel by Arnaud Carre), embedded as `sndh_ym_mix.bin` (data only, no code). (An earlier
+//! version fitted a model to it, 1 % rms off: the audio could not be sample-exact.)
 
 use std::sync::OnceLock;
 
 /// The chip's step rate: the 2 MHz clock over 8.
 const STEP_HZ: u32 = 250_000;
 
-/// The mixing models' per-node constants: the odd-level grid (node v is level 2 v + 1) and the
-/// even-level grid (node v is level 2 v).
-const ODD_W: [f32; 16] =
-    [0.0, 64.1, 136.1, 208.3, 323.8, 454.1, 677.9, 929.9, 1375.0, 1900.7, 2840.8, 3916.6, 5882.4, 8349.1, 13438.0, 21388.1];
-const ODD_K: [f32; 16] =
-    [0.0, 0.0003, 0.0026, 0.0049, 0.0085, 0.0126, 0.0192, 0.0261, 0.0370, 0.0487, 0.0665, 0.0805, 0.0964, 0.1112, 0.1463, 0.2216];
-const EVEN_W: [f32; 16] =
-    [0.0, 15.6, 97.1, 170.9, 261.7, 384.6, 554.7, 792.3, 1125.6, 1605.5, 2305.0, 3303.3, 4745.9, 6911.0, 10474.2, 16849.6];
-const EVEN_K: [f32; 16] =
-    [0.0, -0.0011, 0.0011, 0.0034, 0.0062, 0.0098, 0.0150, 0.0214, 0.0299, 0.0403, 0.0544, 0.0692, 0.0830, 0.0964, 0.1228, 0.1818];
+/// The measured mixing table (`sndh_ym_mix.bin`, 32768 little-endian u16, index a | b << 5 |
+/// c << 10): AtariAudio 1.30's `s_ym2149RecordedMixTable` (MIT, `LICENSE-AtariAudio`), measured
+/// on an ST by Paulo Simoes (16 x 16 x 16) and log-interpolated to 32 levels a channel by Arnaud
+/// Carre. Data only, extracted from `src/ym2149_tables.h` of AtariAudio 1.30.
+static MIX_BIN: &[u8; 65536] = include_bytes!("sndh_ym_mix.bin");
 
 /// The output for the three channels' levels a | b << 5 | c << 10.
 pub(super) fn mix_table() -> &'static [u16] {
     static T: OnceLock<Vec<u16>> = OnceLock::new();
-    T.get_or_init(|| {
-        (0..32768usize)
-            .map(|i| {
-                let (a, b, c) = (i & 31, (i >> 5) & 31, (i >> 10) & 31);
-                let (w, k) = if (a | b | c) & 1 != 0 { (&ODD_W, &ODD_K) } else { (&EVEN_W, &EVEN_K) };
-                let (a, b, c) = (a >> 1, b >> 1, c >> 1);
-                let y = (w[a] + w[b] + w[c]) * (-(k[a] + k[b] + k[c])).exp();
-                y.round().clamp(0.0, 32767.0) as u16
-            })
-            .collect()
-    })
+    T.get_or_init(|| MIX_BIN.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect())
 }
 
 /// The envelope's levels for a shape: 128 positions, the first pass (64) then the 64 it repeats

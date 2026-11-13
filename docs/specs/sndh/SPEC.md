@@ -48,10 +48,12 @@ once per player tick; the exit routine (offset 4) is not called.
 | YM2149 | at `$FF8800`-`$FF88FF`: even addresses read the selected register, writes with bit 1 of the address clear select a register, set write it; word writes put the high byte on the bus, so `move.l #$08000F00,$ff8800` sets R8; registers 0-13 with their masks (R7 keeps 6 bits), 14 and 15 read back what was written |
 | MFP 68901 | at `$FFFA00`-`$FFFA25` (odd bytes): timers A-D with prescalers 4, 10, 16, 50, 64, 100, 200 of 2.4576 MHz and the GPI7 line (an event timer with a count of 1); a timer counts only while its enable bit (IERA / IERB) is set, its mask bit (IMRA / IMRB) lets the handler be called; enabling a running-mode timer, or writing its data register while stopped, restarts it; fixed vectors `$134` A, `$120` B, `$114` C, `$110` D, `$13C` GPI7; no pending / in-service registers (they read back what was written); timer A's event-count mode and GPI7 count the STE DMA's frame ends; pulse-width modes are not modelled |
 | STE DMA sound | `$FF8900`-`$FF8925`: frame start/end/counter, control (play, loop), mode (rate 6258 / 12517 / 25033 / 50066 Hz, mono bit; 50 kHz averaged in pairs), the microwire interface for the master volume (command 3); end of frame counts timer A |
-| BIOS | `TRAP #1` GEMDOS `Malloc` ($48, from a 1 MB heap below the stack; -1 asks the free size) and `Sversion` ($30); `TRAP #14` XBIOS `Xbtimer` (31), `DoSound` (32, its byte-code run one step per tick), `Supexec` (38), `Blitmode` (64: no blitter); other calls return 0 |
+| BIOS | `TRAP #1` GEMDOS `Malloc` ($48, from a 1 MB heap below the stack; -1 asks the free size) and `Sversion` ($30); `TRAP #14` XBIOS `Xbtimer` (31), `DoSound` (32, its byte-code run one step per tick), `Supexec` (38), `Blitmode` (64: 3, a blitter there and on, as the reference answers); other calls return 0 (and are collected as unhandled) |
 | illegal | an illegal instruction, a line-A or line-F opcode and a STOP end the tune |
 | cookie jar | `_SND` = 3, `_MCH` = `$00010000` (STE) at `$900`, pointer at `$5A0` |
 | video | `$FF820A` reads 2 (50 Hz), `$FF8260` reads 0 |
+| blitter | `$FF8A00`-`$FF8A3D` (`src/replay/sndh_blitter.rs`): halftone RAM, increments, addresses, end masks, counts, HOP, logical operation, line number (BUSY, SMUDGE), skew (FXSR, NFSR); writing the line number with BUSY set runs the whole transfer at once, through the CPU's bus (a transfer to `$FF8800` writes the YM2149). The model is AtariAudio 1.30's `Blitter.cpp` (MIT), ported, plus SMUDGE from the hardware documentation |
+| other I/O | reads give `$FF` / `$FFFF`, writes are dropped; each such address (and each GEMDOS / XBIOS call not answered, each other TRAP) is collected, `SndhPlayer::unhandled`, printed by `examples/sndh_regs.rs` |
 
 Timing. The machine lives on the output-sample clock, not the CPU's. A call (the init, the play
 routine, a timer's handler) runs to its return at once: no machine time passes in it, the timers do
@@ -89,13 +91,11 @@ A write of a tone period of 0 or 1 inside a timer handler restarts that channel'
 (flips it, counter to 0) when the handler returns (the sync-square effect).
 
 The three channels' 5-bit levels (0 for a channel the mixer silences) are looked up in a
-32 x 32 x 32 table of 16-bit outputs (a single channel at full volume about 17,100). The reference
-player's table is a measurement of an ST; it is not copied here. Seen from outside it is two
-16 x 16 x 16 grids: when any of the three levels is odd every even level acts as the next odd one,
-and when all are even they act as themselves. Each grid is modelled by
-`(w[a] + w[b] + w[c]) exp(-(k[a] + k[b] + k[c]))` for the three nodes, 16 w and 16 k per grid fitted by
-least squares to the reference's table (rms error 1.0 % of its rms for the odd grid, 0.8 % for the
-even one, 958 at the worst of 32768). Each output sample is the integer average of the chip's steps
+32 x 32 x 32 table of 16-bit outputs (a single channel at full volume 17,344): AtariAudio 1.30's
+`s_ym2149RecordedMixTable` (MIT), measured on an ST by Paulo Simoes as 16 x 16 x 16 levels and
+log-interpolated to 32 per channel by Arnaud Carre, embedded as data (`src/replay/sndh_ym_mix.bin`,
+32768 little-endian u16). (The player first used a two-grid model fitted to it, 1 % rms off, which
+kept the audio from being sample-exact: 0.2 to 34 % of the samples equal, 27 to 38 dB.) Each output sample is the integer average of the chip's steps
 it spans (the output rate against 250 kHz, 5 or 6 steps at 48 kHz); the 2048 latest samples' moving
 average is subtracted. The STE DMA is added in stereo at the reference's level for a centred sound.
 The result is clamped to 16 bits and scaled to +-1.
@@ -108,9 +108,10 @@ documentation, with these exceptions where behaviour was read from a reference:
 - AtariAudio by Arnaud Carre (`github.com/arnaud-carre/AtariAudio`, MIT; its `LICENSE` file was
   read in the clone). Its machine model gave the choices of section 2 that no document fixes: the
   load address `$10002`, the stubs at `$500`, the cookie jar, which BIOS calls tunes need and what
-  they return, DoSound's byte-code, the tag parser's behaviour, the STE DMA and microwire. No source
-  text is copied (its 68000 is Musashi, its YM2149 a table measured on a real machine, its SNDH
-  duration database a 1 MB table: none is used here). The MIT notice is kept in `LICENSE-AtariAudio`.
+  they return, DoSound's byte-code, the tag parser's behaviour, the STE DMA and microwire. Taken
+  from it under its MIT licence: the YM2149 mixing table (data, measured on a real machine) and the
+  blitter's transfer model (`Blitter.cpp`, ported to Rust in `sndh_blitter.rs`). Not used: its
+  68000 (Musashi) and its SNDH duration database. The MIT notice is kept in `LICENSE-AtariAudio`.
 - libsc68 / sc68 and Hatari were not used, and their licences not checked (AtariAudio's MIT licence
   and the hardware documentation were enough).
 
@@ -125,7 +126,10 @@ scratch directory; nothing of it is in the repository), 10 s of the default subs
 |---|---|
 | 5 corpus files (modland `SNDH/`: Action, Bionic Commando, Blasteroids, Gem'X, Thrust), all ICE!-packed | the ordered YM writes of all 470 compared ticks equal the reference's, each on the same output sample (Action is driven by timer C, with a volume-register digidrum at 7.6 kHz) |
 | 33 further modland files (Count Zero, Daglish, Follin, Hubbard, Huelsbeck, Jess, Lap, Mad Max, Tao, Tomchi, Whittaker) | all 33 equal in every write (sample, register, value), the timer-driven ones (Mad Max x3, Tao 13, Goldrunner, Populous) included |
-| audio, 38 files | RMS ratio 0.965 to 1.026 of the reference's (median 0.996), correlation 0.9995 or better, signal-to-error 27 to 38 dB (median 35 dB), 0.2 to 34 % of the samples exactly equal; the difference is the channel summing (a fit of the reference's measured table against the table itself) |
+| audio, 38 files, every subsong (113), 30 s at 48 kHz | sample for sample the reference's in all 113, and the YM writes (sample, register, value) equal over the 30 s |
+| refcmp rows 1723-1727 | IDENTICAL (were SIMILAR, 0.2 to 1 % of the samples equal, with the fitted mix) |
+| blitter, 16 synthetic tunes of 64 random transfers each (all HOP and logical operations, skews, FXSR / NFSR, X counts 1-5, Y counts 1-3, negative increments, end masks), and one that writes YM registers by blitter | every destination word, the address and count registers read back, and the YM writes equal the reference's |
+| unhandled I/O and BIOS calls, all 113 subsongs, 3000 ticks | none: no file at hand touches the blitter or anything else the machine lacks |
 
 What the timer-driven tunes needed (the seven that differed in phase): the reference does not run
 the CPU alongside the chips. It calls the play routine and each timer's handler to completion in
@@ -137,5 +141,6 @@ reset-vector words left at 0 and 4 by each call, as the reference leaves them: G
 them), the envelope's initial position, the square waves' initial states.
 
 Not checked against any real ST recording. The remaining gaps are listed in the head of
-`src/replay/sndh.rs` (blitter, pulse-width timers, USART, a length database for tunes without `TIME`
-or `FRMS`).
+`src/replay/sndh.rs` (pulse-width timers, USART, a length database for tunes without `TIME` or
+`FRMS`). The blitter follows the reference where the documented hardware may differ (the halftone
+ANDed before the skew, the source buffer always loaded from below); no tune at hand uses it.

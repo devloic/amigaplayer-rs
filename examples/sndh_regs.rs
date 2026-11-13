@@ -35,6 +35,9 @@ fn main() {
     for (t, r, v) in p.ym_writes(ticks) {
         println!("{t} {r} {v}");
     }
+    for (k, a) in p.unhandled() {
+        println!("# unhandled {k:?} ${a:06X}");
+    }
     if p.dead() {
         println!("# the tune's code ended (crash or no return)");
     }

@@ -13,8 +13,10 @@
 //! $FF8800, MFP at $FFFA00, DMA sound at $FF8900). Its machine model (where the tune is loaded,
 //! the low-memory stubs, the BIOS calls that are answered, the cookie jar, how a call ends and
 //! what time it takes) follows AtariAudio by Arnaud Carre (MIT; see `LICENSE-AtariAudio`), read
-//! as a behavioural reference; no code is copied, but the behaviours it works out are kept where
-//! the tunes need them. The chip models are this repository's own (`sndh_ym.rs`, `sndh_mfp.rs`).
+//! as a behavioural reference; the behaviours it works out are kept where the tunes need them.
+//! The chip models are this repository's own (`sndh_ym.rs`, `sndh_mfp.rs`) but for two parts taken
+//! from AtariAudio 1.30 under its MIT licence: the YM2149's measured mixing table (data,
+//! `sndh_ym_mix.bin`) and the blitter's transfer model (ported, `sndh_blitter.rs`).
 //!
 //! Timing. The machine lives on the output-sample clock, as the reference's does, and the 68000's
 //! own cycle counts only bound a call. Each output sample the YM makes its sample, the DMA its
@@ -31,8 +33,11 @@
 //! quantised to the output rate). The chip's own timing (the 250 kHz step, the averaging into the
 //! output sample) is `sndh_ym.rs`'s.
 //!
-//! Not done: the blitter (`Blitmode` says there is none, and the cookie jar says an ST or STE
-//! without one), the pulse-width modes of the MFP timers, the 68901's USART and GPIP lines but
+//! The STE's blitter (`sndh_blitter.rs`) runs a transfer to its end when it is started, in no
+//! machine time; `Blitmode` says there is one, as the reference player does. Accesses to I/O the
+//! machine does not have and BIOS calls it does not answer are collected (`unhandled`).
+//!
+//! Not done: the pulse-width modes of the MFP timers, the 68901's USART and GPIP lines but
 //! the mono-detect bit, the ST's video registers but the two a tune might look at; a STOP
 //! instruction ends the call (no interrupt can wake it). A tune's `FRMS`/`TIME` tag gives its
 //! length; AtariAudio's database of lengths for tunes without one is not used.
@@ -42,11 +47,16 @@
 //! address error or a jump to the vectors of unset exceptions ends the tune (it plays silence).
 //! A tune that never returns thus costs a bounded amount of CPU time.
 
+#[path = "sndh_blitter.rs"]
+pub mod blitter;
 #[path = "sndh_mfp.rs"]
 pub mod mfp;
 #[path = "sndh_ym.rs"]
 pub mod ym;
 
+use std::collections::BTreeSet;
+
+use blitter::Blitter;
 use m68k::{AddressBus, CpuCore, CpuType, StepResult};
 use mfp::Mfp;
 use ym::Ym;
@@ -410,11 +420,33 @@ struct StBus {
     ym: Ym,
     mfp: Mfp,
     dma: Dma,
+    blitter: Blitter,
     /// The output samples the chip has made so far: the time of a register write.
     sample_no: u64,
     /// The register writes (output sample, register, value) of a run that asks for them.
     log: Option<Vec<(u64, u8, u8)>>,
+    /// The accesses the machine does not model (an I/O address outside the chips it has, a BIOS
+    /// call it does not answer), for a diagnostic: (kind, address or function number).
+    unhandled: BTreeSet<(Access, u32)>,
 }
+
+/// A kind of access the machine does not model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Access {
+    Read8,
+    Read16,
+    Write8,
+    Write16,
+    /// A GEMDOS function (TRAP #1).
+    Gemdos,
+    /// An XBIOS function (TRAP #14).
+    Xbios,
+    /// Another TRAP (taken through its vector).
+    Trap,
+}
+
+/// The diagnostic set is bounded (a tune that sweeps the address space).
+const UNHANDLED_MAX: usize = 256;
 
 impl StBus {
     fn new(host_rate: u32) -> StBus {
@@ -425,8 +457,23 @@ impl StBus {
             ym: Ym::new(host_rate),
             mfp: Mfp::new(host_rate),
             dma: Dma::new(host_rate),
+            blitter: Blitter::default(),
             sample_no: 0,
             log: None,
+            unhandled: BTreeSet::new(),
+        }
+    }
+
+    /// A blitter register write that sets BUSY: the transfer runs now, to its end.
+    fn blit(&mut self) {
+        let mut b = std::mem::take(&mut self.blitter);
+        b.run(self);
+        self.blitter = b;
+    }
+
+    fn note(&mut self, k: Access, a: u32) {
+        if self.unhandled.len() < UNHANDLED_MAX {
+            self.unhandled.insert((k, a));
         }
     }
 
@@ -462,8 +509,12 @@ impl StBus {
                 if o == 1 { (self.mfp.read(o) & 0x7F) | 0x80 } else { self.mfp.read(o) }
             }
             0xFF8900..=0xFF8925 => self.dma.read8((a - 0xFF8900) as usize),
+            0xFF8A00..=0xFF8A3D => self.blitter.read8((a - 0xFF8A00) as usize),
             0xFFFC00..=0xFFFC06 => 0,
-            _ => 0xFF,
+            _ => {
+                self.note(Access::Read8, a);
+                0xFF
+            }
         }
     }
 
@@ -472,7 +523,13 @@ impl StBus {
             0xFF8800..=0xFF88FF => self.ym_write(a & 0xFE, v),
             0xFFFA00..=0xFFFA25 => self.mfp.write((a - 0xFFFA00) as usize, v),
             0xFF8900..=0xFF8925 => self.dma.write8((a - 0xFF8900) as usize, v),
-            _ => {}
+            0xFF8A00..=0xFF8A3D => {
+                if self.blitter.write8((a - 0xFF8A00) as usize, v) {
+                    self.blit();
+                }
+            }
+            0xFFFC00..=0xFFFC06 => {}
+            _ => self.note(Access::Write8, a),
         }
     }
 
@@ -481,8 +538,12 @@ impl StBus {
             0xFF8800..=0xFF88FF => (self.ym_read(a & 0xFE) as u16) << 8,
             0xFFFA00..=0xFFFA25 => 0xFF00 | self.mfp.read((a - 0xFFFA00 + 1) as usize) as u16,
             0xFF8900..=0xFF8925 => self.dma.read16((a - 0xFF8900) as usize),
+            0xFF8A00..=0xFF8A3C => self.blitter.read16((a - 0xFF8A00) as usize),
             0xFFFC00..=0xFFFC06 => 0,
-            _ => 0xFFFF,
+            _ => {
+                self.note(Access::Read16, a);
+                0xFFFF
+            }
         }
     }
 
@@ -491,7 +552,13 @@ impl StBus {
             0xFF8800..=0xFF88FF => self.ym_write(a & 0xFE, (v >> 8) as u8),
             0xFFFA00..=0xFFFA25 => self.mfp.write((a - 0xFFFA00 + 1) as usize, v as u8),
             0xFF8900..=0xFF8925 => self.dma.write16((a - 0xFF8900) as usize, v),
-            _ => {}
+            0xFF8A00..=0xFF8A3C => {
+                if self.blitter.write16((a - 0xFF8A00) as usize, v) {
+                    self.blit();
+                }
+            }
+            0xFFFC00..=0xFFFC06 => {}
+            _ => self.note(Access::Write16, a),
         }
     }
 
@@ -604,7 +671,7 @@ impl Machine {
         bus.w32(mfp::VECTORS[2], RTE_PC);
         bus.w16(RTE_PC, 0x4E73);
         bus.w16(DONE_PC, 0x4E70);
-        // the cookie jar (an ST: the sound chip only; no blitter, no DMA sound for a tune that asks)
+        // the cookie jar: _SND 3 (the YM2149 and the STE DMA sound), _MCH 0x10000 (an STE)
         bus.w32(0x900, 0x5F53_4E44);
         bus.w32(0x904, 0x3);
         bus.w32(0x908, 0x5F4D_4348);
@@ -732,7 +799,10 @@ impl Machine {
                     }
                 }
                 0x30 => self.cpu.dar[0] = 0,
-                _ => self.cpu.dar[0] = 0,
+                _ => {
+                    self.bus.note(Access::Gemdos, func as u32);
+                    self.cpu.dar[0] = 0
+                }
             },
             14 => match func {
                 31 => {
@@ -770,11 +840,17 @@ impl Machine {
                     self.cpu.pc = self.bus.r32(sp.wrapping_add(6));
                     self.cpu.invalidate_prefetch();
                 }
-                // Blitmode: no blitter
-                64 => self.cpu.dar[0] = 0,
-                _ => self.cpu.dar[0] = 0,
+                // Blitmode: a blitter is there and on (the reference player says the same)
+                64 => self.cpu.dar[0] = 3,
+                _ => {
+                    self.bus.note(Access::Xbios, func as u32);
+                    self.cpu.dar[0] = 0
+                }
             },
-            _ => return false,
+            _ => {
+                self.bus.note(Access::Trap, n as u32);
+                return false;
+            }
         }
         true
     }
@@ -914,6 +990,12 @@ impl SndhPlayer {
         }
         v.extend(self.m.bus.log.take().unwrap_or_default());
         v
+    }
+
+    /// The accesses the tune made so far that the machine does not model (I/O outside the YM2149,
+    /// MFP, DMA sound and the few video and keyboard registers; BIOS calls it does not answer).
+    pub fn unhandled(&self) -> Vec<(Access, u32)> {
+        self.m.bus.unhandled.iter().copied().collect()
     }
 
     fn length(&self) -> Option<u64> {

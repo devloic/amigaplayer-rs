@@ -194,6 +194,8 @@ pub struct Engine {
     genie_mem: u32,
     /// INTENA as `audio_irqs` last saw it.
     intena_seen: u16,
+    /// The module being started is a ProWizard conversion (see `start_native`).
+    prowizard_converted: bool,
     /// The current subsong has made a sound (see `skip_empty_subsong`).
     heard: bool,
     /// The LED filter's state at the first sample, and each change after it
@@ -265,6 +267,7 @@ impl Engine {
             replay_mark: None,
             genie_mem: 0,
             intena_seen: 0,
+            prowizard_converted: false,
             heard: false,
             led_log: Vec::new(),
             led_changes: 0,
@@ -671,6 +674,7 @@ impl Engine {
         }
         self.last_error = None;
         self.m.deli.songend = false;
+        self.prowizard_converted = false;
         // a gzip / xz wrapper first, whatever it holds (a recording as well as a module)
         #[cfg(feature = "archives")]
         let data = crate::decrunch::unwrap_wrapper(&data).unwrap_or(data);
@@ -708,7 +712,8 @@ impl Engine {
         }
         // (a TimeTracker song is the open replayer's own under --open-replayers, not the ProWizard conversion's)
         let own = self.open_replayers && crate::replay::timetracker::is_timetracker(&data);
-        let data = if self.only_player.is_some() || own { data } else { crate::prowizard::convert(data, path) };
+        let (data, converted) = if self.only_player.is_some() || own { (data, false) } else { crate::prowizard::convert_tagged(data, path) };
+        self.prowizard_converted = converted;
         if data.is_empty() {
             bail!("empty file");
         }
@@ -905,7 +910,9 @@ impl Engine {
     }
 
     fn start_native(&mut self, path: &Path, data: &[u8], addr: u32, fmt: &str) -> Result<()> {
-        let pt = ProTracker::new(data, addr).ok_or_else(|| anyhow!("bad module"))?;
+        let mut pt = ProTracker::new(data, addr).ok_or_else(|| anyhow!("bad module"))?;
+        // a ProWizard conversion plays as its original, PTK-Prowiz, does: F00 does not end it
+        pt.f00_ends = !self.prowizard_converted;
         pt.clear_loop_words(&mut self.m.bus.ram);
         self.m.bus.paula.reset();
         self.intena_seen = 0;

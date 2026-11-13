@@ -152,13 +152,18 @@ pub fn identify_convert(data: &[u8], files: &dyn core::Loader) -> Option<(&'stat
 /// The module as a ProTracker module if it is one of the packed formats, else as
 /// it is. `path` is where companion files are looked for.
 pub fn convert(data: Vec<u8>, path: &Path) -> Vec<u8> {
+    convert_tagged(data, path).0
+}
+
+/// `convert`, and whether the module was converted (one of the packed formats).
+pub fn convert_tagged(data: Vec<u8>, path: &Path) -> (Vec<u8>, bool) {
     let files = core::FsLoader { path: path.to_path_buf() };
     match identify_convert(&data, &files) {
         Some((name, m)) => {
             log::info!("ProWizard: {name}, {} -> {} bytes", data.len(), m.len());
-            m
+            (m, true)
         }
-        None => data,
+        None => (data, false),
     }
 }
 

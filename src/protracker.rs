@@ -165,6 +165,10 @@ pub struct ProTracker {
     /// The LED filter (E0x): off at the start, as the engine's 68k hosting and UADE leave it for
     /// a player that never touches it (an Amiga itself powers on with the filter on).
     pub filter: bool,
+    /// Whether F00 ends the song (ProTracker 2.3D's). Off for the ProWizard conversions, whose
+    /// original (UADE's PTK-Prowiz, a ProTracker 3.0b replay) plays on through the pattern and
+    /// ends the song at the wrap (The Player 4 modules `p4x.Col30.mod`, `p4x.ingame_7`).
+    pub f00_ends: bool,
 }
 
 fn word(d: &[u8], o: usize) -> u16 {
@@ -300,6 +304,7 @@ impl ProTracker {
             visited: HashSet::new(),
             songend: false,
             filter: false,
+            f00_ends: true,
         };
         pt.restart_song();
         Some(pt)
@@ -579,7 +584,9 @@ impl ProTracker {
             0xF => {
                 if lo == 0 {
                     // F00 stops ProTracker: the song's end
-                    self.songend = true;
+                    if self.f00_ends {
+                        self.songend = true;
+                    }
                 } else if lo >= 32 {
                     self.bpm = lo as u32;
                 } else {
@@ -1083,6 +1090,22 @@ mod tests {
         let i = w[5].iter().position(|&x| x == (0xDFF096, 1)).unwrap();
         assert_eq!(&w[5][i + 1..i + 5], &[(0xDFF0A4, 0), (0xDFF0A0, 0), (0xDFF0A2, 0), (0xDFF0A4, 1)]);
         assert!(w[5].ends_with(&[(0xDFF0A0, 0), (0xDFF0A2, 0), (0xDFF0A4, 1)]));
+    }
+
+    #[test]
+    fn f00_ends_the_song_unless_the_module_is_a_prowizard_conversion() {
+        let d = module(100, 0, 1, 0, &[(0, 0, note(0, 0, 0xF00))]);
+        let mut pt = ProTracker::new(&d, BASE).unwrap();
+        run(&mut pt, &mut bus(), 6);
+        assert!(pt.songend);
+        // PTK-Prowiz plays on to the wrap (refcmp rows 867, 870)
+        let mut pt = ProTracker::new(&d, BASE).unwrap();
+        pt.f00_ends = false;
+        run(&mut pt, &mut bus(), 6 * 63);
+        assert!(!pt.songend);
+        assert_eq!(pt.speed, 6);
+        run(&mut pt, &mut bus(), 6);
+        assert!(pt.songend);
     }
 
     #[test]

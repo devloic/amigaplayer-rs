@@ -29,7 +29,9 @@
 //! (the Eagleplayer on the engine's 68000, which counts a fixed number of cycles per instruction)
 //! spends them, with the half colour clock every host call drops. The first tick falls where the
 //! reference's does and the ticks come every 71 051 colour clocks. On 59 modules every register
-//! write of the first 60 seconds falls on the reference's colour clock. Every score loops,
+//! write of the first 60 seconds falls on the reference's colour clock, and on the 19 scores whose
+//! samples are in a companion (A-Train, Kyrandia; the reference given it as `MXSM.<name>`) every one
+//! of the first 20 seconds. Every score loops,
 //! as the Eagleplayer's does, though the 2007 source plays one of fewer than 16 events once; a
 //! score without an end event runs on into what the reference has in memory after it
 //! (`heap_image`).
@@ -424,6 +426,19 @@ fn detect(d: &[u8]) -> bool {
 }
 
 /// Where the sample file of `file` may be: `SMPL.` for the prefix, `SMPL.set`, `MXTX.main`.
+/// What a score whose samples are in a companion adds to the reference's set-up, in 68000 cycles:
+/// the Eagleplayer builds the companion's name (`MXSM` and the score's name after its four-letter
+/// prefix) from the module's whole path, 17 cycles a character of the path and 4 more a character of
+/// the name, then loads it and reads its header (`COMPANION_CYCLES`). Measured on EP206's MaxTrax with
+/// the companion named as it asks (`MXSM.<name>`, found at the first try): the 17 A-Train scores and
+/// two of Kyrandia, and one score under 30 paths of 81 to 97 characters (names of 1 to 10).
+const COMPANION_CYCLES: u64 = 32_824;
+
+fn companion_cycles(dir: &str, file: &str) -> u64 {
+    let leaf = file.rsplit(['/', ':']).next().unwrap_or(file);
+    COMPANION_CYCLES + 17 * (dir.len() + file.len()) as u64 + 4 * leaf.len().saturating_sub(5) as u64
+}
+
 fn companions(file: &str) -> Vec<String> {
     let leaf = file.rsplit(['/', ':']).next().unwrap_or(file);
     let mut v = Vec::new();
@@ -440,7 +455,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let file = m.bus.read_cstr(m.deli.file_buf);
     let nscores = be16(d, if be16(d, 6) & 0x8000 != 0 { 8 + 256 } else { 8 }) as usize;
     // the samples: in the module, or in a companion file
-    let (sd, so2) = if be16(d, so) != 0 {
+    let companion = be16(d, so) == 0;
+    let (sd, so2) = if !companion {
         (d.to_vec(), so)
     } else {
         let mut found = None;
@@ -527,7 +543,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         + SETUP_PER_PATCH_SEARCH * (first_patch as u64 + 1)
         + if mx.flags & MUSIC_VELOCITY != 0 { SETUP_VELOCITY } else { 0 }
         // (the 2 cycles the skipping of scores drops in the two modules that have any)
-        - if skipped > 0 { 2 } else { 0 };
+        - if skipped > 0 { 2 } else { 0 }
+        + if companion { companion_cycles(&m.bus.read_cstr(m.deli.dir_buf), &file) } else { 0 };
     let est = SETUP_FIXED + cycles / 2;
     let start = m.bus.clock.max(est.min(FIRST_TICK_ABS - 2_000));
     // the filter is set `FILTER_TO_START` before the start

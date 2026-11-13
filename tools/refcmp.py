@@ -446,6 +446,27 @@ def stage_fixed_companions(path, mod):
                 os.replace(t + '.tmp', t)
 
 
+def stage_maxtrax_samples(mod):
+    """A MaxTrax score whose samples are in a companion: the port (after the Wanted Team's 2007
+    source) takes SMPL.<name>, SMPL.set or MXTX.main, while EP206's MaxTrax (the original the port
+    is checked against) asks for MXSM.<name>, then MXSM, then a file requester (which the engine does
+    not have: InitPlayer fails). The staged copy gets the companion the port takes under the name
+    EP206's asks for first as well, so that the original runs."""
+    d, leaf = os.path.split(mod)
+    if not leaf.lower().startswith('mxtx.'):
+        return
+    names = {f.lower(): f for f in os.listdir(d)}
+    if 'mxsm' + leaf[4:].lower() in names:
+        return
+    for c in ('smpl' + leaf[4:], 'smpl.set', 'mxtx.main'):
+        src = names.get(c.lower())
+        if src and src != leaf:
+            t = os.path.join(d, 'MXSM' + leaf[4:])
+            shutil.copy(os.path.join(d, src), t + '.tmp')
+            os.replace(t + '.tmp', t)
+            return
+
+
 ALIAS_ROOT = '/dev/shm/refcmp'   # 16 characters
 ALIAS_LEN = 76                   # characters of a cache alias path
 
@@ -668,7 +689,8 @@ ALONE = {'emsv6': ('uade', 'EMS-6'),   # with all of UADE's players loaded the o
 # name or None, stand-in)]. A stand-in is another build than the original the port was checked
 # against (README), and its class is marked REF-FALLBACK.
 #   MaxTrax: EP206's MaxTrax (the 1997 build) fails InitPlayer on scores whose samples are in a
-#     companion; the Wanted Team's 2007 build (SOAMC 1.1, 20 Sep 2007; the source the port follows)
+#     companion it cannot find (it asks for MXSM.<name> and MXSM only; stage_maxtrax_samples gives the
+#     staged copy that name); the Wanted Team's 2007 build (SOAMC 1.1, 20 Sep 2007; the source the port follows)
 #     plays them
 #   Fred Editor: EP206's Fred (2.3, 1997) fails InitPlayer on some modules; the 1993 build plays them
 #   ADPCM2/3: EP206's ADPCM plays silent in the engine (the host lacks its refill call on channel 0's
@@ -1286,6 +1308,7 @@ def process(ctx, f):
         path = f['path']
         mod = ctx.stage(path) if ctx.stage else _fallback_stage(path, ctx.cache)
         stage_fixed_companions(path, mod)
+        stage_maxtrax_samples(mod)
         pw, pplay, pout, pled, plines = render_engine(ctx, mod, True, None)
         row['out_port'] = pout or ''
         row['led_port'] = pled or ''

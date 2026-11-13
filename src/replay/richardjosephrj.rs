@@ -205,6 +205,12 @@ pub struct RichardJosephRj {
     /// Reference time at which the last host call ended.
     end: u64,
     first_tick: Option<u64>,
+    /// The start (reference time) of the last tick, once one has run.
+    last_tick: Option<u64>,
+    /// After a change of subsong whose host timer fell due within it: the timer's next grid point
+    /// (absolute), handed to the engine after the tick that ran at the change's end.
+    grid: Option<u64>,
+    next_at: std::cell::Cell<Option<u64>>,
     songend: bool,
 }
 
@@ -1210,7 +1216,17 @@ impl Replayer for RichardJosephRj {
         self.first_tick.take()
     }
 
+    fn next_tick_at(&self) -> Option<u64> {
+        self.next_at.take()
+    }
+
     /// The host's change of subsong (spec 8.2): EndSound, the two volume settings, InitSound.
+    ///
+    /// After ticks the host's timer runs on through the change: a tick that fell due within it
+    /// runs as the change returns, and the next one comes on the timer's old grid (measured on the
+    /// reference trace of refcmp row 1402: ticks every 70,940 colour clocks from 101,991 to
+    /// 314,811, the change from 385,747 to 395,667, a tick at 395,667, the next at 456,691; it came
+    /// a period after the change's end, 71,261 late, before).
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
         let n = if n < self.nsub { n } else { 0 };
         let now = hw.bus.clock.saturating_sub(self.origin);
@@ -1221,13 +1237,26 @@ impl Replayer for RichardJosephRj {
         let t1 = self.end + 236;
         self.init_sound(hw, t1, n + 1);
         self.sub = n;
-        self.first_tick = Some(self.origin + self.end + TICK);
-        hw.bus.clock = hw.bus.clock.max(self.origin + self.end);
+        let end = self.origin + self.end;
+        self.first_tick = Some(end + TICK);
+        if let Some(g) = self.last_tick.map(|t| self.origin + t + TICK) {
+            if g <= end {
+                self.first_tick = Some(end);
+                self.grid = Some(g + TICK);
+            } else {
+                self.first_tick = Some(g);
+            }
+        }
+        hw.bus.clock = hw.bus.clock.max(end);
     }
 
     fn tick(&mut self, hw: &mut Hw) {
         self.t0 = hw.bus.clock.saturating_sub(self.origin);
         self.t = 0;
+        self.last_tick = Some(self.t0);
+        if let Some(g) = self.grid.take() {
+            self.next_at.set(Some(g));
+        }
         self.run_tick(hw);
     }
 }
@@ -1261,6 +1290,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         t: 0,
         end: 0,
         first_tick: None,
+        last_tick: None,
+        grid: None,
+        next_at: std::cell::Cell::new(None),
         songend: false,
     };
     // the host timeline (8.2): the module-change notification comes after the adapter's scan of

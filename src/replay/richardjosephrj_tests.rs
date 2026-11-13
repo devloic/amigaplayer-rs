@@ -279,3 +279,37 @@ fn song_end_ticks_stay_on_the_grid() {
     assert_eq!(r.due, first + 3 * TICK);
     assert_eq!(r.r.tick_clocks(), TICK);
 }
+
+/// A change of subsong after ticks: the host's timer runs on through it, so the tick that fell
+/// due within the change runs as it returns, and the next comes on the old grid (refcmp row 1402:
+/// it came a period after the change's end before, 71,261 colour clocks late).
+#[test]
+fn a_change_after_ticks_keeps_the_timer_grid() {
+    let d = module_c(0x412B4, &[PLAY, PLAY, PLAY]);
+    let mut r = rig(&d).unwrap();
+    r.ticks(3);
+    // the change comes just before the next grid point, which falls due within it
+    let grid = r.due;
+    r.m.bus.clock = grid - 4;
+    {
+        let mut hw = Hw { bus: &mut r.m.bus };
+        r.r.set_subsong(1, &mut hw);
+    }
+    let end = r.m.bus.clock;
+    assert!(end > grid);
+    assert_eq!(r.r.subsong_tick_at(), Some(end));
+    r.m.bus.clock = end;
+    {
+        let mut hw = Hw { bus: &mut r.m.bus };
+        r.r.tick(&mut hw);
+    }
+    assert_eq!(r.r.next_tick_at(), Some(grid + TICK));
+    // before any tick (a subsong chosen at the start) the first tick still follows by a period
+    let mut s = rig(&d).unwrap();
+    {
+        let mut hw = Hw { bus: &mut s.m.bus };
+        s.r.set_subsong(1, &mut hw);
+    }
+    let end = s.m.bus.clock;
+    assert_eq!(s.r.subsong_tick_at(), Some(end + TICK));
+}

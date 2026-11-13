@@ -302,6 +302,36 @@ impl Rjp {
         self.flags0 = self.flags;
     }
 
+    /// The set-up of subsong `n` within a change after ticks, in half colour clocks (`SETTLE_*`).
+    fn change_settle(&self, n: u16) -> u64 {
+        let lists = self.blk[3].1 / 4;
+        let len = |l: usize| -> i64 {
+            let o = be32(&self.d, self.blk[3].0 + 4 * l);
+            let e = if l + 1 == lists { self.blk[5].1 as u32 } else { be32(&self.d, self.blk[3].0 + 4 * l + 4) };
+            e.wrapping_sub(o) as i32 as i64
+        };
+        let n = (n & 63) as usize;
+        let mut h = SETTLE_BASE + SETTLE_SUBSONG * n as u64;
+        for s in 0..=n {
+            let mut longest = 0;
+            for ch in 0..4 {
+                let l = self.rb(self.blk[2].0 + 4 * s + ch) as usize;
+                let x = len(l);
+                if x >= longest {
+                    longest = x;
+                    h += SETTLE_LONGEST;
+                }
+                if l + 1 == lists {
+                    h += SETTLE_LAST_LIST;
+                }
+                if s == n && l != 0 {
+                    h += SETTLE_VOICE[ch];
+                }
+            }
+        }
+        h
+    }
+
     /// A voice reached the end of its list.
     fn list_end(&mut self, ch: usize) {
         self.flags &= !(1 << ch);
@@ -707,10 +737,18 @@ const TIMER_DELAY: u64 = 376;
 const CHANGE_FIRST: u64 = 234;
 
 /// A change of subsong after ticks: from the start-up routine's second stop of DMA to the song's
-/// start (the host's change returns), by the voices of the new subsong (1 to 4). Measured on the
-/// subsong changes of 43 reference runs: 1561 with one voice, 1840 with two, 2399 with four in 13
-/// of 26 runs (2329-2431 in the others: not modelled), three voices not seen.
-const CHANGE_SETTLE: [u64; 4] = [1561, 1840, 2120, 2399];
+/// start (the host's change returns), in half colour clocks. The set-up walks the voice entries of
+/// every subsong from the first to the new one, and in each subsong keeps the longest position list
+/// so far (a list's length: the next list's offset, or for the last list the list block's length,
+/// less its own; signed, from zero; a list as long as the longest so far counts). Fitted, exact on
+/// the 51 subsong changes of the 91 reference runs (and on 85 song starts but six, by a half
+/// cycle) and on byte-modified copies: a fixed part, each subsong walked, each entry that is a new
+/// longest, each entry of the last list, and each voice of the new subsong (voice 0 more).
+const SETTLE_BASE: u64 = 1749;
+const SETTLE_SUBSONG: u64 = 602;
+const SETTLE_LONGEST: u64 = 52;
+const SETTLE_LAST_LIST: u64 = 16;
+const SETTLE_VOICE: [u64; 4] = [511, 507, 507, 507];
 
 /// The start-up routine of a change of subsong, from `CHANGE_FIRST` after it: all voices off,
 /// the volumes cleared, the DMA stopped again.
@@ -759,8 +797,7 @@ impl Replayer for Rjp {
             let grid = self.t0 + self.tick_clocks();
             self.start(n, hw, true);
             startup(hw);
-            let voices = self.flags0.count_ones() as usize;
-            hw.wait(CHANGE_SETTLE[voices.clamp(1, 4) - 1]);
+            hw.wait(self.change_settle(n) / 2);
             if grid <= hw.bus.clock {
                 self.tick_at = Some(hw.bus.clock + TIMER_DELAY);
                 self.grid = grid + self.tick_clocks();
@@ -1018,6 +1055,51 @@ mod tests {
         let second = *stops.last().unwrap();
         let first_dma = log.iter().find(|w| w.0 == 0xDFF096 && w.1 == 0x0001).unwrap().2;
         let h = H_START + H_INSTRUMENT_NEW + H_SPEED + H_REPEAT_CMD + H_NOTE;
-        assert_eq!(first_dma, second + CHANGE_SETTLE[0] + TIMER_DELAY + h / 2);
+        // the set-up walks subsongs 0 and 1: list 0 (length 0) four times, each as long as the
+        // longest, then list 1 (the last list, 4 bytes long) on voice 0, a new longest
+        let settle = SETTLE_BASE + SETTLE_SUBSONG + 5 * SETTLE_LONGEST + SETTLE_LAST_LIST + SETTLE_VOICE[0];
+        assert_eq!(first_dma, second + settle / 2 + TIMER_DELAY + h / 2);
+    }
+
+    /// The set-up of a change walks every subsong up to the new one and counts each entry whose list
+    /// is as long as the longest so far in its subsong (lengths from the offset table, the last list's
+    /// from the list block's length). A fixed time by the number of voices put the first notes of
+    /// 13 of the 21 changes after an empty first subsong (refcmp rows 349, 1618, 1676, ...) -70 to
+    /// +8 colour clocks off, and those of rows 1631, 1647, 1650 and 1683 +6 to +32.
+    #[test]
+    fn the_change_set_up_counts_the_longest_lists() {
+        let mut d = song_with(&[[0, 0, 0, 0], [1, 1, 0, 1]]);
+        let b = blocks(&d).unwrap();
+        let settle = |d: &[u8]| {
+            let r = Rjp {
+                d: d.to_vec(),
+                blk: blocks(d).unwrap(),
+                title: String::new(),
+                subsongs: 2,
+                sub: 0,
+                pristine: Vec::new(),
+                area: Vec::new(),
+                base: 0,
+                v: Default::default(),
+                flags: 0,
+                flags0: 0,
+                songend: false,
+                first: false,
+                tick_at: None,
+                next_at: std::cell::Cell::new(None),
+                grid: 0,
+                ticked: false,
+                t0: 0,
+                h: 0,
+            };
+            r.change_settle(1)
+        };
+        let fixed = SETTLE_BASE + SETTLE_SUBSONG + 3 * SETTLE_LAST_LIST + SETTLE_VOICE[0] + SETTLE_VOICE[1] + SETTLE_VOICE[3];
+        // two lists at offset 0: list 0 is 0 bytes long, list 1 (the last) the list block's 4; subsong
+        // 0's four entries of list 0 are each as long as the longest, and subsong 1's three of list 1
+        assert_eq!(settle(&d), fixed + 7 * SETTLE_LONGEST);
+        // list 1 moved to offset 8: list 0 is 8 bytes long, list 1 -4 (never the longest)
+        d[b[3].0 + 4..b[3].0 + 8].copy_from_slice(&8u32.to_be_bytes());
+        assert_eq!(settle(&d), fixed + 5 * SETTLE_LONGEST);
     }
 }

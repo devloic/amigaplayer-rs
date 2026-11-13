@@ -17,7 +17,14 @@ settings, WAV for WAV:
              the same output stage (first of EP206, then the Eagleplayers UADE
              ships, whose player runs on the 68k); for the formats the libxmp
              port plays, libxmp 4.7.4 itself (the C harness `render`, 48 kHz
-             s16, its defaults).
+             s16, its defaults); for Atari ST SNDH, AtariAudio 1.30 (SNDH_ORACLE,
+             at volume 0.8). When no original gives a reference (none runs
+             the module, or the one that runs is silent and the port is not), a
+             second-choice original of the format (ALT_ORIGINALS: another build
+             that runs the module, marked REF-FALLBACK where the port has a
+             verified original), else for the formats checked in uade123
+             (UADE123_REF) uade123 itself with the port's output stage. A silent
+             original is the reference of a port that is silent too.
 
 The two sample streams are compared and each file gets a class:
 
@@ -640,6 +647,145 @@ ALONE = {'emsv6': ('uade', 'EMS-6'),   # with all of UADE's players loaded the o
          'soundmaster': ('uade', 'SoundMaster')}
 
 
+# Second-choice originals, tried only when the search above finds no usable reference (no player
+# runs the module, or the one that runs is silent while the port is not): normalised format ->
+# [(directory, player file alone in its own directory or None for the whole directory, --player
+# name or None, stand-in)]. A stand-in is another build than the original the port was checked
+# against (README), and its class is marked REF-FALLBACK.
+#   MaxTrax: EP206's MaxTrax (the 1997 build) fails InitPlayer on scores whose samples are in a
+#     companion; the Wanted Team's 2007 build (SOAMC 1.1, 20 Sep 2007; the source the port follows)
+#     plays them
+#   Fred Editor: EP206's Fred (2.3, 1997) fails InitPlayer on some modules; the 1993 build plays them
+#   ADPCM2/3: EP206's ADPCM plays silent in the engine (the host lacks its refill call on channel 0's
+#     audio interrupt, README); ADPCM-Player (SOAMC, 1995) decodes the same files
+#   Hippel COSO: EP206's Hippel-COSO plays some modules silent; UADE's Jochen Hippel COSO plays them
+#   Master / Ultimate SoundTracker: the port plays a Titanics Player module through ProWizard's
+#     conversion; its original is UADE's Titanics Packer. A plain Ultimate SoundTracker module plays
+#     on UADE's Ultimate Soundtracker, which also takes Titanics modules (and plays them wrong), so
+#     Titanics Packer is asked first
+ALT_ORIGINALS = {
+    'maxtrax': [('soamc', 'MaxTrax_(Music-X_Compatible)/1.1_(20.Sep.2007)/MaxTrax', None, True)],
+    'frededitor': [('soamc', 'FredEditor_also_called_Fredmonitor_and_Fredmon/1.1_(30.Aug.1993)/Fred', None, True)],
+    'adpcm2': [('soamc', 'ADPCM_mono/x.x_(xx.xxx.1995)/ADPCM-Player', None, True)],
+    'adpcm3': [('soamc', 'ADPCM_mono/x.x_(xx.xxx.1995)/ADPCM-Player', None, True)],
+    'hippelcoso': [('uade', None, 'Jochen Hippel COSO', True)],
+    'mastersoundtracker': [('uade', None, 'Titanics Packer', False)],
+    'ultimatesoundtracker10': [('uade', None, 'Titanics Packer', False), ('uade', None, 'Ultimate Soundtracker', False)],
+}
+
+# Formats whose original is UADE's player as uade123 runs it (README), which the engine's host does
+# not run (Kris Hatlelid: InitPlayer fails on the modules with a `songplay` companion; MusicMaker
+# 8V: silent in the engine) or does not take (a plain ProTracker module: PTK-Prowiz wants the module
+# type that UADE's front end passes): normalised format -> the player uade123 must report. Used only
+# when the engine has no reference; uade123 gets the port's output stage (UADE's panning is 1 minus
+# the separation, its gain the volume; checked equal on a file both play identically: SIMILAR, level
+# 0.1 dB, side level 1 %). Its 68020 at full speed is not the engine's 68000 timing, so a
+# port can reach SIMILAR at best.
+UADE123 = os.path.expanduser('~/.local/opt/uade/bin/uade123')
+UADE123_REF = {'krishatlelid': 'Kris Hatlelid', 'musicmaker8v': 'MusicMaker8', 'protracker': 'Protracker and family'}
+
+
+def render_uade123(ctx, mod, po, want):
+    """The uade123 reference for a format of UADE123_REF, or None."""
+    if want not in UADE123_REF or not os.path.exists(UADE123):
+        return None
+    if want == 'protracker' and po.get('backend') != 'builtin-protracker':
+        return None
+    filt = {'a500': 'A500', 'a1200': 'A1200', 'none': 'NONE'}.get(po.get('filter', '').split('(')[0])
+    # only the stages uade123 has: Paula through UADE's resampler, the player's LED, no amplifier
+    if (not filt or po.get('resampler') != 'uade-default' or po.get('amplifier', 'none') != 'none'
+            or po.get('builtin-voices', 'no') != 'no' or po.get('mono', '0') != '0' or not po.get('led', '').startswith('auto')):
+        return None
+    try:
+        sep, vol = float(po['sep']), float(po['volume'])
+    except (KeyError, ValueError):
+        return None
+    args = ['-1', '-t', str(ctx.secs), '--frequency=48000', f'--filter={filt}', '-p', f'{1 - sep:.3f}', '-G', f'{vol:.3f}']
+    h = hashlib.sha1(json.dumps([int(os.path.getmtime(UADE123)), mod, args]).encode()).hexdigest()[:20]
+    raw = os.path.join(ctx.cache, h + '.uade.raw')
+    inf = raw + '.txt'
+    if not os.path.exists(inf):
+        cwd = os.path.dirname(mod)
+        try:
+            g = subprocess.run([UADE123, '-g', mod], capture_output=True, text=True, cwd=cwd, timeout=120)
+            info = {k.strip(): v.strip() for k, _, v in (l.partition(':') for l in g.stdout.splitlines()) if v}
+            if info.get('playername') == UADE123_REF[want]:
+                subprocess.run([UADE123, *args, '-e', 'raw', '-f', raw, mod], capture_output=True, text=True, cwd=cwd,
+                               timeout=ctx.secs * 4 + 120)
+            text = ' '.join(f'{k}={info.get(n, "").replace(" ", "_")}' for k, n in (('player', 'playername'), ('subsongs', 'subsongs')))
+        except subprocess.TimeoutExpired:
+            text = 'timeout'
+        open(inf, 'w').write(text.strip())
+    info = open(inf).read()
+    if not os.path.exists(raw) or not os.path.getsize(raw):
+        return None
+    data = read_raw(raw)
+    if not data[1].any():
+        return None
+    return dict(kind='uade123', wav=raw, data=data, out='uade123 ' + info, led='', player='uade123: ' + info, o={}, note='')
+
+
+# Atari ST SNDH: the port's reference is AtariAudio 1.30 (README), built in the scratch dir from its
+# repository (fixround/port-sndh/mkref.sh: `ref FILE OUT.wav LOG SUBSONG SECONDS`, 48 kHz mono, its
+# first line `... subsongs=N default=D ...`). Its level is the engine's at volume 0.8 (measured: the 5
+# corpus files within 0.13 dB, every band alike), so it is compared only at that volume; the port's
+# SNDH output is mono, the same on both channels, so the separation does not enter.
+SNDH_ORACLE = SCRATCH + '/fixround/port-sndh/ref/cbuild/ref'
+
+
+def render_sndh_oracle(ctx, mod, po, pplay):
+    """AtariAudio's render of an SNDH file for the port's subsong, or a NOREF note (str)."""
+    if not os.path.exists(SNDH_ORACLE):
+        return 'no AtariAudio reference build'
+    if po.get('volume') != '0.80' or po.get('mono', '0') != '0':
+        return f'AtariAudio is compared at volume 0.80 only (port: volume {po.get("volume")})'
+    m = re.search(r'\(current (\d+)\)', pplay or '')
+    sub = int(m.group(1)) + 1 if m else 1
+    h = hashlib.sha1(json.dumps([int(os.path.getmtime(SNDH_ORACLE)), mod, sub, ctx.secs]).encode()).hexdigest()[:20]
+    wav = os.path.join(ctx.cache, h + '.sndh.wav')
+    inf = wav + '.txt'
+    if not os.path.exists(inf):
+        try:
+            r = subprocess.run([SNDH_ORACLE, mod, wav, wav + '.ymlog', str(sub), str(ctx.secs)], capture_output=True, text=True,
+                               cwd=os.path.dirname(mod), timeout=ctx.secs * 4 + 120)
+            text = (r.stdout.splitlines() or [''])[0]
+        except subprocess.TimeoutExpired:
+            text = 'timeout'
+        if os.path.exists(wav + '.ymlog'):
+            os.unlink(wav + '.ymlog')
+        open(inf, 'w').write(text)
+    info = open(inf).read()
+    if not os.path.exists(wav) or 'subsongs=' not in info:
+        return 'AtariAudio: ' + info[:80]
+    data = read_wav(wav)
+    if not data[1].any():
+        return 'AtariAudio renders it silent'
+    return dict(kind='atariaudio', wav=wav, data=data, out=f'AtariAudio 1.30 subsong {sub} ' + info, led='',
+                player=f'AtariAudio 1.30 (oracle): subsong {sub} ' + info[:60], o={}, note='')
+
+
+def alternative_reference(ctx, mod, po, want, why):
+    """A second-choice original (ALT_ORIGINALS, then uade123) for a module the search found no
+    usable reference for, or None. `why`: what the search found."""
+    for src, rel, name, standin in ALT_ORIGINALS.get(want, ()):
+        d = alone_dir(ctx, src, rel) if rel else {'ep206': EP206, 'uade': UADE_PLAYERS}[src]
+        if rel and not os.path.exists(os.path.join({'ep206': EP206, 'uade': UADE_PLAYERS, 'soamc': SOAMC}[src], rel)):
+            continue
+        rw, rplay, rout, rled, _ = render_engine(ctx, mod, False, d, ('--player', name) if name else (),
+                                                 fast_cpu=po.get('reference-cpu') == 'fast')
+        o = parse_output(rout)
+        if not (rw and rplay and o.get('backend') == '68k'):
+            continue
+        data = read_wav(rw)
+        if not data[1].any():
+            continue
+        cand = dict(kind='engine', wav=rw, data=data, out=rout, led=rled or '', player=f'alt-{src}: {rplay}', o=o, note='')
+        if standin:
+            cand['fallback'] = f'REF-FALLBACK (alternative original {src}:{rel or name}; {why})'
+        return cand
+    return render_uade123(ctx, mod, po, want)
+
+
 def alone_dir(ctx, src, name):
     d = os.path.join(ctx.cache, 'alone-' + re.sub(r'[^A-Za-z0-9]', '_', name))
     os.makedirs(d, exist_ok=True)
@@ -705,9 +851,10 @@ def special_reference(mod, fmt):
     return None
 
 
-def find_reference(ctx, mod, po, port_short=False):
-    """The original's render for a file whose port output line parses to `po`:
-    dict(kind 'engine'|'libxmp'|'none', wav (path), data ((rate, samples)), out, led, player, o, note, noref)."""
+def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
+    """The original's render for a file whose port output line parses to `po` (`pplay`: its
+    `playing` line): dict(kind 'engine'|'libxmp'|'uade123'|'atariaudio'|'none', wav (path),
+    data ((rate, samples)), out, led, player, o, note, noref)."""
     none = dict(kind='none', note='', noref=True)
     if po.get('backend') == 'libxmp-port' and not _norm(po.get('format', '')).startswith('delusiondigitalmusicformat'):
         if not os.path.exists(ctx.oracle):
@@ -720,6 +867,10 @@ def find_reference(ctx, mod, po, port_short=False):
     want = _norm(po.get('format', ''))
     if want in NO_AMIGA_PLAYER:
         return dict(none, note='no Amiga player plays this format (README)')
+    if want == 'sndh':
+        # an Atari ST program: the 68k DeliPlayer chain accepts the files and plays them silent (README)
+        ref = render_sndh_oracle(ctx, mod, po, pplay)
+        return ref if isinstance(ref, dict) else dict(none, note=ref)
     dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
     if want in UADE_FIRST:
         dirs = dirs[::-1]
@@ -781,7 +932,8 @@ def find_reference(ctx, mod, po, port_short=False):
         fallback = fallback or cand
     fallback = fallback or (bads[0] if bads else None)
     if not fallback:
-        return dict(none, note='no original player plays it in the engine')
+        why = 'no original player plays it in the engine'
+        return alternative_reference(ctx, mod, po, want, why) or dict(none, note=why)
     if refused and fallback['player'].split(': ')[0] not in [t for t, _, _ in tries[:first]]:
         # the original this port is checked against did not run, and another player stands in for it:
         # its FILTER/DIFF classes are not about the port's original
@@ -793,8 +945,10 @@ def find_reference(ctx, mod, po, port_short=False):
             # replayer: its output is not the original of this port
             return dict(none, note=f'the {want} Eagleplayer refuses it; {fallback["player"][:60]} is another replayer')
     fallback['data'] = read_wav(fallback['wav'])
-    if not fallback['data'][1].any():
-        return dict(none, note='the original is silent in the engine (' + fallback['player'][:60] + ')')
+    if not fallback['data'][1].any() and not port_silent:
+        # (a silent original is the reference of a port that is silent too: both play nothing)
+        why = 'the original is silent in the engine (' + fallback['player'][:60] + ')'
+        return alternative_reference(ctx, mod, po, want, why) or dict(none, note=why)
     return fallback
 
 
@@ -815,7 +969,8 @@ def process(ctx, f):
         po = parse_output(pout)
         with wave.open(pw, 'rb') as w:
             port_short = w.getnframes() < w.getframerate() // 4
-        ref = find_reference(ctx, mod, po, port_short)
+        rb = read_wav(pw)
+        ref = find_reference(ctx, mod, po, port_short, port_silent=not rb[1].any(), pplay=pplay)
         if ref['kind'] == 'none':
             row['cls'] = 'NOREF' if ref['noref'] else 'FAIL'
             row['note'] = ref['note']
@@ -823,7 +978,6 @@ def process(ctx, f):
         row.update(out_ref=ref['out'], led_ref=ref['led'], ref_player=ref['player'])
         ra, oref = ref['data'], ref['o']
         cut_note = ''
-        rb = read_wav(pw)
         if ra[0] != rb[0]:
             row['note'] = f'rates {ra[0]} vs {rb[0]}'
             return row

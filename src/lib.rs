@@ -181,6 +181,9 @@ pub mod prowizard;
 pub mod riffwave;
 #[doc(hidden)]
 #[allow(missing_docs)]
+pub mod mpegaudio;
+#[doc(hidden)]
+#[allow(missing_docs)]
 pub mod replay;
 #[cfg(feature = "sid")]
 #[doc(hidden)]

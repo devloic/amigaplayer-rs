@@ -691,6 +691,12 @@ impl Engine {
             let x = p.and_then(|p| crate::aiff::AiffPlayer::from_pcm(p, self.rate as u32)).map_err(|e| anyhow!(e))?;
             return self.start_pcm(Box::new(x), path);
         }
+        // MPEG audio layers 1-3 (bare streams with several valid frames in a row, or a RIFF WAVE
+        // of format tag $50 / $55), decoded in full, on the same player
+        if self.only_player.is_none() && crate::mpegaudio::detect(&data) {
+            let x = crate::mpegaudio::decode(data).and_then(|p| crate::aiff::AiffPlayer::from_pcm(p, self.rate as u32)).map_err(|e| anyhow!(e))?;
+            return self.start_pcm(Box::new(x), path);
+        }
         // ZX Spectrum / Amstrad CPC AY tunes (ZXAYEMUL): the built-in Z80 and AY-3-8912
         if self.only_player.is_none() && crate::replay::ay::detect(&data) {
             let x = crate::replay::ay::player(&data, self.rate as u32).map_err(|e| anyhow!(e))?;

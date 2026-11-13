@@ -40,6 +40,12 @@ amigaplayer-songdb = { path = "crates/songdb", version = "0.1.0", optional = tru
 delharc = { version = "0.6.2", default-features = false, features = ["lh1", "lz", "lhx"], optional = true }
 flate2 = { version = "1.1", optional = true }
 lzma-rs = { version = "0.3", optional = true }
+# MPEG audio layers 1, 2 and 3 (`src/mpegaudio.rs`): Symphonia's pure-Rust MPA demuxer and
+# decoder, MPL-2.0 (GPL-2 compatible), with symphonia-core / -metadata (MPL-2.0) and permissive
+# third-party crates. 0.6, not 0.5: 0.5.5 reads the bit allocation of two channels in a mono
+# layer 1 frame. Builds for wasm32-unknown-unknown.
+symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features = ["mp1", "mp2", "mp3"] }
+symphonia-core = "0.6.1"
 
 [features]
 # What `cargo build --release` produces: the player window, the open replayers (Rust ports),

@@ -1392,13 +1392,26 @@ mod tests {
         std::fs::read(Path::new("/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/SoundMasterII2/files").join(rel)).ok()
     }
 
-    const CORPUS: [(&str, &str); 6] = [
+    const CORPUS: [(&str, &str); 19] = [
         ("sm1/_unknown/rackney'sisland 1.sm", "A-8"),
         ("sm1/_unknown/rackney'sisland 3.sm", "A+8"),
         ("v1/Jeroen Soede/futureshock-gameover.smpro", "C"),
         ("v3/Jeroen Soede/doofus 1.sm3", "D"),
         ("v3/Michael Jestram/necromania-loader fixed.sm3", "D"),
         ("v3/Michael Jestram/x-out-loader & jingle.sm3", "D"),
+        ("v3/Michael Jestram/central park xxl.sm3", "D"),
+        ("v3/Michael Jestram/ghostngoblins2003.sm3", "D"),
+        ("v3/Michael Jestram/hurry up...!!!.sm3", "D"),
+        ("v3/Michael Jestram/necromania finale.sm3", "D"),
+        ("v3/Michael Jestram/necromania.sm3", "D"),
+        ("v3/Michael Jestram/project novastorm-preview.sm3", "D"),
+        ("v3/Michael Jestram/silkworm.sm3", "D"),
+        ("v3/Michael Jestram/tln2-central park!!!.sm3", "D"),
+        ("v3/Michael Jestram/tln2-final battle!!!.sm3", "D"),
+        ("v3/Michael Jestram/tln2-the sewers!!!.sm3", "D"),
+        ("v3/Michael Jestram/turrican loader.sm3", "D"),
+        ("v3/Michael Jestram/turrican2 loader.sm3", "D"),
+        ("sm1/_unknown/delta-rob hubbard.sm", "D"),
     ];
 
     #[test]

@@ -16,6 +16,7 @@ per 50 Hz tick, `tools/replay-cmp.py`; refcmp for the sound):
 |---|---|
 | first corpus (13 files: builds A, B, C) | identical writes in every tick, 20 s, and 110-280 s runs of one file per build through the song wrap |
 | second corpus (44 files: builds A-8, A+8, A, B/C, D) | all recognised; identical writes in every tick for 20 s (1000 ticks); 150-200 s runs (through the wrap where there is one) identical with equal tick counts for the 30 or so files run that long; second songs of 3 files identical |
+| Michael Jestram `.sm3` (14 files) and delta-rob hubbard.sm | all recognised as build D; identical writes in every tick for 20 s (1000 ticks); 180 s runs of 7 files (9000, 5380, 6945, 5125, 4610, 3845 ticks) identical with equal tick counts; second songs of necromania-loader fixed and x-out-loader & jingle identical (60 s) |
 | refcmp, SoundMaster alone | 44 of 44 SIMILAR (the WAVs differ in write timing and phase only), no inconsistency |
 
 ## 1. Builds

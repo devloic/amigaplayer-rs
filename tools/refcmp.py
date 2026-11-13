@@ -31,7 +31,9 @@ settings, WAV for WAV:
              original is the reference of a port that is silent too. The formats
              no Amiga player plays here (BLACKBOX_REF: 8SVX, AIFF, WAV, MPEG audio,
              ZX AY, NSF, Symphonie) are checked against sox, ffmpeg, libgme or
-             openmpt123 instead. uade123's
+             openmpt123 instead; where an original does run (ORIGINAL_BEFORE_BLACKBOX: NSF's
+             DeliPlayer) it comes first and the tool is the fallback, and Fibonacci 8SVX is
+             checked on the data the original Eagleplayer's Paula fetches (render_8svx_dma). uade123's
              PTK-Prowiz clears every sample's first long before it plays (ProTracker
              2.3D, the port's original, only a one-shot sample's first word): where
              that changes what plays, both sides render a copy with it cleared
@@ -693,8 +695,9 @@ ALONE = {'emsv6': ('uade', 'EMS-6'),   # with all of UADE's players loaded the o
 #     staged copy that name); the Wanted Team's 2007 build (SOAMC 1.1, 20 Sep 2007; the source the port follows)
 #     plays them
 #   Fred Editor: EP206's Fred (2.3, 1997) fails InitPlayer on some modules; the 1993 build plays them
-#   ADPCM2/3: EP206's ADPCM plays silent in the engine (the host lacks its refill call on channel 0's
-#     audio interrupt, README); ADPCM-Player (SOAMC, 1995) decodes the same files
+#   ADPCM2/3: EP206's ADPCM played silent in the engine before the host Caused a direct-mode
+#     AudioStruct's interrupt (its refill on channel 0's blocks, README); it plays now and is the
+#     reference; ADPCM-Player (SOAMC, 1995), which decodes the same files, stays the fallback
 #   Hippel COSO: EP206's Hippel-COSO plays some modules silent; UADE's Jochen Hippel COSO plays them
 #   ProTracker: the port plays a Titanics Player module through ProWizard's conversion (a 31-sample
 #     module on the built-in ProTracker); its original is UADE's Titanics Packer, which no name the
@@ -888,10 +891,13 @@ def render_sndh_oracle(ctx, mod, po, pplay):
 #     output frame down), the port's recorded-audio stage (no filter, no separation, gain volume/0.8).
 #     Calibration: on the 44.1 kHz and 48 kHz files the decoded samples agree to 1 LSB; the README
 #     checked the decoders sample for sample against sox and ffmpeg at the file's rate. sox does not
-#     read Fibonacci-delta 8SVX and ffmpeg decodes it low nibble first (README), so those stay NOREF.
+#     read Fibonacci-delta 8SVX and ffmpeg decodes it low nibble first (README): those are checked
+#     against the original Eagleplayer's data instead (render_8svx_dma below).
 #   ffmpeg: MPEG audio layers 1-3, decoded by ffmpeg 6 at the file's rate (float), then as for sox
 #     (the port decodes with symphonia-bundle-mp3 onto the same recorded-audio stage).
-#   gme: ZX Spectrum AY (ZXAYEMUL) and NSF through ffmpeg's libgme, 48 kHz, the port's subsong. GME is
+#   gme: ZX Spectrum AY (ZXAYEMUL) and NSF through ffmpeg's libgme, 48 kHz, the port's subsong (NSF:
+#     only where its original, ORIGINAL_BEFORE_BLACKBOX, gives no render; PlayAY, the original of ZX AY,
+#     does not run in the engine: README). GME is
 #     another emulation (its own AY level curve and output filters): no file plays alike, the class
 #     says how far the port is from it, not whether it is exact.
 #   openmpt123: Symphonie / Symphonie Pro (the port follows libopenmpt 0.8.7; openmpt123 0.7.3, 48 kHz,
@@ -904,6 +910,138 @@ BLACKBOX_REF = {'iff8svx': 'sox', 'aiff': 'sox', 'riffwave': 'sox', 'riffwaveadp
                 'iff8svxfibonacci': None, 'zxayemul': 'gme', 'nsf': 'gme',
                 'symphonie': 'openmpt123', 'symphoniepro': 'openmpt123',
                 'mpegaudiolayer1': 'ffmpeg', 'mpegaudiolayer2': 'ffmpeg', 'mpegaudiolayer3': 'ffmpeg'}
+
+# Formats of BLACKBOX_REF whose original Amiga player does run in the engine: it is the reference,
+# the black-box tool only the fallback (the original renders nothing or silence). Normalised port
+# format -> (player directory, --player name, output-stage flags given to BOTH sides).
+#   NSF: the PlayerStore DeliPlayer "NSF" (V1.00, 3.8.00, "based on CoolNESs"; no library, config or
+#     companion) plays the 4 corpus files: two pulse voices, the triangle and the noise on Paula
+#     voices 0, 3, 2, 1 as short looped waveforms, PLAY every 59115 colour clocks (60 Hz, NTSC). It is
+#     another emulation, not the hardware: its Paula periods put the NES timers 139 cents flat (Paula
+#     period 4.2944 x (timer + 1) with 8-byte pulse waves: an NES clock of 1.652 MHz, where NTSC is 1.789773
+#     and PAL 1.662607 MHz; the port and libgme agree on the NTSC pitch to 0.5 Hz), no DMC, Paula's
+#     64-step volume for the NES's mixer. Rendered with --filter none: the port models the NES's own
+#     output filters, the A500's is no part of the sound (the port's recorded-audio stage ignores the
+#     flag: same samples with and without it), and both sides get it so the stages compare equal.
+ORIGINAL_BEFORE_BLACKBOX = {'nsf': (DELI_STORE, 'NSF', ('--filter', 'none'))}
+
+
+# IFF 8SVX Fibonacci: no black-box decoder reads it right, and the original's audio is not comparable
+# with the port's (the port plays the decoded samples on the recorded-audio stage at the file's rate,
+# linearly interpolated to 48 kHz; the original plays them on Paula at a period). The reference is the
+# original's DATA: EP206's Eagleplayer "IFF 8SVX" (V0.84, 08.01.97) runs in the engine (its own
+# process, made with dos CreateNewProc, reads the BODY through OpenFromLock and decodes it into a
+# double buffer refilled from voice 0's AudioStruct interrupt), and every byte its Paula channels 0
+# and 1 fetch (DELI_DMA_LOG) is looked for, in 256-byte chunks, in the port's decoded samples
+# (amigaplayer-render at the file's own rate: the samples themselves, no interpolation; left for
+# channel 0, right for channel 1). SIMILAR: every non-silent chunk found verbatim but at most two per
+# channel: the original's stream moves by 2 bytes at its first buffer change (the chunk across it is
+# not found), and a one-shot sample's last chunk runs on, in the original, into the start of its next
+# pass; the positions are not all the same, so IDENTICAL is not claimed. Measured on the 4 rows: all
+# chunks verbatim but those, decoded high nibble first (as the port, the format's specification and
+# NostalgicPlayer); decoded low nibble first (ffmpeg's way) not one is.
+FIB8SVX_PLAYER = ('ep206', 'IFF 8SVX')
+FIB8SVX_CHUNK = 256
+FIB8SVX_MISS = 2   # chunks per channel the original may differ in (see above)
+
+
+def render_8svx_dma(ctx, mod):
+    """The data comparison of a Fibonacci 8SVX file with the original Eagleplayer (dict kind 'dma-bytes',
+    cls, note) or a NOREF note (str)."""
+    render = os.path.join(os.path.dirname(ctx.bin), 'amigaplayer-render')
+    src, name = FIB8SVX_PLAYER
+    if not os.path.exists(os.path.join(EP206, name)):
+        return f'no {name} Eagleplayer in EP206'
+    if not os.path.exists(render):
+        return 'no amigaplayer-render beside the binary (it decodes at the file rate)'
+    try:
+        d = open(mod, 'rb').read()
+    except OSError as e:
+        return str(e)
+    i = d.find(b'VHDR')
+    rate = int.from_bytes(d[i + 20:i + 22], 'big') if i >= 0 else 0
+    if not 8000 <= rate <= 192000:
+        return f'VHDR rate {rate} outside amigaplayer-render\'s range'
+    st = os.stat(render)
+    key = hashlib.sha1(json.dumps([ctx.binkey, int(st.st_mtime), st.st_size, mod, ctx.secs, 'fib8svx-2']).encode()).hexdigest()[:20]
+    res = os.path.join(ctx.cache, key + '.fib8svx.txt')
+    if not os.path.exists(res):
+        base = os.path.join(ctx.cache, key)
+        env = dict(os.environ, SDL_AUDIO_DRIVER='dummy', RUST_LOG='error', DELIPLAYERS=ctx.empty, DELIGENIES=ctx.empty,
+                   EAGLEPLAYERS=alone_dir(ctx, src, name), DELI_DMA_LOG=base + '.dma')
+        r = p = None
+        try:
+            r = subprocess.run([ctx.bin, '--68k-players', '--player', name, '--wav', base + '.o.wav', '--seconds', str(ctx.secs), mod],
+                               env=env, cwd=os.path.dirname(mod), capture_output=True, text=True, timeout=ctx.secs * 4 + 120)
+            orig_ok = r.returncode == 0 and 'backend=68k' in r.stderr and os.path.exists(base + '.dma')
+            p = subprocess.run([render, '--format', 'raw', '--rate', str(rate), '--seconds', str(ctx.secs), '--silence', '0',
+                                '--out', base + '.p.raw', mod], cwd=os.path.dirname(mod), capture_output=True, text=True,
+                               timeout=ctx.secs * 4 + 120)
+        except subprocess.TimeoutExpired:
+            orig_ok = False
+        if not orig_ok:
+            text = 'NOREF\tthe original ' + name + ' did not run: ' + ((r.stderr.strip().splitlines() or [''])[-1][:80] if r else 'timeout')
+        elif not p or p.returncode != 0:
+            text = 'FAIL\tamigaplayer-render: ' + ((p.stderr.strip().splitlines() or [''])[-1][:80] if p else 'timeout')
+        else:
+            port = np.fromfile(base + '.p.raw', dtype='<i2').reshape(-1, 2)
+            fetched = {0: [], 1: []}
+            for l in open(base + '.dma'):
+                v = l.split()
+                if len(v) == 4 and v[1] in ('0', '1'):
+                    w = int(v[3], 16)
+                    fetched[int(v[1])] += (w >> 8, w & 255)
+            found = total = chans = 0
+            offs = {}
+            for ch in (0, 1):
+                g = np.array(fetched[ch], dtype=np.uint8)
+                nz = np.nonzero(g)[0]
+                if not len(nz):
+                    continue
+                g = g[nz[0]:].astype(np.int8)
+                chans += 1
+                side = (port[:, ch] >> 8).astype(np.int8).tobytes()
+                for k in range(0, len(g) - FIB8SVX_CHUNK + 1, FIB8SVX_CHUNK):
+                    c = g[k:k + FIB8SVX_CHUNK]
+                    if not c.any():
+                        continue
+                    total += 1
+                    o = side.find(c.tobytes())
+                    if o >= 0:
+                        found += 1
+                        offs[o - k] = offs.get(o - k, 0) + 1
+            top = sorted(offs.items(), key=lambda x: -x[1])[:4]
+            what = (f'{found}/{total} of the {FIB8SVX_CHUNK}-byte chunks the original\'s Paula fetched are verbatim in the '
+                    f'port\'s samples at {rate} Hz (positions port - original: ' + ', '.join(f'{o:+d} x{n}' for o, n in top) + ')')
+            if total == 0:
+                text = 'NOREF\tthe original fetched only silence'
+            else:
+                text = ('SIMILAR' if found >= total - FIB8SVX_MISS * chans else 'DIFF') + '\t' + what
+        for ext in ('.dma', '.o.wav', '.p.raw'):
+            if os.path.exists(base + ext):
+                os.unlink(base + ext)
+        open(res, 'w').write(text)
+    cls, note = open(res).read().split('\t', 1)
+    if cls == 'NOREF':
+        return note
+    return dict(kind='dma-bytes', cls=cls, note=f'{name} Eagleplayer (EP206) Paula fetches: ' + note,
+                player=f'{name} Eagleplayer (EP206): Paula DMA bytes')
+
+
+def original_before_blackbox(ctx, mod, want):
+    """The original's render for a format of ORIGINAL_BEFORE_BLACKBOX (dict), or a note (str) on why
+    there is none (then the black-box tool is the reference)."""
+    pdir, name, flags = ORIGINAL_BEFORE_BLACKBOX[want]
+    if not os.path.exists(os.path.join(pdir, name)):
+        return f'no original {name} in {pdir}'
+    rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, ('deli', pdir), ('--player', name, *flags))
+    o = parse_output(rout)
+    if not (rw and rplay and o.get('backend') == '68k'):
+        return f'original {name}: ' + (rlines[-1] if rlines else 'no output')[:80]
+    data = read_wav(rw)
+    if not data[1].any():
+        return f'original {name} renders it silent'
+    return dict(kind='engine', wav=rw, data=data, out=rout, led=rled or '', player=f'deli+original: {rplay}', o=o, note='')
 
 
 def port_rate_conversion(x, src, dst=48000):
@@ -1103,8 +1241,19 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
     data ((rate, samples)), out, led, player, o, note, noref)."""
     none = dict(kind='none', note='', noref=True)
     if _norm(po.get('format', '')) in BLACKBOX_REF:
+        why = ''
+        if _norm(po['format']) == 'iff8svxfibonacci':
+            ref = render_8svx_dma(ctx, mod)
+            return ref if isinstance(ref, dict) else dict(none, note=ref + '; ' + render_blackbox(ctx, mod, po, pplay, None))
+        if _norm(po['format']) in ORIGINAL_BEFORE_BLACKBOX:
+            orig = original_before_blackbox(ctx, mod, _norm(po['format']))
+            if isinstance(orig, dict):
+                return orig
+            why = orig
         ref = render_blackbox(ctx, mod, po, pplay, BLACKBOX_REF[_norm(po['format'])])
-        return ref if isinstance(ref, dict) else dict(none, note=ref)
+        if isinstance(ref, dict) and why:
+            ref['fallback'] = f'REF-FALLBACK (black box: {why})'
+        return ref if isinstance(ref, dict) else dict(none, note=(why + '; ' if why else '') + ref)
     if po.get('backend') == 'libxmp-port' and not _norm(po.get('format', '')).startswith('delusiondigitalmusicformat'):
         if not os.path.exists(ctx.oracle):
             return dict(none, note='no libxmp oracle')
@@ -1324,6 +1473,14 @@ def process(ctx, f):
             return row
         row['player'] = pplay
         po = parse_output(pout)
+        stage = ORIGINAL_BEFORE_BLACKBOX.get(_norm(po.get('format', '')), (None, None, ()))[2]
+        if stage:
+            # the original is rendered at this output stage: the port too, so that the stages compare
+            sw, splay, sout, sled, slines = render_engine(ctx, mod, True, None, stage)
+            if sw and splay:
+                pw, pplay, pout, pled, plines = sw, splay, sout, sled, slines
+                row.update(player=pplay, out_port=pout or '', led_port=pled or '')
+                po = parse_output(pout)
         with wave.open(pw, 'rb') as w:
             port_short = w.getnframes() < w.getframerate() // 4
         rb = read_wav(pw)
@@ -1348,6 +1505,9 @@ def process(ctx, f):
             return row
         if ref['kind'] == 'hvl-ticks':
             row.update(cls=ref['cls'], note=ref['note'], ref_player='hvl_replay 1.9 (BSD-3) tick dump')
+            return row
+        if ref['kind'] == 'dma-bytes':
+            row.update(cls=ref['cls'], note=ref['note'], ref_player=ref['player'])
             return row
         cut_note = ''
         if ref['kind'] == 'uade123' and ref['player'].startswith('uade123: player=Protracker_and_family'):

@@ -602,6 +602,7 @@ impl Engine {
         self.m.deli.voices.reset();
         self.m.deli.note_struct = 0;
         eagle::stop(&mut self.m);
+        deli::end_new_procs(&mut self.m);
         for (a, _) in std::mem::take(&mut self.m.deli.list) {
             self.m.heap.free(a);
         }
@@ -1523,6 +1524,22 @@ impl Engine {
         let p = &mut self.m.bus.paula;
         let mut raised = (std::mem::take(&mut p.raised) | p.intreq & p.intena & !self.intena_seen) & (0xF << 7);
         self.intena_seen = p.intena;
+        if let (Some((structs, n)), true) = (self.m.deli.eagle.direct_ints, raised != 0) {
+            // a direct-mode Eagleplayer's AudioStruct interrupts: Caused at its voices' block
+            // starts, whether or not the player enabled Paula's audio interrupts
+            for ch in 0..(n as usize).min(4) {
+                if raised & (0x80u16 << ch) == 0 {
+                    continue;
+                }
+                let is = self.m.bus.r32(structs + ch as u32 * crate::amplifier::aus::SIZE + crate::amplifier::aus::INT);
+                if is != 0 && (is as usize) < crate::bus::RAM_SIZE && self.m.bus.r8(is + 8) == 2 {
+                    let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));
+                    if code != 0 {
+                        crate::os::call_int_code(&mut self.m, code, data, 0);
+                    }
+                }
+            }
+        }
         if raised == 0 || self.m.bus.paula.pending_audio_irqs() == 0 {
             return;
         }

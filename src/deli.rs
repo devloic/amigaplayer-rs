@@ -249,6 +249,51 @@ fn start_proc(m: &mut Machine, i: usize) -> Result<(), String> {
     r
 }
 
+/// dos CreateNewProc for a player: a process of its own at `entry` (`name` 0 or a C string),
+/// started at once and run until it first waits, as a child of higher priority would; after that
+/// it runs, like the player processes, when it has received what it waits for. Returns the
+/// Process (0 when guest memory ran out).
+pub fn create_process(m: &mut Machine, entry: u32, stack_size: u32, pri: i8, name: u32) -> u32 {
+    let top = std::mem::replace(&mut m.alloc_top, true);
+    let tcb = m.alloc(0x100);
+    if tcb == 0 {
+        m.alloc_top = top;
+        return 0;
+    }
+    m.bus.w8(tcb + 8, 13); // NT_PROCESS
+    m.bus.w8(tcb + 9, pri as u8);
+    m.bus.w32(tcb + 10, name);
+    m.bus.w32(tcb + crate::os::TC_SIGALLOC, 0xFFFF);
+    m.bus.w32(tcb + 0xB8, 0xFFFF_FFFF); // pr_WindowPtr: no requesters
+    let port = tcb + 92; // pr_MsgPort
+    new_port(m, port, tcb, 8);
+    let stack_size = stack_size.max(0x4000);
+    let t = m.new_task(entry, stack_size, tcb);
+    m.alloc_top = top;
+    let Some(mut t) = t else { return 0 };
+    m.os.new_procs.insert(tcb);
+    log::debug!("CreateNewProc: process ${tcb:06x} at ${entry:06x}, priority {pri}");
+    m.deli.procs.push(PlayerProc {
+        entry,
+        pri,
+        stack_size,
+        msg_port_ptr: 0,
+        fns: HashSet::new(),
+        task: None,
+        running: true,
+        port,
+        msg: 0,
+        reply: 0,
+    });
+    let i = m.deli.procs.len() - 1;
+    let r = m.resume(&mut t);
+    m.deli.procs[i].task = Some(t);
+    if let Err(e) = r {
+        m.crashed = Some(e);
+    }
+    tcb
+}
+
 /// Calls a process player's function through a DeliMessage. Only D0 comes back.
 fn proc_call(m: &mut Machine, i: usize, entry: u32) -> Result<Regs, String> {
     if m.deli.procs[i].task.is_none() && !m.deli.procs[i].running {
@@ -288,6 +333,37 @@ fn run_proc(m: &mut Machine, i: usize) -> Result<(), String> {
     r
 }
 
+/// Drops the processes the stopped module's player made with CreateNewProc (they are not run again).
+pub fn end_new_procs(m: &mut Machine) {
+    if m.os.new_procs.is_empty() {
+        return;
+    }
+    let gone = std::mem::take(&mut m.os.new_procs);
+    m.deli.procs.retain(|p| !p.task.as_ref().is_some_and(|t| gone.contains(&t.tcb)));
+    m.os.delays.clear();
+}
+
+/// The engine's own context waits (dos Delay, or exec Wait for a signal that has not come) while
+/// processes a player made with CreateNewProc have something to do: they run first, as they
+/// would while the caller slept; a process asleep in Delay wakes, since time passes.
+pub fn run_new_procs(m: &mut Machine) {
+    for i in 0..m.deli.procs.len() {
+        let Some(t) = &m.deli.procs[i].task else { continue };
+        let tcb = t.tcb;
+        if t.done || !m.os.new_procs.contains(&tcb) {
+            continue;
+        }
+        if let Some(w) = m.os.delays.get_mut(&tcb) {
+            *w = 0;
+        } else if !crate::os::task_ready(m, tcb) {
+            continue;
+        }
+        if let Err(e) = run_proc(m, i) {
+            m.crashed = Some(e);
+        }
+    }
+}
+
 /// Runs the player processes that have received what they wait for (audio.device replies).
 pub fn run_procs(m: &mut Machine) {
     // highest priority first, as exec would schedule them (SetTaskPri may change it)
@@ -295,7 +371,7 @@ pub fn run_procs(m: &mut Machine) {
     order.sort_by_key(|&i| std::cmp::Reverse(m.bus.r8(m.deli.procs[i].task.as_ref().map_or(0, |t| t.tcb) + 9) as i8));
     for i in order {
         let ready = match &m.deli.procs[i].task {
-            Some(t) => !t.done && crate::os::task_ready(m, t.tcb),
+            Some(t) => !t.done && (crate::os::task_ready(m, t.tcb) || m.os.delays.get(&t.tcb).is_some_and(|&w| m.bus.clock >= w)),
             None => false,
         };
         if ready {

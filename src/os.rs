@@ -121,6 +121,10 @@ pub struct OsState {
     pub libs_dir: Option<PathBuf>,
     logged: HashSet<(usize, i32)>,
     pub console: String,
+    /// The processes players made with dos CreateNewProc (see `deli::create_process`).
+    pub new_procs: HashSet<u32>,
+    /// dos Delay() of one of `new_procs`: the bus clock it sleeps until.
+    pub delays: HashMap<u32, u64>,
 }
 
 const NT_LIBRARY: u8 = 9;
@@ -803,6 +807,10 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
         "Signal" => signal(m, a1, d0),
         "Wait" => {
             let t = m.os.current_task;
+            if m.bus.r32(t + TC_SIGRECVD) & d0 == 0 && !m.can_yield() && !m.os.new_procs.is_empty() {
+                // what a process of the player's own would do meanwhile, it does now
+                crate::deli::run_new_procs(m);
+            }
             let got = m.bus.r32(t + TC_SIGRECVD) & d0;
             if got != 0 || !m.can_yield() {
                 // DeliTracker's own context cannot wait for anything: everything has arrived
@@ -2030,6 +2038,41 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
     let (d1, d2, d3) = (m.d(1), m.d(2), m.d(3));
     let cur = m.os.locks.get(&m.os.current_dir).cloned();
     match lvo {
+        498 => {
+            // CreateNewProc(d1 = tags): NP_Seglist (TAG_USER + 1001) or NP_Entry (+ 1003),
+            // NP_StackSize (+ 1011), NP_Name (+ 1012), NP_Priority (+ 1013); the rest (I/O
+            // handles, current and home directory, CLI) are not modelled
+            let (mut seg, mut entry, mut stack, mut name, mut pri) = (0, 0, 4096, 0, 0i8);
+            let mut p = d1;
+            for _ in 0..256 {
+                if p == 0 {
+                    break;
+                }
+                let (t, v) = (m.bus.r32(p), m.bus.r32(p + 4));
+                match t {
+                    0 => break,
+                    1 => {}
+                    2 => {
+                        p = v;
+                        continue;
+                    }
+                    3 => p += v * 8,
+                    0x8000_03E9 => seg = v,
+                    0x8000_03EB => entry = v,
+                    0x8000_03F3 => stack = v,
+                    0x8000_03F4 => name = v,
+                    0x8000_03F5 => pri = v as i8,
+                    _ => {}
+                }
+                p += 8;
+            }
+            if entry == 0 && seg != 0 {
+                entry = (seg << 2) + 4;
+            }
+            let pr = if entry != 0 { crate::deli::create_process(m, entry, stack, pri, name) } else { 0 };
+            m.set_d0(pr);
+            return true;
+        }
         948 => {
             // PutStr(d1)
             let s = m.bus.read_cstr(d1);
@@ -2115,6 +2158,29 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
                 }
             }
         }
+        "OpenFromLock" => {
+            // a file handle on the locked file, read mode; the lock then belongs to the handle
+            let f = match m.os.locks.get(&d1).cloned() {
+                Some(p) if m.os.no_host_files => m.os.read_file(&p).map(|d| (Handle::Mem(std::io::Cursor::new(d)), p)),
+                Some(p) if p.is_file() => File::open(&p).map(|f| (Handle::Disk(f), p)),
+                _ => Err(std::io::ErrorKind::NotFound.into()),
+            };
+            match f {
+                Ok((file, path)) => {
+                    let fh = bptr_alloc(m, 44);
+                    log::debug!("OpenFromLock -> {}", path.display());
+                    m.os.files.insert(fh, OpenFile { file, path });
+                    if m.os.locks.remove(&d1).is_some() {
+                        m.heap.free(d1 << 2);
+                    }
+                    m.set_d0(fh);
+                }
+                Err(_) => {
+                    m.os.io_err = ERROR_OBJECT_NOT_FOUND;
+                    m.set_d0(0);
+                }
+            }
+        }
         "Close" => {
             if m.os.files.remove(&d1).is_some() {
                 m.heap.free(d1 << 2);
@@ -2177,7 +2243,28 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
             m.set_d0(0);
         }
         "Input" | "Output" | "SelectInput" | "SelectOutput" => m.set_d0(CONSOLE_FH),
-        "Flush" | "SetVBuf" | "IsInteractive" | "Delay" | "DateStamp" | "SetIoErr" => m.set_d0(0),
+        "Delay" => {
+            // a process made by CreateNewProc sleeps d1 ticks (1/50 s); the engine's own context
+            // and the DTP_Process players (called through a DeliMessage they answer at once) do not
+            let t = m.os.current_task;
+            match m.os.delays.get(&t).copied() {
+                Some(w) if m.bus.clock >= w => {
+                    m.os.delays.remove(&t);
+                }
+                Some(_) => m.yield_now(None),
+                None if m.can_yield() && m.os.new_procs.contains(&t) => {
+                    m.os.delays.insert(t, m.bus.clock + (d1.max(1) as u64) * m.bus.frame);
+                    m.yield_now(None);
+                }
+                None => {
+                    if !m.os.new_procs.is_empty() {
+                        crate::deli::run_new_procs(m);
+                    }
+                }
+            }
+            m.set_d0(0);
+        }
+        "Flush" | "SetVBuf" | "IsInteractive" | "DateStamp" | "SetIoErr" => m.set_d0(0),
         "Seek" => {
             let r = match m.os.files.get_mut(&d1) {
                 Some(f) => {
@@ -2279,6 +2366,7 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
             let p = m.os.host_path(&n, cur.as_deref());
             let d = if m.os.no_host_files { m.os.read_file(&p).ok() } else { std::fs::read(&p).ok() };
             let r = d.and_then(|d| crate::deli::load_seg(m, &d).ok());
+            log::debug!("LoadSeg {n:?} ({}): {}", p.display(), if r.is_some() { "loaded" } else { "failed" });
             m.set_d0(r.map(|(seg, _)| seg).unwrap_or(0));
         }
         "UnLoadSeg" => m.set_d0(1),

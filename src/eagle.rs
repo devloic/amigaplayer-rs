@@ -144,6 +144,10 @@ pub struct EagleHost {
     pub allocs: Vec<u32>,
     /// ENPP_ entries already reported as unimplemented.
     logged: u128,
+    /// A player poking Paula itself (EPAMB_Direct, 4 voices or fewer) that asked for
+    /// AudioStruct interrupts: (AudioStructs, how many). The Interrupt of voice v's struct is
+    /// Caused when Paula channel v starts a block, as when the amplifier plays the voices.
+    pub direct_ints: Option<(u32, u32)>,
 }
 
 /// Whether a player's tags make it an Eagleplayer.
@@ -214,6 +218,11 @@ pub fn amplifier_ready(m: &mut Machine, player: &str) {
     log::info!("{player}: amplifier with {n} AudioStructs at ${structs:06x}, flags ${flags:x}");
     let direct = flags & epamb::DIRECT != 0;
     if direct && n <= 4 {
+        // (IFF 8SVX, V0.84: flags $83, voice 0's struct holds the Interrupt that has its own
+        // process refill the double buffer; without it the buffers stay silent)
+        if flags & (epamb::AUDIO_INTS | 0x80) != 0 && structs != 0 && (structs as usize) + (n as usize) * 100 <= crate::bus::RAM_SIZE {
+            m.deli.eagle.direct_ints = Some((structs, n));
+        }
         return;
     }
     let structs_ok = structs != 0 && structs as usize + n as usize * 100 <= crate::bus::RAM_SIZE;
@@ -228,6 +237,7 @@ pub fn amplifier_ready(m: &mut Machine, player: &str) {
 
 /// Frees what the host allocated for the current module.
 pub fn stop(m: &mut Machine) {
+    m.deli.eagle.direct_ints = None;
     for a in std::mem::take(&mut m.deli.eagle.allocs) {
         m.heap.free(a);
     }

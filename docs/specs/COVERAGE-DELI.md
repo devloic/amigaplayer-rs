@@ -75,7 +75,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | FTM | FaceTheMusic 2.70 | Face The Music | open `Face The Music` | 20 S | A | V |
 | Hippel | Hippel 1.50 | Jochen Hippel (TFMX-type) | open `Hippel TFMX` | 3 S | A | V |
 | Hippel-COSO_note | Hippel-COSO 2.10 | Hippel COSO (also took a 7V file) | open `Hippel COSO`, `Hippel 7V` | COSO 6 S, 2 N; 7V 16 S, 7 N | A | V |
-| IFF-8SVX | IFF-8SVX 2.90 | IFF 8SVX sample | built-in decoder `src/iff8svx.rs` (PCM, Fibonacci) | PCM 2 I, 6 NE against sox 14.4.2; Fibonacci 4 N (no black-box decoder reads it right) | P | V |
+| IFF-8SVX | IFF-8SVX 2.90 | IFF 8SVX sample | built-in decoder `src/iff8svx.rs` (PCM, Fibonacci) | PCM 2 I, 6 NE against sox 14.4.2; Fibonacci 4 S against the bytes the `IFF 8SVX` Eagleplayer's Paula fetches (this DeliPlayer refuses Fibonacci files: its check) | P | V |
 | IFF-SMUS | IFF-SMUS 1.10 | IFF SMUS + instruments | open `IFF-SMUS` | 17 S | R | V |
 | JamCracker_note | JamCracker 2.40 | JamCracker | open `JamCracker` | 9 S | A | V |
 | MarkII_note | Mark_II 1.70 | Mark II | open `Mark II` | 8 I | A | V |
@@ -133,7 +133,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Music-Ass_note | Music-Assembler 1.30 | Music Assembler | open `Music Assembler` | 16 I | A | V |
 | MusicMaker_note | MusicMaker 1.30 | MusicMaker 4V/8V, by name; it refused the corpus's single-file `MM8.` modules | open `MusicMaker 4V`, `8V` | 4V 1 S; 8V 9 S (against uade123's MusicMaker8) | N | V |
 | NESA_note | NESA 1.23 ("NESA - NES Audio", Morgan Johansson) | NES music (no file found) | none | none | N | X |
-| NSF | NSF 1.0 (Eagleplayer; "based on CoolNESs") | NES Sound Format (`NESM`) | built-in 6502 + 2A03 APU (`src/replay/nsf.rs`, 67cc1e6); expansion-chip tunes refused | 4 F against libgme (ffmpeg): another emulation, highs 3-5 dB apart above 10 kHz; not sample-exact | N | V |
+| NSF | NSF 1.0 (Eagleplayer; "based on CoolNESs") | NES Sound Format (`NESM`) | built-in 6502 + 2A03 APU (`src/replay/nsf.rs`, 67cc1e6); expansion-chip tunes refused | 4 F against this player (refcmp's reference; libgme the fallback): it runs in the engine, another emulation on Paula, 139 cents flat of the NES's NTSC pitch, which the port and libgme share; not sample-exact | A, ref 4 | V |
 | OctaMED | OctaMED 1.20 | OctaMED SoundStudio (MMD3) | open `OctaMED SoundStudio` | 4 I | A | V |
 | Paul Shields | Paul Shields 0.2 (an Eagleplayer) | Paul Shields | open `Paul Shields` | 8 S | A | V |
 | PierreAdane | Pierre Adane Packer 0.1 (an Eagleplayer) | Pierre Adane Packer (`pap.`) | open `Pierre Adane Packer` | 10 S | R | V |
@@ -164,7 +164,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | 669 | Composer669 0.80 (a DeliPlayer) | Composer 669 | libxmp port, 669 loader | 8 I (against libxmp 4.7.4 as oracle) | E | V |
 | Action Amics | Action Amics 0.2 | Actionamics | open `Actionamics` | 3 S (ref 3) | A | V |
 | Activision Pro | Activision Pro 1.8 | Activision Pro / Martin Walker | open `ActivisionPro` | 19 S (ref 19) | A | V |
-| ADPCM | ADPCM 0.0 | ADPCM2 / ADPCM3 | open `ADPCM2 / ADPCM3` | 3 S (REF-FALLBACK: SOAMC ADPCM-Player; EP206 ADPCM is silent here); UADE's headerless ADPCM mono, 8 I, is another format that this player refused | A | V |
+| ADPCM | ADPCM 0.0 | ADPCM2 / ADPCM3 | open `ADPCM2 / ADPCM3` | 3 S (against this player, which plays since the host Causes direct-mode AudioStruct interrupts; before: REF-FALLBACK, SOAMC ADPCM-Player); UADE's headerless ADPCM mono, 8 I, is another format that this player refused | A | V |
 | AIFF | AIFF 0.1 | AIFF sample | built-in decoder `src/aiff.rs` | 5 I, 3 NE against sox 14.4.2 | P | V |
 | A.M.Composer 1.2 | A.M.Composer 1.2 0.1 | A.M.Composer | open `A.M.Composer` | 4 S (ref 4) | E | V |
 | AProSys | AProSys 0.1 | AProSys | open `AProSys` | 8 I (ref 8) | A | V |
@@ -197,7 +197,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | Hippel_7V | Hippel_7V 1.0 (a DeliPlayer) | Hippel 7 voices | open `Hippel 7V` | 16 S, 7 N | A | V |
 | Hippel-COSO | Hippel-COSO 2.12 | Hippel COSO (and a 7V file) | open `Hippel COSO` | 6 S, 2 N (ref 6) | A | V |
 | Hippel-ST_note | Hippel-ST 1.10 (a DeliPlayer) | Jochen Hippel ST | open `Jochen Hippel ST` | 8 I | A | V |
-| IFF 8SVX | IFF 8SVX 0.2 | IFF 8SVX sample | built-in decoder `src/iff8svx.rs` | PCM 2 I, 6 NE against sox 14.4.2; Fibonacci 4 N | P | V |
+| IFF 8SVX | IFF 8SVX 0.2 (V0.84) | IFF 8SVX sample | built-in decoder `src/iff8svx.rs` | PCM 2 I, 6 NE against sox 14.4.2; Fibonacci 4 S against this player's Paula DMA bytes (it plays since the host's CreateNewProc, OpenFromLock and direct-mode AudioStruct interrupts; README) | P, ref 4 | V |
 | IFF EMOD | IFF EMOD 0.1 | Quadra Composer (EMOD) | open `Quadra Composer` | 18 T, 2 S | A | V |
 | IFF-SMUS | IFF-SMUS 2.2 | IFF SMUS + instruments | open `IFF-SMUS` | 17 S (ref 17) | A | V |
 | In Stereo 1.0 | In Stereo 1.0 5.0 | InStereo! 1.0 | open `InStereo! 1.0` | 4 I, 1 S (ref 5) | A | V |
@@ -227,8 +227,8 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | OctaMED | OctaMED 0.1 | OctaMED | open `OctaMED` | 7 S (ref 7) | A | V |
 | Oktalyzer | Oktalyzer 1.45 | Oktalyzer | open `Oktalyzer` | 50 S (ref 50) | A | V |
 | PierreAdane | Pierre Adane Packer 0.1 | Pierre Adane Packer | open `Pierre Adane Packer` | 10 S | R | V |
-| PlayAY | PlayAY 2.1 (+ AYPlayers) | ZX Spectrum / CPC AY: ZXAYEMUL, ZXAYAMAD, ST11, STRC | built-in Z80 + AY (`src/replay/ay.rs`): EMUL and AMAD; ST11 and STRC not played | EMUL: 10 L, 1 D against libgme (ffmpeg; another emulation, 2-3 dB louder, its own level curve); 13 files in `dl-modules/PlayAY/`, 11 in refcmp | P | V (EMUL vs GME only; AMAD U; ST11/STRC X) |
-| PlaySid | PlaySID 0.1 | C64 PSID | `src/sid` (C64 + SID emulation) with `--features sid` (used by the AzuraCast renderer build); left out of the default build only for its licence (GPL-2.0-only) | none | E | U |
+| PlayAY | PlayAY 2.1 (+ AYPlayers) | ZX Spectrum / CPC AY: ZXAYEMUL, ZXAYAMAD, ST11, STRC | built-in Z80 + AY (`src/replay/ay.rs`): EMUL and AMAD; ST11 and STRC not played | EMUL: 10 L, 1 D against libgme (ffmpeg; another emulation, 2-3 dB louder, its own level curve); 13 files in `dl-modules/PlayAY/`, 11 in refcmp. PlayAY itself does not run: its AYPlayer loads (with `AYPlayers/` in the working directory), then it writes through a null pointer in InitSound (README) | P | V (EMUL vs GME only; AMAD U; ST11/STRC X) |
+| PlaySid | PlaySID 0.1 | C64 PSID | `src/sid` (C64 + SID emulation) with `--features sid` (used by the AzuraCast renderer build); left out of the default build only for its licence (GPL-2.0-only) | not in refcmp (no `sid` in the gate's build); `tools/psid-playsid.py` against this player: 1 L, 1 F on the 2 PSID files on disk | E | U |
 | Polytracker | PolyTracker 0.90 (a DeliPlayer) | PolyTracker | open `PolyTracker` | 20 S (ref 20) | A | V |
 | Profiteam-Soundfactory | Profiteam-Soundfactory 0.1 | Sound Factory | open `Sound Factory` | 8 I, 1 D, 1 F (ref 8) | A | V |
 | Promizer 0.1 | Promizer 0.1a 1.1 | Promizer 0.1 | ProWizard `promizer.rs` + built-in ProTracker | 5 S (UADE PTK-Prowiz in the engine) | P | V |
@@ -294,26 +294,26 @@ STRC are not played.
 Verification of 2026-11-13 (`claude-scratch/deliplayerrust/fixround/unverified/`: `newrows.json` holds
 the 148 refcmp rows 1735-1882 that the list `listen/files.json` lacks, their files copied under
 `mods/` from the archive by the header index, `dl-modules/` and `ident/tme/`; `out/run2/` the run).
-Where the engine runs no original, `tools/refcmp.py` (`BLACKBOX_REF`) now takes an installed program:
+Where the engine runs no original, `tools/refcmp.py` (`BLACKBOX_REF`) now takes an installed program (NSF and Fibonacci 8SVX: the originals, which do run):
 
 | Format | Rows | Reference | Calibration | Result |
 |---|---|---|---|---|
 | S3M, IT, MTM, 669, DBM0 | 8 each | libxmp 4.7.4 (the existing oracle of the libxmp port) | XM rows already IDENTICAL against it | 40 I |
 | IFF 8SVX (PCM) | 8 | sox 14.4.2 at the file's rate, then the port's rate conversion (`src/aiff.rs`) | 44.1 kHz files 2 I | 2 I, 6 NE (1 LSB: f32 rounding) |
-| IFF 8SVX Fibonacci | 4 | none: sox does not read it, ffmpeg takes the low nibble first (README) | | 4 N |
+| IFF 8SVX Fibonacci | 4 | the original Eagleplayer `IFF 8SVX` (EP206): the bytes its Paula fetches against the port's samples at the file's rate (sox does not read it, ffmpeg takes the low nibble first) | | 4 S: every 256-byte chunk verbatim but the one across the original's first buffer change (and Lille.Mono's last) |
 | AIFF | 8 | sox, as above | | 5 I, 3 NE |
 | RIFF WAVE PCM / MS ADPCM | 6 / 4 | sox, as above | | 2 I, 4 NE / 4 NE |
 | MPEG audio layers 2, 3 | 8 | ffmpeg 6 at the file's rate, then the port's rate conversion | | 5 NE, 2 S, 1 PITCH: `fl10.mp2`, where ffmpeg drops the first frame and libmad (mpg321) agrees with the port |
 | Symphonie / Symphonie Pro | 4 | openmpt123 0.7.3, 48 kHz, linear, no dither | the X-Tracker port (same libopenmpt) is 4 S against it, level 0.00 dB | 4 S, level within 0.03 dB |
 | ZX Spectrum AY (EMUL) | 11 | libgme through ffmpeg | none possible: GME is another emulation | 10 L, 1 D: the port 0.8-3.3 dB quieter, every band 3.3-5.9 dB below GME |
-| NSF | 4 | libgme through ffmpeg | none possible, as above | 4 F: 3.3-5.2 dB less at 10-20 kHz, 1.4-3.1 dB at 5-10 kHz |
+| NSF | 4 | the original DeliPlayer `NSF` (PlayerStore) in the engine, both sides `--filter none`; libgme the fallback | libgme and the port agree on the pitch (0 cents) | 4 F: the original 139 cents flat, 2.3-4.3 dB louder, 4.8-6.0 dB more at 10-20 kHz (against libgme before: 4 F, 3.3-5.2 dB less at 10-20 kHz) |
 | ProRunner 2, Promizer 0.1 / 1.x / 4.0 | 8, 5, 5, 2 | UADE's PTK-Prowiz in the engine (the existing ProWizard reference) | the Chiptracker rows: 10 S against it | 20 S |
 | PumaTracker, InStereo! 2.0, TME | 8, 6, 8 | EP206's Pumatracker 1.0, In Stereo 2.0, TME (the generic search) | | 8 S; 5 I, 1 S; 8 S |
 | A.M.Composer, EMS before v6 | 4, 5 | EP206's A.M.Composer 1.2, EMS | | 4 S (the two jingles loop in the original, which reports no song end: `ORIGINAL_PLAYS_ON`), 5 S |
 
 The rows count as V here; until the lead adds them to the list and the baseline, the corpus itself has
 none of these formats. The AY and NSF rows are inconsistency classes against an emulation that is not
-the port's model: the gate would carry them as LEVEL/DIFF/FILTER.
+the port's model (for NSF the original Amiga player, out of tune): the gate would carry them as LEVEL/DIFF/FILTER.
 
 Formats that are not covered (8 player files):
 

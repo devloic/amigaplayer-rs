@@ -1,5 +1,7 @@
 # Coverage of the Eagleplayer set by open replayers
 
+(The installed DeliPlayers, PlayerStore, EP206 Eagleplayers and DeliGenies: `COVERAGE-DELI.md`.)
+
 Reconciled 2026-11-05 against the 178 player files in the UADE player directory
 (`~/.local/opt/uade/share/uade/players`). The original "63 players without an open replayer" list (from the format comparison report,
 `fixround/formatdiff/REPORT.md` section 2) was recovered and is checked below. Every player is now either covered by a clean-room open replayer

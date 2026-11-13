@@ -118,6 +118,12 @@ pub struct Rjp {
     /// The tick after the start-up tick: when it falls (absolute).
     next_at: std::cell::Cell<Option<u64>>,
     due: u64,
+    /// A tick has run since the song was loaded (the host's timer is running).
+    ticked: bool,
+    /// The time the tick spends on the voices without a pattern before the first one that has
+    /// one, until that voice's first write (taken by a write that the gaps model keys without
+    /// its channel, a DMA stop or start; the others' start gaps hold it).
+    lead: u64,
 }
 
 /// The name the sample companion has: `smp.NAME` for `rjp.NAME` (the prefix in any
@@ -195,6 +201,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         tick_at: None,
         next_at: std::cell::Cell::new(None),
         due: 0,
+        ticked: false,
+        lead: 0,
     };
     r.title = file;
     let mut hw = Hw { bus: &mut m.bus };
@@ -228,9 +236,9 @@ impl Rjp {
         self.blk[6].0.wrapping_add(be32(&self.d, self.blk[4].0 + 4 * n as usize) as usize)
     }
 
-    /// Stop, then the start of subsong `n`.
+    /// The start of subsong `n` (the original writes no stop of DMA here: the load stops it once,
+    /// a change in its start-up routine).
     fn start(&mut self, n: u16, hw: &mut Hw, change: bool) {
-        hw.dmacon(0x000F);
         self.sub = n;
         self.songend = false;
         self.first = change;
@@ -318,6 +326,7 @@ impl Rjp {
         v.d = e[2];
         v.phase = 4;
         let s = v.sample.wrapping_add(start);
+        hw.wait(std::mem::take(&mut self.lead));
         hw.dmacon(1 << ch);
         hw.bus.write_word(0xDFF0AA + 16 * ch as u32, 0);
         if (s as usize) + 2 <= self.area.len() {
@@ -520,16 +529,19 @@ impl Rjp {
             let v = &self.v[ch];
             let a = self.base.wrapping_add(v.sample).wrapping_add(2 * v.loop_start as u32);
             let len = v.loop_len;
+            self.lead = 0;
             hw.loc(ch, a);
             hw.len(ch, len);
         }
         if self.v[ch].dma {
             self.v[ch].dma = false;
+            hw.wait(std::mem::take(&mut self.lead));
             hw.dmacon(0x8200 | 1 << ch);
             self.v[ch].install = true;
         }
         self.sequence(ch, hw);
         let vol = self.volume(ch);
+        self.lead = 0;
         hw.vol(ch, vol);
         let per = self.period(ch);
         hw.per(ch, per);
@@ -578,6 +590,10 @@ static GAPS: WriteGaps = WriteGaps::new(
     &[(0, 0), (1, 89), (2, 177), (3, 266), (12, 516), (13, 613), (14, 705), (15, 807), (16, 576), (20, 28)],
 );
 
+/// What a voice without a pattern takes of the tick before the next voice's writes (the start gaps
+/// of the first write by channel: LOC 0, 89, 177, 266).
+const LEAD_SKIP: u64 = 89;
+
 /// The tick's first write falls this far into it (the start gap of a stop of DMA below).
 const START_FIRST: u64 = 576;
 
@@ -591,6 +607,19 @@ const CHANGE_FIRST: u64 = 234;
 
 /// The tick after the start-up one falls this much later than a period after the change.
 const CHANGE_EXTRA: u64 = 380;
+
+/// The start-up routine of a change of subsong, from `CHANGE_FIRST` after it: all voices off,
+/// the volumes cleared, the DMA stopped again.
+fn startup(hw: &mut Hw) {
+    hw.wait(CHANGE_FIRST);
+    hw.dmacon(0x000F);
+    for ch in 0..4 {
+        hw.vol(ch, 0);
+        hw.wait(6);
+    }
+    hw.wait(4648);
+    hw.dmacon(0x000F);
+}
 
 impl Replayer for Rjp {
     fn format(&self) -> &'static str {
@@ -614,7 +643,18 @@ impl Replayer for Rjp {
     }
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
-        self.start(n, hw, true);
+        if self.ticked {
+            self.start(n, hw, true);
+        } else {
+            // a change before the host's timer has run (a subsong chosen at the start): the
+            // start-up routine runs at once, and the first tick comes a period after the song's
+            // start as for the first subsong (the reference's first notes follow its last
+            // start-up by a period and its timer's start, not 8,000 colour clocks, and their
+            // DMA comes on a full tick after their data-register write, when the channel has
+            // left the state that write put it in)
+            self.start(n, hw, false);
+            startup(hw);
+        }
     }
 
     fn subsong_tick_at(&mut self) -> Option<u64> {
@@ -626,6 +666,7 @@ impl Replayer for Rjp {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.ticked = true;
         if self.flags0 == 0 {
             // a subsong without voices ends at every tick
             self.songend = true;
@@ -638,17 +679,11 @@ impl Replayer for Rjp {
             // state the data-register write leaves them in)
             self.first = false;
             self.next_at.set(Some(self.due + self.tick_clocks() + CHANGE_EXTRA));
-            hw.wait(CHANGE_FIRST);
-            hw.dmacon(0x000F);
-            for ch in 0..4 {
-                hw.vol(ch, 0);
-                hw.wait(6);
-            }
-            hw.wait(4648);
-            hw.dmacon(0x000F);
+            startup(hw);
             hw.wait(3351 - START_FIRST);
         }
         hw.gaps(&GAPS);
+        self.lead = LEAD_SKIP * self.v.iter().take_while(|v| !v.active).count() as u64;
         for ch in 0..4 {
             if self.v[ch].active {
                 self.step(ch, hw);
@@ -661,6 +696,7 @@ impl Replayer for Rjp {
 mod tests {
     use super::*;
     use crate::engine::Engine;
+    use crate::replay::DT_TICK;
     use std::path::Path;
 
     fn block(d: &mut Vec<u8>, b: &[u8]) {
@@ -671,6 +707,11 @@ mod tests {
     /// One voice (list 1: pattern 1 then stop): instrument 1 with envelope 0, a
     /// note, a rest, a note off; the sample area is 64 bytes of 0x40.
     fn song() -> Vec<u8> {
+        song_with(&[[1, 0, 0, 0]])
+    }
+
+    /// `song` with these subsongs (the list number of each voice).
+    fn song_with(subsongs: &[[u8; 4]]) -> Vec<u8> {
         let mut d = b"RJP1SMOD".to_vec();
         let mut ins = vec![0u8; 64];
         // record 0: the empty instrument
@@ -686,7 +727,7 @@ mod tests {
         ins[r + 0x16 + 1] = 4;
         block(&mut d, &ins);
         block(&mut d, &[64, 64, 254, 64, 254, 254]);
-        block(&mut d, &[1, 0, 0, 0]);
+        block(&mut d, subsongs.concat().as_slice());
         block(&mut d, &[0, 0, 0, 0, 0, 0, 0, 0]);
         block(&mut d, &[0, 0, 0, 0, 0, 0, 0, 0]);
         block(&mut d, &[1, 0, 0, 0]);
@@ -750,5 +791,52 @@ mod tests {
         // the start-up routine (volumes cleared first) runs only after a change of subsong, not
         // at the song's start; the envelope is flat at 64
         assert_eq!(reg(&log, 0xDFF0A8)[..2], [64, 64]);
+    }
+
+    /// A subsong chosen before the timer has run (`--subsong`): the start-up routine runs at the
+    /// change, and the first notes come a period after the song's start, so that their DMA comes on a
+    /// full tick after the data-register write, when the channel has left the word that write
+    /// started; it then fetches the sample (it fetched from address 0 when the notes came in the
+    /// start-up tick, 8,000 colour clocks after the change).
+    #[test]
+    fn subsong_chosen_at_the_start_fetches_the_sample() {
+        let dir = Path::new("/rjp-test");
+        let mut smp = b"RJP1".to_vec();
+        smp.extend_from_slice(&[0x40; 64]);
+        let path = dir.join("rjp.test");
+        let mut e = Engine::new(48000.0);
+        e.m.os.mem_files.insert(dir.join("SMP.test"), smp);
+        e.open_replayers = true;
+        // subsong 1 plays on voice 3 alone
+        e.play_data(&path, song_with(&[[1, 0, 0, 0], [0, 0, 0, 1]])).unwrap();
+        e.m.bus.write_log = Some(Vec::new());
+        e.m.bus.paula.dma_log = Some(Vec::new());
+        let start = e.m.bus.clock;
+        e.change_subsong(1).unwrap();
+        assert_eq!(e.playing.as_ref().unwrap().sub, 1);
+        let song_start = e.m.bus.clock;
+        let mut out = vec![0f32; 2 * 960 * 6];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let at = |a: u32, v: Option<u16>| log.iter().find(|w| w.0 == a && v.is_none_or(|v| w.1 == v)).map(|w| w.2);
+        // the note: a period after the song's start, then the DMA a tick later
+        let dat = at(0xDFF0DA, None).unwrap();
+        let on = at(0xDFF096, Some(0x8208)).unwrap();
+        assert!(dat > song_start + DT_TICK, "{dat} {song_start}");
+        assert!(on - dat > 65536 + 339, "DMA on {} after the data write", on - dat);
+        // every fetch of voice 3 is in its sample
+        let loc = log.iter().filter(|w| w.0 == 0xDFF0D0 || w.0 == 0xDFF0D2).map(|w| w.1 as u32).collect::<Vec<_>>();
+        let base = loc[0] << 16 | loc[1];
+        let dma = e.m.bus.paula.dma_log.take().unwrap();
+        assert!(!dma.is_empty());
+        assert!(dma.iter().all(|f| f.1 == 3 && f.2 >= base && f.2 < base + 16), "{:x?}", &dma[..4.min(dma.len())]);
+        // the start-up routine at the change: DMA off, the volumes cleared, DMA off again
+        let vols: Vec<u64> = log.iter().filter(|w| [0xDFF0A8, 0xDFF0B8, 0xDFF0C8, 0xDFF0D8].contains(&w.0) && w.1 == 0).map(|w| w.2).collect();
+        assert_eq!(vols.len(), 4);
+        assert!(vols.iter().all(|&t| t > start && t <= song_start), "{vols:?} {start} {song_start}");
+        // the voices before voice 3 have no pattern: its first write of the tick (the stop of DMA)
+        // waits for them
+        let off = at(0xDFF096, Some(0x0008)).unwrap();
+        assert_eq!(off, song_start + DT_TICK + TIMER_DELAY + START_FIRST + 3 * LEAD_SKIP);
     }
 }

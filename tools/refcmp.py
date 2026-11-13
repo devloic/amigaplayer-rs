@@ -756,6 +756,37 @@ PTK_CLEAR_TAGS = (b'M.K.', b'M!K!', b'M&K!', b'N.T.')
 PTK_CLEAR_NOTE = 'PTK-Prowiz clears each sample\'s first long: both sides on a copy with it cleared'
 
 
+# Where PTK-Prowiz's ProWizard conversion of a packed module is known to misread it: a note on the row (the class
+# stays; the module, not the port, is what the reference gets wrong). Checked on the converted module PTK-Prowiz
+# leaves in chip memory (a uadecore copy dumping chip RAM, run by uade123 -u), against the port's conversion, row by
+# row on the rows that play (up to the first B/D), position by position, on all 66 The Player 4.1A files of the
+# corpus (Allister Brimble's games; no P40A/P40B, no other P4x file on disk):
+#  - 48 convert identically. In the 17 with a Bxx, PTK-Prowiz writes the stored B parameter as is, the port
+#    (NostalgicPlayer's ThePlayer4xFormatBase) halves it. The stored values are all even (2, 4, 18) and in 3 files
+#    exceed the song's positions (Primal Rage Game_Over and Ingame_18: 4 of 3 positions; Crash Dummies ingame_3: 18
+#    of 10); halved, every one is a position of the song (the last, or 1-2 after the intro). The stored value is the
+#    position times 2: the reference's jump target is wrong (beyond the 20 s window in every refcmp row).
+#  - Body Blows Galactic p4x.titanica: a note with a negative Axx (stored A F1) loses its note and sample in
+#    PTK-Prowiz (00000A10; port 00D66A10), followed by 14 rows of portamento down that only make sense on that note;
+#    mutated copies show PTK-Prowiz drops the note whenever the A parameter is >= 0x80.
+# libxmp 4.6.3's p40.c (MIT, Asle's ProWizard like PTK-Prowiz) also keeps B as stored; it does not drop the note.
+REF_NOTES = {
+    # its track data is mostly 68k replay code and period tables (only 0x106-0x18b is track rows, duplicated): the
+    # tracks of 8 of its 9 patterns point into code. PTK-Prowiz decodes the four voices row by row, ends the pattern
+    # for all four at the first fresh B/D row, and keeps each voice's pending repeat / empty-row count into the next
+    # pattern; the port (and libxmp) decode each track on its own from its offset. On the 65 well-formed files the
+    # two readings give the same rows (each track's counts end at its pattern's end); here pattern 0's voice 3 is a
+    # D01 repeated 122 times (period-table words read as a row), so PTK-Prowiz's patterns are 1 row long and the song ends after 0.7 s (port 12.4 s).
+    'Incredible_Crash_Dummies/p4x.unused': 'module broken (track data overwritten by replay code): PTK-Prowiz carries '
+                                           'repeat counts across patterns, patterns 1 row, song 0.7 s',
+}
+
+
+def ref_note(path):
+    """The REF_NOTES note of the module at `path`, or ''."""
+    return next((n for k, n in REF_NOTES.items() if path.endswith('/' + k)), '')
+
+
 def ptk_cleared_copy(ctx, mod):
     """A copy of the 31-sample ProTracker module `mod` with each sample's first 4 bytes cleared, or None when
     the port already plays the same bytes as PTK-Prowiz (every first long zero, but the first word of a
@@ -1335,7 +1366,7 @@ def process(ctx, f):
         row['cls'] = cls
         if ref.get('fallback'):
             mm.append(ref['fallback'])
-        row['note'] = ' '.join(mm + ([cut_note] if cut_note else []))
+        row['note'] = ' '.join(mm + [n for n in (cut_note, ref_note(f['path'])) if n])
     except Exception as e:  # noqa
         row['note'] = f'{type(e).__name__}: {e}'[:160]
     return row

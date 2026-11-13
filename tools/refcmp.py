@@ -1095,6 +1095,9 @@ def process(ctx, f):
                 if tref['kind'] != 'none':
                     tref['note'] = ''
                     tref['player'] += ' (on the TFMX twin ' + os.path.basename(twin) + ')'
+                    # a stand-in: the original ran on another file, so count it with the fallbacks
+                    tref['fallback'] = ('REF-FALLBACK (the original refuses the COSO container; reference is '
+                                        'the original on the TFMX twin ' + os.path.basename(twin) + ')')
                     ref = tref
         if ref['kind'] == 'none':
             row['cls'] = 'NOREF' if ref['noref'] else 'FAIL'

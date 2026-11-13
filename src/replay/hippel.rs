@@ -376,14 +376,27 @@ fn new_coso(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // ExtLoad: the samples from NAME.samp (the name up to its last dot), if any
     let mut samples = 0;
     let name = m.bus.read_cstr(m.deli.file_buf);
+    let mut data = None;
     if let Some(dot) = name.rfind('.') {
-        let (_, data) = crate::deli::read_companion(m, &format!("{}samp", &name[..=dot]));
-        if let Ok(s) = data {
-            let a = m.alloc(s.len() as u32 + 1024);
-            if a != 0 {
-                m.bus.write_bytes(a, &s);
-                samples = a;
-            }
+        data = crate::deli::read_companion(m, &format!("{}samp", &name[..=dot])).1.ok();
+    }
+    // a `soc.NAME` song (Amberstar's) has its samples in `smp.NAME`, else in `smp.set`
+    // beside it (case ignored); without NAME.samp the Eagleplayer refuses it
+    let mut from_samp = data.is_some();
+    if data.is_none() && name.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("soc.")) {
+        data = crate::deli::read_companion(m, &format!("smp.{}", &name[4..])).1.ok();
+        if data.is_none() {
+            data = crate::deli::read_companion(m, "smp.set").1.ok();
+        }
+        from_samp = false;
+    }
+    if let Some(s) = data {
+        let a = m.alloc(s.len() as u32 + 1024);
+        if a != 0 {
+            m.bus.write_bytes(a, &s);
+            samples = a;
+        } else {
+            from_samp = false;
         }
     }
     let off = |k: usize| base.wrapping_add(be32(d, 4 * k));
@@ -412,7 +425,7 @@ fn new_coso(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     let path = m.bus.read_cstr(m.deli.dir_buf) + &name;
     let mut hw = Hw { bus: &mut m.bus };
-    hw.wait(init_time(&path) + if samples != 0 { SAMP_LOAD } else { 0 });
+    hw.wait(init_time(&path) + if from_samp { SAMP_LOAD } else { 0 });
     p.init_sound(1, &mut hw);
     Some(Box::new(p))
 }
@@ -4651,6 +4664,38 @@ mod tests {
         d.extend((0..64).map(|i| if i < 32 { 0x40 } else { 0xc0 }));
         assert_eq!(d.len(), SAMPLES + 64);
         d
+    }
+
+    /// The first sample address InitSound writes for voice 0, and where the module's own
+    /// samples are, for `module()` played as `path`.
+    fn first_sample_address(path: &Path) -> (u16, u16) {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(path, module()).unwrap();
+        let base = e.m.deli.list.first().unwrap().0;
+        let mut out = vec![0f32; 2 * 960];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let first = log.iter().find(|w| w.0 == 0xDFF0A2).unwrap().1;
+        (first, (base + SAMPLES as u32) as u16)
+    }
+
+    #[test]
+    fn a_soc_song_takes_its_samples_from_smp_set() {
+        let dir = std::env::temp_dir().join(format!("coso-soc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // no companion: the samples in the module
+        let (at, own) = first_sample_address(&dir.join("soc.Song"));
+        assert_eq!(at, own);
+        // smp.set (case ignored) beside it: the samples are loaded from there
+        std::fs::write(dir.join("SMP.SET"), [0x40u8; 64]).unwrap();
+        let (at, own) = first_sample_address(&dir.join("soc.Song"));
+        assert_ne!(at, own);
+        // not for another prefix
+        let (at, own) = first_sample_address(&dir.join("hipc.Song"));
+        assert_eq!(at, own);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

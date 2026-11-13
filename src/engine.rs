@@ -625,7 +625,16 @@ impl Engine {
         }
         // module into guest memory (padded so 1k checks never read garbage)
         let size = data.len() as u32;
-        let addr = self.m.alloc(size.max(1024) + 1024);
+        let need = size.max(1024) + 1024;
+        // a module that leaves the replayer less than this (its sample copies, the amplifier's
+        // buffers) is given the memory of the recompiled 68k players' region and the old stack
+        // when that makes it fit: the open replayers run no 68k code (the 68k players are
+        // interpreted from then on)
+        const REPLAYER_RESERVE: u32 = 0x2_0000;
+        if self.open_replayers {
+            self.m.claim_native_region(need + REPLAYER_RESERVE);
+        }
+        let addr = self.m.alloc(need);
         if addr == 0 {
             bail!("module too large");
         }

@@ -14,6 +14,23 @@ impl Heap {
         Heap { free, used: BTreeMap::new() }
     }
 
+    /// Adds the memory `start..end` (outside every block, free or used) to the heap.
+    pub fn add_region(&mut self, start: u32, end: u32) {
+        let (mut s, mut l) = (start, end - start);
+        if let Some((&ps, &pl)) = self.free.range(..s).next_back() {
+            if ps + pl == s {
+                self.free.remove(&ps);
+                s = ps;
+                l += pl;
+            }
+        }
+        if let Some(&nl) = self.free.get(&(s + l)) {
+            self.free.remove(&(s + l));
+            l += nl;
+        }
+        self.free.insert(s, l);
+    }
+
     pub fn alloc(&mut self, size: u32) -> Option<u32> {
         let size = (size.max(1) + 7) & !7;
         let (&start, &len) = self.free.iter().find(|&(_, &len)| len >= size)?;
@@ -87,6 +104,13 @@ impl Heap {
         self.free.values().sum()
     }
 
+    /// `largest`, were `add_region(start, end)` done.
+    pub fn largest_with_region(&self, start: u32, end: u32) -> u32 {
+        let below = self.free.range(..start).next_back().filter(|(ps, pl)| *ps + *pl == start).map_or(0, |(_, pl)| *pl);
+        let above = self.free.get(&end).copied().unwrap_or(0);
+        self.largest().max(below + (end - start) + above)
+    }
+
     pub fn largest(&self) -> u32 {
         self.free.values().copied().max().unwrap_or(0)
     }
@@ -119,5 +143,20 @@ mod tests {
         assert_eq!(h.largest(), 0x1000 - 0x100);
         assert_eq!(h.alloc_top(0xF00), Some(0x1100));
         assert_eq!(h.alloc_top(8), None);
+    }
+
+    #[test]
+    fn a_region_added_joins_its_neighbours() {
+        let mut h = Heap::new(0x1000, 0x2000);
+        let a = h.alloc(0x100).unwrap();
+        assert_eq!(h.largest(), 0xF00);
+        // 0x3000..0x4000 is not next to the free block: the largest stays, with it 0x1000
+        assert_eq!(h.largest_with_region(0x3000, 0x4000), 0x1000);
+        // 0x2000..0x3000 is: the free block and the region make one
+        assert_eq!(h.largest_with_region(0x2000, 0x3000), 0xF00 + 0x1000);
+        h.add_region(0x2000, 0x3000);
+        assert_eq!(h.largest(), 0x1F00);
+        h.free(a);
+        assert_eq!(h.largest(), 0x2000);
     }
 }

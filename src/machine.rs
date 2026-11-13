@@ -28,7 +28,11 @@ const STUB_AREA: u32 = 0x408;
 const STUB_AREA_END: u32 = 0x2000;
 pub const HEAP_START: u32 = 0x2000;
 const STACK_SIZE: u32 = 0x20000;
-pub const STACK_TOP: u32 = RAM_SIZE as u32 - 0x10;
+pub const STACK_TOP: u32 = LOW_RAM_END - 0x10;
+/// The end of the RAM the layout above (heap, recompiled players, stack) was made for. The
+/// bytes from there to `RAM_SIZE` are for the stack once `claim_native_region` has given the
+/// region below it to the heap.
+const LOW_RAM_END: u32 = 0x00B0_0000;
 /// Max instructions for a single host->guest call (catches hung players). For interpreted
 /// code the calls it nests (an interrupt handler run from inside a library call) count too.
 pub const CALL_BUDGET: u64 = 200_000_000;
@@ -119,6 +123,8 @@ pub struct Machine {
     /// otherwise differ just because different things lie around them.
     pub native_enabled: bool,
     pub native_stats: NativeStats,
+    /// The guest stack's top (`STACK_TOP`, or the end of RAM once the native region is the heap's).
+    stack_top: u32,
     /// `alloc` takes memory from the top of the heap. Set while Eagleplayers
     /// load, so the memory DeliPlayers and modules get does not move.
     pub alloc_top: bool,
@@ -155,6 +161,7 @@ impl Machine {
             crashed: None,
             native: Vec::new(),
             native_layout,
+            stack_top: STACK_TOP,
             native_enabled,
             native_stats: NativeStats::default(),
             alloc_top: false,
@@ -207,6 +214,26 @@ impl Machine {
         self.next_stub += 4;
         self.add_trap_at(a, t);
         a
+    }
+
+    /// Gives the heap the memory the layout keeps out of it (the region the recompiled 68k
+    /// players occupy, and the old stack) when a block of `need` bytes then fits and did not
+    /// before; the stack moves to the bytes above (`RAM_SIZE`). Only when no recompiled player
+    /// is loaded and no guest code runs; from then on 68k players are interpreted (the layout
+    /// is gone). False, and nothing changed, otherwise.
+    pub fn claim_native_region(&mut self, need: u32) -> bool {
+        if self.stack_top != STACK_TOP || !self.native.is_empty() || self.depth != 0 {
+            return false;
+        }
+        let from = if self.native_layout { NATIVE_LO } else { NATIVE_HI };
+        if self.heap.largest() >= need || self.heap.largest_with_region(from, LOW_RAM_END) < need {
+            return false;
+        }
+        self.native_layout = false;
+        self.native_enabled = false;
+        self.heap.add_region(from, LOW_RAM_END);
+        self.stack_top = RAM_SIZE as u32 - 0x10;
+        true
     }
 
     pub fn alloc(&mut self, size: u32) -> u32 {
@@ -324,8 +351,8 @@ impl Machine {
         let saved_dar = self.cpu.dar;
         let saved_pc = self.cpu.pc;
         let saved_sr = self.cpu.get_sr();
-        let sp = if self.depth == 0 { STACK_TOP } else { (saved_dar[15] - 0x100) & !3 };
-        if sp < STACK_TOP - STACK_SIZE + 0x400 {
+        let sp = if self.depth == 0 { self.stack_top } else { (saved_dar[15] - 0x100) & !3 };
+        if sp < self.stack_top - STACK_SIZE + 0x400 {
             return Err("guest stack overflow".into());
         }
         let sp = sp - 4;
@@ -638,6 +665,25 @@ impl m68k_rc::Bus for Bus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claiming_the_native_region_makes_room_and_moves_the_stack() {
+        let mut m = Machine::new(CpuType::M68000);
+        let before = m.heap.largest();
+        // fits already: nothing is claimed
+        assert!(!m.claim_native_region(before));
+        let need = before + 0x1000;
+        assert!(m.claim_native_region(need));
+        assert!(m.heap.largest() >= need);
+        // once only; the stack is at the end of RAM now, and calls run on it
+        assert!(!m.claim_native_region(need + 0x1000_0000));
+        let code = m.alloc(16);
+        m.bus.write_bytes(code, &[0x70, 42, 0xD0, 0x81, 0x4E, 0x75]);
+        let mut r = [0u32; 16];
+        r[1] = 8;
+        assert_eq!(m.call(code, &r).unwrap()[0], 50);
+        assert_eq!(m.stack_top, RAM_SIZE as u32 - 0x10);
+    }
 
     #[test]
     fn call_returns_registers() {

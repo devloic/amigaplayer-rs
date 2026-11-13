@@ -8,7 +8,7 @@ use m68k::{AddressBus, FastMem};
 
 /// RAM from $000000 up to the CIA/custom-chip area. DMA can reach all of it,
 /// so there is no chip/fast distinction.
-pub const RAM_SIZE: usize = 0x00B0_0000;
+pub const RAM_SIZE: usize = 0x00B2_0000;
 
 /// Colour clocks per frame: 313 lines (PAL, non-interlaced).
 pub const FRAME: u64 = 313 * LINE;

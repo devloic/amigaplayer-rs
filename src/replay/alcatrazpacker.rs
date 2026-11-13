@@ -515,17 +515,21 @@ fn start(d: &[u8], smp: u32, title: String) -> Option<Alp> {
     Some(p)
 }
 
+/// The sample file of the song file `name`: its first `alp.` (any case) becomes `smp.`.
+/// A copy that carries a prefix (`Cedric__alp.ingame_1`) keeps it, so its companion is
+/// `Cedric__smp.ingame_1` as stored beside it.
+fn companion_name(name: &str) -> Option<String> {
+    let i = name.to_ascii_lowercase().find("alp.")?;
+    Some(format!("{}smp.{}", &name[..i], &name[i + 4..]))
+}
+
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let w = parts(d)?;
     let total = be32(d, 4) as usize;
     let file = m.bus.read_cstr(m.deli.file_buf);
     let name = file.rsplit('/').next().unwrap_or(&file).to_string();
     let smp = if total > d.len() {
-        let rest = match name.get(..4) {
-            Some(p) if p.eq_ignore_ascii_case("alp.") => &name[4..],
-            _ => return None,
-        };
-        let data = crate::deli::read_companion(m, &format!("smp.{rest}")).1.ok()?;
+        let data = crate::deli::read_companion(m, &companion_name(&name)?).1.ok()?;
         let a = m.alloc((data.len() as u32).max(4));
         if a == 0 {
             return None;
@@ -663,6 +667,35 @@ mod tests {
         assert!(!end);
         let (_, end) = run(module(), 64 * 6 + 10);
         assert!(end);
+    }
+
+    #[test]
+    fn the_companion_keeps_the_prefix_of_a_renamed_copy() {
+        assert_eq!(companion_name("alp.ingame_1").as_deref(), Some("smp.ingame_1"));
+        assert_eq!(companion_name("ALP.Title").as_deref(), Some("smp.Title"));
+        assert_eq!(companion_name("Cedric__alp.ingame_1").as_deref(), Some("Cedric__smp.ingame_1"));
+        assert_eq!(companion_name("song.mod"), None);
+    }
+
+    #[test]
+    fn a_renamed_copy_finds_its_sample_file_by_content_recognition() {
+        // the song without its samples (they are in the companion), in a directory beside
+        // `Pre__smp.x`
+        let dir = std::env::temp_dir().join(format!("alp-prefix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = module();
+        let song = d.len() - 16;
+        d.truncate(song);
+        std::fs::write(dir.join("Pre__smp.x"), [0x11u8; 16]).unwrap();
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.play_data(&dir.join("Pre__alp.x"), d.clone()).unwrap();
+        assert_eq!(e.playing.as_ref().unwrap().format, "Alcatraz Packer");
+        // no companion beside it: not played
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        assert!(e.play_data(&dir.join("Other__alp.x"), d).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

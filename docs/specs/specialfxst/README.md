@@ -20,7 +20,8 @@
   block after the 1 KB one.
 - **Notes outside the period table** (bad data, or a pitch kick / transpose / arpeggio that leaves 0..101)
   read player memory. SPEC 3.1 describes what is read; the bytes are in `data/` (from the player binary).
-  The lead decides whether to embed them; with sane music data they are never reached.
+  The lead decides whether to embed them; with sane music data they are never reached. They are code bytes
+  of the player, so the port does not embed them: indices -128..-1 and 122..127 give period 0.
 - **Periods** written by the replay are not range-checked: slides can wrap them, and the emulator masks to
   12 bits before converting.
 - Private reading notes and scripts exist in a private working folder (not for the implementer).

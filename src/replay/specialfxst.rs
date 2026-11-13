@@ -13,10 +13,9 @@
 //! interrupt flag. Every write is placed at the colour clock the specification's cycle ledger
 //! gives.
 //!
-//! Embedded data (taken from the original player on the project owner's decision): a note index
-//! outside the 102-entry period table reads the player's own memory in the original. Indices 102
-//! to 121 give the table addresses as the specification describes; indices -128 to -1 read
-//! `specialfxst_period_underflow.bin` and 122 to 127 read `specialfxst_period_overflow_tail.bin`.
+//! A note index outside the 102-entry period table reads the player's own memory in the original.
+//! Indices 102 to 121 give the table addresses as the specification describes; indices -128 to -1
+//! and 122 to 127 read the player's code there, which is not embedded: they give period 0.
 //!
 //! Choices where the specification is silent (all safe):
 //! * reads outside the image give zero; a voice that reads more than a bounded number of events
@@ -52,10 +51,6 @@ const PERIODS: [u16; 102] = [
     0x23, 0x21, 0x1F, 0x1D, 0x1C, 0x1A, 0x19, 0x17, 0x16, 0x15, 0x13, 0x12, 0x11, 0x10, 0xF, 0xE, 0xD, 0xC, 0xB, 0xA, 0x9,
 ];
 
-/// The 128 words before the period table (index -1 is the last word), big-endian.
-static UNDERFLOW: &[u8; 256] = include_bytes!("specialfxst_period_underflow.bin");
-/// The 6 words after the table's addressed part (indices 122 to 127), big-endian.
-static OVERFLOW_TAIL: &[u8; 12] = include_bytes!("specialfxst_period_overflow_tail.bin");
 
 /// Paula volume by the YM volume register.
 const VT: [u16; 16] = [0, 1, 2, 3, 4, 5, 7, 9, 12, 16, 21, 27, 34, 42, 52, 64];
@@ -501,8 +496,8 @@ impl SpecialFxSt {
                     a as u16
                 }
             }
-            122..=127 => be16(OVERFLOW_TAIL, 2 * (i - 122) as usize),
-            _ => be16(UNDERFLOW, 2 * (i + 128) as usize),
+            // the original reads its own code here (see the header)
+            _ => 0,
         }
     }
 

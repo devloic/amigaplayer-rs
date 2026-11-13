@@ -135,7 +135,8 @@ Indices outside 0..101 read the player's memory around the table: indices -128..
 `data/period_underflow.bin` (256 bytes, index -1 = its last word); indices 102..121 give the ten located
 table addresses as 32-bit values, high word first, in the order arpeggio, slide, volume envelope, trigger,
 drum, subsong, pattern, extra pattern, slide list, digital-sample table (absolute addresses in memory);
-indices 122..127 give the words of `data/period_overflow_tail.bin`.
+indices 122..127 give the words of `data/period_overflow_tail.bin`. (Both files are player code; the port reads
+0 for those indices instead.)
 
 ### 3.2 Subsong start
 

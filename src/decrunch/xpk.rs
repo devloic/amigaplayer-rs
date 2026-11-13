@@ -31,6 +31,7 @@ pub(crate) enum Method {
     Rake,
     Shri,
     Smpl,
+    Impl,
 }
 
 impl Method {
@@ -45,6 +46,7 @@ impl Method {
             Method::Rake => "XPK RAKE",
             Method::Shri => "XPK SHRI",
             Method::Smpl => "XPK SMPL",
+            Method::Impl => "XPK IMPL",
         }
     }
 
@@ -59,6 +61,7 @@ impl Method {
             b"RAKE" => Method::Rake,
             b"SHRI" => Method::Shri,
             b"SMPL" => Method::Smpl,
+            b"IMPL" => Method::Impl,
             _ => return None,
         })
     }
@@ -167,6 +170,7 @@ fn create(m: Method, chunk: &[u8], state: &mut State) -> Option<()> {
         Method::Blzw => blzw::check(chunk).map(|_| ()),
         Method::Rake => rake::check(chunk).map(|_| ()),
         Method::Smpl => smpl::check(chunk),
+        Method::Impl => super::imploder::check(chunk),
         Method::Shri => shri::check(chunk, state),
         Method::Lhlb | Method::Mash | Method::Nuke | Method::Duke => Some(()),
     }
@@ -232,6 +236,7 @@ pub(crate) fn depack(d: &[u8]) -> Option<Vec<u8>> {
                         Method::Duke => nuke::decompress(c.data, o, true)?,
                         Method::Rake => rake::decompress(c.data, o)?,
                         Method::Smpl => smpl::decompress(c.data, o)?,
+                        Method::Impl => super::imploder::decompress(c.data, o)?,
                         Method::Shri => return None, // handled above
                     }
                 }

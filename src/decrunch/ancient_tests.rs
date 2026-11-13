@@ -9,7 +9,7 @@ use super::{decrunch, unpack_identified, Kind, XpkMethod};
 
 /// An XPK file with short chunk headers: `(type, data, unpacked size)` per chunk, then the end
 /// chunk. `flags` goes to byte 32 (1 long headers is not used here, 2 password).
-fn xpk(method: &[u8; 4], chunks: &[(u8, Vec<u8>, usize)], raw: &[u8], flags: u8) -> Vec<u8> {
+pub(super) fn xpk(method: &[u8; 4], chunks: &[(u8, Vec<u8>, usize)], raw: &[u8], flags: u8) -> Vec<u8> {
     let mut body = Vec::new();
     let mut put_chunk = |ty: u8, data: &[u8], unpacked: usize| {
         let mut sum = [0u8; 2];
@@ -216,10 +216,10 @@ fn powerplayer_header_checks() {
 
 // ------------------------------------------------------- damaged data
 
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self) -> u32 {
+    pub(super) fn next(&mut self) -> u32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
@@ -297,7 +297,7 @@ fn damaged_streams_never_panic() {
 
 /// ancient's repository (`testing/test_files`) and the CLI's output for each file (`ref/`,
 /// made by `scripts/mkref.sh` there).
-const ANCIENT: &str = "/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-ancient";
+pub(super) const ANCIENT: &str = "/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-ancient";
 
 fn ancient_files() -> Vec<(&'static str, Kind)> {
     let mut v = vec![];

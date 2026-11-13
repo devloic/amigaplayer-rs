@@ -349,7 +349,7 @@ in its place.
 | Headphone-NotePlayer | Headphone-NotePlayer 1.90 | NotePlayer, 32 voices, for headphones | not needed. Stereo separation is `--separation` / `--mono`; no headphone filter |
 | GenieStore/ModSave-NotePlayer | ModSave-NotePlayer 2.10 | NotePlayer that saves the module as an IFF-8SVX mono/stereo sample (up to 16 channels) | `--wav` / `amigaplayer-render --out` (WAV or raw, not 8SVX) |
 | Converter | Converter 1.20 | converts "exotic" module formats into common ones (its strings name none) | not needed: the open path plays formats directly; which formats it converted is unknown |
-| Decruncher | Decruncher 1.31 | decrunches packed files; its strings name Imploder (`IMP!`), LhA, GZip, Zip, LZX | `src/decrunch` (PP20, XPK methods, Pack-Ice, S404, MMCMP, CrunchMania, PowerPlayer) and the `archives` feature (LhA, LZX, zip, gzip, xz, tar). No Imploder (`IMP!`) depacker found in `src/decrunch` |
+| Decruncher | Decruncher 1.31 | decrunches packed files; its strings name Imploder (`IMP!`), LhA, GZip, Zip, LZX | `src/decrunch` (PP20, XPK methods, Pack-Ice, S404, MMCMP, CrunchMania, PowerPlayer, Imploder `IMP!` and its variants, XPK IMPL) and the `archives` feature (LhA, LZX, zip, gzip, xz, tar) |
 | Deli-Wizard | Deli-Wizard 2.20 (Nicolas Franck, "based on Pro-Wizard convert-routines") | converts packed modules to Noise/ProTracker | `src/prowizard` (47 converter files) + the built-in ProTracker |
 | GenieStore/ST-NT-PT_Conv | ST-NT-PT-Song_Converter 1.0 | turns Sound/Noise/ProTracker song files into modules | none found. Song files without samples are not played |
 | GenieStore/ST-Cruncher | ST-Cruncher 0.40 | decrunches modules packed with SoundTracker-Cruncher (OTT Design) | none found |
@@ -370,6 +370,6 @@ in its place.
 | GenieStore/NewYearGenie | NewYearGenie 1.30 | season's greetings | none (effect) |
 | GenieStore/Xmas-Genie | Xmas-Genie 1.1 | season's greetings | none (effect) |
 
-Genie functions the default build lacks and that affect which files play: the Imploder, SoundTracker-Cruncher
-and modCRUSHER depackers, and ST/NT/PT song-file conversion. None was checked on a file: the corpus
+Genie functions the default build lacks and that affect which files play: the SoundTracker-Cruncher
+and modCRUSHER depackers (no clean source or format documentation found; the Imploder depacker is in `src/decrunch/imploder.rs`), and ST/NT/PT song-file conversion. None was checked on a file: the corpus
 has no such packed file.

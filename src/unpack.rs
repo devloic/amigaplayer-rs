@@ -15,6 +15,8 @@
 //! | [`StoneCracker`](Packer::StoneCracker) | `S404` |
 //! | [`CrunchMania`](Packer::CrunchMania) | `CrM!` / `CrM2` / `Crm!` / `Crm2` (and renamed headers) |
 //! | [`PowerPlayer`](Packer::PowerPlayer) | `SFHD` / `SFCD` |
+//! | [`Imploder`](Packer::Imploder)     | `IMP!` and its variants (`ATN!`, `EDAM`, `M.H.`, `BDPI`, `CHFI`, `RDC9`, `Dupa`, `FLT!`, `PARA`) |
+//! | [`XpkImpl`](Packer::XpkImpl)         | XPK container with the IMPL (Imploder) method |
 //! | [`XpkBzp2`](Packer::XpkBzp2)         | XPK container with the BZP2 method |
 //! | [`XpkBlzw`](Packer::XpkBlzw)         | XPK container with the BLZW method |
 //! | [`XpkLhlb`](Packer::XpkLhlb)         | XPK container with the LHLB method |
@@ -61,6 +63,10 @@ pub enum Packer {
     CrunchMania,
     /// PowerPlayer Music Compressor (`SFHD`, `SFCD`).
     PowerPlayer,
+    /// File Imploder (`IMP!` and the variants of other crunchers and productions).
+    Imploder,
+    /// XPK container using the IMPL (Imploder) method.
+    XpkImpl,
     /// XPK container using the BZP2 (bzip2) method.
     XpkBzp2,
     /// XPK container using the BLZW (LZW) method.
@@ -98,6 +104,8 @@ impl Packer {
             Packer::StoneCracker => "StoneCracker S404",
             Packer::CrunchMania => "CrunchMania",
             Packer::PowerPlayer => "PowerPlayer",
+            Packer::Imploder => "Imploder",
+            Packer::XpkImpl => "XPK IMPL",
             Packer::XpkBzp2 => "XPK BZP2",
             Packer::XpkBlzw => "XPK BLZW",
             Packer::XpkLhlb => "XPK LHLB",
@@ -131,7 +139,9 @@ impl From<Kind> for Packer {
             Kind::StoneCracker => Packer::StoneCracker,
             Kind::CrunchMania => Packer::CrunchMania,
             Kind::PowerPlayer => Packer::PowerPlayer,
+            Kind::Imploder => Packer::Imploder,
             Kind::Xpk(m) => match m {
+                XpkMethod::Impl => Packer::XpkImpl,
                 XpkMethod::Bzp2 => Packer::XpkBzp2,
                 XpkMethod::Blzw => Packer::XpkBlzw,
                 XpkMethod::Lhlb => Packer::XpkLhlb,

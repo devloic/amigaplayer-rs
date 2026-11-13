@@ -55,7 +55,7 @@ refuses them with "built without 68k player support; rebuild with --features hos
   (it is built into DeliTracker rather than shipped as a plugin), a translation
   of ProTracker 2.3D's replay routine after 8bitbubsy's pt2-clone and PT2.3F
   (BSD 3-Clause: `LICENSE-pt2-clone`; see Built-in ProTracker).
-* `src/decrunch.rs`: PowerPacker (PP20) decrunching, and in `src/decrunch/` the single-file depackers of libxmp (Pack-Ice, XPK SQSH, StoneCracker S404, MMCMP) and the ports of LibAncient, NostalgicPlayer's C# port of Teemu Suutari's ancient (CrunchMania, PowerPlayer, and the XPK container with the BZP2, BLZW, LHLB, MASH, NUKE, DUKE, RAKE, SHRI and SMPL methods; BSD-2-Clause and MIT: `LICENSE-ancient`).
+* `src/decrunch.rs`: PowerPacker (PP20) decrunching, and in `src/decrunch/` the single-file depackers of libxmp (Pack-Ice, XPK SQSH, StoneCracker S404, MMCMP) and the ports of LibAncient, NostalgicPlayer's C# port of Teemu Suutari's ancient (CrunchMania, PowerPlayer, Imploder `IMP!` and its variants, and the XPK container with the IMPL, BZP2, BLZW, LHLB, MASH, NUKE, DUKE, RAKE, SHRI and SMPL methods; BSD-2-Clause and MIT: `LICENSE-ancient`).
 * `src/prowizard/`: packed ProTracker modules converted back to ProTracker
   (see ProWizard).
 * `src/ui.rs`: SDL3 window with transport controls, scopes and module list.

@@ -54,7 +54,7 @@ enum {
      * files handed to ap_open_opts() and no file of the host, and every call into it has an
      * instruction budget: a module that hangs or faults stops, renders silence and reports
      * through ap_error(). No external player is ever loaded. Needs a library built with the
-     * host-68k feature (the default), else AP_ERR_UNSUPPORTED.
+     * custom-modules feature (the default), else AP_ERR_UNSUPPORTED.
      */
     AP_OPEN_CUSTOM = 1
 };

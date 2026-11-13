@@ -6,6 +6,12 @@
 #
 #   tools/ci-check.sh [-j N] [--quick]       (--quick: skip the full refcmp, run the tests only)
 #
+# The application is built twice: the default build (no 68k player support) and the build with
+# `--features host-68k`, which refcmp needs: its reference side runs the original 68k players
+# (`--68k-players`). The 68k binary is built WITHOUT the `native` feature, so without the
+# recompiled players even in a checkout that has crates/players-native/gen (the baseline is
+# measured without them; see the end of tools/refcmp.py's docstring).
+#
 # The build goes to a directory of its own, not target/release: that is a symlink into a cache
 # shared by every worktree, and another build overwrites the binary a run is comparing.
 set -euo pipefail
@@ -25,11 +31,15 @@ done
 mkdir -p "$WORK/bin"
 export CARGO_TARGET_DIR="$WORK/target" CARGO_BUILD_BUILD_DIR="$WORK/builddir"
 cd "$ROOT"
-echo "== build"
+echo "== build (default: no 68k players)"
 cargo build --release
+echo "== build (--features host-68k: the refcmp binary)"
+cargo build --release --features host-68k
 cp "$CARGO_TARGET_DIR/release/amigaplayer-rs" "$WORK/bin/amigaplayer-rs"
-echo "== cargo test"
+echo "== cargo test (default)"
 cargo test --release
+echo "== cargo test (--features host-68k)"
+cargo test --release --features host-68k
 [ -n "$QUICK" ] && { echo "ok (quick: refcmp skipped)"; exit 0; }
 echo "== refcmp --all (baseline tools/refcmp-baseline.tsv)"
 # no sound to the speakers; the list and caches are those of the listen page's scratch folder

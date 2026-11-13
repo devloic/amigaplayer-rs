@@ -126,7 +126,7 @@ pub fn detect_with(name: &str, data: &[u8], companions: &[(&str, &[u8])]) -> Opt
 /// assert!(amigaplayer_rs::detect_custom(&amigaplayer_rs::testdata::minimal_custom()));
 /// assert!(!amigaplayer_rs::detect_custom(&amigaplayer_rs::testdata::minimal_mod()));
 /// ```
-#[cfg(feature = "host-68k")]
+#[cfg(feature = "custom-modules")]
 pub fn detect_custom(data: &[u8]) -> bool {
     catch_unwind(AssertUnwindSafe(|| open::detect_custom(data))).unwrap_or(false)
 }
@@ -134,7 +134,7 @@ pub fn detect_custom(data: &[u8]) -> bool {
 /// Choices for [`Song::open_opts`]. `Options::default()` is what [`Song::open`] does.
 ///
 /// ```
-/// # #[cfg(feature = "host-68k")] {
+/// # #[cfg(feature = "custom-modules")] {
 /// use amigaplayer_rs::{Options, Song};
 /// let module = amigaplayer_rs::testdata::minimal_custom();
 /// let mut song = Song::open_opts("cust.tune", &module, &[], 44100, &Options::new().allow_custom(true))?;
@@ -159,13 +159,13 @@ impl Options {
 
     /// Lets a custom module (see [`detect_custom`]) play: its own 68k code runs on the emulated
     /// 68000, in the emulated machine's memory. Off by default, and only in builds with the
-    /// `host-68k` feature. No external DeliPlayer or Eagleplayer is ever loaded by a [`Song`].
+    /// `custom-modules` feature. No external DeliPlayer or Eagleplayer is ever loaded by a [`Song`].
     ///
     /// What bounds that code: it sees the companion files given to `open_opts` and no file of
     /// the host; every call into it has an instruction budget, after which (as after a CPU
     /// exception) the song stops, renders silence and reports [`Error::Guest`] through
     /// [`Song::error`]. See `docs/LIBRARY.md`, "Custom modules".
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     pub fn allow_custom(mut self, on: bool) -> Options {
         self.custom = on;
         self
@@ -246,7 +246,7 @@ impl Song {
     }
 
     /// As [`Song::open_with`], with [`Options`]: custom modules, when
-    /// `Options::allow_custom` is set (`host-68k` builds).
+    /// `Options::allow_custom` is set (`custom-modules` builds).
     pub fn open_opts(name: &str, data: &[u8], companions: &[(&str, &[u8])], rate: u32, opts: &Options) -> Result<Song> {
         if !(MIN_RATE..=MAX_RATE).contains(&rate) {
             return Err(Error::InvalidRate(rate));
@@ -276,12 +276,12 @@ impl Song {
         Ok(Song { e, name, data: data.to_vec(), files, rate, poisoned: false, opts: opts.clone(), failed: None, meta })
     }
 
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     fn custom(data: &[u8], opts: &Options) -> bool {
         opts.custom && open::detect_custom(data)
     }
 
-    #[cfg(not(feature = "host-68k"))]
+    #[cfg(not(feature = "custom-modules"))]
     fn custom(_data: &[u8], _opts: &Options) -> bool {
         false
     }
@@ -308,7 +308,7 @@ impl Song {
     fn start(name: &str, data: &[u8], files: &[(PathBuf, Vec<u8>)], rate: u32, opts: &Options) -> Result<open::Song> {
         let path = PathBuf::from(DIR).join(name);
         let open = || {
-            #[cfg(feature = "host-68k")]
+            #[cfg(feature = "custom-modules")]
             if opts.custom {
                 return open::Song::open_custom(&path, data.to_vec(), files.to_vec(), rate);
             }

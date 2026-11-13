@@ -29,7 +29,7 @@ const E_SUBSONG: c_int = 4;
 const E_INTERNAL: c_int = 5;
 const E_ARGUMENT: c_int = 6;
 const E_GUEST: c_int = 7;
-#[cfg_attr(all(feature = "host-68k", feature = "songdb"), allow(dead_code))]
+#[cfg_attr(all(feature = "custom-modules", feature = "songdb"), allow(dead_code))]
 const E_UNSUPPORTED: c_int = 8;
 
 /// `ap_open_opts` flag: custom modules may play (their own 68k code is run).
@@ -160,16 +160,16 @@ pub unsafe extern "C" fn ap_open_with(
 
 /// 1 if `data` is a custom module (an executable that carries its own player, which
 /// `ap_open_opts` plays with `AP_OPEN_CUSTOM`), else 0. Always 0 in a build without the
-/// `host-68k` feature.
+/// `custom-modules` feature.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_detect_custom(data: *const u8, len: usize) -> c_int {
     let Some(d) = (unsafe { bytes(data, len) }) else {
         set_error(E_ARGUMENT, "null data");
         return 0;
     };
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     return guard(0, || amigaplayer_rs::detect_custom(d) as c_int);
-    #[cfg(not(feature = "host-68k"))]
+    #[cfg(not(feature = "custom-modules"))]
     {
         let _ = d;
         0
@@ -193,12 +193,12 @@ pub unsafe extern "C" fn ap_open_opts(
         set_error(E_ARGUMENT, "unknown flags");
         return std::ptr::null_mut();
     }
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     let opts = Options::new().allow_custom(flags & OPEN_CUSTOM != 0);
-    #[cfg(not(feature = "host-68k"))]
+    #[cfg(not(feature = "custom-modules"))]
     let opts = {
         if flags & OPEN_CUSTOM != 0 {
-            set_error(E_UNSUPPORTED, "this build cannot play custom modules (built without the host-68k feature)");
+            set_error(E_UNSUPPORTED, "this build cannot play custom modules (built without the custom-modules feature)");
             return std::ptr::null_mut();
         }
         Options::new()
@@ -718,7 +718,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     #[test]
     fn a_custom_module_plays_with_the_flag() {
         let m = minimal_custom();
@@ -740,7 +740,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     #[test]
     fn a_custom_module_that_hangs_reports_it() {
         // its interrupt routine is `bra.s *`
@@ -762,7 +762,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "host-68k"))]
+    #[cfg(not(feature = "custom-modules"))]
     #[test]
     fn the_flag_is_refused_without_the_feature() {
         let m = minimal_custom();

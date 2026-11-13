@@ -10,7 +10,9 @@ settings, WAV for WAV:
 
   port       amigaplayer-rs --open-replayers, with every player directory empty
              (so no 68k player stands in for the port)
-  reference  the ORIGINAL player: the same binary with --68k-players,
+  reference  the ORIGINAL player: the same binary with --68k-players (so the binary
+             must be built with the 68k hosting: `cargo build --release --features host-68k`;
+             the default build has no 68k player support and refuses the option),
              running the real Eagleplayer/DeliPlayer on the emulated Amiga with
              the same output stage (first of EP206, then the Eagleplayers UADE
              ships, whose player runs on the 68k); for the formats the libxmp
@@ -44,9 +46,11 @@ NEW inconsistencies (bad now, good or absent before) and FIXED ones, and exits 1
 on a new one. Renders are cached (--cache) by binary mtime and size, settings,
 module and player directories.
 
+The binary: `cargo build --release --features host-68k` (the `native` feature, which adds the
+recompiled players, is not part of it and must stay off for the baseline).
 The baseline is measured with a binary that has NO recompiled players (crates/players-native/gen
-absent, or its `gen` feature off). With gen compiled in (a clean build in a checkout that has
-gen/, e.g. a fresh CARGO_TARGET_DIR) the machine's heap ends at NATIVE_LO instead of the top of
+absent, or its `gen` feature off, which `host-68k` alone leaves it). With gen compiled in (the
+`native` feature in a checkout that has gen/) the machine's heap ends at NATIVE_LO instead of the top of
 RAM, the reference's allocations land at other addresses, and 18 rows move (Musicline
 IDENTICAL -> SIMILAR, several MED/SoundFactory/ArtOfNoise rows): not a regression of the port.
 Check the binary is the right kind: it is about 10 MB without gen, about 33 MB with.
@@ -936,6 +940,12 @@ def main():
     ap.add_argument('--listen', default=LISTEN_PY, help='listen.py, for its staging of modules with companions')
     ap.add_argument('--oracle', default=XMP_ORACLE)
     a = ap.parse_args()
+    # the reference side needs the 68k hosting: a default build refuses --68k-players (with
+    # --wav so that a build that has it does not open a window)
+    probe = subprocess.run([a.bin, '--68k-players', '--wav', os.devnull, os.devnull + '.none'], capture_output=True, text=True,
+                           env=dict(os.environ, SDL_AUDIO_DRIVER='dummy'))
+    if 'built without 68k player support' in probe.stderr:
+        ap.error(f'{a.bin} has no 68k player support: build it with `cargo build --release --features host-68k`')
     files = json.load(open(a.list))
     if not a.all:
         if not a.fmt and not a.id:

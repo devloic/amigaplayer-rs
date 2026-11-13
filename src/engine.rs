@@ -199,6 +199,27 @@ pub struct Engine {
     /// Every change, also those past `led_log`'s.
     led_changes: u64,
     led_seen: Option<bool>,
+    /// Player directories given to `set_player_dirs`, not loaded yet: they are loaded when a
+    /// module needs a 68k player (see `load_pending_players`).
+    #[cfg(feature = "host-68k")]
+    pending_dirs: Option<PlayerDirs>,
+    /// What loading the pending directories found, for the application to report
+    /// (`take_load_report`).
+    #[cfg(feature = "host-68k")]
+    load_report: Vec<String>,
+}
+
+/// The directories of the 68k players, to be loaded when a module needs one
+/// (`Engine::set_player_dirs`).
+#[cfg(feature = "host-68k")]
+#[derive(Clone, Debug, Default)]
+pub struct PlayerDirs {
+    /// DeliPlayers (`Engine::load_players`).
+    pub players: Option<PathBuf>,
+    /// Eagleplayers (`Engine::load_eagleplayers`).
+    pub eagleplayers: Option<PathBuf>,
+    /// DeliGenies (`Engine::load_genies`).
+    pub genies: Option<PathBuf>,
 }
 
 /// Colour clocks into the frame at which a 68k player starts. Any phase will do for a player
@@ -244,6 +265,10 @@ impl Engine {
             led_log: Vec::new(),
             led_changes: 0,
             led_seen: None,
+            #[cfg(feature = "host-68k")]
+            pending_dirs: None,
+            #[cfg(feature = "host-68k")]
+            load_report: Vec::new(),
         }
     }
 
@@ -396,6 +421,55 @@ impl Engine {
     }
 
     #[cfg(feature = "host-68k")]
+    /// Remembers the player directories without reading them: they are loaded (players, then
+    /// Eagleplayers, then genies, as `load_players` etc. would) just before the first module that
+    /// needs a 68k player is placed in guest memory, and never when the open replayers play
+    /// everything. A module the open replayers take then has the whole guest heap, not what the
+    /// players leave (an 11 MB MED fits), and a start-up that plays only those reads no
+    /// player file. What was loaded is in `take_load_report`.
+    pub fn set_player_dirs(&mut self, dirs: PlayerDirs) {
+        self.pending_dirs = Some(dirs);
+    }
+
+    #[cfg(feature = "host-68k")]
+    /// Loads the directories of `set_player_dirs`, if they have not been yet.
+    pub fn load_pending_players(&mut self) {
+        let Some(d) = self.pending_dirs.take() else { return };
+        if let Some(dir) = &d.players {
+            let n = self.load_players(dir);
+            self.load_report.push(format!("{n} players loaded from {}", dir.display()));
+        }
+        if let Some(dir) = &d.eagleplayers {
+            let n = self.load_eagleplayers(dir);
+            self.load_report.push(format!("{n} eagleplayers loaded from {}", dir.display()));
+        }
+        if let Some(dir) = &d.genies {
+            let n = self.load_genies(dir);
+            self.load_report.push(format!("{n} genies loaded from {}", dir.display()));
+        }
+    }
+
+    #[cfg(feature = "host-68k")]
+    /// The lines `load_pending_players` has produced since the last call.
+    pub fn take_load_report(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.load_report)
+    }
+
+    #[cfg(feature = "host-68k")]
+    /// Whether an open replayer, the built-in ProTracker or the libxmp port is going to try
+    /// this module (the same tests as `start_placed` makes). They may still decline it, and the
+    /// 68k players get it then.
+    fn open_claims(&self, path: &Path, data: &[u8]) -> bool {
+        if ProTracker::detect(data).filter(|f| *f != "SoundTracker").is_some() {
+            return true;
+        }
+        crate::replay::adpcmmono::set_name(&file_name(path));
+        let found = crate::replay::REPLAYERS.iter().any(|o| (o.detect)(data));
+        crate::replay::adpcmmono::set_name("");
+        found || crate::xmp::detect_open(data).is_some()
+    }
+
+    #[cfg(feature = "host-68k")]
     /// Loads every DeliPlayer found (recursively) under `dir`.
     pub fn load_players(&mut self, dir: &Path) -> usize {
         self.m.os.progdir = dir.parent().unwrap_or(dir).to_path_buf();
@@ -460,7 +534,7 @@ impl Engine {
         n
     }
 
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     fn configure(&mut self, idx: usize) -> Result<()> {
         if self.players[idx].configured {
             return Ok(());
@@ -623,6 +697,18 @@ impl Engine {
         if data.is_empty() {
             bail!("empty file");
         }
+        // the 68k players are read when this module needs one, before it takes its place in
+        // the heap (so they lie where they did when loaded at start-up)
+        #[cfg(feature = "host-68k")]
+        if self.pending_dirs.is_some() && (!self.open_replayers || self.only_player.is_some() || !self.open_claims(path, &data)) {
+            self.load_pending_players();
+        }
+        self.start_placed(path, data)
+    }
+
+    /// `start_module` from the module's copy in guest memory on: the data is decrunched and
+    /// converted, and no 68k player is waiting to be loaded unless an open replayer may take it.
+    fn start_placed(&mut self, path: &Path, data: Vec<u8>) -> Result<()> {
         // module into guest memory (padded so 1k checks never read garbage)
         let size = data.len() as u32;
         let need = size.max(1024) + 1024;
@@ -720,11 +806,19 @@ impl Engine {
                 return self.start_mix(Box::new(x), path);
             }
         }
+        // the open replayers declined it: the 68k players still waiting to be loaded are
+        // needed now, and the module takes its place again behind them
+        #[cfg(feature = "host-68k")]
+        if self.pending_dirs.is_some() {
+            self.m.deli.list.clear();
+            self.m.heap.free(addr);
+            self.load_pending_players();
+            return self.start_placed(path, data);
+        }
         #[cfg(feature = "host-68k")]
         let eagle_from = self.eagle_from.unwrap_or(self.builtin_players);
-        #[cfg(feature = "host-68k")]
-        {
         // 2. a custom module carries its own player
+        #[cfg(feature = "custom-modules")]
         if crate::hunk::is_hunk_file(&data) {
             if let Ok(p) = deli::load_player(&mut self.m, &data, path) {
                 if p.is_custom() {
@@ -734,6 +828,8 @@ impl Engine {
                 }
             }
         }
+        #[cfg(feature = "host-68k")]
+        {
         // 3. external players
         for idx in 0..eagle_from {
             if by_name_only(&self.players[idx].name, path) && self.check_player(idx)? {
@@ -913,7 +1009,7 @@ impl Engine {
         Ok(())
     }
 
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     fn start_deli(&mut self, idx: usize, path: &Path, custom: bool) -> Result<()> {
         if custom {
             self.configure(idx)?;
@@ -1019,6 +1115,7 @@ impl Engine {
         if let Some(f) = init_note {
             deli::call_fn(&mut self.m, g, f, None).map_err(|e| anyhow!(e))?;
         }
+        #[cfg(feature = "host-68k")]
         self.start_genies();
         self.playing = Some(Playing {
             backend: Backend::Deli(idx),
@@ -1034,7 +1131,7 @@ impl Engine {
         self.start_sound(idx)
     }
 
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     /// An Eagleplayer's ModuleInfo tag list, once InitPlayer has filled it.
     fn module_info(&mut self, idx: usize) -> Option<u32> {
         let pl = &self.players[idx];

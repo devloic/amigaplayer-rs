@@ -11,10 +11,13 @@ name = "amigaplayer"
 crate-type = ["cdylib", "staticlib"]
 
 [features]
-default = ["host-68k"]
+default = ["custom-modules"]
 # The emulated 68000 hosting a custom module's own code (`ap_open_opts` with AP_OPEN_CUSTOM,
 # `ap_detect_custom`). No external player is ever loaded. Without it the flag is refused.
-host-68k = ["amigaplayer-rs/host-68k"]
+custom-modules = ["amigaplayer-rs/custom-modules"]
+# Older name of `custom-modules`. It does not load the 68k players either (this library never
+# does: see the `host-68k` feature of amigaplayer-rs, which only the application wants).
+host-68k = ["custom-modules"]
 # The ap_songdb_* functions: song lengths and metadata from audacious-uade's song database
 # (a directory given at run time: the data, CC BY-NC-SA 4.0, is not part of the library).
 # Off by default; without it ap_songdb_open fails with AP_ERR_UNSUPPORTED.

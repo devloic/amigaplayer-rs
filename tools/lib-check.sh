@@ -1,10 +1,11 @@
 #!/bin/bash
 # Checks the library side of the repository, end to end (no network, no audio device):
-#   1. the open-replayer library with default features off, with `host-68k` (custom
-#      modules through `Song`), with `archives` (the archive readers) and with `songdb` (the
-#      song database reader, on a synthetic database): build, tests (unit, integration,
-#      doctests), examples
-#   2. the application (default features) still builds
+#   1. the open-replayer library with default features off, with `custom-modules` (custom
+#      modules through `Song`), with `host-68k` (the 68k player hosting too), with `archives`
+#      (the archive readers) and with `songdb` (the song database reader, on a synthetic
+#      database): build, tests (unit, integration, doctests), examples
+#   2. the application still builds, as the default build (no 68k player support: its 68k
+#      options must refuse with a message) and with `--features host-68k`
 #   3. the C API: its tests with and without its features, build the cdylib/staticlib,
 #      compile examples/c/play.c, link it both ways, render a synthetic module and compare
 #      the samples with the Rust example's
@@ -45,7 +46,8 @@ echo "== 1. library, default features off"
 cargo build --release --lib --no-default-features
 cargo test --release --no-default-features
 cargo build --release --no-default-features --examples
-echo "== 1b. library with host-68k (custom modules), and the headless renderer"
+echo "== 1b. library with custom-modules, and with host-68k (which implies it)"
+cargo test --release --no-default-features --features custom-modules
 cargo test --release --no-default-features --features host-68k
 echo "== 1b'. archives (LhA, LZX, zip, gzip, xz, tar in memory), and the unarchive example on a fixture"
 cargo test --release --no-default-features --features archives
@@ -66,7 +68,17 @@ grep -q '"songdb":{"key":"'"$(cut -d' ' -f1 "$WORK/demo-songdb.keys")"'","durati
 echo "render --songdb finds the synthetic entry"
 
 echo "== 2. application"
-if [ -n "$APP" ]; then cargo build --release; else echo "(skipped)"; fi
+if [ -n "$APP" ]; then
+  cargo build --release
+  # the default build has no 68k player support: its options say so, they are not ignored
+  if "$T/amigaplayer-rs" --players /nonexistent 2>"$WORK/no68k.err"; then
+    echo "the default build accepted --players" >&2; exit 1
+  fi
+  grep -q 'built without 68k player support; rebuild with --features host-68k' "$WORK/no68k.err" \
+    || { echo "unexpected message: $(cat "$WORK/no68k.err")" >&2; exit 1; }
+  echo "default build refuses --players: $(head -1 "$WORK/no68k.err")"
+  cargo build --release --features host-68k
+else echo "(skipped)"; fi
 
 echo "== 3. C API"
 cargo test --release -p amigaplayer-capi --no-default-features

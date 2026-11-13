@@ -29,7 +29,7 @@
 //! * [`Song`]: [`open`](Song::open) / [`open_with`](Song::open_with) (companion files such as
 //!   TFMX `smpl.*`, Mark Cooksey `mcs.*` are passed in memory: nothing touches the file system),
 //!   [`open_opts`](Song::open_opts) with [`Options`] (custom modules, which carry their own
-//!   68k replay routine: `host-68k` builds, see `Options::allow_custom` and `detect_custom`),
+//!   68k replay routine: `custom-modules` builds, see `Options::allow_custom` and `detect_custom`),
 //!   [`error`](Song::error),
 //!   [`render_f32`](Song::render_f32) / [`render_i16`](Song::render_i16),
 //!   [`subsongs`](Song::subsongs) / [`set_subsong`](Song::set_subsong),
@@ -53,13 +53,14 @@
 //!
 //! | feature    | default | what it adds |
 //! |------------|---------|--------------|
-//! | `host-68k` | yes     | loading and running the original 68k DeliPlayers, Eagleplayers and DeliGenies (the application's mode of operation); in the library, custom modules through `Song::open_opts` (`Options::allow_custom`), and nothing else |
-//! | `ui`       | yes     | the SDL3 player window and the `amigaplayer-rs` binary (implies `host-68k`) |
+//! | `custom-modules` | yes | custom modules (executables carrying their own 68000 replay code) played on the emulated 68000 through `Song::open_opts` (`Options::allow_custom`) and `detect_custom`; no third-party player is involved |
+//! | `host-68k` (alias `68k-players`) | no | loading and running the original 68k DeliPlayers, Eagleplayers and DeliGenies: the `Engine` methods that drive them and the options of the application that go with them (implies `custom-modules`). Not in the default build: those files have no clear licence |
+//! | `ui`       | yes     | the SDL3 player window and the `amigaplayer-rs` binary |
 //! | `songdb`   | no      | `amigaplayer_rs::songdb`: lengths and metadata from audacious-uade's song database (code vendored in `crates/songdb`; the data is not included), and `--songdb` of `amigaplayer-render` |
 //! | `archives` | yes     | `amigaplayer_rs::archive` (LhA, LZX, zip, gzip, xz, tar; pure Rust: delharc, flate2, lzma-rs, and its own LZX), and gzip / xz wrappers undone like the other packers |
-//! | `native`   | yes     | the players recompiled to Rust, when generated from the user's own player files (implies `host-68k`) |
+//! | `native`   | no      | the players recompiled to Rust, when generated from the user's own player files (implies `host-68k`) |
 //!
-//! A library user wants `default-features = false` (plus `features = ["host-68k"]` to play
+//! A library user wants `default-features = false` (plus `features = ["custom-modules"]` to play
 //! custom modules):
 //!
 //! ```toml
@@ -108,7 +109,7 @@ pub mod songlengths;
 pub mod unpack;
 
 pub use song::{detect, detect_with, formats, Error, Options, Result, Song, Subsongs};
-#[cfg(feature = "host-68k")]
+#[cfg(feature = "custom-modules")]
 pub use song::detect_custom;
 
 pub mod testdata;

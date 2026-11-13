@@ -18,6 +18,17 @@ for EaglePlayers. It runs the **Eagleplayers** of Eagleplayer 2.06 too:
                    DeliTrackerGlobals + dtg_* support functions
 ```
 
+**Two builds.** `cargo build --release` makes the application without any 68k player support:
+it plays everything the open replayers (Rust ports, see "Open replayers"), the built-in
+ProTracker, the libxmp ports, the decrunchers, the archives and the custom modules play, and
+never loads or runs a third-party DeliPlayer, Eagleplayer or DeliGenie (those have no clear
+licence, and the project is dropping them). Building with the cargo feature `host-68k`
+(also spelled `68k-players`) puts the 68k player hosting described below in the binary:
+`cargo build --release --features host-68k`. The rest of this part describes that build;
+see Setup. The options `--players`, `--eagleplayers`, `--player`, `--68k-players`,
+`--genies`, `--genie`, `--noteplayer` and `--libs` exist only there (the default binary
+refuses them with "built without 68k player support; rebuild with --features host-68k").
+
 * `src/deli.rs`: the DeliPlayer interface (`DTP_*` tags, `DeliTrackerGlobals`,
   the `dtg_*` support functions), following the original developer kit.
 * `src/eagle.rs`: the Eagleplayer additions: `EP_*` tags, the
@@ -61,7 +72,8 @@ amigaplayer-rs = { path = "../deliplayerrust", default-features = false }
 
 ```rust
 let mut e = amigaplayer_rs::engine::Engine::new(48000.0);
-e.load_players(&amigaplayer_rs::default_players_dir().unwrap());
+e.open_replayers = true;        // the open replayers play what they know
+// with the `host-68k` feature only: e.load_players(&amigaplayer_rs::default_players_dir().unwrap());
 e.play_data(path, bytes)?;      // or play_file(path)
 e.render(&mut buf);             // interleaved stereo f32
 ```
@@ -70,6 +82,27 @@ e.render(&mut buf);             // interleaved stereo f32
 
 ```sh
 cargo build --release
+```
+
+is the whole setup of the default build (the player window, the open replayers, the built-in
+ProTracker, the libxmp ports, archives, custom modules; needs the SDL3 development libraries).
+Its features are `ui`, `archives` and `custom-modules` (a hunk executable that carries its own
+68000 replay code, played on this project's own host, not through a DeliPlayer). The cargo
+features that change what is in the binary:
+
+| feature | default | what it adds |
+|---|---|---|
+| `ui` | yes | the SDL3 window and the `amigaplayer-rs` binary |
+| `archives` | yes | LhA / LZX / zip / gzip / xz / tar |
+| `custom-modules` | yes | custom modules (`cust.*`, `CustomPlay`) on the emulated 68000 |
+| `host-68k` (alias `68k-players`) | no | loading and running the third-party 68k DeliPlayers, Eagleplayers and DeliGenies, and the options that go with them; implies `custom-modules` |
+| `native` | no | the players recompiled to Rust (`crates/players-native/gen`, see below); implies `host-68k` |
+| `songdb`, `sid` | no | the song database reader; the C64 SID player (makes the build GPL-2.0-only) |
+
+### The 68k players (optional, build-time)
+
+```sh
+cargo build --release --features host-68k     # the binary hosts the 68k players
 tools/fetch-deliplayers.sh        # downloads DeliTracker232.lha from Aminet,
                                   # installs ~/.config/amigaplayer-rs/DeliPlayers
 tools/fetch-eagleplayers.sh       # optional: downloads Eagleplayer.lha (2.06),
@@ -84,7 +117,12 @@ freeware and are fetched from the official Aminet archives
 (`mus/play/DeliTracker232.lha`, `mus/play/Eagleplayer.lha`). Needs `curl` and
 `lhasa`, plus the SDL3 development libraries for building.
 
-### Native translation (optional)
+With `host-68k` the player directories are read when a module needs a 68k player, not at
+start-up: a session that only plays what the open replayers know reads no player file, and such
+a module has the whole emulated heap (an 11 MB OctaMED fits). The open replayers are tried first
+(`--68k-players` has the 68k players take those formats too, `--player NAME` only that one).
+
+### Native translation (optional, needs the 68k build)
 
 The players can also be machine-translated from 68k to Rust, so their calls run
 as native code instead of on the interpreter:
@@ -93,7 +131,7 @@ as native code instead of on the interpreter:
 tools/recomp/build.sh                      # builds m68k-recomp into target-recomp/
 python3 -I tools/native-players.py \
     ~/.config/amigaplayer-rs/DeliPlayers ~/.config/amigaplayer-rs/Eagleplayers
-cargo build --release
+cargo build --release --features native       # implies host-68k
 ```
 
 `tools/recomp` is a static 68000/68020 → Rust recompiler (from the
@@ -109,7 +147,7 @@ translated address and run through the generated code. The interpreter
 (`crates/m68k-rc`) covers whatever the recompiler did not reach, and A-line traps
 go to the HLE as before. The translation is used only while the translated
 instruction bytes are unchanged, and a player that modifies its own code falls
-back to the interpreter. Without `gen/` the build is the plain interpreter.
+back to the interpreter. Without `gen/` (or without the `native` feature) the build is the plain interpreter.
 
 `DELI_NATIVE=0` keeps the native memory layout but interprets everything, which
 is how the translation is checked: renders with and without it must be
@@ -126,6 +164,14 @@ renders with it (see Timing and sound).
 ```sh
 amigaplayer-rs [FILES/DIRS...]                     # player window
 amigaplayer-rs --wav out.wav --seconds 60 MODULE   # render to WAV, headless
+amigaplayer-rs --wav out.wav ARCHIVE.lha           # every module in an archive, in order
+amigaplayer-rs --archive-entry NAME ARCHIVE.lha    # only that entry of the archive
+```
+
+With a build with `--features host-68k` (see Setup) there are also:
+
+```sh
+amigaplayer-rs --68k-players ...                   # the 68k players play the open replayers' formats too
 amigaplayer-rs --players DIR ...                   # other DeliPlayers dir
 amigaplayer-rs --eagleplayers DIR ...              # other Eagleplayers dir
 amigaplayer-rs --player NAME ...                   # only try this player
@@ -134,9 +180,10 @@ amigaplayer-rs --noteplayer 8Voices-NotePlayer ... # another genie plays _note p
 amigaplayer-rs --noteplayer builtin ...            # the built-in renderer plays them
 amigaplayer-rs --genie NAME ...                    # run any other genie
 amigaplayer-rs --libs DIR ...                      # LIBS: for the players' disk libraries
-amigaplayer-rs --wav out.wav ARCHIVE.lha           # every module in an archive, in order
-amigaplayer-rs --archive-entry NAME ARCHIVE.lha    # only that entry of the archive
 ```
+
+A build without the feature refuses each of them with "built without 68k player support;
+rebuild with --features host-68k" (exit status 2), and ignores `$DELIPLAYERS` and the like.
 
 ### Archives
 
@@ -171,7 +218,7 @@ emulated OS (the library's in-memory companions) was the other choice; it would 
 libxmp's loaders and the 68k players' own file look-ups in the same way, and the files
 on disk let a user look at what was played.
 
-Players are looked up in `--players DIR`, `$DELIPLAYERS`,
+(In a `host-68k` build.) Players are looked up in `--players DIR`, `$DELIPLAYERS`,
 `~/.config/amigaplayer-rs/DeliPlayers`, then `./DeliPlayers`; Eagleplayers in
 `--eagleplayers DIR`, `$EAGLEPLAYERS`, `~/.config/amigaplayer-rs/Eagleplayers`, then
 `./Eagleplayers`. DeliPlayers are asked first, Eagleplayers last (after the
@@ -510,8 +557,9 @@ external Eagleplayers are not ("The external Eagleplayers are not released under
 the GPL", Eagleplayer 2.04 sources), and most of them hold the composers' own
 replay routines.
 The formats they know are played with them, not with the 68k players: that is the
-default (`--open-replayers` is still accepted and changes nothing; `--68k-players`
-plays them with the 68k players, as `--player NAME` always does). They write
+default (`--open-replayers` is still accepted and changes nothing, in either build;
+`--68k-players`, in a build with the `host-68k` feature, plays them with the 68k players,
+as `--player NAME` always does). They write
 Paula's registers as the original players do, and are checked against the
 Eagleplayers, not against NostalgicPlayer:
 
@@ -863,8 +911,8 @@ plain modules, as Devils Replay and HCD Protector keep the `M.K.` mark.
 ## Using as a library
 
 The open replayers, the libxmp port, the built-in ProTracker, the decrunchers and the AIFF
-decoder are a library with no SDL and no 68k player hosting (`default-features = false`, or the
-`host-68k` feature off). Rust, C and WebAssembly front ends; full guide in
+decoder are a library with no SDL and no 68k player hosting (`default-features = false`; the
+application's default build has the hosting off too, see Setup). Rust, C and WebAssembly front ends; full guide in
 [`docs/LIBRARY.md`](docs/LIBRARY.md).
 
 ```toml

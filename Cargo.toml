@@ -14,7 +14,7 @@ exclude = ["tools/", "crates/", "docs/", "target-recomp/", "run.sh", "q.py", "tw
 # crates.io): crates/m68k-rc, crates/players-native (its generated gen/ is gitignored and never
 # ships: the registry is empty), crates/songdb (amigaplayer-songdb: no dependencies, and no
 # data), then this one. Users of the library want `default-features = false` (no SDL3, no
-# 68k player hosting, no generated players).
+# 68k player hosting, no generated players; add `custom-modules` to play custom modules).
 [workspace]
 # The C API shares the root's lock file and target directory; m68k-rc, players-native and
 # songdb are path dependencies and so members too. The WebAssembly crate keeps a lock file and
@@ -42,11 +42,27 @@ flate2 = { version = "1.1", optional = true }
 lzma-rs = { version = "0.3", optional = true }
 
 [features]
-default = ["ui", "native", "host-68k", "archives"]
+# What `cargo build --release` produces: the player window, the open replayers (Rust ports),
+# the built-in ProTracker, the libxmp ports, archives, and the custom modules (executables that
+# carry their own 68000 replay code, played on this project's own host). NO 68k player support:
+# the third-party DeliPlayers, Eagleplayers and DeliGenies are never loaded or run, and nothing
+# recompiled from them is in the binary. They come back only with `host-68k` at build time:
+#   cargo build --release --features host-68k
+default = ["ui", "archives", "custom-modules"]
+# Custom modules (`cust.*`, `CustomPlay`: a hunk executable with a DeliTracker player header
+# whose own code plays it): the emulated 68000 runs that code on the project's own host
+# (src/deli.rs). No player of anybody else is involved. `Song::open_opts` with
+# `Options::allow_custom` and `detect_custom` need it; the open-replayer library
+# (`default-features = false`) does not.
+custom-modules = []
 # Hosting of the original 68k DeliPlayers / Eagleplayers / DeliGenies (loading them from
-# disk, running their code on the emulated 68000, the `Engine` methods that drive them).
-# The application needs it; the open-replayer library (`default-features = false`) does not.
-host-68k = []
+# disk, running their code on the emulated 68000, the `Engine` methods that drive them, and the
+# `--players` / `--eagleplayers` / `--genies` / `--player` / `--68k-players` options of the
+# application). Off by default: those files have no clear licence and the project has dropped
+# them. Implies `custom-modules`. Without it the application says so when such an option is used.
+host-68k = ["custom-modules"]
+# The same, under a name that says what it is.
+68k-players = ["host-68k"]
 # `amigaplayer_rs::songdb`: song lengths and metadata from audacious-uade's song database,
 # and `--songdb` / `--stop-at songdb` of amigaplayer-render. Off by default.
 songdb = ["dep:amigaplayer-songdb"]
@@ -63,9 +79,11 @@ archives = ["dep:delharc", "dep:flate2", "dep:lzma-rs"]
 # image is included (see src/sid/mod.rs).
 sid = []
 # The SDL3 player window. The library (engine only) builds without it.
-ui = ["dep:sdl3", "host-68k"]
-# The players recompiled to Rust (crates/players-native/gen), when generated. They
-# are derived from the user's player files: leave this off in a build to distribute.
+ui = ["dep:sdl3"]
+# The players recompiled to Rust (crates/players-native/gen), when generated. They are derived
+# from the user's player files (never distribute a build with them) and only make sense
+# together with the 68k players they replace: it implies `host-68k`, and is off by default.
+#   cargo build --release --features native
 native = ["host-68k", "players-native/gen"]
 
 [lib]

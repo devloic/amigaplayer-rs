@@ -86,8 +86,6 @@ struct App {
     dialog_tx: Sender<Vec<PathBuf>>,
     dialog_rx: Receiver<Vec<PathBuf>>,
     dragging_volume: bool,
-    players_loaded: usize,
-    eagleplayers_loaded: usize,
 }
 
 fn module_files(p: &Path, out: &mut Vec<PathBuf>, depth: u32) {
@@ -490,10 +488,7 @@ fn draw(app: &mut App, c: &mut Canvas<Window>, lay: &Layout) {
         text(c, "Drop modules or folders here, or use Add / Dir.", lr.x + 8.0, lr.y + 8.0, DIM);
         text(
             c,
-            &format!(
-                "{} DeliPlayers, {} Eagleplayers loaded.  Keys: space play/pause, enter play, arrows, n/p, +/-",
-                app.players_loaded, app.eagleplayers_loaded
-            ),
+            "Keys: space play/pause, enter play, arrows, n/p, +/-",
             lr.x + 8.0,
             lr.y + 8.0 + ROW_H * 2.0,
             DIM,
@@ -524,12 +519,19 @@ fn draw(app: &mut App, c: &mut Canvas<Window>, lay: &Layout) {
     c.present();
 }
 
+/// The 68k player side of the command line (a build with `host-68k`).
+#[cfg(feature = "host-68k")]
+pub struct Players68k {
+    pub dirs: amigaplayer_rs::engine::PlayerDirs,
+    pub libs: Option<PathBuf>,
+    pub use_genies: Vec<String>,
+    pub only_player: Option<String>,
+    /// The open replayers play what they know (the default); false: the 68k players do.
+    pub open_replayers: bool,
+}
+
 pub fn run(
-    players: Option<PathBuf>,
-    eagleplayers: Option<PathBuf>,
-    genies: Option<PathBuf>,
-    libs: Option<PathBuf>,
-    use_genies: &[String],
+    #[cfg(feature = "host-68k")] p68k: Players68k,
     files: Vec<PathBuf>,
     settings: crate::engine::Settings,
 ) -> Result<()> {
@@ -549,20 +551,22 @@ pub fn run(
 
     let mut engine = Engine::new(SAMPLE_RATE as f64);
     engine.settings = settings;
-    engine.m.os.libs_dir = libs;
-    let players_loaded = match &players {
-        Some(dir) => engine.load_players(dir),
-        None => 0,
-    };
-    let eagleplayers_loaded = match &eagleplayers {
-        Some(dir) => engine.load_eagleplayers(dir),
-        None => 0,
-    };
-    if let Some(dir) = &genies {
-        engine.load_genies(dir);
-    }
-    for g in use_genies {
-        engine.use_genie(g)?;
+    // The formats the open replayers know are played with them (the default).
+    engine.open_replayers = true;
+    #[cfg(feature = "host-68k")]
+    {
+        engine.m.os.libs_dir = p68k.libs;
+        engine.only_player = p68k.only_player;
+        engine.open_replayers = p68k.open_replayers;
+        // the player directories are read when a module needs a 68k player (a genie chosen by
+        // name must be loaded to be found: that is done now)
+        engine.set_player_dirs(p68k.dirs);
+        if !p68k.use_genies.is_empty() {
+            engine.load_pending_players();
+        }
+        for g in &p68k.use_genies {
+            engine.use_genie(g)?;
+        }
     }
     let engine = Arc::new(Mutex::new(engine));
 
@@ -597,12 +601,7 @@ pub fn run(
         dialog_tx: tx,
         dialog_rx: rx,
         dragging_volume: false,
-        players_loaded,
-        eagleplayers_loaded,
     };
-    if players.is_none() {
-        app.set_status("no DeliPlayers directory found (use --players DIR); only ProTracker modules will play".into(), true);
-    }
     if !files.is_empty() {
         app.add_paths(&files);
         app.play_index(0);

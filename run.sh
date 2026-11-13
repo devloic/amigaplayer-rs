@@ -1,18 +1,24 @@
 #!/bin/sh
-# Builds amigaplayer-rs (release), installs the DeliPlayers on first use, and
-# starts it. All arguments are passed through:
+# Builds amigaplayer-rs (release) and starts it. All arguments are passed through:
 #
 #   ./run.sh                         empty player window
 #   ./run.sh ~/mods/ song.mod        open files/folders in the module list
 #   ./run.sh --wav out.wav MODULE    render to WAV instead
 #
-# Set DELIPLAYERS=/path/to/DeliPlayers to use another players directory.
+# The default build has no 68k player support. With WITH_68K=1 the binary is built with
+# `--features host-68k`, the DeliPlayers are installed on first use and passed with --players
+# (set DELIPLAYERS=/path/to/DeliPlayers to use another players directory).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here"
 
-cargo build --release --quiet
+if [ "${WITH_68K:-}" != 1 ]; then
+    cargo build --release --quiet
+    exec "$here/target/release/amigaplayer-rs" "$@"
+fi
+
+cargo build --release --quiet --features host-68k
 
 players="${DELIPLAYERS:-$HOME/.config/amigaplayer-rs/DeliPlayers}"
 # the folder of the older deliplayer name, when only that one is there

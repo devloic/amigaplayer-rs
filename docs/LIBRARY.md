@@ -8,7 +8,7 @@ decruncher for packed files, and an AIFF decoder. Bytes in, PCM out; no audio de
 read behind your back, deterministic output.
 
 It does **not** include the hosting of the user's original 68k DeliPlayers / Eagleplayers
-(the application's business), and has no SDL dependency. With the `host-68k` feature a `Song`
+(a build-time option of the application, `--features host-68k`), and has no SDL dependency. With the `custom-modules` feature a `Song`
 can also play **custom modules**, which carry their own 68k replay routine, when the caller
 asks for it: see [Custom modules](#custom-modules).
 
@@ -76,8 +76,8 @@ while !song.songend() && song.elapsed_secs() < 120.0 {
 | `detect_with(name, &[u8], companions) -> Option<String>` | as `detect`, given the file name and companion files; where the bytes pass more than one replayer's check (Infogrames and Rob Hubbard 2 modules; the bank beside them decides) it starts the song to name the one that plays it |
 | `formats() -> Vec<&'static str>` | the formats the library knows |
 | `Song::open(name, bytes, rate)` / `open_with(.., companions, ..)` | start a module. Companions (TFMX `smpl.*`, Mark Cooksey `mcs.*`, IFF-SMUS `Instruments/*`, ...) are `(relative path, bytes)` pairs |
-| `Song::open_opts(name, bytes, companions, rate, &Options)` | as `open_with`, with `Options` (`Options::new().allow_custom(true)`: custom modules, `host-68k` builds) |
-| `detect_custom(&[u8]) -> bool` | the bytes are a custom module (`host-68k` builds); nothing is run |
+| `Song::open_opts(name, bytes, companions, rate, &Options)` | as `open_with`, with `Options` (`Options::new().allow_custom(true)`: custom modules, `custom-modules` builds) |
+| `detect_custom(&[u8]) -> bool` | the bytes are a custom module (`custom-modules` builds); nothing is run |
 | `error() -> Option<&Error>` | why the song stopped by itself and renders silence: `Error::Guest` (a custom module's code failed), `Error::Internal` (a replayer panicked) |
 | `render_f32` / `render_i16` | fill interleaved stereo; return frames written |
 | `subsongs()` / `set_subsong(n)` | `Subsongs { first, last, current }`; out of range is an `Error` |
@@ -104,10 +104,10 @@ file to WAV, no SDL), `list_formats`, `make_demo_mod`.
 
 A custom module (`CUST.*`, `cust.*`: mostly game music ripped together with its player) is an
 AmigaOS executable with a DeliTracker player header: the replay routine is 68k code inside
-the file. `Song` plays one only when asked to, per open call, in a build with `host-68k`:
+the file. `Song` plays one only when asked to, per open call, in a build with `custom-modules` (which the application's default build has; `host-68k` implies it):
 
 ```toml
-amigaplayer = { git = "...", package = "amigaplayer-rs", default-features = false, features = ["host-68k"] }
+amigaplayer = { git = "...", package = "amigaplayer-rs", default-features = false, features = ["custom-modules"] }
 ```
 
 ```rust
@@ -258,7 +258,7 @@ is the documented one.
 0.x semver. Within `0.y.*` the documented items above keep their meaning; a `0.(y+1)` may change
 them. Everything else (`engine`, `machine`, `replay`, `paula`, ...) is `#[doc(hidden)]`: public
 only because the application, the WebAssembly and C crates and the tools in `tools/` use it.
-The compiled-out `host-68k` code leaves the emulated machine (`machine`, `os`, `deli`, `heap`)
+The compiled-out `host-68k` and `custom-modules` code leaves the emulated machine (`machine`, `os`, `deli`, `heap`)
 in place, because the open replayers load their modules and companion files through it.
 
 ## Command line without SDL: `amigaplayer-render`
@@ -332,7 +332,7 @@ The header is `crates/amigaplayer-capi/include/amigaplayer.h` (hand-written, doc
 An `ap_song *` is an opaque handle; failures return NULL or a negative number and set a
 per-thread error. Custom modules play through `ap_open_opts(..., AP_OPEN_CUSTOM)` (see
 [Custom modules](#custom-modules); `ap_error` reports a module whose code failed); the
-library is built with `host-68k` by default, and `--no-default-features` leaves the 68000
+library is built with `custom-modules` by default, and `--no-default-features` leaves the 68000
 hosting out (the flag then fails with `AP_ERR_UNSUPPORTED`). API 0.2.0 (`ap_version()` 200)
 added `ap_open_opts`, `ap_detect_custom`, `ap_error` and `ap_error_code`; nothing changed in
 the functions of 0.1.0. Linking statically needs `-lpthread -ldl -lm`. Other languages bind to it with
@@ -369,8 +369,8 @@ a deployed web app and does not change.
 
 ## Checking it all
 
-`tools/lib-check.sh` builds and tests the library with default features off, with `host-68k`
-and with `host-68k songdb` (and the song database crate by itself, and the renderer's
+`tools/lib-check.sh` builds and tests the library with default features off, with `custom-modules`,
+with `host-68k` and with `host-68k songdb` (and the song database crate by itself, and the renderer's
 `--songdb` on a synthetic database), builds the application, builds and tests the C API (with
 and without its features) and compares a C-rendered file with the Rust example's, builds the
 wasm and runs the node smoke test.

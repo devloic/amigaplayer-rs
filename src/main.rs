@@ -2,19 +2,32 @@ mod ui;
 
 use amigaplayer_rs::paulaout::Filter;
 use amigaplayer_rs::xmp::mixer::Interp;
-use amigaplayer_rs::{default_eagleplayers_dir, default_genies_dir, default_libs_dir, default_players_dir, engine, SAMPLE_RATE};
+#[cfg(feature = "host-68k")]
+use amigaplayer_rs::{default_eagleplayers_dir, default_genies_dir, default_libs_dir, default_players_dir};
+use amigaplayer_rs::{engine, SAMPLE_RATE};
 use amigaplayer_rs::engine::Settings;
 
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
+/// The options that need the 68k players, which only a build with `host-68k` has.
+#[cfg(not(feature = "host-68k"))]
+const NEEDS_68K: &[&str] = &["--players", "--eagleplayers", "--player", "--68k-players", "--genies", "--genie", "--noteplayer", "--libs"];
+
 struct Args {
+    #[cfg(feature = "host-68k")]
     players: Option<PathBuf>,
+    #[cfg(feature = "host-68k")]
     eagleplayers: Option<PathBuf>,
+    #[cfg(feature = "host-68k")]
     genies: Option<PathBuf>,
+    #[cfg(feature = "host-68k")]
     libs: Option<PathBuf>,
+    #[cfg(feature = "host-68k")]
     use_genies: Vec<String>,
+    #[cfg(feature = "host-68k")]
     only_player: Option<String>,
+    #[cfg(feature = "host-68k")]
     open_replayers: bool,
     wav: Option<PathBuf>,
     seconds: f64,
@@ -32,20 +45,39 @@ struct Args {
 }
 
 fn usage() -> ! {
+    eprintln!("{}", USAGE_HEAD);
+    #[cfg(feature = "host-68k")]
+    eprintln!("{}", USAGE_68K);
+    #[cfg(not(feature = "host-68k"))]
     eprintln!(
-        "usage: amigaplayer-rs [--players DIR] [--eagleplayers DIR] [--player NAME] [--68k-players]\n\
-         \x20                 [--genies DIR] [--genie NAME]... [--noteplayer NAME] [--libs DIR]\n\
-         \x20                 [--wav OUT.wav [--seconds N] [--subsong N] [--volume V]]\n\
+        "The 68k-player options ({}) need a build with the host-68k feature:\n\
+         cargo build --release --features host-68k",
+        NEEDS_68K.join(" ")
+    );
+    eprintln!("{}", USAGE_TAIL);
+    std::process::exit(2)
+}
+
+const USAGE_HEAD: &str = "usage: amigaplayer-rs [--wav OUT.wav [--seconds N] [--subsong N] [--volume V]]\n\
          \x20                 [--filter a500|a1200|none|auto] [--led auto|on|off|force]\n\
          \x20                 [--separation 0..1] [--mono] [--interp nearest|linear|spline]\n\
          \x20                 [--xmp-filter on|off] [--archive-entry NAME]\n\
          \x20                 [FILES/DIRS...]\n\
          \n\
          Without --wav the SDL3 player window opens with FILES as the module list.\n\
+         The formats the open replayers (Rust ports of NostalgicPlayer's players and clean-room\n\
+         ports), the built-in ProTracker and the libxmp ports know are played with them\n\
+         (--open-replayers is accepted and changes nothing).";
+
+/// The options of a build with `host-68k`.
+#[cfg(feature = "host-68k")]
+const USAGE_68K: &str = "68k players (this build has them): [--players DIR] [--eagleplayers DIR] [--player NAME]\n\
+         \x20                 [--68k-players] [--genies DIR] [--genie NAME]... [--noteplayer NAME] [--libs DIR]\n\
          --players DIR holds the original 68k DeliPlayers (default: $DELIPLAYERS,\n\
          ~/.config/amigaplayer-rs/DeliPlayers, ./DeliPlayers), --eagleplayers DIR the\n\
          Eagleplayers (default: $EAGLEPLAYERS, ~/.config/amigaplayer-rs/Eagleplayers,\n\
-         ./Eagleplayers); DeliPlayers are tried first. --player NAME tries only the\n\
+         ./Eagleplayers); DeliPlayers are tried first. The player directories are read when a\n\
+         module needs a 68k player, not before. --player NAME tries only the\n\
          player of that name (a player without a module check, like BFB Master, plays\n\
          only when chosen so). A library a player opens is loaded from the module's\n\
          directory, its libs/, ../libs/, then --libs DIR (LIBS:; default:\n\
@@ -54,11 +86,11 @@ fn usage() -> ! {
          ~/.config/amigaplayer-rs/DeliGenies, ./DeliGenies); --genie NAME runs one, and a\n\
          NotePlayer genie (--noteplayer NAME) plays the notes of _note players\n\
          (default: 4Voices-NotePlayer when installed; --noteplayer builtin has the\n\
-         built-in renderer play them). The formats the open replayers\n\
-         (Rust ports of NostalgicPlayer's players and clean-room ports) know are\n\
-         played with them, not with the 68k players: that is the default\n\
-         (--open-replayers is accepted and changes nothing); --68k-players\n\
-         plays them with the 68k players instead (--player NAME always does). --led off renders with the LED filter\n\
+         built-in renderer play them). --68k-players\n\
+         plays the formats the open replayers know with the 68k players instead\n\
+         (--player NAME always does).";
+
+const USAGE_TAIL: &str = "--led off renders with the LED filter\n\
          ignored (UADE's start state; an Amiga starts with it on); auto (the\n\
          default, also spelled on) follows the player's LED; force switches it on\n\
          whatever the player does. --filter picks the Amiga filter model (auto:\n\
@@ -72,26 +104,54 @@ fn usage() -> ! {
          and its entries play in order, those no player takes skipped (with --wav:\n\
          one after the other, each up to --seconds); --archive-entry NAME plays only\n\
          the entry of that name (its path in the archive or its file name, any case).\n\
-         A gzip or xz file of one module plays as the module."
-    );
-    std::process::exit(2)
-}
+         A gzip or xz file of one module plays as the module.";
 
 fn parse_args() -> Args {
-    let mut a = Args { players: None, eagleplayers: None, genies: None, libs: None, use_genies: Vec::new(), only_player: None, open_replayers: true, wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
+    let mut a = Args {
+        #[cfg(feature = "host-68k")]
+        players: None,
+        #[cfg(feature = "host-68k")]
+        eagleplayers: None,
+        #[cfg(feature = "host-68k")]
+        genies: None,
+        #[cfg(feature = "host-68k")]
+        libs: None,
+        #[cfg(feature = "host-68k")]
+        use_genies: Vec::new(),
+        #[cfg(feature = "host-68k")]
+        only_player: None,
+        #[cfg(feature = "host-68k")]
+        open_replayers: true,
+        wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
     // (a file name need not be UTF-8: options are read as text, file names as given)
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
     while let Some(s) = it.next() {
+        // not a silent no-op: these options act only in a build that has the 68k players
+        #[cfg(not(feature = "host-68k"))]
+        if NEEDS_68K.contains(&s.as_str()) {
+            eprintln!("amigaplayer-rs: {s}: built without 68k player support; rebuild with --features host-68k");
+            std::process::exit(2);
+        }
         match s.as_str() {
+            #[cfg(feature = "host-68k")]
             "--players" => a.players = it.next().map(PathBuf::from),
+            #[cfg(feature = "host-68k")]
             "--eagleplayers" => a.eagleplayers = it.next().map(PathBuf::from),
+            #[cfg(feature = "host-68k")]
             "--player" => a.only_player = it.next(),
             // (the open replayers are the default; the flag stays accepted)
+            #[cfg(feature = "host-68k")]
             "--open-replayers" => a.open_replayers = true,
+            #[cfg(not(feature = "host-68k"))]
+            "--open-replayers" => {}
+            #[cfg(feature = "host-68k")]
             "--68k-players" => a.open_replayers = false,
+            #[cfg(feature = "host-68k")]
             "--genies" => a.genies = it.next().map(PathBuf::from),
+            #[cfg(feature = "host-68k")]
             "--libs" => a.libs = it.next().map(PathBuf::from),
+            #[cfg(feature = "host-68k")]
             "--genie" | "--noteplayer" => a.use_genies.push(it.next().unwrap_or_else(|| usage())),
             "--wav" => a.wav = it.next().map(PathBuf::from),
             "--seconds" => a.seconds = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
@@ -184,26 +244,31 @@ fn render_wav(args: &Args) -> Result<()> {
     let wav = args.wav.as_ref().unwrap();
     let Some(file) = args.files.first() else { bail!("--wav needs a module file") };
     let mut e = engine::Engine::new(SAMPLE_RATE as f64);
-    e.m.os.libs_dir = args.libs.clone().or_else(default_libs_dir);
-    // (before the players load: a player without a check is loaded only when chosen by name)
-    e.only_player = args.only_player.clone();
-    if let Some(dir) = args.players.clone().or_else(default_players_dir) {
-        let n = e.load_players(&dir);
-        eprintln!("{n} players loaded from {}", dir.display());
+    #[cfg(feature = "host-68k")]
+    {
+        e.m.os.libs_dir = args.libs.clone().or_else(default_libs_dir);
+        // (before the players load: a player without a check is loaded only when chosen by name)
+        e.only_player = args.only_player.clone();
+        // The directories are read when a module needs a 68k player (see `set_player_dirs`),
+        // at once when a genie is chosen by name (it must be loaded to be found).
+        e.set_player_dirs(engine::PlayerDirs {
+            players: args.players.clone().or_else(default_players_dir),
+            eagleplayers: args.eagleplayers.clone().or_else(default_eagleplayers_dir),
+            genies: args.genies.clone().or_else(default_genies_dir),
+        });
+        if !args.use_genies.is_empty() {
+            e.load_pending_players();
+            report_loads(&mut e);
+        }
+        for g in &args.use_genies {
+            e.use_genie(g)?;
+        }
+        e.open_replayers = args.open_replayers;
     }
-    if let Some(dir) = args.eagleplayers.clone().or_else(default_eagleplayers_dir) {
-        let n = e.load_eagleplayers(&dir);
-        eprintln!("{n} eagleplayers loaded from {}", dir.display());
+    #[cfg(not(feature = "host-68k"))]
+    {
+        e.open_replayers = true;
     }
-    if let Some(dir) = args.genies.clone().or_else(default_genies_dir) {
-        let n = e.load_genies(&dir);
-        eprintln!("{n} genies loaded from {}", dir.display());
-    }
-    for g in &args.use_genies {
-        e.use_genie(g)?;
-    }
-    e.only_player = args.only_player.clone();
-    e.open_replayers = args.open_replayers;
     apply_settings(args, &mut e.settings);
     if let Some(n) = std::env::var("DELI_CPU_SPEED").ok().and_then(|v| v.parse::<u64>().ok()) {
         // the guest CPU's 68000 cycles per colour clock are 2; a larger speed divides them
@@ -231,13 +296,19 @@ fn render_wav(args: &Args) -> Result<()> {
     let mut played = 0;
     for item in &items {
         if let Some(name) = &item.entry {
-            if let Err(err) = e.play_file(&item.path) {
+            let r = e.play_file(&item.path);
+            #[cfg(feature = "host-68k")]
+            report_loads(&mut e);
+            if let Err(err) = r {
                 eprintln!("entry {name}: skipped ({err})");
                 continue;
             }
             eprintln!("entry {name}");
         } else {
-            e.play_file(&item.path)?;
+            let r = e.play_file(&item.path);
+            #[cfg(feature = "host-68k")]
+            report_loads(&mut e);
+            r?;
         }
         played += 1;
         for _ in 0..args.subsong.unsigned_abs() {
@@ -314,6 +385,14 @@ fn render_wav(args: &Args) -> Result<()> {
     write_wav(wav, SAMPLE_RATE, &out)
 }
 
+/// Prints what loading the 68k player directories found.
+#[cfg(feature = "host-68k")]
+fn report_loads(e: &mut engine::Engine) {
+    for l in e.take_load_report() {
+        eprintln!("{l}");
+    }
+}
+
 /// The window's list: FILES, or with --archive-entry the entry of that name in each archive.
 fn window_files(args: &Args) -> Result<Vec<PathBuf>> {
     let Some(want) = args.archive_entry.as_deref() else { return Ok(args.files.clone()) };
@@ -332,11 +411,18 @@ fn main() {
     } else {
         window_files(&args).and_then(|files| {
             ui::run(
-                args.players.clone().or_else(default_players_dir),
-                args.eagleplayers.clone().or_else(default_eagleplayers_dir),
-                args.genies.clone().or_else(default_genies_dir),
-                args.libs.clone().or_else(default_libs_dir),
-                &args.use_genies,
+                #[cfg(feature = "host-68k")]
+                ui::Players68k {
+                    dirs: engine::PlayerDirs {
+                        players: args.players.clone().or_else(default_players_dir),
+                        eagleplayers: args.eagleplayers.clone().or_else(default_eagleplayers_dir),
+                        genies: args.genies.clone().or_else(default_genies_dir),
+                    },
+                    libs: args.libs.clone().or_else(default_libs_dir),
+                    use_genies: args.use_genies.clone(),
+                    only_player: args.only_player.clone(),
+                    open_replayers: args.open_replayers,
+                },
                 files,
                 {
                     let mut s = Settings::default();

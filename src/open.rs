@@ -64,7 +64,7 @@ pub fn claimed_by_several(data: &[u8]) -> bool {
 /// Whether `data` (after decrunching) is a custom module: an AmigaOS executable with a
 /// DeliTracker player header whose tags say `DTP_CustomPlayer` (the module's own code plays
 /// it). Nothing of it is run. An open replayer may still claim such a file first (`detect`).
-#[cfg(feature = "host-68k")]
+#[cfg(feature = "custom-modules")]
 pub fn detect_custom(data: &[u8]) -> bool {
     let data = crate::decrunch::decrunch(data.to_vec());
     if !crate::hunk::is_hunk_file(&data) || crate::hunk::parse(&data).is_err() {
@@ -78,7 +78,7 @@ pub fn detect_custom(data: &[u8]) -> bool {
 /// The instructions one call into a custom module's code may run when `Song` hosts it: a
 /// tenth of the engine's `machine::CALL_BUDGET`, minutes of a 68000's time still, so that
 /// a module that hangs costs the host a fraction of a second, not seconds.
-#[cfg(feature = "host-68k")]
+#[cfg(feature = "custom-modules")]
 pub const CUSTOM_CALL_BUDGET: u64 = crate::machine::CALL_BUDGET / 10;
 
 pub struct Song {
@@ -102,14 +102,14 @@ impl Song {
     /// 68000, when no open replayer takes it. Its code sees the files given here and no
     /// file of the host, and each call into it has an instruction budget. No external
     /// player is loaded: only the module's own code runs.
-    #[cfg(feature = "host-68k")]
+    #[cfg(feature = "custom-modules")]
     pub fn open_custom(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32) -> Result<Song> {
         Song::start(path, data, files, rate, true)
     }
 
     fn start(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32, custom: bool) -> Result<Song> {
         let mut e = Engine::new(rate as f64);
-        #[cfg(feature = "host-68k")]
+        #[cfg(feature = "custom-modules")]
         if custom {
             e.m.os.no_host_files = true;
             e.m.call_budget = CUSTOM_CALL_BUDGET;

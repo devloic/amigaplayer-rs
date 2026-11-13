@@ -1,7 +1,7 @@
 //! Custom modules through `Song` (`Options::allow_custom`, `host-68k` builds): a synthetic one
 //! plays, and one whose 68k code hangs, faults or is damaged stops with an error; the host
 //! is never hung or taken down.
-#![cfg(feature = "host-68k")]
+#![cfg(feature = "custom-modules")]
 
 use amigaplayer_rs::testdata::{custom_with, minimal_custom, minimal_mod};
 use amigaplayer_rs::{detect, detect_custom, Error, Options, Song};

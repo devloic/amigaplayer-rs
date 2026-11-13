@@ -46,7 +46,7 @@ pub fn minimal_mod() -> Vec<u8> {
 /// (`DTP_CustomPlayer`) and a few dozen 68000 instructions that play a looping square wave on
 /// Paula's first channel. Two subsongs (0 and 1, an octave apart), the title "synthetic", and
 /// the song's end reported after three seconds (150 timer interrupts). For
-/// `Song::open_opts` with `Options::allow_custom`, in builds with the `host-68k` feature.
+/// `Song::open_opts` with `Options::allow_custom`, in builds with the `custom-modules` feature.
 pub fn minimal_custom() -> Vec<u8> {
     custom_with(&[], &[])
 }

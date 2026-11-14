@@ -276,6 +276,21 @@ enum Cost {
 }
 
 impl Cost {
+    /// What a path costs more on one voice than `cycles` gives, measured: a voice's loop entry
+    /// (the time from the voice before's period write), the volume effect (17 cycles a voice
+    /// more on the first three, and 17 more on a row's tick), the small effects (17 more on a
+    /// row's tick, 5 less on the last voice) and a note's start on the last voice (20 less).
+    fn voice_cycles(self, v: usize, row: bool) -> i64 {
+        match (self, v) {
+            (Cost::Voice, 1) => -4,
+            (Cost::Voice, 2) => 5,
+            (Cost::FxVolume, 0..=3) => [0, 17, 34, 24][v] + 17 * row as i64,
+            (Cost::NoteOn, 3) => -20,
+            (Cost::FxSmall, 0..=3) => 17 * row as i64 - 5 * (v == 3) as i64,
+            _ => 0,
+        }
+    }
+
     /// 68000 cycles (two a colour clock), fitted by least squares to the
     /// Eagleplayer's write logs (all subsongs of the two modules known); the
     /// paths those never take (the sample effect's inversion, the sample number,
@@ -287,7 +302,7 @@ impl Cost {
         match self {
             Tick => 657,
             Measure3 => 16,
-            Row => 41,
+            Row => 39,
             RowVoice => 164,
             RowWait => 82,
             RowByte => 64,
@@ -296,9 +311,9 @@ impl Cost {
             RowNote => -1,
             RowInstr => -18,
             RowNoteDma => 31,
-            Note => 81,
-            NoteOn => 597,
-            NoteInstr => 74,
+            Note => 79,
+            NoteOn => 599,
+            NoteInstr => 72,
             Inv => 37,
             InvVoice => 150,
             InvTaken => 36,
@@ -307,16 +322,16 @@ impl Cost {
             InvFlip => 224,
             InvEdge => 40,
             InvEnd => 37,
-            RowEnd => 20,
-            NewPos => 1263,
+            RowEnd => 29,
+            NewPos => 1277,
             SongEnd => 88,
-            Track => 0,
+            Track => -4,
             Voice => 126,
             Voice4 => 16,
             Restart => 29,
             Restart0 => 13,
-            Fx => 179,
-            EnvNone => -30,
+            Fx => 180,
+            EnvNone => -31,
             EnvAttack => 58,
             EnvAttackEnd => 58,
             EnvDecay => 18,
@@ -326,9 +341,9 @@ impl Cost {
             EnvRelease => 68,
             EnvReleaseEnd => 28,
             EnvSkip => 87,
-            EnvDone => -1,
+            EnvDone => -2,
             VolTail => 43,
-            List => 43,
+            List => 44,
             ListOn => 34,
             ListCount => 32,
             ListStep => 180,
@@ -341,18 +356,18 @@ impl Cost {
             FxArp => 166,
             FxSlide => 36,
             FxVolSlideSet => 76,
-            FxVolSlide => 112,
+            FxVolSlide => 111,
             FxVolSlideTest => 18,
-            FxVibArg => 95,
-            FxVib => 252,
+            FxVibArg => 98,
+            FxVib => 249,
             FxMul => -1,
             FxTrem => 360,
-            FxSmall => 40,
+            FxSmall => 38,
             FxOffset => 148,
-            FxOffsetCut => -44,
+            FxOffsetCut => -45,
             FxArg => 46,
-            FxVolume => 86,
-            FxVolumeMax => 10,
+            FxVolume => 60,
+            FxVolumeMax => 8,
             Arp => 86,
             ArpOn => 34,
             ArpCount => 32,
@@ -375,11 +390,11 @@ impl Cost {
             Clamp => -97,
             ClampHigh => 16,
             Delayed => -52,
-            Trig => 56,
+            Trig => 57,
             TrigLen => 22,
             TrigPer => -23,
-            End => 66,
-            WriteVol => 264,
+            End => 67,
+            WriteVol => 263,
             WritePer => 63,
             WriteLoc => 56,
             WriteLen => 22,
@@ -390,10 +405,11 @@ impl Cost {
 }
 
 /// The trace of code paths for fitting their costs (ACTIONAMICS_TRACE=file):
-/// one line per register write, with the paths taken since the one before.
+/// one line per register write, with the paths taken since the one before (each as
+/// `Cost@voice`, an `r` after it on a row's tick).
 struct Trace {
     out: Option<std::io::BufWriter<std::fs::File>>,
-    pend: Vec<Cost>,
+    pend: Vec<String>,
 }
 
 impl Trace {
@@ -417,7 +433,7 @@ impl Trace {
             use std::io::Write;
             let _ = write!(o, "{}", hw.bus.clock);
             for e in self.pend.drain(..) {
-                let _ = write!(o, " {:?}", e);
+                let _ = write!(o, " {e}");
             }
             let _ = writeln!(o);
         }
@@ -440,6 +456,10 @@ pub struct Actionamics {
     /// The odd 68000 cycle not yet waited (`spend`).
     cycles: i64,
     trace: Trace,
+    /// The voice whose code runs (`Cost::voice_cycles`; 9 outside the voice loops, 8 in the
+    /// sample effect's loop), and whether the tick reads a row.
+    tv: usize,
+    rowtick: bool,
     /// The first tick's clock, taken by the engine at the start.
     first_tick: Option<u64>,
 }
@@ -469,6 +489,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         cycles: 0,
         trace: Trace::open(),
         first_tick: None,
+        tv: 9,
+        rowtick: false,
     };
     let mut hw = Hw { bus: &mut m.bus };
     a.start_sound(0, &mut hw, 687);
@@ -510,6 +532,10 @@ impl Replayer for Actionamics {
     fn tick(&mut self, hw: &mut Hw) {
         let s = self.p + SONG;
         self.trace.mark(hw);
+        // the code's time counts from the interrupt: no odd cycle is carried into the tick
+        self.cycles = 0;
+        self.tv = 9;
+        self.rowtick = hw.bus.r8(s + S_COUNTER).wrapping_add(1) == hw.bus.r8(s + S_SPEED);
         self.at(hw, Cost::Tick);
         let m = hw.bus.r8(s + S_MEASURE).wrapping_add(1);
         hw.bus.w8(s + S_MEASURE, m);
@@ -525,12 +551,14 @@ impl Replayer for Actionamics {
             hw.bus.w8(s + S_MEASURE, 0);
             self.dma = 0;
             for i in 0..4 {
+                self.tv = i;
                 self.read_row(hw, i);
             }
             self.write(hw, Cost::WriteDmaOff);
             hw.dmacon(self.dma);
             self.dma = self.dma.wrapping_add(0x8000);
             for i in 0..4 {
+                self.tv = i;
                 self.setup_note(hw, i);
             }
             self.sample_fx(hw);
@@ -548,12 +576,14 @@ impl Replayer for Actionamics {
                     hw.bus.w8(s + S_POS, hw.bus.r8(s + S_LOOP));
                 }
                 for i in 0..4 {
+                    self.tv = i;
                     self.setup_track(hw, i);
                 }
             }
         }
 
         for i in 0..4 {
+            self.tv = i;
             let v = self.voice(i);
             self.at(hw, Cost::Voice);
             // the fourth voice is skipped while the player's sound effects
@@ -619,9 +649,9 @@ impl Actionamics {
     }
 
     fn at(&mut self, _hw: &mut Hw, c: Cost) {
-        self.spend(c.cycles());
+        self.spend(c.cycles() + c.voice_cycles(self.tv, self.rowtick));
         if self.trace.out.is_some() {
-            self.trace.pend.push(c);
+            self.trace.pend.push(format!("{:?}@{}{}", c, self.tv, if self.rowtick { "r" } else { "" }));
         }
     }
 
@@ -855,6 +885,7 @@ impl Actionamics {
     /// sample, stepping through a range of it. Each sample once a time, however
     /// many voices play it.
     fn sample_fx(&mut self, hw: &mut Hw) {
+        self.tv = 8;
         self.at(hw, Cost::Inv);
         let mut taken = [0u32; 4];
         for (i, tk) in taken.iter_mut().enumerate() {

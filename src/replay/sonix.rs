@@ -23,6 +23,14 @@
 //! writes its pointer, length, period and volume every tick, its wave synthesised
 //! anew into one of two 128-byte buffers.
 //!
+//! Timing: a tick is the CIA timer's value plus one E clocks (5 colour clocks each);
+//! each write lands at the tick's start plus half the 68000 cycles of the code
+//! paths taken before it (per build: SNX and TINY differ), fitted to the
+//! reference's write logs; the DMA-on write follows the beam wait (nine changes of
+//! the raster line, polled). Not modelled: the raster-line phase of the
+//! reference's song start (its load time), the SNX build's extra work on every
+//! tick of a one-shot sample, and the synthesis paths' cycles.
+//!
 //! Recognition is by content (the format's two header tests), and a file that
 //! starts `FORM` is left to the IFF-SMUS replayer, which plays the same instruments
 //! under a different sequencer.
@@ -68,10 +76,145 @@ const TEMPO: [u16; 128] = [
 const SNX_CLOCK: u32 = 1_773_375;
 /// The NTSC colour clock, which the AIFF and 8SVX periods divide even on a PAL machine.
 const NTSC_CLOCK: u32 = 3_579_545;
-/// Colour clocks the player waits before it enables DMA: nine raster lines.
-const DMA_WAIT: u64 = 9 * LINE;
 /// Chip memory per synthesis voice: two 128-byte wave buffers.
 const BUF: u32 = 256;
+
+// The original's 68000 cycles per code path, fitted exactly to the reference's writes (from the
+// write logs of a run and of a run started one cycle late): the SNX build's and the TINY build's
+// (a path not listed costs nothing more than the paths it is counted with). Per voice where the
+// path's cost differs by voice.
+const SNX_COST: &[(&str, i64)] = &[
+    ("ai.down", 88),
+    ("ai.gate", -41),
+    ("ai.per2", 48),
+    ("ai.rel", 39),
+    ("ai.start", 1295),
+    ("ai.up", 115),
+    ("ai.zone", 151),
+    ("env.at.gt", 6),
+    ("env.down", -14),
+    ("env.next", 30),
+    ("env.up", -6),
+    ("env3", 24),
+    ("ev", 385),
+    ("ev.note", 620),
+    ("ev.rel", -280),
+    ("ev.vol", -246),
+    ("ev.wait", 48),
+    ("rel.off", 140),
+    ("rel.on", 282),
+    ("sa.lfo", 665),
+    ("sa.lv0", 1093),
+    ("sa.per2", 48),
+    ("sa.rel", 39),
+    ("sa.start.end", 3),
+    ("seq.tempo", -1),
+    ("sq.ended", 473),
+    ("sq.read", 183),
+    ("sq.wait", 477),
+    ("vo.post", 1104),
+];
+const SNX_COST_CH: &[(&str, [i64; 4])] = &[
+    ("out.b0", [-5, 0, -19, 0]),
+    ("out.b1", [19, 25, 25, 47]),
+    ("out.b1.end", [20, 19, 0, -3]),
+    ("out.b1.loc", [16, 16, 16, 16]),
+    ("out.b2", [-6, 0, 0, 22]),
+    ("out.b2.end", [357, 449, 523, 544]),
+    ("out.b2.loc", [16, 16, 16, 16]),
+    ("out.end", [265, 265, 243, 163]),
+    ("out.idle", [0, 70, 48, 0]),
+    ("out.per", [0, 1, 20, 23]),
+    ("out.vol", [214, 237, 260, 283]),
+    ("sq", [0, 0, 3, 0]),
+    ("vo.aif.n", [-18, 18, 0, 0]),
+    ("vo.aif.r", [-18, 18, 0, 0]),
+    ("vo.aif.s", [66, 18, 0, 0]),
+    ("vo.skip", [222, 79, 0, 79]),
+];
+const TINY_COST: &[(&str, i64)] = &[
+    ("env.at.gt", 6),
+    ("env.down", 10),
+    ("env.next", 30),
+    ("env.up", -6),
+    ("out", 264),
+    ("out.dma", 8),
+    ("rel.off", -1),
+    ("rel.on", 15),
+    ("sa.dly", 1028),
+    ("sa.lfo", 1134),
+    ("sa.new", 62),
+    ("sa.lv0", -39),
+    ("sa.oneshot", -166),
+    ("sa.per2", 48),
+    ("sa.range", 250),
+    ("sa.rel", 49),
+    ("sa.start", 1190),
+    ("sa.tri", 8),
+    ("sn", 828),
+    ("sn.new", -63),
+    ("te", 201),
+    ("te.0", -114),
+    ("te.end.again", -33),
+    ("te.wait", 70),
+    ("tick", 340),
+    ("tk.dec", 417),
+    ("tk.stop", -264),
+    ("tq.gate", 156),
+    ("tq.gaterel", 235),
+    ("tq.read", 57),
+    ("tq.restart", 1308),
+    ("tq.wait", 181),
+    ("vo.post", 447),
+];
+const TINY_COST_CH: &[(&str, [i64; 4])] = &[
+    ("out.b0", [-25, -45, 0, 0]),
+    ("out.b1", [78, 78, 123, 123]),
+    ("out.b1.end", [20, 0, 0, 0]),
+    ("out.b1.loc", [28, 28, 28, 28]),
+    ("out.b2", [0, 0, 45, 45]),
+    ("out.b2.end", [369, 442, 535, 559]),
+    ("out.b2.loc", [28, 28, 28, 28]),
+    ("out.end", [426, 381, 381, 248]),
+    ("out.idle", [70, 25, 70, -53]),
+    ("out.per", [0, 20, 20, 20]),
+    ("out.vol", [226, 249, 272, 295]),
+    ("tq", [0, 0, 0, 2]),
+    ("vo.skip", [153, 153, 153, 153]),
+];
+
+
+/// The original's 68000 cycles since the tick's start; each write lands at the tick's start plus
+/// half of them.
+#[derive(Default)]
+struct Cy {
+    t0: u64,
+    cy: i64,
+    tiny: bool,
+}
+
+impl Cy {
+    fn c(&mut self, k: &str) {
+        let t = if self.tiny { TINY_COST } else { SNX_COST };
+        self.cy += t.iter().find(|e| e.0 == k).map_or(0, |e| e.1);
+    }
+    fn cc(&mut self, k: &str, ch: usize) {
+        let t = if self.tiny { TINY_COST_CH } else { SNX_COST_CH };
+        self.cy += t.iter().find(|e| e.0 == k).map_or(0, |e| e.1[ch]);
+    }
+    /// A path taken `n` times.
+    fn n(&mut self, k: &str, n: u32) {
+        let t = if self.tiny { TINY_COST } else { SNX_COST };
+        self.cy += t.iter().find(|e| e.0 == k).map_or(0, |e| e.1) * n as i64;
+    }
+    /// Up to the next write's moment.
+    fn w(&mut self, hw: &mut Hw) {
+        let t = self.t0 + self.cy.max(0) as u64 / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+}
 
 // ------------------------------------------------------------------ recognition
 
@@ -542,6 +685,8 @@ struct Voice {
     wave_phase: u16,
     dir: i16,
     started: bool,
+    /// The voice's first note: no instrument before it.
+    fresh: bool,
     out: (u32, u16),
     // what the write routine writes
     per: u16,
@@ -558,6 +703,7 @@ struct Track {
     instr: Option<usize>,
     volume: u16,
     bend: u8,
+    done: bool,
 }
 
 pub struct Sonix {
@@ -580,6 +726,7 @@ pub struct Sonix {
     // TINY
     count: u16,
     songend: bool,
+    cy: Cy,
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -637,7 +784,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         d: d.to_vec(),
         instrs,
         v: Default::default(),
-        t: [Track { pos: None, wait: 1, gate: 0, instr: None, volume: 255, bend: 0 }; 4],
+        t: [Track { pos: None, wait: 1, gate: 0, instr: None, volume: 255, bend: 0, done: false }; 4],
         silent: mem,
         bufs: mem + 8,
         tempo: rd16(d, 0x12).unwrap_or(0),
@@ -647,6 +794,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         rate: 0,
         count: 0,
         songend: false,
+        cy: Cy { tiny, ..Default::default() },
     };
     s.begin();
     if tiny {
@@ -680,6 +828,7 @@ impl Sonix {
                 instr: None,
                 volume: if self.tiny { rd16(&self.d, 0x12 + 4 * v).unwrap_or(0) } else { 255 },
                 bend: 0,
+                done: false,
             };
         }
     }
@@ -710,7 +859,10 @@ impl Sonix {
         let v = &mut self.v[ch];
         v.cmd = Cmd::None;
         if v.status == Status::On {
+            self.cy.c("rel.on");
             v.cmd = Cmd::Release;
+        } else {
+            self.cy.c("rel.off");
         }
     }
 
@@ -719,8 +871,13 @@ impl Sonix {
         v.cmd = Cmd::None;
         if v.status != Status::Idle {
             v.status = Status::Idle;
+            self.cy.cc("stop", ch);
+            self.cy.w(hw);
             hw.dmacon(1 << ch);
+            self.cy.cc("stop.per", ch);
+            self.cy.w(hw);
             hw.per(ch, 2);
+            self.cy.cc("stop.end", ch);
         }
     }
 
@@ -729,6 +886,11 @@ impl Sonix {
         let Some(k) = &self.instrs[i] else { return };
         let tech = k.tech();
         let old = self.v[ch].instr.and_then(|o| self.instrs[o].as_ref()).map(|k| k.tech());
+        self.cy.c("sn");
+        if self.v[ch].instr.is_none() {
+            self.cy.c("sn.new");
+            self.v[ch].fresh = true;
+        }
         if self.v[ch].status != Status::Idle && old.is_some_and(|o| o != tech) {
             self.stop_note(ch, hw);
         }
@@ -744,16 +906,20 @@ impl Sonix {
     fn snx_pass(&mut self, hw: &mut Hw) -> usize {
         let mut ended = 0;
         for ch in 0..4 {
+            self.cy.cc("sq", ch);
             if self.t[ch].wait != 0 {
                 self.t[ch].wait -= 1;
                 if self.t[ch].wait != 0 {
+                    self.cy.c("sq.wait");
                     continue;
                 }
             }
             let Some(mut p) = self.t[ch].pos else {
+                self.cy.c("sq.ended");
                 ended += 1;
                 continue;
             };
+            self.cy.c("sq.read");
             loop {
                 let Some(w) = rd16(&self.d, p) else {
                     self.t[ch].pos = None;
@@ -761,11 +927,14 @@ impl Sonix {
                     break;
                 };
                 p += 2;
+                self.cy.c("ev");
                 let (hi, lo) = ((w >> 8) as u8, w as u8);
                 if w == 0 {
+                    self.cy.c("ev.0");
                     continue;
                 }
                 if w == 0xFFFF {
+                    self.cy.c("ev.end");
                     self.t[ch].pos = None;
                     ended += 1;
                     break;
@@ -773,23 +942,39 @@ impl Sonix {
                 if w >= 0xC000 {
                     let n = w & 0x3FFF;
                     if n == 0 {
+                        self.cy.c("ev.w0");
                         continue;
                     }
+                    self.cy.c("ev.wait");
                     self.t[ch].wait = n;
                     self.t[ch].pos = Some(p);
                     break;
                 }
                 match hi {
-                    0x80 => self.t[ch].instr = ((lo as usize) < self.instrs.len()).then_some(lo as usize),
-                    0x81 => self.t[ch].volume = lo as u16,
+                    0x80 => {
+                        self.cy.c("ev.instr");
+                        self.t[ch].instr = ((lo as usize) < self.instrs.len()).then_some(lo as usize)
+                    }
+                    0x81 => {
+                        self.cy.c("ev.vol");
+                        self.t[ch].volume = lo as u16
+                    }
                     0x82 => {
+                        self.cy.c("ev.tempo");
                         self.tempo = lo as u16;
                         self.snx_tempo();
                     }
-                    0x83 => self.t[ch].bend = lo,
-                    0x84..=0xBF => {}
-                    _ if lo == 0 => self.release_note(ch),
+                    0x83 => {
+                        self.cy.c("ev.bend");
+                        self.t[ch].bend = lo
+                    }
+                    0x84..=0xBF => self.cy.c("ev.x"),
+                    _ if lo == 0 => {
+                        self.cy.c("ev.rel");
+                        self.release_note(ch)
+                    }
                     _ => {
+                        self.cy.c("ev.note");
                         if let Some(i) = self.t[ch].instr {
                             let vol = ((((self.t[ch].volume + 1) as u32 * (2 * lo as u32 + 1)) & 0xFFFF) >> 8) as u8;
                             self.start_note(ch, Some(i), hi, vol, hw);
@@ -802,11 +987,14 @@ impl Sonix {
     }
 
     fn snx_sequence(&mut self, hw: &mut Hw) {
+        self.cy.c("seq");
         if self.applied != Some(self.tempo) {
+            self.cy.c("seq.tempo");
             self.snx_tempo();
         }
         let ended = self.snx_pass(hw);
         if ended == 4 {
+            self.cy.c("seq.restart");
             self.songend = true;
             for ch in 0..4 {
                 self.release_note(ch);
@@ -821,6 +1009,7 @@ impl Sonix {
     fn tiny_step(&mut self, hw: &mut Hw) {
         let mut ended = self.tiny_pass(hw);
         if ended == 4 {
+            self.cy.c("tq.restart");
             self.songend = true;
             for ch in 0..4 {
                 if rd32(&self.d, 0x20 + 4 * ch).unwrap_or(0) != 0 {
@@ -837,10 +1026,13 @@ impl Sonix {
         let mut ended = 0;
         let transpose = (rd16(&self.d, 4).unwrap_or(0) as i16 >> 4) - 8;
         for ch in 0..4 {
+            self.cy.cc("tq", ch);
             let mode = rd32(&self.d, 0x20 + 4 * ch).unwrap_or(0);
             if self.t[ch].gate != 0 {
                 self.t[ch].gate -= 1;
+                self.cy.c("tq.gate");
                 if self.t[ch].gate == 0 && mode != 0 {
+                    self.cy.c("tq.gaterel");
                     self.release_note(ch);
                 }
                 continue;
@@ -848,23 +1040,30 @@ impl Sonix {
             if self.t[ch].wait != 0 {
                 self.t[ch].wait -= 1;
                 if self.t[ch].wait != 0 {
+                    self.cy.c("tq.wait");
                     continue;
                 }
             }
             let Some(mut p) = self.t[ch].pos else {
+                self.cy.c("tq.ended");
                 ended += 1;
                 continue;
             };
+            self.cy.c("tq.read");
             loop {
                 let Some(w) = rd16(&self.d, p) else {
                     ended += 1;
                     break;
                 };
+                self.cy.c("te");
                 if w == 0 {
+                    self.cy.c("te.0");
                     p += 2;
                     continue;
                 }
                 if w == 0xFFFF {
+                    self.cy.c(if self.t[ch].done { "te.end.again" } else { "te.end" });
+                    self.t[ch].done = true;
                     // the pointer stays on the end marker
                     self.t[ch].pos = Some(p);
                     ended += 1;
@@ -874,22 +1073,26 @@ impl Sonix {
                 let (hi, dd) = ((w >> 8) as u8, w & 0xFF);
                 match hi {
                     0x81 => {
+                        self.cy.c("te.instr");
                         let slot = dd as usize;
                         self.t[ch].instr = (slot < 64 && self.instrs.get(slot).is_some_and(|i| i.is_some())).then_some(slot);
                     }
                     0x80 => {
+                        self.cy.c("te.wait");
                         self.t[ch].wait = dd;
                         self.t[ch].pos = Some(p);
                         break;
                     }
-                    0x82..=0xFF => {}
+                    0x82..=0xFF => self.cy.c("te.x"),
                     _ => {
                         self.t[ch].pos = Some(p);
                         match self.t[ch].instr {
                             Some(i) if mode != 0 => {
+                                self.cy.c("te.note");
                                 let n = (transpose + hi as i16) as u8;
                                 let mut vol = self.t[ch].volume;
                                 if mode & 0xFFFF != 1 {
+                                    self.cy.c("te.half");
                                     vol >>= 1;
                                 }
                                 self.start_note(ch, Some(i), n, vol as u8, hw);
@@ -897,7 +1100,10 @@ impl Sonix {
                                 self.t[ch].gate = g;
                                 self.t[ch].wait = dd - g;
                             }
-                            _ => self.t[ch].wait = dd,
+                            _ => {
+                                self.cy.c("te.rest");
+                                self.t[ch].wait = dd
+                            }
                         }
                         break;
                     }
@@ -911,6 +1117,7 @@ impl Sonix {
 
     fn update(&mut self, ch: usize, hw: &mut Hw) -> bool {
         let Some(i) = self.v[ch].instr else {
+            self.cy.cc("vo.none", ch);
             self.v[ch].status = Status::Idle;
             return false;
         };
@@ -924,11 +1131,29 @@ impl Sonix {
         };
         let bend_b = self.t[ch].bend;
         let v = &mut self.v[ch];
+        let cy = &mut self.cy;
+        let cmd = match v.cmd {
+            Cmd::Start => "s",
+            Cmd::Release => "r",
+            Cmd::None => "n",
+        };
         let stop = match self.instrs[i].as_ref().unwrap() {
-            Kind::Synth(s) => update_synth(s, v, &x, bend_b, hw),
-            Kind::Sampled(s) => update_sampled(s, v, &x, ch, bend_b, hw),
-            Kind::Aiff(z) => update_aiff(z, v, &x, ch, bend_b, hw),
-            Kind::Svx(s) => update_svx(s, v, &x, ch, bend_b, hw),
+            Kind::Synth(s) => {
+                cy.cc(&format!("vo.syn.{cmd}"), ch);
+                update_synth(s, v, &x, bend_b, hw, cy)
+            }
+            Kind::Sampled(s) => {
+                cy.cc(&format!("vo.sam.{cmd}"), ch);
+                update_sampled(s, v, &x, ch, bend_b, hw, cy)
+            }
+            Kind::Aiff(z) => {
+                cy.cc(&format!("vo.aif.{cmd}"), ch);
+                update_aiff(z, v, &x, ch, bend_b, hw, cy)
+            }
+            Kind::Svx(s) => {
+                cy.cc(&format!("vo.svx.{cmd}"), ch);
+                update_svx(s, v, &x, ch, bend_b, hw, cy)
+            }
         };
         let v = &mut self.v[ch];
         match v.cmd {
@@ -936,48 +1161,102 @@ impl Sonix {
             Cmd::Release => v.status = Status::Rel,
             Cmd::None => {}
         }
+        self.cy.c("vo.post");
         v.cmd = Cmd::None;
         stop
     }
 
     fn output(&mut self, hw: &mut Hw) {
         let mut mask = 0u16;
+        self.cy.c("out");
         for ch in 0..4 {
             let v = &mut self.v[ch];
+            let cy = &mut self.cy;
             if v.status == Status::Idle {
+                cy.cc("out.idle", ch);
                 continue;
             }
             let synth = matches!(v.instr.and_then(|i| self.instrs[i].as_ref()), Some(Kind::Synth(_)));
             if synth {
+                cy.cc("out.syn", ch);
+                cy.w(hw);
                 hw.loc(ch, v.out.0);
+                cy.cc("out.syn.len", ch);
+                cy.w(hw);
                 hw.len(ch, v.out.1);
+                cy.cc("out.syn.per", ch);
+                cy.w(hw);
                 hw.per(ch, v.per);
+                cy.cc("out.syn.vol", ch);
+                cy.w(hw);
                 hw.vol(ch, v.vol & 0x7F);
                 if v.started {
+                    cy.c("out.syn.st");
                     v.started = false;
                     mask |= 1 << ch;
                 }
+                cy.cc("out.syn.end", ch);
             } else {
+                let started = v.block == 2;
                 match v.block {
                     2 => {
+                        cy.cc("out.b2", ch);
+                        cy.w(hw);
                         hw.len(ch, v.first.1);
+                        cy.cc("out.b2.loc", ch);
+                        cy.w(hw);
                         hw.loc(ch, v.first.0);
+                        cy.cc("out.b2.end", ch);
                         mask |= 1 << ch;
                         v.block = 1;
                     }
                     1 => {
+                        cy.cc("out.b1", ch);
+                        cy.w(hw);
                         hw.len(ch, v.looped.1);
+                        cy.cc("out.b1.loc", ch);
+                        cy.w(hw);
                         hw.loc(ch, v.looped.0);
+                        cy.cc("out.b1.end", ch);
                         v.block = 0;
                     }
-                    _ => {}
+                    _ => cy.cc("out.b0", ch),
                 }
+                cy.cc("out.per", ch);
+                cy.w(hw);
                 hw.per(ch, v.per);
+                cy.cc("out.vol", ch);
+                cy.w(hw);
                 hw.vol(ch, v.vol & 0x7F);
+                if started {
+                    cy.c("out.dma");
+                }
+                cy.cc("out.end", ch);
             }
         }
-        hw.wait(DMA_WAIT);
+        self.cy.c("wait.pre");
+        self.beam_wait();
+        self.cy.w(hw);
         hw.dmacon(0x8000 | mask);
+    }
+
+    /// The wait before DMA is switched on: nine changes of the beam's line, each polled from a
+    /// read of the line (the first poll 16 cycles after it, then every 25), the next round's read
+    /// 35 cycles after the poll that saw the change; the DMACON write 79 cycles after the last.
+    fn beam_wait(&mut self) {
+        let t0 = self.cy.t0;
+        let line = |c: i64| (t0 + c.max(0) as u64 / 2) / LINE;
+        let mut q = self.cy.cy;
+        let mut p = q;
+        for _ in 0..9 {
+            let l0 = line(q);
+            p = q + 16;
+            while line(p) == l0 {
+                p += 25;
+            }
+            q = p + 35;
+        }
+        self.cy.cy = p + 79;
     }
 
     fn voices(&mut self, hw: &mut Hw) -> u16 {
@@ -987,6 +1266,8 @@ impl Sonix {
                 if self.update(ch, hw) {
                     stop |= 1 << ch;
                 }
+            } else {
+                self.cy.cc("vo.skip", ch);
             }
         }
         stop
@@ -1003,77 +1284,107 @@ struct Ctx {
 }
 
 /// One step of the envelope (stage 0-2 move toward their level; stage 3 is the release).
-fn envelope(stage: &mut usize, level: &mut u32, lv: &[u16; 4], rt: &[u16; 4], rscale: u16) {
+fn envelope(stage: &mut usize, level: &mut u32, lv: &[u16; 4], rt: &[u16; 4], rscale: u16, cy: &mut Cy) {
     let target = (lv[*stage] as u32) << 16;
     let rc = rt[*stage] as u32;
+    cy.c(&format!("env{}", *stage));
+    cy.n("env.sh", ((rc >> 5) ^ 7) & 63);
     let step = ((((rc & 0x1F) + 0x21) * rscale as u32).wrapping_shl(3)).checked_shr(((rc >> 5) ^ 7) & 63).unwrap_or(0);
     let (t, l) = (target as i32 as i64, *level as i32 as i64);
     if (t - l).abs() <= step as i64 {
+        cy.c(if t == l { "env.at.eq" } else if l < t { "env.at.lt" } else { "env.at.gt" });
         *level = target;
         if *stage < 2 {
+            cy.c("env.next");
             *stage += 1;
         }
     } else if l < t {
+        cy.c("env.up");
         *level = level.wrapping_add(step);
     } else {
+        cy.c("env.down");
         *level = level.wrapping_sub(step);
     }
 }
 
-fn update_sampled(s: &Sampled, v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw: &mut Hw) -> bool {
+fn update_sampled(s: &Sampled, v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw: &mut Hw, cy: &mut Cy) -> bool {
     let mut stop = false;
     match v.cmd {
         Cmd::Start => {
+            if v.fresh {
+                cy.c("sa.new");
+                v.fresh = false;
+            }
             let n = v.note as i32;
             let o = 10 - n / 12;
             if o < 0 || o > s.hi as i32 || o < s.lo as i32 {
+                cy.c("sa.range");
                 v.cmd = Cmd::None;
                 if v.status == Status::Idle {
                     return false;
                 }
             } else {
+                cy.c("sa.start");
+                cy.n("sa.oct", o as u32);
                 let r = (n % 12) as usize;
                 v.base_period = ((if x.tiny { 0xD5C8u32 } else { 0x1AB9 } * SEMI[r] as u32) >> 15) as u16;
                 let a = s.data + s.w * ((1u32 << o) - (1u32 << s.lo.max(0))) ;
                 let (p, q) = (s.one << o, (s.w - s.one.min(s.w)) << o);
                 v.first = (a, ((p + q) / 2) as u16);
                 v.looped = if q == 0 { (x.silent, 4) } else { (a + p, (q / 2) as u16) };
+                if q == 0 {
+                    cy.c("sa.oneshot");
+                }
                 if !x.tiny || v.status == Status::Idle {
+                    cy.c("sa.lv0");
                     v.level = 0;
                 }
                 if !x.tiny || v.status != Status::On {
+                    cy.c("sa.st0");
                     v.stage = 0;
                 }
                 v.phase = 0;
+                cy.c("sa.div");
                 v.delay = divu((s.delay as u32) << 15, x.r) >> 1;
+                cy.w(hw);
                 hw.dmacon(1 << ch);
+                cy.c("sa.per2");
+                cy.w(hw);
                 hw.per(ch, 2);
+                cy.c("sa.start.end");
                 v.block = 2;
                 stop = x.tiny;
             }
         }
-        Cmd::Release => v.stage = 3,
+        Cmd::Release => {
+            cy.c("sa.rel");
+            v.stage = 3
+        }
         Cmd::None => {}
     }
     // the LFO
     if v.delay != 0 {
+        cy.c("sa.dly");
         v.delay -= 1;
     } else {
+        cy.c("sa.lfo");
         v.phase = v.phase.wrapping_add((((s.rate as u32 * x.r as u32).wrapping_shl(7)) >> 16) as u16).wrapping_add(0x40);
     }
     let mut t = (v.phase >> 7).wrapping_add(0x80);
     if t & 0x100 != 0 {
+        cy.c("sa.tri");
         t ^= 0xFF;
     }
     t ^= 0x80;
     v.lfo = -(t as u8 as i8 as i16);
-    envelope(&mut v.stage, &mut v.level, &s.lv, &s.rt, x.r);
+    envelope(&mut v.stage, &mut v.level, &s.lv, &s.rt, x.r, cy);
     let m = ((v.lfo as i32 * s.depth as i32) as i16 as i32) >> 7;
     let f = (0x1000 + m) as u16 as u32;
     let p = if x.tiny {
-        (v.base_period as u32 * ((0x1000 + m - (x.wheel as i32 - 0x80)) as u16 as u32)) >> 19
+        let g = (0x1000 + m - (x.wheel as i32 - 0x80)) as u16 as u32;
+        (v.base_period as u32 * g) >> 19
     } else {
-        bend((v.base_period as u32 * f) >> 16, bend_b)
+        bend_c((v.base_period as u32 * f) >> 16, bend_b, cy)
     };
     v.per = p as u16;
     let level = v.level >> 16;
@@ -1087,6 +1398,15 @@ fn update_sampled(s: &Sampled, v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw
         (((a * level) & 0xFFFF) >> 10) as u16
     };
     stop
+}
+
+fn bend_c(p: u32, b: u8, cy: &mut Cy) -> u32 {
+    if b == 0 {
+        cy.c("bend0");
+    } else {
+        cy.c("bend");
+    }
+    bend(p, b)
 }
 
 fn zone_period(z: &[Zone], n: u8) -> Option<(usize, u16)> {
@@ -1134,16 +1454,19 @@ fn zone_period(z: &[Zone], n: u8) -> Option<(usize, u16)> {
     None
 }
 
-fn update_aiff(z: &[Zone], v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw: &mut Hw) -> bool {
+fn update_aiff(z: &[Zone], v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw: &mut Hw, cy: &mut Cy) -> bool {
     match v.cmd {
         Cmd::Start => match zone_period(z, v.note) {
             None => {
+                cy.c("ai.range");
                 v.cmd = Cmd::None;
                 if v.status == Status::Idle {
                     return false;
                 }
             }
             Some((i, bp)) => {
+                cy.c("ai.start");
+                cy.n("ai.zone", i as u32);
                 let zone = &z[i];
                 v.base_period = bp;
                 let (p, q) = match zone.sustain {
@@ -1156,31 +1479,47 @@ fn update_aiff(z: &[Zone], v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw: &m
                 v.attack = divu(0xFF00, zone.attack.wrapping_add(1));
                 v.release = divu(0xFF00, zone.release.wrapping_add(1));
                 v.gate = true;
+                if zone.sustain.is_none() {
+                    cy.c("ai.oneshot");
+                }
+                cy.w(hw);
                 hw.dmacon(1 << ch);
+                cy.c("ai.per2");
+                cy.w(hw);
                 hw.per(ch, 2);
+                cy.c("ai.start.end");
                 v.block = 2;
             }
         },
-        Cmd::Release => v.gate = false,
+        Cmd::Release => {
+            cy.c("ai.rel");
+            v.gate = false
+        }
         Cmd::None => {}
     }
-    v.per = bend(v.base_period as u32, bend_b) as u16;
+    v.per = bend_c(v.base_period as u32, bend_b, cy) as u16;
     let speed = if v.gate { v.attack } else { v.release } as u64;
     let step = speed * x.r as u64 * 2;
     if v.gate {
+        cy.c("ai.gate");
         if v.level != 0xFF00 {
+            cy.c("ai.up");
             let l = v.level as u64 + (step >> 16);
             v.level = if step > 0xFFFF_FFFF || l >= 0xFF00 { 0xFF00 } else { l as u32 };
         }
     } else if v.level != 0 {
+        cy.c("ai.down");
         v.level = if step > 0xFFFF_FFFF { 0 } else { v.level.saturating_sub((step >> 16) as u32) };
+    } else {
+        cy.c("ai.zero");
     }
     let rv = (0xFF00u32 * (v.volume as u32 + 1)) >> 16;
     v.vol = (((((rv + 1) * v.level) >> 16) + 1) & 0xFFFF) as u16 >> 2;
     false
 }
 
-fn update_svx(s: &Svx, v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw: &mut Hw) -> bool {
+fn update_svx(s: &Svx, v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw: &mut Hw, cy: &mut Cy) -> bool {
+    let _ = x;
     match v.cmd {
         Cmd::Start => {
             let n = v.note as i32;
@@ -1191,37 +1530,54 @@ fn update_svx(s: &Svx, v: &mut Voice, x: &Ctx, ch: usize, bend_b: u8, hw: &mut H
                 ((((0x1ACu32 * SEMI[r] as u32) * 2) >> 16) as u16, 10 - q - s.shift)
             };
             if o < 0 || o > 24 || (o as i8) as i32 >= s.octaves {
+                cy.c("sv.range");
                 v.cmd = Cmd::None;
                 if v.status == Status::Idle {
                     return false;
                 }
             } else {
+                cy.c(if n >= 128 { "sv.start.hz" } else { "sv.start" });
+                cy.n("sv.oct", o as u32);
                 v.base_period = bp;
                 let (os, rp) = (s.one, s.rep);
                 let a = s.body + ((os + rp) << o) - (os + rp);
                 let (p, q) = (os << o, rp << o);
                 v.first = (a, ((p + q) / 2) as u16);
                 v.looped = if q == 0 { (x.silent, 4) } else { (a + p, (q / 2) as u16) };
+                if q == 0 {
+                    cy.c("sv.oneshot");
+                }
                 v.gate = true;
+                cy.w(hw);
                 hw.dmacon(1 << ch);
+                cy.c("sv.per2");
+                cy.w(hw);
                 hw.per(ch, 2);
+                cy.c("sv.start.end");
                 v.block = 2;
             }
         }
-        Cmd::Release => v.gate = false,
+        Cmd::Release => {
+            cy.c("sv.rel");
+            v.gate = false
+        }
         Cmd::None => {}
     }
-    v.per = bend(v.base_period as u32, bend_b) as u16;
+    v.per = bend_c(v.base_period as u32, bend_b, cy) as u16;
     v.vol = if v.gate {
+        cy.c("sv.gate");
         let rv = (0xFF00u32 * (v.volume as u32 + 1)) >> 16;
         (((((rv + 1) * ((s.vol >> 1) & 0xFFFF)) >> 16) & 0xFFFF) >> 1) as u16
     } else {
+        cy.c("sv.off");
         0
     };
     false
 }
 
-fn update_synth(s: &Synth, v: &mut Voice, x: &Ctx, bend_b: u8, hw: &mut Hw) -> bool {
+fn update_synth(s: &Synth, v: &mut Voice, x: &Ctx, bend_b: u8, hw: &mut Hw, cy: &mut Cy) -> bool {
+    let _ = hw;
+    cy.c("sy");
     match v.cmd {
         Cmd::Start => {
             let n = v.note;
@@ -1260,17 +1616,24 @@ fn update_synth(s: &Synth, v: &mut Voice, x: &Ctx, bend_b: u8, hw: &mut Hw) -> b
                     v.lfo_wait = divu((s.lfo_delay as u32) << 15, x.r) >> 2;
                     v.lfo = s.modtab[0] as i16;
                 }
+                cy.c("sy.start");
                 v.started = true;
             }
         }
-        Cmd::Release => v.stage = 3,
+        Cmd::Release => {
+            cy.c("sy.rel");
+            v.stage = 3
+        }
         Cmd::None => {}
     }
     // the LFO
     if (v.lfo_wait as i16) < 0 {
+        cy.c("sy.lfooff");
     } else if v.lfo_wait != 0 {
+        cy.c("sy.lfodly");
         v.lfo_wait -= 1;
     } else {
+        cy.c("sy.lfo");
         let inc = ((s.lfo_rate as u32 * x.r as u32).wrapping_shl(6)) >> 16;
         if x.tiny {
             let t = v.lfo_pos as u32 + inc;
@@ -1295,14 +1658,16 @@ fn update_synth(s: &Synth, v: &mut Voice, x: &Ctx, bend_b: u8, hw: &mut Hw) -> b
             v.lfo = s.modtab[(v.lfo_pos >> 8) as usize] as i16;
         }
     }
-    envelope(&mut v.stage, &mut v.level, &s.lv, &s.rt, x.r);
+    envelope(&mut v.stage, &mut v.level, &s.lv, &s.rt, x.r, cy);
     if v.glide_count != 0 {
+        cy.c("sy.glide");
         v.glide_count -= 1;
         v.base = v.base.wrapping_add(v.glide_step);
     }
     let mut xx = v.base;
     let mut sh = 5i32;
     while (xx as i16) > 0x1AC && sh > 0 {
+        cy.c("sy.oct");
         xx >>= 1;
         sh -= 1;
     }
@@ -1343,6 +1708,8 @@ fn update_synth(s: &Synth, v: &mut Voice, x: &Ctx, bend_b: u8, hw: &mut Hw) -> b
     let src = &s.bank[k * 128..k * 128 + 128];
     v.toggle ^= 0x80;
     let addr = x.buf + v.toggle;
+    cy.c(if s.wave_x == 0 { "sy.w0" } else if s.wave_y == 0 { "sy.wx" } else { "sy.wxy" });
+    cy.n("sy.words", words as u32);
     let wave = synth_wave(s, v, x, src, words as usize, sh as u32);
     hw.bus.write_bytes(addr, &wave);
     if log::log_enabled!(log::Level::Trace) {
@@ -1419,7 +1786,8 @@ impl Replayer for Sonix {
     }
 
     fn tick_clocks(&self) -> u64 {
-        self.interval as u64 * 5
+        // a CIA timer counts its value and the reload: value + 1 E clocks of 5 colour clocks
+        (self.interval as u64 + 1) * 5
     }
 
     fn songend(&self) -> bool {
@@ -1429,15 +1797,22 @@ impl Replayer for Sonix {
     fn tick(&mut self, hw: &mut Hw) {
         // the interval that starts now was programmed before this interrupt
         self.interval = self.timer;
+        self.cy.t0 = hw.bus.clock;
+        self.cy.cy = 0;
+        self.cy.c("tick");
         if self.tiny {
             if self.count != 0 {
+                self.cy.c("tk.dec");
                 self.count -= 1;
             }
             if self.count == 0 {
+                self.cy.c("tk.step");
                 self.count = self.tiny_tempo();
                 self.tiny_step(hw);
             }
             let stop = self.voices(hw);
+            self.cy.c("tk.stop");
+            self.cy.w(hw);
             hw.dmacon(stop);
         } else {
             self.snx_sequence(hw);

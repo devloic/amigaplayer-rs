@@ -48,7 +48,13 @@
 //! macro or effect sets it, the volume every tick of a running voice, and DMA
 //! on once at the end of the tick through ENPP_DMAMask (whose host waits for
 //! the DMA after it). Notes past its 64 periods read on into its variables; the
-//! port gives the DMA word that follows the table, then 0.
+//! port gives the DMA word that follows the table, then 0. It calls dtg_SongEnd
+//! at a pattern end on the song's last step and at a track step `EFFE 0001`.
+//! Its writes go through the host's calls (ENPP_Poke*, ENPP_DMAMask), each landing
+//! half the 68000 cycles its code ran since the last call returned (or since the
+//! interrupt) later: the tick charges per-path costs (`COSTS15`, with per-voice
+//! and per-track deviations `COSTS15_CTX`) fitted exactly to the reference's
+//! gaps, and a tick that runs past the next interrupt delays it (`TICK_EXIT`).
 //!
 //! TFMX 7V (`Seven`) follows the Eagleplayer TFMX_7V ("TFMX 7V Eagleplayer
 //! V2.35"): the Pro replayer grown to eight voices, 0-2 on Paula's channels
@@ -72,8 +78,9 @@
 //! start of every tick while no track has a pattern and at a track step `EFFE 0000`.
 //!
 //! All three space their writes as the originals do: each code path costs the
-//! colour clocks fitted by least squares to the Eagleplayers' write logs
-//! (`COST`, `COST15`, `COST7`), and the originals' waits for the DMA are kept.
+//! cycles fitted to the Eagleplayers' write logs (`COSTS`, `COSTS15`; 7V and the
+//! early modules colour clocks by least squares, `COST7`, `COST15`), and the
+//! originals' waits for the DMA are kept.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -3028,7 +3035,7 @@ impl Replayer for Pro {
 pub const OPEN_15: Open = Open { name: "TFMX 1.5", detect: detect_15, new: new_15 };
 
 /// CHECK5: "TFMX" not followed by "SONG" (the TFHD single file, which it also
-/// takes, is not supported here).
+/// takes, is `tfhd.rs`'s).
 pub(super) fn detect_15(d: &[u8]) -> bool {
     d.len() >= 0x800 && be32(d, 0) == 0x54464d58 && &d[5..9] != b"SONG"
 }
@@ -3106,38 +3113,159 @@ enum B {
     NewNote,
     MacroCmd,
     DmaOn,
-    DmaNow,
-    /// What the TFHD player's own pokes take before each kind of write.
-    PokeVol,
-    PokePer,
-    PokeLen,
-    PokeDma,
-    PokeLoc,
     Count,
 }
 
-/// Fitted by least squares to the reference's write times (18 modules, 120000
+/// An early module's colour clocks per code path (the Eagleplayer's tick is `COSTS15`):
+/// fitted by least squares to the Eagleplayer's write times (18 modules, 120000
 /// gaps); the time from the interrupt to the first row or voice (Tick, with
 /// Tracks) cannot be told from the reference's timer phase and is estimated.
-const COST15: [u64; B::Count as usize] = [150, 0, 0, 62, 134, 377, 375, 58, 0, 142, 187, 80, 277, 0, 63, 205, 106, 0, 0, 0, 0, 0, 0];
+const COST15: [u64; B::Count as usize] = [150, 0, 0, 62, 134, 377, 375, 58, 0, 142, 187, 80, 277, 0, 63, 205, 106];
 
-/// The TFHD player's costs (to fit): the same code paths, written straight to Paula.
-const COST15_TFHD: [u64; B::Count as usize] = [150, 0, 0, 62, 134, 377, 375, 58, 0, 142, 187, 80, 277, 0, 63, 205, 106, 0, 0, 0, 0, 0, 0];
+/// The macro commands' names, for `COSTS15` (the commands past $19 do nothing but end the tick).
+const M15_NAMES: [&str; 0x1b] = ["M_00", "M_01", "M_02", "M_03", "M_04", "M_05", "M_06", "M_07", "M_08", "M_09", "M_0A", "M_0B", "M_0C", "M_0D", "M_0E", "M_0F", "M_10", "M_11", "M_12", "M_13", "M_14", "M_15", "M_16", "M_17", "M_18", "M_19", "M_XX"];
+/// The pattern commands' names, for `COSTS15`.
+const P_NAMES: [&str; 16] = ["P_F0", "P_F1", "P_F2", "P_F3", "P_F4", "P_F5", "P_F6", "P_F7", "P_F8", "P_F9", "P_FA", "P_FB", "P_FC", "P_FD", "P_FE", "P_FF"];
 
-/// Colour clocks from the end of `new` to the first of the TFHD player's start writes.
-const TFHD15_INIT_LEAD: u64 = 871;
+/// Colour clocks from a tick's end to the next tick's start when that interrupt is already
+/// due (measured: a modified copy whose first rows run past the next interrupt).
+const TICK_EXIT: u64 = 109;
 
-/// And from the last of them to the timer's start.
-const TFHD15_INIT_TAIL: u64 = 78;
+/// 68000 cycles of the Eagleplayer's tick, by code path (sorted; a name not listed costs 0). Each
+/// host call (ENPP_Poke*, ENPP_DMAMask) lands half the cycles counted since the last one returned
+/// (or since the interrupt) later, rounded down.
+const COSTS15: &[(&str, i64)] = &[
+    ("CALL_ADR", 202),
+    ("CALL_DMA", 149),
+    ("CALL_LEN", 278),
+    ("CALL_PER", 174),
+    ("CALL_SONGEND", 25),
+    ("ENV", 123),
+    ("ENV_DONE", 36),
+    ("ENV_DOWN", 11),
+    ("ENV_NEG", -21),
+    ("ENV_WAIT", 41),
+    ("FADE", 113),
+    ("FADE_DONE", 31),
+    ("FADE_DOWN", 26),
+    ("FADE_NOW", -29),
+    ("LOOP_DEC", 33),
+    ("LOOP_FF", 35),
+    ("M14_DEC", 103),
+    ("M14_FF", 105),
+    ("MACRO", 221),
+    ("M_00", 79),
+    ("M_01", 44),
+    ("M_02", 22),
+    ("M_04", 90),
+    ("M_05", 17),
+    ("M_06_GO", 137),
+    ("M_07", 60),
+    ("M_08", 189),
+    ("M_08_OUT", 16),
+    ("M_08_POST", 90),
+    ("M_09", 157),
+    ("M_09_POST", 90),
+    ("M_0A", 28),
+    ("M_0B", 56),
+    ("M_0C", 81),
+    ("M_0C_OUT", 118),
+    ("M_0C_POST", 16),
+    ("M_0D", 36),
+    ("M_0F", 60),
+    ("M_10", 40),
+    ("M_11", 16),
+    ("M_12", 12),
+    ("M_13", 31),
+    ("M_14", 40),
+    ("M_15", 48),
+    ("M_16", 28),
+    ("M_17_OUT", 131),
+    ("M_18", 52),
+    ("M_19_MID", 8),
+    ("M_WAIT", 116),
+    ("NP", 387),
+    ("NP_NOTE", 242),
+    ("NP_PORTA", 171),
+    ("PORTA", 186),
+    ("PORTA_DOWN", 39),
+    ("PORTA_HIT", 19),
+    ("PORTA_OFF", 100),
+    ("PORTA_REACHED", 28),
+    ("PORTA_UP", 49),
+    ("PORTA_UP_REACHED", 18),
+    ("PORTA_WAIT", 129),
+    ("P_CMD", 199),
+    ("P_F0_SONGEND", 61),
+    ("P_F1", 47),
+    ("P_F1_DEC", 29),
+    ("P_F1_FF", 31),
+    ("P_F2", 100),
+    ("P_F3", 30),
+    ("P_F5_ON", 28),
+    ("P_F6", 63),
+    ("P_F7", 6),
+    ("P_FA", 31),
+    ("P_FA_FADE", 32),
+    ("P_FE", 16),
+    ("RET_ADR", 88),
+    ("RET_DMA", 20),
+    ("RET_LEN", 12),
+    ("ROW", 99),
+    ("ROW_FE_DMA", 9),
+    ("ROW_FE_POST", 179),
+    ("ROW_OFF", 14),
+    ("ROW_WAIT", 30),
+    ("TRACKS", 432),
+    ("TR_HALF", 23),
+    ("TR_HALF_SKIP", 94),
+    ("TR_PASS", 35),
+    ("TR_RESTART", 176),
+    ("TS", 222),
+    ("TS_E1", 20),
+    ("TS_E1_SONGEND", 11),
+    ("TS_E2", 16),
+    ("TS_EBIG", 4),
+    ("TS_FADE_GO", 33),
+    ("TS_K", 15),
+    ("TS_K_SET", 108),
+    ("VIB", 106),
+    ("VIB_FLIP", 60),
+    ("VOICE", 62),
+    ("V_FADE_END", 36),
+    ("V_FADE_ON", 25),
+    ("V_FADE_STEP", 81),
+    ("V_FX", 9),
+    ("V_LOCK_DEC", 14),
+    ("V_NOFX", 45),
+    ("V_OFF", 70),
+    ("V_VOL", 363),
+    ("V_VOL_POST", 15),
+    ("V_VOL_SCALE", 94),
+];
+/// The cycles a name costs more (or less) in one context: 0-3 voice `i`'s code, 10-17 track `k - 10`'s.
+const COSTS15_CTX: &[(&str, u8, i64)] = &[
+    ("CALL_LEN", 0, -23),
+    ("CALL_LEN", 2, 23),
+    ("CALL_PER", 3, 13),
+    ("CALL_VOL", 2, 23),
+    ("M_08_OUT", 0, -23),
+    ("M_08_OUT", 2, 23),
+    ("M_0C", 2, 23),
+    ("M_0C_OUT", 0, -23),
+    ("M_17", 2, 23),
+    ("M_17_OUT", 0, -23),
+    ("RET_ADR", 0, -23),
+    ("RET_ADR", 2, 23),
+    ("RET_ADR", 3, 26),
+    ("VIB_OUT", 3, -13),
+    ("V_FADE", 0, -23),
+    ("V_VOL", 3, 13),
+];
 
 pub struct V15 {
     /// An early module (`new_early`): no fade to $3F at the start, as UADE's player.
     early: bool,
-    /// Played from a TFHD file by the TFMX-1.5-TFHD player (`tfhd.rs`): DMA on per voice,
-    /// its own start writes and its own cost table.
-    tfhd: bool,
-    /// The TFHD player's start writes (their spacing is their own, no poke cost is added).
-    raw: bool,
     g: Blk<0x46>,
     w: Blk<0x120>,
     p: Blk<0xc8>,
@@ -3151,6 +3279,17 @@ pub struct V15 {
     spent: u64,
     counts: [u32; B::Count as usize],
     trace: Option<std::fs::File>,
+    /// In the Eagleplayer's tick (not an early module's): the clock of the last host call (or
+    /// the interrupt) and the 68000 cycles its code has run since (`COSTS15`).
+    in_tick: bool,
+    seg: u64,
+    cyc: i64,
+    names: Vec<(&'static str, u32, u8)>,
+    /// Whose code runs: 0-3 a voice's, 10-17 a track's, 9 neither.
+    ctx: u8,
+    /// The earliest clock the next tick's code can start: a tick that runs past the next
+    /// interrupt delays it until the host has left the interrupt (TICK_EXIT colour clocks).
+    next_tick: u64,
 }
 
 fn new_15(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -3166,10 +3305,11 @@ fn new_15(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     build_15(d, base, m, &smpl_data, false)
 }
 
-/// The TFMX-1.5-TFHD player's engine: the song part `d` is in guest memory at `base`, its
-/// samples are at `smpl` (in the same file, no copy).
-pub(super) fn new_15_tfhd(d: &[u8], base: u32, smpl: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
-    make_15(d, base, m, smpl, false, true)
+/// A TFHD file of type 1: the song part `d` is in guest memory at `base`, its samples are at
+/// `smpl` (in the same file, no copy). The Eagleplayer TFMX_1.5 plays these exactly as an
+/// `mdat` with its `smpl` (the reference's writes are the same), so the engine is the same.
+pub(super) fn new_15_tfhd(d: &[u8], base: u32, smpl: u32, _m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    make_15(d, base, smpl, false)
 }
 
 /// An early `TFMX-SONG ` module (the fixed tables of TFMX 1.5, no offsets at
@@ -3189,10 +3329,10 @@ fn build_15(d: &[u8], base: u32, m: &mut Machine, smpl_data: &[u8], early: bool)
         return None;
     }
     m.bus.write_bytes(smpl, smpl_data);
-    make_15(d, base, m, smpl, early, false)
+    make_15(d, base, smpl, early)
 }
 
-fn make_15(d: &[u8], base: u32, m: &mut Machine, smpl: u32, early: bool, tfhd: bool) -> Option<Box<dyn Replayer>> {
+fn make_15(d: &[u8], base: u32, smpl: u32, early: bool) -> Option<Box<dyn Replayer>> {
     // InitPlayer: the last subsong is before the second song starting at 0
     let (mut n, mut zeros) = (29i32, 2);
     for k in 0..31 {
@@ -3206,8 +3346,6 @@ fn make_15(d: &[u8], base: u32, m: &mut Machine, smpl: u32, early: bool, tfhd: b
     }
     let mut p = V15 {
         early,
-        tfhd,
-        raw: false,
         g: Blk([0; 0x46]),
         w: Blk([0; 0x120]),
         p: Blk([0; 0xc8]),
@@ -3221,6 +3359,12 @@ fn make_15(d: &[u8], base: u32, m: &mut Machine, smpl: u32, early: bool, tfhd: b
         spent: 0,
         counts: [0; B::Count as usize],
         trace: std::env::var_os("TFMX_TRACE").and_then(|p| std::fs::File::create(p).ok()),
+        in_tick: false,
+        next_tick: 0,
+        seg: 0,
+        cyc: 0,
+        names: Vec::new(),
+        ctx: 9,
     };
     p.g.sb(H_MASTER, 0x40);
     p.g.sb(H_MASTER + 1, 0x40);
@@ -3231,35 +3375,65 @@ fn make_15(d: &[u8], base: u32, m: &mut Machine, smpl: u32, early: bool, tfhd: b
         p.w.sw(4 * ch + W_DMA_ON, 0x8200 | 1 << ch);
         p.w.sw(4 * ch + W_DMA_OFF, 1 << ch);
     }
-    if tfhd {
-        p.tfhd_init(&mut Hw { bus: &mut m.bus });
-    }
     p.init_sound(0);
     Some(Box::new(p))
 }
 
 impl V15 {
-    /// The TFHD player's start: three groups of volume zeros before the first interrupt.
-    fn tfhd_init(&mut self, hw: &mut Hw) {
-        let t0 = hw.bus.clock + TFHD15_INIT_LEAD;
-        for start in [0u64, 804, 2397] {
-            let mut t = t0 + start;
-            for (ch, gap) in [0u64, 136, 148, 143].into_iter().enumerate() {
-                t += gap;
-                let now = hw.bus.clock;
-                hw.wait(t.saturating_sub(now));
-                hw.bus.write_word(0xdff0a8 + 16 * ch as u32, 0);
-            }
-        }
-        hw.wait(TFHD15_INIT_TAIL);
-    }
-
     fn at(&mut self, a: B) {
-        self.spent += if self.tfhd { COST15_TFHD[a as usize] } else { COST15[a as usize] };
+        if self.in_tick {
+            return;
+        }
+        self.spent += COST15[a as usize];
         self.counts[a as usize] += 1;
     }
 
+    /// The original's code for `name` runs once (in the Eagleplayer's tick).
+    fn c(&mut self, name: &'static str) {
+        if !self.in_tick {
+            return;
+        }
+        if let Ok(k) = COSTS15.binary_search_by(|e| e.0.cmp(name)) {
+            self.cyc += COSTS15[k].1;
+        }
+        if let Some(e) = COSTS15_CTX.iter().find(|e| e.0 == name && e.1 == self.ctx) {
+            self.cyc += e.2;
+        }
+        if self.trace.is_some() {
+            let v = self.ctx;
+            match self.names.iter_mut().find(|e| e.0 == name && e.2 == v) {
+                Some(e) => e.1 += 1,
+                None => self.names.push((name, 1, v)),
+            }
+        }
+    }
+
+    /// A host call returns: the next one's time counts from here.
+    fn host_done(&mut self, hw: &Hw) {
+        if self.in_tick {
+            self.seg = hw.bus.clock;
+            self.cyc = 0;
+        }
+    }
+
     fn flush(&mut self, hw: &mut Hw, what: &str) {
+        if self.in_tick {
+            let t = self.seg + (self.cyc.max(0) / 2) as u64;
+            if t > hw.bus.clock {
+                hw.bus.clock = t;
+            }
+            if let Some(f) = &mut self.trace {
+                use std::io::Write;
+                let c: Vec<String> = self
+                    .names
+                    .iter()
+                    .map(|(n, k, v)| if *v < 4 { format!("{n}#{v}:{k}") } else if (10..18).contains(v) { format!("{n}@{}:{k}", v - 10) } else { format!("{n}:{k}") })
+                    .collect();
+                let _ = writeln!(f, "{} {} {} {}", hw.bus.clock, what, self.cyc, c.join(","));
+            }
+            self.names.clear();
+            return;
+        }
         hw.wait(self.spent);
         self.spent = 0;
         if let Some(f) = &mut self.trace {
@@ -3272,37 +3446,52 @@ impl V15 {
     }
 
     fn reg(&mut self, hw: &mut Hw, a: u32, v: u16) {
-        if self.tfhd && !self.raw {
-            self.at(match a {
-                0xdff096 => B::PokeDma,
-                _ => match (a.wrapping_sub(0xdff0a0)) % 16 {
-                    4 => B::PokeLen,
-                    6 => B::PokePer,
-                    8 => B::PokeVol,
-                    _ => B::PokeDma,
-                },
-            });
-        }
+        let (pre, post, ch) = match a {
+            0xdff096 => ("CALL_DMA", "RET_DMA", 9),
+            _ => {
+                let ch = ((a.wrapping_sub(0xdff0a0)) / 16) as u8;
+                match (a.wrapping_sub(0xdff0a0)) % 16 {
+                    4 => ("CALL_LEN", "RET_LEN", ch),
+                    6 => ("CALL_PER", "RET_PER", ch),
+                    _ => ("CALL_VOL", "RET_VOL", ch),
+                }
+            }
+        };
+        self.call(pre, ch);
         self.flush(hw, "w");
         hw.bus.write_word(a, v);
+        self.host_done(hw);
+        self.call(post, ch);
+    }
+
+    /// The code around a host call for channel `ch` (9: none) runs.
+    fn call(&mut self, name: &'static str, ch: u8) {
+        let k = self.ctx;
+        self.ctx = ch;
+        self.c(name);
+        self.ctx = k;
     }
 
     /// ENPP_DMAMask (the host waits for the DMA after switching voices on).
     fn dma_mask(&mut self, hw: &mut Hw, m: u16) {
         let v = (m & 0x8000) | (m & 0xf);
-        self.reg(hw, 0xdff096, v);
+        self.call("CALL_DMA", 9);
+        self.flush(hw, "w");
+        hw.bus.write_word(0xdff096, v);
         if v & 0x8000 != 0 {
             let now = hw.bus.clock;
             hw.wait((now / LINE + 10) * LINE - now);
         }
+        self.host_done(hw);
+        self.call("RET_DMA", 9);
     }
 
     fn poke_adr(&mut self, hw: &mut Hw, ch: usize, a: u32) {
-        if self.tfhd {
-            self.at(B::PokeLoc);
-        }
+        self.call("CALL_ADR", ch as u8);
         self.flush(hw, "w");
         hw.loc(ch, a);
+        self.host_done(hw);
+        self.call("RET_ADR", ch as u8);
     }
 
     fn poke_len(&mut self, hw: &mut Hw, ch: usize, v: u16) {
@@ -3368,18 +3557,6 @@ impl V15 {
     /// $11348: the pending song's start.
     fn start_song(&mut self, hw: &mut Hw) {
         self.at(B::Start);
-        if self.tfhd {
-            // the TFHD player's first interrupt: volumes off, DMA off, modulation off
-            self.raw = true;
-            for ch in 0..4 {
-                self.poke_vol(hw, ch, 0);
-                self.spent += 10;
-            }
-            self.dma_mask(hw, 0x000f);
-            self.spent += 1113;
-            self.reg(hw, 0xdff09e, 0x00ff);
-            self.raw = false;
-        }
         // $11588
         self.g.sw(H_PLAYING, 0);
         for ch in 0..4 {
@@ -3395,7 +3572,9 @@ impl V15 {
         self.p.sw(0, first);
         self.p.sw(2, hw.bus.r16(a4 + 0x140));
         self.p.sw(6, hw.bus.r16(a4 + 0x180));
+        self.c("START");
         if self.p.w(6) > 0xf {
+            self.c("ST_HALF");
             self.g.sw(H_HALF, 1);
             self.p.sw(6, self.p.w(6).wrapping_sub(0x10));
             self.g.sw(H_NOTE_WAIT, 2);
@@ -3406,6 +3585,7 @@ impl V15 {
             self.p.sl(0x68 + 4 * k, 0);
         }
         if self.p.w(0) != 0x1ff {
+            self.c("ST_STEP");
             self.track_step(hw);
         }
         self.g.sw(H_RESTART, 0);
@@ -3426,12 +3606,18 @@ impl V15 {
     fn track_step(&mut self, hw: &mut Hw) {
         for _ in 0..0x10000 {
             self.at(B::TrackStep);
+            self.c("TS");
             let a0 = self.mdat.wrapping_add(((self.p.w(4) as u32) << 4) & 0xffff).wrapping_add(0x800);
             let d0 = hw.bus.r16(a0);
             if d0 == 0xeffe {
                 let c = hw.bus.r16(a0 + 2);
                 let a0 = a0 + 4;
-                match if c < 5 { c } else { 0 } {
+                if c >= 5 {
+                    self.c("TS_EBIG");
+                }
+                let c = if c < 5 { c } else { 0 };
+                self.c(["TS_E0", "TS_E1", "TS_E2", "TS_E3", "TS_E4"][c as usize]);
+                match c {
                     0 => {
                         // stops without telling DeliTracker; UADE's player (an early
                         // module) reports the song end here
@@ -3444,6 +3630,13 @@ impl V15 {
                     1 => {
                         self.p.sw(4, hw.bus.r16(a0));
                         self.songend = true;
+                        if self.in_tick {
+                            // the Eagleplayer calls dtg_SongEnd here
+                            self.call("CALL_SONGEND", 9);
+                            self.flush(hw, "s");
+                            self.host_done(hw);
+                            self.c("TS_E1_SONGEND");
+                        }
                     }
                     2 => {
                         let s = hw.bus.r16(a0);
@@ -3458,21 +3651,26 @@ impl V15 {
                     _ => {
                         self.p.sw(4, self.p.w(4).wrapping_add(1));
                         if self.fade_lock == 0 {
+                            self.c("TS_FADE");
                             let (b1, b3) = (hw.bus.r8(a0 + 1), hw.bus.r8(a0 + 3));
-                            self.fade(b1, b3);
+                            self.fade(b1, b3, true);
                         }
                     }
                 }
                 continue;
             }
+            self.c("TS_PAT");
             for k in 0..8 {
                 if k == 7 && self.g.w(H_SFX7) != 0 {
+                    self.c("TS_SFX7");
                     break;
                 }
+                self.c("TS_K");
                 let w = hw.bus.r16(a0 + 2 * k as u32);
                 let o = 4 * k;
                 self.p.sw(0x48 + o, w);
                 if (w as i16) >= 0 {
+                    self.c("TS_K_SET");
                     let pa = self.pattern_addr(hw, ((w >> 8) & 0x7f) as u32);
                     self.p.sl(0x28 + o, pa);
                     self.p.sl(0x68 + o, 0);
@@ -3483,23 +3681,29 @@ impl V15 {
         }
     }
 
-    fn fade(&mut self, speed: u8, end: u8) {
+    /// `ts`: a track step's fade, whose paths cost differently from a pattern's.
+    fn fade(&mut self, speed: u8, end: u8, ts: bool) {
         self.fade_lock = 1;
         self.g.sb(H_FADE_END, end);
         self.g.sb(H_FADE_CNT, speed);
         self.g.sb(H_FADE_RESET, speed);
+        self.c("FADE");
         if speed == 0 {
+            self.c(if ts { "TS_FADE_NOW" } else { "FADE_NOW" });
             self.g.sb(H_MASTER, end);
         } else {
             self.g.sb(H_FADE_DIR, 1);
             let m = self.g.b(H_MASTER);
             if m != end {
+                self.c(if ts { "TS_FADE_GO" } else { "FADE_GO" });
                 if m > end {
+                    self.c("FADE_DOWN");
                     self.g.sb(H_FADE_DIR, 0xff);
                 }
                 return;
             }
         }
+        self.c("FADE_DONE");
         self.g.sb(H_FADE_DIR, 0);
         self.fade_lock = 0;
     }
@@ -3507,23 +3711,33 @@ impl V15 {
     /// $107FC: the patterns, when the speed counter is up.
     fn tracks(&mut self, hw: &mut Hw) {
         self.at(B::Tracks);
+        self.c("TRACKS");
         let c = self.g.w(H_SPEED_CNT);
         if c != 0 {
+            self.c("TR_WAIT");
             self.g.sw(H_SPEED_CNT, c - 1);
             return;
         }
         self.g.sw(H_SPEED_CNT, self.p.w(6));
         'again: for _ in 0..256 {
             if self.g.w(H_HALF) != 0 && self.g.w(H_RESTART) != 0 {
+                self.c("TR_HALF_SKIP");
                 self.g.sw(H_SPEED_CNT, 0);
                 self.g.sw(H_RESTART, 0);
                 self.g.sw(H_NOTE_WAIT, 1);
                 return;
             }
+            if self.g.w(H_HALF) != 0 {
+                self.c("TR_HALF");
+            }
+            self.c("TR_PASS");
             self.g.sb(H_RESTART, 0);
             for k in 0..8 {
+                self.ctx = 10 + k as u8;
                 self.pattern(hw, 4 * k);
+                self.ctx = 9;
                 if self.g.b(H_RESTART) != 0 {
+                    self.c("TR_RESTART");
                     continue 'again;
                 }
             }
@@ -3534,15 +3748,20 @@ impl V15 {
     /// $1088E: pattern `o / 4`'s row.
     fn pattern(&mut self, hw: &mut Hw, o: usize) {
         self.at(B::Row);
+        self.c("ROW");
         let num = self.p.b(0x48 + o);
         if num >= 0x90 {
+            self.c("ROW_OFF");
             if num == 0xfe {
+                self.c("ROW_FE");
                 self.p.sb(0x48 + o, 0xff);
                 if self.p.w(0x08 + o) == 0 {
                     // $11322
+                    self.c("ROW_FE_DMA");
                     let i = (self.p.b(0x49 + o) & 3) as usize;
                     let m = self.w.w(4 * i + W_DMA_OFF);
                     self.dma_mask(hw, m);
+                    self.c("ROW_FE_POST");
                     self.w.sw(4 * i + W_STATE, 0);
                 }
             }
@@ -3550,10 +3769,13 @@ impl V15 {
         }
         let wt = self.p.w(0x6a + o);
         if wt != 0 {
+            self.c("ROW_WAIT");
             self.p.sw(0x6a + o, wt - 1);
             return;
         }
+        self.c("ROW_READ");
         for _ in 0..0x10000 {
+            self.c("P_CMD");
             let step = self.p.w(0x68 + o);
             let a = self.p.l(0x28 + o).wrapping_add(step.wrapping_mul(4) as i16 as u32);
             let cmd = hw.bus.r32(a);
@@ -3562,42 +3784,61 @@ impl V15 {
             let step_on = |s: &mut Self| s.p.sw(0x68 + o, s.p.w(0x68 + o).wrapping_add(1));
             if b0 < 0xf0 {
                 self.at(B::Note);
+                self.c("P_NOTE");
                 self.g.sb(H_CMD, b0.wrapping_add(self.p.b(0x49 + o)));
                 if self.p.w(0x08 + o) == 0 {
+                    self.c("P_NOTE_ON");
                     self.note_port(hw, self.g.l(H_CMD));
                 }
                 step_on(self);
                 continue;
             }
             self.at(B::PatternCmd);
+            self.c(P_NAMES[(b0 & 0xf) as usize]);
             let (b1, b3) = ((cmd >> 16) as u8, cmd as u8);
             let w1 = cmd as u16;
             match b0 & 0xf {
                 0 => {
                     if self.p.b(0x48 + o) == 0x81 {
+                        self.c("P_F0_81");
                         self.p.sb(0x48 + o, 0xff);
                         return;
                     }
                     if self.p.w(4) == self.p.w(2) {
+                        self.c("P_F0_LAST");
                         self.p.sw(4, self.p.w(0));
                         self.songend = true;
+                        if self.in_tick {
+                            // the Eagleplayer calls dtg_SongEnd here
+                            self.call("CALL_SONGEND", 9);
+                            self.flush(hw, "s");
+                            self.host_done(hw);
+                            self.c("P_F0_SONGEND");
+                        }
                     } else {
+                        self.c("P_F0_NEXT");
                         self.p.sw(4, self.p.w(4).wrapping_add(1));
                     }
+                    let k = self.ctx;
+                    self.ctx = 9;
                     self.track_step(hw);
+                    self.ctx = k;
                     self.g.sw(H_RESTART, 0xffff);
                     return;
                 }
                 1 => {
                     let c = self.p.b(0x4a + o);
                     if c == 0 {
+                        self.c("P_F1_ZERO");
                         self.p.sb(0x4a + o, 0xff);
                         step_on(self);
                         continue;
                     }
                     if c == 0xff {
+                        self.c("P_F1_FF");
                         self.p.sb(0x4a + o, b1.wrapping_sub(1));
                     } else {
+                        self.c("P_F1_DEC");
                         self.p.sb(0x4a + o, c - 1);
                     }
                     self.p.sw(0x68 + o, w1);
@@ -3629,6 +3870,7 @@ impl V15 {
                 }
                 5..=7 => {
                     if self.p.w(0x08 + o) == 0 {
+                        self.c("P_F5_ON");
                         self.note_port(hw, self.g.l(H_CMD));
                     }
                     step_on(self);
@@ -3640,7 +3882,8 @@ impl V15 {
                 }
                 10 => {
                     if self.fade_lock == 0 {
-                        self.fade(b1, b3);
+                        self.c("P_FA_FADE");
+                        self.fade(b1, b3, false);
                     }
                     step_on(self);
                 }
@@ -3659,7 +3902,23 @@ impl V15 {
         self.g.sl(H_CMD, d0);
         let [b0, b1, b2, b3] = d0.to_be_bytes();
         let v = 4 * (b2 & 3) as usize;
-        if self.w.b(v + W_LOCK + 3) == 0 {
+        self.c("NP");
+        if self.w.b(v + W_LOCK + 3) != 0 {
+            self.c("NP_LOCKED");
+        } else {
+            self.c(if b0 == 0xf7 {
+                "NP_F7"
+            } else if b0 == 0xf6 {
+                "NP_F6"
+            } else if b0 == 0xf5 {
+                "NP_F5"
+            } else if b0 >= 0xbf {
+                "NP_PORTA"
+            } else if b0 < 0x40 {
+                "NP_NOTE"
+            } else {
+                "NP_NONE"
+            });
             if b0 == 0xf7 {
                 self.w.sb(v + W_ENV, 1);
                 self.w.sb(v + W_ENV + 3, b1);
@@ -3700,47 +3959,62 @@ impl V15 {
     /// $10CF2: voice `ch`'s tick.
     fn voice(&mut self, hw: &mut Hw, ch: usize) {
         self.at(B::Voice);
+        self.c("VOICE");
         let v = 4 * ch;
         let st = self.w.w(v + W_STATE);
         if (st as i16) <= 0 {
             self.at(B::Effects);
+            self.c(if st == 0 { "V_FX_OFF" } else { "V_FX" });
             let l = self.w.w(v + W_LOCK);
             if (l as i16) >= 0 {
+                self.c("V_LOCK_DEC");
                 self.w.sw(v + W_LOCK, l.wrapping_sub(1));
             } else {
+                self.c("V_LOCK_CLR");
                 self.w.sb(v + W_LOCK + 3, 0);
             }
             self.vibrato(hw, ch);
             self.porta(hw, ch);
             self.envelope(ch);
             self.at(B::Fade);
+            self.c("V_FADE");
             let dir = self.g.b(H_FADE_DIR);
             if dir != 0 {
+                self.c("V_FADE_ON");
                 let c = self.g.b(H_FADE_CNT).wrapping_sub(1);
                 self.g.sb(H_FADE_CNT, c);
                 if c == 0 {
+                    self.c("V_FADE_STEP");
                     self.g.sb(H_FADE_CNT, self.g.b(H_FADE_RESET));
                     let m = self.g.b(H_MASTER).wrapping_add(dir);
                     self.g.sb(H_MASTER, m);
                     if self.g.b(H_FADE_END) == m {
+                        self.c("V_FADE_END");
                         self.g.sb(H_FADE_DIR, 0);
                         self.fade_lock = 0;
                     }
                 }
             }
             self.at(B::Volume);
+            self.c("V_VOL");
             let d1 = self.g.b(H_MASTER) as u16;
             let mut d0 = self.w.b(v + W_VOL) as u16;
             if d1 != 0x40 {
+                self.c("V_VOL_SCALE");
                 d0 = ((((d0 << 2) as u32 * d1 as u32) as u16) >> 8) & 0x7f;
             }
             self.poke_vol(hw, ch, d0);
+            self.c("V_VOL_POST");
+        } else {
+            self.c("V_NOFX");
         }
         let st = self.w.w(v + W_STATE);
         if st == 0 {
+            self.c("V_OFF");
             return;
         }
         if (st as i16) > 0 {
+            self.c("V_NEW");
             self.at(B::NewNote);
             self.w.sw(v + W_STEP, 0);
             self.w.sw(v + W_WAIT, self.g.w(H_NOTE_WAIT));
@@ -3753,18 +4027,23 @@ impl V15 {
     fn vibrato(&mut self, hw: &mut Hw, ch: usize) {
         let v = 4 * ch;
         if self.w.b(v + W_VIB_RESET) == 0 {
+            self.c("VIB_OFF");
             return;
         }
         self.at(B::Vibrato);
+        self.c("VIB");
         let o = self.w.w(v + W_VIB_OFS).wrapping_add(self.w.b(v + W_VIB_WIDTH) as i8 as u16);
         self.w.sw(v + W_VIB_OFS, o);
         let d0 = o.wrapping_add(self.w.w(v + W_PER));
         if self.w.w(v + W_PORTA_RATE) == 0 {
+            self.c("VIB_OUT");
             self.poke_per(hw, ch, d0);
+            self.c("VIB_POST");
         }
         let t = self.w.b(v + W_VIB_TIME).wrapping_sub(1);
         self.w.sb(v + W_VIB_TIME, t);
         if t == 0 {
+            self.c("VIB_FLIP");
             self.w.sb(v + W_VIB_TIME, self.w.b(v + W_VIB_RESET));
             self.w.sb(v + W_VIB_WIDTH, (self.w.b(v + W_VIB_WIDTH) ^ 0xff).wrapping_add(1));
         }
@@ -3774,61 +4053,79 @@ impl V15 {
         let v = 4 * ch;
         let rate = self.w.w(v + W_PORTA_RATE);
         if rate == 0 {
+            self.c("PORTA_OFF");
             return;
         }
         let t = self.w.b(v + W_PORTA_TIME).wrapping_sub(1);
         self.w.sb(v + W_PORTA_TIME, t);
         if t != 0 {
+            self.c("PORTA_WAIT");
             return;
         }
         self.at(B::Porta);
+        self.c("PORTA");
         self.w.sb(v + W_PORTA_TIME, self.w.b(v + W_PORTA_RESET));
         let d1 = self.w.w(v + W_PER);
         let mut d0 = self.w.w(v + W_PORTA_PER);
         if d0 == d1 {
+            self.c("PORTA_EQ");
             return;
         }
-        let reached = if d0 < d1 {
+        let up = d0 < d1;
+        let reached = if up {
+            self.c("PORTA_UP");
             d0 = d0.wrapping_add(rate);
             d0 >= d1
         } else {
+            self.c("PORTA_DOWN");
             d0 = d0.wrapping_sub(rate);
             d0 <= d1
         };
         if reached {
+            self.c(if d0 == d1 { "PORTA_HIT" } else if up { "PORTA_UP_REACHED" } else { "PORTA_REACHED" });
             self.w.sw(v + W_PORTA_RATE, 0);
             d0 = self.w.w(v + W_PER);
         }
         let d0 = d0 & 0x7ff;
         self.w.sw(v + W_PORTA_PER, d0);
         self.poke_per(hw, ch, d0);
+        self.c("PORTA_POST");
     }
 
     fn envelope(&mut self, ch: usize) {
         let v = 4 * ch;
         if self.w.b(v + W_ENV) == 0 {
+            self.c("ENV_OFF");
             return;
         }
         let c = self.w.b(v + W_ENV + 1);
         if c != 0 {
+            self.c("ENV_WAIT");
             self.w.sb(v + W_ENV + 1, c - 1);
             return;
         }
         self.at(B::Env);
+        self.c("ENV");
         self.w.sb(v + W_ENV + 1, self.w.b(v + W_ENV));
         let end = self.w.b(v + W_ENV + 2) as i8;
         let rate = self.w.b(v + W_ENV + 3);
         let vol = self.w.b(v + W_VOL);
         let done = if end > vol as i8 {
+            self.c("ENV_UP");
             let n = vol.wrapping_add(rate) as i8;
             self.w.sb(v + W_VOL, n as u8);
             end <= n
         } else {
+            self.c("ENV_DOWN");
             let n = vol.wrapping_sub(rate) as i8;
             self.w.sb(v + W_VOL, n as u8);
+            if n < 0 {
+                self.c("ENV_NEG");
+            }
             n < 0 || end >= n
         };
         if done {
+            self.c("ENV_DONE");
             self.w.sb(v + W_VOL, end as u8);
             self.w.sb(v + W_ENV, 0);
         }
@@ -3839,17 +4136,21 @@ impl V15 {
         let v = 4 * ch;
         let wt = self.w.w(v + W_WAIT);
         if wt != 0 {
+            self.c("M_WAIT");
             self.w.sw(v + W_WAIT, wt - 1);
             return;
         }
+        self.c("M_RUN");
         let step_on = |s: &mut Self| s.w.sw(v + W_STEP, s.w.w(v + W_STEP).wrapping_add(1));
         for _ in 0..0x10000 {
             self.at(B::MacroCmd);
+            self.c("MACRO");
             let a = self.w.l(v + W_MACRO).wrapping_add(self.w.w(v + W_STEP).wrapping_mul(4) as i16 as u32);
             let cmd = hw.bus.r32(a);
             self.g.sl(H_CMD, cmd);
             let [c, b1, b2, b3] = cmd.to_be_bytes();
             let w1 = cmd as u16;
+            self.c(M15_NAMES[(c as usize).min(0x1a)]);
             match c {
                 0x00 | 0x0a | 0x13 => {
                     if c != 0x13 {
@@ -3860,17 +4161,12 @@ impl V15 {
                     if c != 0x0a {
                         let m = self.w.w(v + W_DMA_OFF);
                         self.dma_mask(hw, m);
+                        self.c(if c == 0 { "M_00_POST" } else { "M_13_POST" });
                     }
                     step_on(self);
                 }
                 0x01 => {
-                    if self.tfhd {
-                        // the TFHD player switches the voice on at once, with its own
-                        // word (master enable set), and does not wait for the DMA
-                        self.at(B::DmaNow);
-                        let m = self.w.w(v + W_DMA_ON);
-                        self.reg(hw, 0xdff096, m);
-                    } else if self.early {
+                    if self.early {
                         // UADE's player switches the voice on at once
                         let m = self.w.w(v + W_DMA_ON);
                         self.dma_mask(hw, m);
@@ -3883,11 +4179,13 @@ impl V15 {
                     let a = (cmd & 0xff_ffff).wrapping_add(self.g.l(H_SMPL));
                     self.w.sl(v + W_ADDR, a);
                     self.poke_adr(hw, ch, a);
+                    self.c("M_02_POST");
                     step_on(self);
                 }
                 0x03 => {
                     self.w.sw(v + W_LEN, w1);
                     self.poke_len(hw, ch, w1);
+                    self.c("M_03_POST");
                     step_on(self);
                 }
                 0x04 => {
@@ -3897,18 +4195,22 @@ impl V15 {
                 }
                 0x05 | 0x10 => {
                     if c == 0x10 && self.w.b(v + W_KEY) == 0 {
+                        self.c("M_10_NOKEY");
                         step_on(self);
                         continue;
                     }
                     let l = self.w.b(v + W_LOOP);
                     if l == 0 {
+                        self.c("LOOP_END");
                         self.w.sb(v + W_LOOP, 0xff);
                         step_on(self);
                         continue;
                     }
                     if l == 0xff {
+                        self.c("LOOP_FF");
                         self.w.sb(v + W_LOOP, b1.wrapping_sub(1));
                     } else {
+                        self.c("LOOP_DEC");
                         self.w.sb(v + W_LOOP, l - 1);
                     }
                     self.w.sw(v + W_STEP, w1);
@@ -3924,9 +4226,11 @@ impl V15 {
                     // through $10D66: the voice's state and wait again
                     let st = self.w.w(v + W_STATE);
                     if st == 0 {
+                        self.c("M_06_OFF");
                         return;
                     }
                     if (st as i16) > 0 {
+                        self.c("M_06_NEW");
                         self.w.sw(v + W_STEP, 0);
                         self.w.sw(v + W_WAIT, self.g.w(H_NOTE_WAIT));
                         self.w.sw(v + W_STATE, 0xffff);
@@ -3934,9 +4238,11 @@ impl V15 {
                     }
                     let wt = self.w.w(v + W_WAIT);
                     if wt != 0 {
+                        self.c("M_06_WAIT");
                         self.w.sw(v + W_WAIT, wt - 1);
                         return;
                     }
+                    self.c("M_06_GO");
                 }
                 0x07 => {
                     self.w.sw(v + W_STATE, 0);
@@ -3955,7 +4261,9 @@ impl V15 {
                     .wrapping_add(w1);
                     self.w.sw(v + W_PER, per);
                     if self.w.w(v + W_PORTA_RATE) == 0 {
+                        self.c("M_08_OUT");
                         self.poke_per(hw, ch, per);
+                        self.c(if c == 8 { "M_08_POST" } else { "M_09_POST" });
                     }
                     step_on(self);
                     return;
@@ -3974,8 +4282,10 @@ impl V15 {
                     self.w.sb(v + W_VIB_WIDTH, b3);
                     self.w.sb(v + W_VIB_WIDTH + 1, 1);
                     if self.w.w(v + W_PORTA_RATE) == 0 {
+                        self.c("M_0C_OUT");
                         let p = self.w.w(v + W_PER);
                         self.poke_per(hw, ch, p);
+                        self.c("M_0C_POST");
                         self.w.sw(v + W_VIB_OFS, 0);
                     }
                     step_on(self);
@@ -4000,28 +4310,34 @@ impl V15 {
                     let a = self.w.l(v + W_ADDR).wrapping_add(w1 as i16 as u32);
                     self.w.sl(v + W_ADDR, a);
                     self.poke_adr(hw, ch, a);
+                    self.c("M_11_POST");
                     step_on(self);
                 }
                 0x12 => {
                     let l = self.w.w(v + W_LEN).wrapping_add(w1);
                     self.w.sw(v + W_LEN, l);
                     self.poke_len(hw, ch, l);
+                    self.c("M_12_POST");
                     step_on(self);
                 }
                 0x14 => {
                     if self.w.b(v + W_KEY) == 0 {
+                        self.c("M_14_NOKEY");
                         step_on(self);
                         continue;
                     }
                     let l = self.w.b(v + W_LOOP);
                     if l == 0 {
+                        self.c("M14_END");
                         self.w.sb(v + W_LOOP, 0xff);
                         step_on(self);
                         continue;
                     }
                     if l == 0xff {
+                        self.c("M14_FF");
                         self.w.sb(v + W_LOOP, b3.wrapping_sub(1));
                     } else {
+                        self.c("M14_DEC");
                         self.w.sb(v + W_LOOP, l - 1);
                     }
                     return;
@@ -4034,7 +4350,9 @@ impl V15 {
                 0x17 => {
                     self.w.sw(v + W_PER, w1);
                     if self.w.w(v + W_PORTA_RATE) == 0 {
+                        self.c("M_17_OUT");
                         self.poke_per(hw, ch, w1);
+                        self.c("M_17_POST");
                     }
                     step_on(self);
                 }
@@ -4045,15 +4363,19 @@ impl V15 {
                     let l = self.w.w(v + W_LEN).wrapping_sub((d0 as u16) >> 1);
                     self.w.sw(v + W_LEN, l);
                     self.poke_adr(hw, ch, a);
+                    self.c("M_18_MID");
                     self.poke_len(hw, ch, l);
+                    self.c("M_18_POST");
                     step_on(self);
                 }
                 0x19 => {
                     let a = self.g.l(H_SMPL);
                     self.w.sl(v + W_ADDR, a);
                     self.poke_adr(hw, ch, a);
+                    self.c("M_19_MID");
                     self.w.sw(v + W_LEN, 1);
                     self.poke_len(hw, ch, 1);
+                    self.c("M_19_POST");
                     step_on(self);
                 }
                 _ => {
@@ -4067,7 +4389,16 @@ impl V15 {
     /// $1079E.
     fn interrupt(&mut self, hw: &mut Hw) {
         self.flush(hw, "t");
+        if !self.early {
+            if hw.bus.clock < self.next_tick {
+                hw.bus.clock = self.next_tick;
+            }
+            self.in_tick = true;
+            self.seg = hw.bus.clock;
+            self.cyc = 0;
+        }
         self.at(B::Tick);
+        self.c("TICK");
         // UADE's player (an early module) reports the song end at the start of every tick
         // while all eight tracks have no pattern (a step of FE/FF tracks), the Eagleplayer
         // never does: seen in the reference's song-end calls, the tick after the stop
@@ -4075,22 +4406,32 @@ impl V15 {
             self.songend = true;
         }
         if (self.g.w(H_START) as i16) >= 0 {
+            self.c("I_START");
             self.start_song(hw);
         } else if self.g.w(H_ON) == 0 || self.g.w(H_PLAYING) == 0 {
+            self.c("I_IDLE");
             self.fade_lock = 0;
         } else {
+            self.c("I_PLAY");
             self.tracks(hw);
             self.dma_on = 0;
             for ch in 0..4 {
+                self.ctx = ch as u8;
                 self.voice(hw, ch);
             }
+            self.ctx = 9;
             if self.dma_on != 0 {
                 self.at(B::DmaOn);
+                self.c("DMA_ON");
                 let m = self.dma_on;
                 self.dma_mask(hw, m);
+            } else {
+                self.c("NO_DMA_ON");
             }
         }
         self.flush(hw, "e");
+        self.in_tick = false;
+        self.next_tick = hw.bus.clock + TICK_EXIT;
     }
 }
 

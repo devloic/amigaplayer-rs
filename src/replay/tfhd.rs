@@ -28,7 +28,11 @@
 //! * the subsong numbering of Pro is the compacted table's (the table is rewritten in guest
 //!   memory like the player does), and a file with no kept entry plays entry 0;
 //! * the CIA register writes of the Pro player's start-up (timer and filter) are not made;
-//!   the engine's timer is started at the time the specification gives.
+//!   the engine's timer is started at the time the specification gives;
+//! * a type-1 file is played as the Eagleplayer TFMX_1.5 (which takes these files too, and
+//!   is the reference's player for them) plays it: exactly as the `mdat` with its `smpl`,
+//!   its writes the same. The TFMX-1.5-TFHD player's own start-up writes and its DMA on at
+//!   the macro's command are not made.
 
 use super::{be16, be32, tfmx, Open, Replayer};
 use crate::machine::Machine;

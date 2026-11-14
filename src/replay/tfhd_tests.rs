@@ -191,32 +191,26 @@ fn song_table_is_compacted() {
 }
 
 #[test]
-fn v15_switches_each_voice_on_at_the_macros_command() {
+fn v15_switches_the_voices_on_at_the_ticks_end() {
+    // the Eagleplayer TFMX_1.5 plays a type-1 TFHD file as an mdat: no start writes of its
+    // own, DMA on once at the end of the tick through ENPP_DMAMask (the mask's low bits and
+    // the set bit), then the host's wait for the DMA
     let s = song(b"TFMX \0\0\x01\0\0", &MACRO);
     let (_, log) = play(tfhd(1, 0x12, &s, &square())).unwrap();
-    // the start: three groups of volume zeros, then (first interrupt) the volumes, DMA
-    // off and the modulation off
-    assert!(log[..12].iter().all(|w| (0xdff0a8..=0xdff0d8).contains(&w.0)));
-    assert!(log[..12].iter().all(|w| w.1 == 0));
+    assert!(reg(&log, 0xDFF09E).is_empty());
     let dmacon = reg(&log, 0xDFF096);
-    assert_eq!(dmacon[0], 0x000f);
-    assert!(reg(&log, 0xDFF09E).contains(&0x00ff));
-    // DMA on is the voice's own word with the master enable bit, written at the command;
-    // the plain 1.5 player's end-of-tick word does not appear
-    assert!(dmacon.contains(&0x8201), "{dmacon:x?}");
-    assert!(!dmacon.contains(&0x8001));
-    // and with no wait for the DMA after it: the next write follows within a few hundred
-    // colour clocks
-    let at = log.iter().position(|w| w.0 == 0xDFF096 && w.1 == 0x8201).unwrap();
+    assert!(dmacon.contains(&0x8001), "{dmacon:x?}");
+    assert!(!dmacon.contains(&0x8201));
+    let at = log.iter().position(|w| w.0 == 0xDFF096 && w.1 == 0x8001).unwrap();
     if let Some(next) = log.get(at + 1) {
-        assert!(next.2 - log[at].2 < 8 * crate::paula::LINE, "{} {}", next.2, log[at].2);
+        assert!(next.2 - log[at].2 >= 9 * crate::paula::LINE, "{} {}", next.2, log[at].2);
     }
 }
 
 #[test]
 fn v15_tfhd_equals_the_plain_engine_in_values() {
     // the same song part played through TFHD gives the plain player's volumes, periods and
-    // lengths (the differences are the DMA-on word and the start)
+    // lengths
     let s = song(b"TFMX \0\0\x01\0\0", &MACRO);
     let (_, log) = play(tfhd(1, 0x12, &s, &square())).unwrap();
     assert!(reg(&log, 0xDFF0A4).contains(&16));

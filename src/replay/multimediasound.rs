@@ -102,12 +102,81 @@ fn layout(d: &[u8]) -> Option<Layout> {
     (total <= d.len() as u64).then_some(Layout { songlen: n, samples: s as u32, total })
 }
 
+/// Whether the init looks for subsongs (section 3.3 of the specification).
+fn splits(l: &Layout, tempo: u16) -> bool {
+    !(l.total == 95_688 || tempo <= 0x1BB6 || l.songlen == 1)
+}
+
+/// The 68000 cycles from the machine's start to the host's first volume write, the original's
+/// init (measured on the reference's runs of the 10 refcmp rows and 30 one-change copies, exact
+/// on all): 28 a sample with data, 31 an order and 4 more where it is at least the highest
+/// before it; when it looks for subsongs, 98, then 133 a position whose pattern has a note, 65
+/// an entry 0 and 62 an entry 0xFFFE0000 before it, for an empty-or-stopped pattern 83 at the
+/// last position, otherwise 205 (213 from the second on) and 36 a long of the next pattern up
+/// to its first one not 0 (57 less when all 256 are 0: the abort).
+fn init_cycles(d: &[u8], l: &Layout, tempo: u16) -> u64 {
+    let n = l.songlen as usize;
+    let order = |p: usize| d.get(ORDERS as usize + p).copied().unwrap_or(0) as usize;
+    let long = |p: usize, k: usize| {
+        let o = PATTERNS as usize + 1024 * order(p) + 4 * k;
+        d.get(o..o + 4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let mut c = 5955 + 28 * (0..31).filter(|&i| be32(d, 4 * i) != 0).count() as u64 + 31 * n as u64;
+    let mut max = 0;
+    for p in 0..n {
+        if order(p) >= max {
+            max = order(p);
+            c += 4;
+        }
+    }
+    if !splits(l, tempo) {
+        return c;
+    }
+    c += 98;
+    let (mut p, mut split) = (1, 0);
+    while p < n {
+        let mut quiet = true;
+        for k in 0..256 {
+            match long(p, k) {
+                0 => c += 65,
+                0xFFFE_0000 => c += 62,
+                _ => {
+                    quiet = false;
+                    break;
+                }
+            }
+        }
+        if !quiet {
+            c += 133;
+            p += 1;
+            continue;
+        }
+        if p + 1 == n {
+            c += 83;
+            break;
+        }
+        let k = (0..256).find(|&k| long(p + 1, k) != 0);
+        c += 205 + if split > 0 { 8 } else { 0 } + k.map_or(36 * 256 - 57, |k| 36 * (k as u64 + 1));
+        split += 1;
+        if k.is_none() {
+            break;
+        }
+        p += 2;
+    }
+    c
+}
+
+/// The host's volume writes of the song init, colour clocks after the previous one (the first after
+/// the init); and from the last of them to the song's start, by the filter byte (0, 0xFF, other).
+const HOST_GAPS: [u64; 8] = [0, 150, 162, 174, 262, 150, 162, 174];
+const HOST_START: [u64; 3] = [1724, 1733, 1746];
+
 /// The (start, end) position pairs. `end` is exclusive; 0 marks the one subsong an aborted split
 /// leaves without an end.
 fn subsongs(d: &[u8], l: &Layout, tempo: u16) -> Vec<(u16, u16)> {
     let n = l.songlen as u16;
     let mut v = vec![(0u16, n)];
-    if l.total == 95_688 || tempo <= 0x1BB6 || n == 1 {
+    if !splits(l, tempo) {
         return v;
     }
     let pat = |p: u16| -> &[u8] {
@@ -206,6 +275,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         a = a.wrapping_add(len);
     }
     let subs = subsongs(d, &l, tempo);
+    // the song starts on the clock the original's init and the host's start reach
+    m.bus.clock = m.bus.clock.max(init_cycles(d, &l, tempo) / 2);
+    let filter = d[0x433];
     let mut s = MultiMediaSound {
         base,
         samples,
@@ -224,6 +296,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         next_at: first_tick_hook(),
     };
     s.init_song(0, &mut m.bus);
+    m.bus.clock += HOST_START[match filter {
+        0 => 0,
+        0xFF => 1,
+        _ => 2,
+    }];
     Some(Box::new(s))
 }
 
@@ -260,11 +337,9 @@ impl MultiMediaSound {
     /// cleared, speed 6.
     fn init_song(&mut self, n: u16, b: &mut Bus) {
         self.cur = n.min(self.subs.len() as u16 - 1);
-        for _ in 0..2 {
-            for ch in 0..4u32 {
-                b.clock += 150;
-                b.write_word(0xDFF0A8 + 16 * ch, 0);
-            }
+        for (k, g) in HOST_GAPS.iter().enumerate() {
+            b.clock += g;
+            b.write_word(0xDFF0A8 + 16 * (k as u32 & 3), 0);
         }
         // the filter byte: 0 is on, 0xFF off, anything else is cleared in the module and is on
         match b.r8(self.base + 0x433) {

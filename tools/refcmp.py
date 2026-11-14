@@ -29,7 +29,7 @@ settings, WAV for WAV:
              verified original), else for the formats checked in uade123
              (UADE123_REF) uade123 itself with the port's output stage. A silent
              original is the reference of a port that is silent too. The formats
-             no Amiga player plays here (BLACKBOX_REF: 8SVX, AIFF, WAV, MPEG audio,
+             no Amiga player plays here (BLACKBOX_REF: 8SVX, 16SV, AIFF, WAV, MPEG audio,
              ZX AY, NSF, Symphonie; and X-Tracker, whose original's output stage the port
              does not have) are checked against sox, ffmpeg, libgme or
              openmpt123 instead; where an original does run (ORIGINAL_BEFORE_BLACKBOX: NSF's
@@ -959,7 +959,10 @@ def render_sndh_oracle(ctx, mod, po, pplay):
 #     read Fibonacci-delta 8SVX and ffmpeg decodes it low nibble first (README): those are checked
 #     against the original Eagleplayer's data instead (render_8svx_dma below).
 #   ffmpeg: MPEG audio layers 1-3, decoded by ffmpeg 6 at the file's rate (float), then as for sox
-#     (the port decodes with symphonia-bundle-mp3 onto the same recorded-audio stage).
+#     (the port decodes with symphonia-bundle-mp3 onto the same recorded-audio stage). IFF 16SV
+#     (16-bit big-endian PCM; sox 14.4.2 refuses a FORM that is not 8SVX), likewise: ffmpeg's iff
+#     demuxer plays the whole BODY. Calibration: the 12 archive files (SoundBox's, mono, 16-44.1 kHz)
+#     decode sample for sample equal to the port's at the file's rate.
 #   gme: ZX Spectrum AY (ZXAYEMUL) and NSF through ffmpeg's libgme, 48 kHz, the port's subsong (only
 #     where their original, ORIGINAL_BEFORE_BLACKBOX, gives no render). GME is
 #     another emulation (its own AY level curve and output filters): no file plays alike, the class
@@ -970,7 +973,7 @@ def render_sndh_oracle(ctx, mod, po, pplay):
 SOX = '/usr/bin/sox'
 FFMPEG = '/usr/bin/ffmpeg'
 OPENMPT123 = '/usr/bin/openmpt123'
-BLACKBOX_REF = {'iff8svx': 'sox', 'aiff': 'sox', 'riffwave': 'sox', 'riffwaveadpcm': 'sox',
+BLACKBOX_REF = {'iff8svx': 'sox', 'iff16sv': 'ffmpeg', 'aiff': 'sox', 'riffwave': 'sox', 'riffwaveadpcm': 'sox',
                 'iff8svxfibonacci': None, 'zxayemul': 'gme', 'nsf': 'gme',
                 'symphonie': 'openmpt123', 'symphoniepro': 'openmpt123',
                 'mpegaudiolayer1': 'ffmpeg', 'mpegaudiolayer2': 'ffmpeg', 'mpegaudiolayer3': 'ffmpeg',

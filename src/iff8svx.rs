@@ -1,12 +1,14 @@
-//! IFF 8SVX sample files (8-bit, uncompressed or Fibonacci-delta), decoded for the
-//! recorded-audio player (`crate::aiff::AiffPlayer::from_pcm`, the engine's PCM backend).
+//! IFF 8SVX sample files (8-bit, uncompressed or Fibonacci-delta) and their 16-bit sibling
+//! IFF 16SV (uncompressed), decoded for the recorded-audio player
+//! (`crate::aiff::AiffPlayer::from_pcm`, the engine's PCM backend).
 //!
-//! A port of NostalgicPlayer's IFF-8SVX sample converter and of what its Sample player
-//! does with it (https://github.com/neumatho/NostalgicPlayer, MIT, Thomas Neumann:
-//! `LICENSE-NostalgicPlayer`): `Source/Agents/SampleConverters/Iff8Svx/`
+//! A port of NostalgicPlayer's IFF-8SVX and IFF-16SV sample converters and of what its
+//! Sample player does with them (https://github.com/neumatho/NostalgicPlayer, MIT, Thomas
+//! Neumann: `LICENSE-NostalgicPlayer`): `Source/Agents/SampleConverters/Iff8Svx/`
 //! `Iff8SvxLoaderWorkerBase.cs`, `Formats/PcmFormat.cs`, `Formats/FibonacciFormat.cs`,
-//! and `Source/Agents/Players/Sample/SampleWorker.cs`. The 16 Fibonacci deltas are the
-//! format's own table.
+//! `Source/Agents/SampleConverters/Iff16Sv/` `Iff16SvLoaderWorkerBase.cs`,
+//! `Formats/PcmFormat.cs`, and `Source/Agents/Players/Sample/SampleWorker.cs`. The 16
+//! Fibonacci deltas are the format's own table.
 //!
 //! As that source:
 //! - `VHDR` gives the lengths, the rate, the octaves and the compression (0 PCM,
@@ -26,6 +28,13 @@
 //! A repeating Fibonacci file goes on with the values decoded the first time (the
 //! source restarts its accumulator at 0 when it seeks).
 //!
+//! IFF 16SV (`FORM` / `16SV`) has the same chunks; its samples are big-endian signed 16-bit
+//! words and the only compression is 0 (PCM). `VHDR`'s lengths count samples, but SoundBox
+//! (R. Koerber) wrote them in bytes: as the source, when the lengths (times two for a stereo
+//! file) are the `BODY` chunk's size they are taken as bytes. A stereo file's right channel
+//! starts that many bytes into `BODY` (half of it for the source's own files). Not as the
+//! source: the repeat start of such a file is halved too (the source keeps it in bytes).
+//!
 //! The file is not trusted: every size is cut down to the bytes that are there, and the
 //! decoded data is at most twice the file's size.
 
@@ -44,15 +53,18 @@ struct Chunks {
     body: Option<(usize, usize)>,
     stereo: bool,
     title: String,
+    /// a FORM 16SV: 16-bit samples
+    sixteen: bool,
 }
 
-/// The chunks of a FORM 8SVX file (the first `VHDR` and `BODY`), or `None` for any other file.
+/// The chunks of a FORM 8SVX or FORM 16SV file (the first `VHDR` and `BODY`), or `None` for
+/// any other file.
 fn chunks(data: &[u8]) -> Option<Chunks> {
-    if data.len() < 12 || &data[0..4] != b"FORM" || &data[8..12] != b"8SVX" {
+    if data.len() < 12 || &data[0..4] != b"FORM" || !(&data[8..12] == b"8SVX" || &data[8..12] == b"16SV") {
         return None;
     }
     let end = data.len();
-    let mut c = Chunks { vhdr: None, body: None, stereo: false, title: String::new() };
+    let mut c = Chunks { vhdr: None, body: None, stereo: false, title: String::new(), sixteen: &data[8..12] == b"16SV" };
     let mut o = 12;
     // every turn moves on by 8 bytes at least
     while o + 8 <= end {
@@ -85,7 +97,13 @@ fn chunks(data: &[u8]) -> Option<Chunks> {
 
 /// Whether `data` is a FORM 8SVX file with a `VHDR` of a known compression and a `BODY`.
 pub fn detect(data: &[u8]) -> bool {
-    chunks(data).is_some_and(|c| c.body.is_some() && c.vhdr.is_some_and(|v| v.4 <= 1))
+    chunks(data).is_some_and(|c| !c.sixteen && c.body.is_some() && c.vhdr.is_some_and(|v| v.4 <= 1))
+}
+
+/// Whether `data` is a FORM 16SV file with a PCM `VHDR` and a `BODY` (the source's check:
+/// compression 0, the only one IFF 16SV has).
+pub fn detect_16sv(data: &[u8]) -> bool {
+    chunks(data).is_some_and(|c| c.sixteen && c.body.is_some() && c.vhdr.is_some_and(|v| v.4 == 0))
 }
 
 /// The samples `src` (one channel's Fibonacci-delta bytes) decodes to.
@@ -106,9 +124,13 @@ fn fibonacci(src: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Decodes the file: signed 8-bit samples at the file's rate, the frames interleaved.
+/// Decodes the file: signed 8-bit (16SV: 16-bit big-endian) samples at the file's rate, the
+/// frames interleaved.
 pub fn decode(data: Vec<u8>) -> Result<Pcm, String> {
     let c = chunks(&data).ok_or("IFF 8SVX: not a FORM 8SVX file")?;
+    if c.sixteen {
+        return decode_16sv(data, c);
+    }
     let (one_shot, repeat, rate, octaves, comp) = c.vhdr.ok_or("IFF 8SVX: no VHDR chunk")?;
     let (at, stop) = c.body.ok_or("IFF 8SVX: no BODY chunk")?;
     if comp > 1 {
@@ -167,6 +189,59 @@ pub fn decode(data: Vec<u8>) -> Result<Pcm, String> {
     Ok(pcm(d, 0, n, 2))
 }
 
+/// `decode` for a FORM 16SV file.
+fn decode_16sv(data: Vec<u8>, c: Chunks) -> Result<Pcm, String> {
+    let (one_shot, repeat, rate, octaves, comp) = c.vhdr.ok_or("IFF 16SV: no VHDR chunk")?;
+    let (at, stop) = c.body.ok_or("IFF 16SV: no BODY chunk")?;
+    if comp != 0 {
+        return Err(format!("IFF 16SV: unsupported compression {comp}"));
+    }
+    if rate == 0 {
+        return Err("IFF 16SV: bad sample rate".into());
+    }
+    let mut total = one_shot as u64 + repeat as u64;
+    let mut len = total;
+    for _ in 1..octaves {
+        len = len.saturating_mul(2);
+        total = total.saturating_add(len);
+    }
+    let chans = if c.stereo { 2 } else { 1 };
+    // the sample count of all channels; SoundBox's files give it in bytes (the BODY's size)
+    let mut all = total.saturating_mul(chans);
+    let in_bytes = all == (stop - at) as u64;
+    if in_bytes {
+        all /= 2;
+    }
+    let loop_start = (octaves == 1 && repeat != 0).then_some(if in_bytes { one_shot as usize / 2 } else { one_shot as usize });
+    let pcm = |data: Vec<u8>, start: usize, frames: usize, channels: usize| Pcm {
+        data,
+        start,
+        frames,
+        channels,
+        bits: 16,
+        enc: Enc::Be,
+        rate: rate as f64,
+        format: "IFF 16SV",
+        title: c.title,
+        loop_start: loop_start.filter(|&s| s < frames),
+    };
+    if !c.stereo {
+        // played from the file itself
+        return Ok(pcm(data, at, (stop - at) / 2, 1));
+    }
+    // stereo: the right channel's words follow the left's; the source's right channel starts the
+    // count of all samples in bytes into BODY (a count that does not fit the data: half of it each)
+    let body = &data[at..stop];
+    let left = if all == 0 || all >= body.len() as u64 { body.len() / 4 * 2 } else { all as usize & !1 };
+    let n = left.min(body.len() - left) / 2;
+    let mut d = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        d.extend_from_slice(&body[2 * i..2 * i + 2]);
+        d.extend_from_slice(&body[left + 2 * i..left + 2 * i + 2]);
+    }
+    Ok(pcm(d, 0, n, 2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +270,11 @@ mod tests {
     }
 
     fn form(chunks: &[Vec<u8>]) -> Vec<u8> {
-        let mut body = b"8SVX".to_vec();
+        form_of(b"8SVX", chunks)
+    }
+
+    fn form_of(kind: &[u8; 4], chunks: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = kind.to_vec();
         for c in chunks {
             body.extend(c);
         }
@@ -298,6 +377,72 @@ mod tests {
         assert_eq!(decode(form(&[vhdr(1, 0, 0, 1, 0), chunk(b"BODY", &[1])])).err().unwrap(), "IFF 8SVX: bad sample rate");
         // a short VHDR is none
         assert!(!detect(&form(&[chunk(b"VHDR", &[0; 19]), chunk(b"BODY", &[1])])));
+    }
+
+    fn words(p: &Pcm) -> Vec<i16> {
+        p.data[p.start..p.start + p.frames * p.channels * 2].chunks_exact(2).map(|b| i16::from_be_bytes([b[0], b[1]])).collect()
+    }
+
+    #[test]
+    fn sixteen_bit_mono_lengths_in_samples_or_in_bytes() {
+        let body: Vec<u8> = [0x0102i16, -2, 0x7FFF, -0x8000].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let f = form_of(b"16SV", &[vhdr(4, 0, 31300, 1, 0), chunk(b"NAME", b"Snare\0"), chunk(b"BODY", &body)]);
+        assert!(detect_16sv(&f) && !detect(&f));
+        let p = decode(f).unwrap();
+        assert_eq!((p.channels, p.bits, p.rate, p.format, p.title.as_str()), (1, 16, 31300.0, "IFF 16SV", "Snare"));
+        assert_eq!(words(&p), [0x0102, -2, 0x7FFF, -0x8000]);
+        let mut x = AiffPlayer::from_pcm(p, 31300).unwrap();
+        let mut out = [0f32; 10];
+        assert_eq!(x.render(&mut out), 4);
+        assert_eq!(&out[2..8], &[-2.0 / 32768.0, -2.0 / 32768.0, 32767.0 / 32768.0, 32767.0 / 32768.0, -1.0, -1.0]);
+        // a repeat part counted in samples, and SoundBox's in bytes (one-shot + repeat = BODY's size)
+        let f = form_of(b"16SV", &[vhdr(2, 2, 8000, 1, 0), chunk(b"BODY", &body)]);
+        assert_eq!(decode(f).unwrap().loop_start, Some(2));
+        let f = form_of(b"16SV", &[vhdr(4, 4, 8000, 1, 0), chunk(b"BODY", &body)]);
+        assert_eq!(decode(f).unwrap().loop_start, Some(2));
+    }
+
+    #[test]
+    fn sixteen_bit_stereo_is_left_then_right() {
+        let w = |v: &[i16]| v.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
+        let chan = chunk(b"CHAN", &6u32.to_be_bytes());
+        // 2 samples a channel, in samples and in bytes
+        for n in [2, 4] {
+            let f = form_of(b"16SV", &[vhdr(n, 0, 8000, 1, 0), chan.clone(), chunk(b"BODY", &w(&[1, 2, -1, -2]))]);
+            let p = decode(f).unwrap();
+            assert_eq!((p.channels, p.frames), (2, 2));
+            assert_eq!(words(&p), [1, -1, 2, -2]);
+        }
+        // a header that does not fit the data: half each (an odd word over)
+        let f = form_of(b"16SV", &[vhdr(0, 0, 8000, 1, 0), chan, chunk(b"BODY", &w(&[1, 2, 3, 4, 5]))]);
+        assert_eq!(words(&decode(f).unwrap()), [1, 3, 2, 4]);
+    }
+
+    #[test]
+    fn sixteen_bit_refused_and_damaged() {
+        assert!(!detect_16sv(&form_of(b"16SV", &[vhdr(1, 0, 8000, 1, 1), chunk(b"BODY", &[1, 2])])));
+        assert!(!detect_16sv(&form_of(b"16SV", &[vhdr(1, 0, 8000, 1, 0)])));
+        assert!(!detect_16sv(&form(&[vhdr(1, 0, 8000, 1, 0), chunk(b"BODY", &[1, 2])])));
+        assert_eq!(decode(form_of(b"16SV", &[vhdr(1, 0, 8000, 1, 1), chunk(b"BODY", &[1, 2])])).err().unwrap(), "IFF 16SV: unsupported compression 1");
+        assert_eq!(decode(form_of(b"16SV", &[vhdr(1, 0, 0, 1, 0), chunk(b"BODY", &[1, 2])])).err().unwrap(), "IFF 16SV: bad sample rate");
+        for stereo in [false, true] {
+            let mut c = vec![vhdr(4, 4, 8000, 1, 0)];
+            if stereo {
+                c.push(chunk(b"CHAN", &6u32.to_be_bytes()));
+            }
+            c.push(chunk(b"BODY", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]));
+            let f = form_of(b"16SV", &c);
+            for n in 0..f.len() {
+                for g in [f[..n].to_vec(), { let mut g = f.clone(); g[n] = 0xFF; g }, { let mut g = f.clone(); g[n] = 0; g }] {
+                    if let Ok(p) = decode(g) {
+                        let mut x = AiffPlayer::from_pcm(p, 48000).unwrap();
+                        for _ in 0..4 {
+                            x.render(&mut [0.0; 64]);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

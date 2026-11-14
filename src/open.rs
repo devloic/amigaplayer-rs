@@ -19,10 +19,10 @@ pub fn detect(data: &[u8]) -> Option<String> {
     if crate::aiff::detect(data) {
         return Some("AIFF".to_string());
     }
-    // the recorded-audio formats the engine plays on the same player, in its order (IFF 8SVX and
+    // the recorded-audio formats the engine plays on the same player, in its order (IFF 8SVX, 16SV and
     // RIFF WAVE of the kinds the decoders know, MPEG audio that decodes, ZX Spectrum AY tunes);
     // one that does not decode is not claimed
-    if crate::iff8svx::detect(data) {
+    if crate::iff8svx::detect(data) || crate::iff8svx::detect_16sv(data) {
         return crate::iff8svx::decode(data.to_vec()).ok().map(|p| p.format.to_string());
     }
     if crate::riffwave::detect(data) {
@@ -67,6 +67,7 @@ pub fn detect(data: &[u8]) -> Option<String> {
 pub fn claimed_by_several(data: &[u8]) -> bool {
     if crate::aiff::detect(data)
         || crate::iff8svx::detect(data)
+        || crate::iff8svx::detect_16sv(data)
         || crate::riffwave::detect(data)
         || crate::mpegaudio::detect(data)
         || crate::replay::ay::detect(data)

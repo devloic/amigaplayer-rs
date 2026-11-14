@@ -194,7 +194,7 @@ impl Options {
 pub const MAX_SEEK_SECS: f64 = 86_400.0;
 
 /// The names of the formats the library can play: every open replayer, the built-in
-/// ProTracker, the recorded-audio decoders (AIFF, IFF 8SVX, RIFF WAVE, MPEG audio), the AY, NSF and SNDH
+/// ProTracker, the recorded-audio decoders (AIFF, IFF 8SVX, IFF 16SV, RIFF WAVE, MPEG audio), the AY, NSF and SNDH
 /// players and the PC tracker loaders of the libxmp port. Several
 /// of them may be reported by [`Song::format`] and [`detect`] under a more specific
 /// name (a version or variant).
@@ -203,6 +203,7 @@ pub fn formats() -> Vec<&'static str> {
         "ProTracker",
         "AIFF",
         "IFF 8SVX",
+        "IFF 16SV",
         "RIFF WAVE",
         "MPEG audio layer 1",
         "MPEG audio layer 2",

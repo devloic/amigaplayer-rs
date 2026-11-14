@@ -1,4 +1,4 @@
-//! `Song` takes the recorded-audio formats the engine plays (AIFF, IFF 8SVX, RIFF WAVE, MPEG audio,
+//! `Song` takes the recorded-audio formats the engine plays (AIFF, IFF 8SVX and 16SV, RIFF WAVE, MPEG audio,
 //! ZX Spectrum AY) as `amigaplayer-render` does: same recognition, same samples.
 
 use amigaplayer_rs::{detect, detect_with, formats, Error, Song};
@@ -58,6 +58,26 @@ fn svx(fib: bool) -> Vec<u8> {
     f
 }
 
+/// An IFF 16SV of SoundBox's kind: VHDR's one-shot length in bytes (the BODY's size).
+fn svx16() -> Vec<u8> {
+    let body: Vec<u8> = (0..600i32).flat_map(|i| (((i * 523) % 30000 - 15000) as i16).to_be_bytes()).collect();
+    let mut vhdr = Vec::new();
+    vhdr.extend((body.len() as u32).to_be_bytes());
+    vhdr.extend(0u32.to_be_bytes());
+    vhdr.extend(32u32.to_be_bytes());
+    vhdr.extend(31300u16.to_be_bytes());
+    vhdr.push(1);
+    vhdr.push(0);
+    vhdr.extend(0x10000u32.to_be_bytes());
+    let mut b = b"16SV".to_vec();
+    b.extend(chunk(b"VHDR", &vhdr, true));
+    b.extend(chunk(b"BODY", &body, true));
+    let mut f = b"FORM".to_vec();
+    f.extend((b.len() as u32).to_be_bytes());
+    f.extend(b);
+    f
+}
+
 fn aiff() -> Vec<u8> {
     let mut comm = Vec::new();
     comm.extend(1u16.to_be_bytes());
@@ -79,6 +99,7 @@ fn cases() -> Vec<(&'static str, Vec<u8>, &'static str)> {
         ("a.wav", wav_pcm16(), "RIFF WAVE"),
         ("a.8svx", svx(false), "IFF 8SVX"),
         ("b.8svx", svx(true), "IFF 8SVX (Fibonacci)"),
+        ("a.16sv", svx16(), "IFF 16SV"),
         ("a.aiff", aiff(), "AIFF"),
         ("a.mp3", MP3_MONO22.to_vec(), "MPEG audio layer 3"),
         ("b.mp3", MP3_STEREO44.to_vec(), "MPEG audio layer 3"),
@@ -99,7 +120,7 @@ fn render(s: &mut Song, frames: usize) -> Vec<i16> {
 #[test]
 fn recognised_and_played_under_the_engines_name() {
     let f = formats();
-    for want in ["IFF 8SVX", "RIFF WAVE", "MPEG audio layer 3", "ZXAYEMUL"] {
+    for want in ["IFF 8SVX", "IFF 16SV", "RIFF WAVE", "MPEG audio layer 3", "ZXAYEMUL"] {
         assert!(f.contains(&want), "{want} missing from formats()");
     }
     for (name, data, format) in cases() {
@@ -120,6 +141,10 @@ fn damaged_audio_files_are_not_claimed() {
     // an 8SVX of an unknown compression is not claimed either
     let mut s = svx(false);
     s[8 + 4 + 8 + 15] = 7; // sCompression
+    assert_eq!(detect(&s), None);
+    // nor a 16SV of any compression but PCM
+    let mut s = svx16();
+    s[8 + 4 + 8 + 15] = 1;
     assert_eq!(detect(&s), None);
 }
 
@@ -166,7 +191,7 @@ fn refcmp_pcm_groups_are_recognised() {
         let c: Vec<&str> = l.split('\t').collect();
         if c.len() > pi.max(fi) {
             let g = c[fi];
-            if ["AIFF", "IFF 8SVX", "RIFF WAVE", "MPEG audio", "ZX Spectrum AY"].iter().any(|k| g.contains(k)) {
+            if ["AIFF", "IFF 8SVX", "IFF 16SV", "RIFF WAVE", "MPEG audio", "ZX Spectrum AY"].iter().any(|k| g.contains(k)) {
                 seen.entry(g.to_string()).or_insert_with(|| c[pi].to_string());
             }
         }

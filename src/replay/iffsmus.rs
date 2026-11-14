@@ -35,8 +35,12 @@
 //!   the second phase half stepping by its own length, the filter tables'
 //!   wrapping differences;
 //! * the transpose shifted with its sign (NostalgicPlayer divides it unsigned);
-//! * DeliTracker's default timer until the first tick sets the tempo's, and the
-//!   time the original takes between its writes and to load (`COST`, `INIT`).
+//! * InitPlayer's timer for the first two ticks (the tempo's, which the first
+//!   sets through dtg_SetTimer, is loaded at the next underflow);
+//! * the original's time: it writes Paula only through the host's calls
+//!   (ENPP_DMAMask, ENPP_Poke*), and each lands at the clock its code's 68000
+//!   cycles since the last call reach (`COSTS`), so every write falls on the
+//!   reference's colour clock.
 //!
 //! The `Instruments:` volume's names are found in any case (an engine change:
 //! the Amiga's file systems ignore case, and many songs name their instruments
@@ -268,96 +272,113 @@ fn asr_l(v: i32, n: u32) -> i32 {
     v >> n.min(31)
 }
 
-/// The parts of the original's code that take time, counted as they run
-/// (`IffSmus::gap`).
-mod f {
-    pub const TICK: usize = 0;
-    pub const FADE: usize = 1;
-    pub const ROW: usize = 2;
-    pub const TRACK_WAIT: usize = 3;
-    pub const TRACK_READ: usize = 4;
-    pub const WORD: usize = 5;
-    pub const NOTE: usize = 6;
-    pub const INSTR_EV: usize = 7;
-    pub const VOICE_IDLE: usize = 8;
-    pub const SYNTH: usize = 9;
-    pub const SYNTH_START: usize = 10;
-    pub const SAMPLED: usize = 11;
-    pub const SAMPLED_START: usize = 12;
-    pub const FORM: usize = 13;
-    pub const FORM_START: usize = 14;
-    pub const PLAIN: usize = 15;
-    pub const MIX: usize = 16;
-    pub const PHASE: usize = 17;
-    pub const PHASE_SEG: usize = 18;
-    pub const LFO_STEP: usize = 19;
-    pub const ENV_LEVEL: usize = 20;
-    pub const PORT: usize = 21;
-    pub const OCTAVE: usize = 22;
-    pub const VIB_STEP: usize = 23;
-    pub const PLAY_SKIP: usize = 24;
-    pub const RELEASE: usize = 25;
-    pub const SYN_RET: usize = 26;
-    pub const SMP_RET: usize = 27;
-    pub const FORM_RET: usize = 28;
-    pub const N: usize = 29;
-}
-
-/// The register writes, for the time before each (`IffSmus::gap`).
-mod w {
-    pub const MUTE: usize = 0;
-    pub const MUTE_PER: usize = 1;
-    pub const DMA_OFF: usize = 2;
-    pub const SYN_LOC: usize = 3;
-    pub const SYN_LEN: usize = 4;
-    pub const SYN_PER: usize = 5;
-    pub const SYN_VOL: usize = 6;
-    pub const SMP_LEN: usize = 7;
-    pub const SMP_LOC: usize = 8;
-    pub const SMP_PER: usize = 9;
-    pub const SMP_VOL: usize = 10;
-    pub const DMA_ON: usize = 11;
-    pub const FORM_LEN: usize = 12;
-    pub const FORM_LOC: usize = 13;
-    pub const FORM_PER: usize = 14;
-    pub const FORM_VOL: usize = 15;
-    pub const N: usize = 16;
-}
-
-/// Colour clocks the original takes between its writes: what each part of its
-/// code costs (`f::`), then each write's own (`w::`), fitted (least squares) to
-/// the gaps between the writes of its write logs on 50 songs (rms 17 colour
-/// clocks). The tick's start is in the time of the init (`INIT`); no song of
-/// those plays an IFF sample, so its writes take a sampled sound's.
-const COST: [i64; f::N + w::N] = [
-    0, 118, 368, -9, 50, 14, 406, 133, 60, 1111, 485, 717, 50, 247, 247, 16, 36, 25, 108, 92, -2, 73, 19, 56, 32, 144, 65,
-    62, 62, //
-    579, 124, 718, 182, 99, 91, 87, 241, 88, 188, 89, 102, 241, 88, 188, 89,
+/// 68000 cycles of the original's code, by the part of it the port runs (the names `c` takes; a
+/// name not listed costs 0). A host call (a write, dtg_SetTimer, ENPP_SongEnd, ENPP_Amplifier) lands
+/// at the clock the cycles counted since the last one reach, halved and rounded down (the engine's
+/// static cycle table: a path's time depends only on its branches), and the count starts again
+/// there; ENPP_DMAMask's wait for the DMA ends a tick's writes. Integers fitted (exactly, the sum
+/// of absolute values kept small) to every gap between two host calls in the reference's logs of
+/// the 17 refcmp rows and of copies with an IFF instrument out of its octaves (177 451 gaps, all
+/// within the rounding but one, in row 737). Where several names always run together the split
+/// between them is arbitrary, and a few are negative (a path that skips part of a shared one).
+/// No reference plays an IFF sample (the original leaves the copies' 8SVX instruments silent), so
+/// its writes take a sampled sound's costs.
+const COSTS: &[(&str, i64)] = &[
+    ("AMP", 130),
+    ("DMA_OFF", 584),
+    ("DMA_ON", 242),
+    ("ENV_DOWN", 10),
+    ("ENV_LEVEL", 6),
+    ("ENV_NEG", 6),
+    ("ENV_NEXT", 30),
+    ("EV_END", -70),
+    ("EV_ZERO", -91),
+    ("FM_REP", 162),
+    ("FORM_LEN", 249),
+    ("FORM_LOC", 175),
+    ("FORM_PER", 207),
+    ("FORM_RET", 84),
+    ("FORM_START", 736),
+    ("FORM_VOL", 178),
+    ("HOLD", -25),
+    ("INSTR_EV", 166),
+    ("LFO_CARRY", 21),
+    ("LFO_C_NEG", 9),
+    ("LFO_STEP", 204),
+    ("LFO_STOP", -16),
+    ("LFO_WAIT", 35),
+    ("MIX", 70),
+    ("MIX2", 70),
+    ("MIX_SETUP", 208),
+    ("MIX_WRAP", 10),
+    ("MUTE", 520),
+    ("MUTEV_OLD_SYNTH", 2),
+    ("MUTE_PER", 248),
+    ("NOTE", 710),
+    ("NOTE_OTHER_TYPE", 559),
+    ("NOTE_SOUNDING", 55),
+    ("OCTAVE", 39),
+    ("PHASE", 48),
+    ("PHASE_SEG", 296),
+    ("PH_BORROW", 4),
+    ("PH_OV", 37),
+    ("PLAIN", 33),
+    ("PLAY_ON", 8),
+    ("PLAY_SKIP", 58),
+    ("RELEASE", 205),
+    ("RELEASE_ON", 12),
+    ("REL_DONE", 33),
+    ("RESTART_TRACK", 155),
+    ("ROW", -552),
+    ("ROW_END_DONE", 408),
+    ("SAMPLED", 1304),
+    ("SEQ_TEMPO", 342),
+    ("SETTIMER", 666),
+    ("SMP_LEN", 249),
+    ("SMP_LOC", 175),
+    ("SMP_PER", 207),
+    ("SMP_RET", 84),
+    ("SMP_VOL", 178),
+    ("SM_LOOP", 162),
+    ("SM_ST0", 24),
+    ("SONG_END", 831),
+    ("SP_ENTRY", 217),
+    ("SP_LOOP", 78),
+    ("SP_POST_FIRST", 13),
+    ("SP_PRE_LOC_FIRST", 3),
+    ("SYNTH", 1943),
+    ("SYN_LEN", 198),
+    ("SYN_LOC", 386),
+    ("SYN_PER", 182),
+    ("SYN_RET", 100),
+    ("SYN_VOL", 174),
+    ("SY_LFO_MODE", 228),
+    ("SY_PHASE0", 16),
+    ("SY_PORT", 453),
+    ("SY_ST0", 49),
+    ("TRACK_READ", 6),
+    ("TRACK_WAIT", 132),
+    ("VIB_NEG", 8),
+    ("VIB_STEP", 106),
+    ("VOICE_CMD0", 129),
+    ("VOICE_CMD1", 610),
+    ("VOICE_CMD2", 182),
+    ("VOICE_OFF", 195),
+    ("WORD", 108),
 ];
 
-/// The time from the start to the first tick's writes: a constant (InitPlayer,
-/// the tick's start), then each part of the loader (`l::`): a chunk, an
-/// instrument, a name compared, a file opened, a synthesis sound's filter
-/// tables, a sample shared, a track's event and note, a read, a sample loaded.
-/// Fitted to the same logs, to a few thousand colour clocks.
-const INIT: i64 = 8829;
-const INIT_COST: [i64; l::N] = [1549, -174, 390, 2253, 1056902, -1597, 29, 40, 212, 1545];
-
-/// Colour clocks from the original's timer start to the song start (the end of the host's start-up)
-/// in the reference's runs: 11456 to 12063 on 17 modules, the median.
-const START_LATE: u64 = 11665;
-/// The reference's first interval between ticks is this much shorter than a period (the median of
-/// 17 modules, 11142 to 11393 colour clocks).
-const SECOND_SHORT: u64 = 11270;
+/// The period of InitPlayer's timer: the reference's first tick falls this long after the song
+/// start, and its second as long after the first (the tempo's timer, set in the first tick, is
+/// loaded at the next underflow).
+const FIRST_PERIOD: u64 = (TIMER as u64 + 1) * 5;
 
 pub struct IffSmus {
     g: u32,
     timer: u16,
     songend: bool,
-    /// The parts of the original's code run since the last write.
-    feat: [i64; f::N],
-    /// The part of their time already let pass (`spend`).
-    paid: i64,
+    /// The clock of the last host call (or the tick's start), and the 68000 cycles spent since.
+    seg: u64,
+    cyc: i64,
     /// The first tick's time, until the engine has taken it.
     first_at: Option<u64>,
     /// The second tick's time, once the first has run (the tempo it set).
@@ -371,23 +392,6 @@ struct Loader<'a> {
     m: &'a mut Machine,
     g: u32,
     allocs: Vec<u32>,
-    /// The parts of the loader's code run (`l::`).
-    feat: [i64; l::N],
-}
-
-/// The loader's parts that take time.
-mod l {
-    pub const CHUNK: usize = 0;
-    pub const INSTRUMENT: usize = 1;
-    pub const SCAN: usize = 2;
-    pub const FILE: usize = 3;
-    pub const TABLES: usize = 4;
-    pub const SHARED: usize = 5;
-    pub const WORD: usize = 6;
-    pub const NOTE: usize = 7;
-    pub const BYTE: usize = 8;
-    pub const SAMPLE: usize = 9;
-    pub const N: usize = 10;
 }
 
 /// An open file: its contents and position, and the handle's memory.
@@ -460,7 +464,6 @@ impl Loader<'_> {
     fn open(&mut self, name: &str) -> Option<File> {
         let p = self.m.os.host_path(name, None);
         let data = self.m.os.read_file(&p).ok()?;
-        self.feat[l::FILE] += 1;
         let fh = self.m.alloc(44);
         self.allocs.push(fh);
         log::debug!("IFF-SMUS: {name} -> {} ({} bytes)", p.display(), data.len());
@@ -468,7 +471,6 @@ impl Loader<'_> {
     }
 
     fn close(&mut self, f: File) {
-        self.feat[l::BYTE] += f.reads;
         self.m.heap.free(f.fh);
         self.allocs.retain(|&a| a != f.fh);
     }
@@ -530,7 +532,6 @@ impl Loader<'_> {
         }
         while left != 0 {
             let id = f.long()?;
-            self.feat[l::CHUNK] += 1;
             let mut n = f.long()?.wrapping_add(1) & !1;
             left = left.wrapping_sub(n.wrapping_add(8));
             match &id.to_be_bytes() {
@@ -579,7 +580,6 @@ impl Loader<'_> {
                             }
                             name.push(0);
                             self.copy_in(g + G_NAME, &name);
-                            self.feat[l::INSTRUMENT] += 1;
                             let e = self.instrument(&name, dir);
                             if e == 0 {
                                 let fl = self.m.bus.r8(g + G_FLAGS);
@@ -656,9 +656,7 @@ impl Loader<'_> {
                 if d < 0 { 0 } else { hi | d as u16 }
             };
             b.w16(p, v);
-            self.feat[l::WORD] += 1;
             if hi < 0x8100 {
-                self.feat[l::NOTE] += 1;
             }
             p += 2;
         }
@@ -681,7 +679,6 @@ impl Loader<'_> {
                 continue;
             }
             let other: Vec<u8> = (0..32).map(|i| self.m.bus.r8(ins + I_NAME + i)).collect();
-            self.feat[l::SCAN] += 1;
             if same_name(&other, name) {
                 let u = self.m.bus.r16(e + 4);
                 self.m.bus.w16(e + 4, u.wrapping_add(1));
@@ -767,7 +764,6 @@ impl Loader<'_> {
                 return;
             }
         }
-        self.feat[l::TABLES] += 1;
         let t = self.alloc(0x2002);
         if t == 0 {
             return;
@@ -821,7 +817,6 @@ impl Loader<'_> {
             }
             let other: Vec<u8> = (0..32).map(|i| self.m.bus.r8(o + P_SAMPLE_NAME + i)).collect();
             if same_name(&name, &other) {
-                self.feat[l::SHARED] += 1;
                 let smp = self.m.bus.r32(o + P_SAMPLE);
                 self.m.bus.w32(ins + P_SAMPLE, smp);
                 let u = self.m.bus.r16(smp + F_USERS);
@@ -829,7 +824,6 @@ impl Loader<'_> {
                 return ins;
             }
         }
-        self.feat[l::SAMPLE] += 1;
         let smp = self.load_file(&Self::path(Some(dir), &name, ".ss"));
         let smp = if smp != 0 { smp } else { self.load_file(&Self::path(None, &name, ".ss")) };
         if smp == 0 {
@@ -865,7 +859,6 @@ impl Loader<'_> {
         // the 32 bytes read count as read: the file goes on from its start
         let mut s = File { data: f.data.clone(), pos: 0, fh: 0, reads: 0 };
         let r = self.form_chunks(&mut s, ins);
-        self.feat[l::BYTE] += s.reads;
         if r.is_none() || self.m.bus.r32(ins + X_BODY) == 0 {
             let b = self.m.bus.r32(ins + X_BODY);
             self.free(b);
@@ -945,7 +938,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     // ExtLoad: the player's variables ($12030), then the score
     let path = m.bus.read_cstr(m.deli.dir_buf) + &m.bus.read_cstr(m.deli.file_buf);
-    let mut l = Loader { m, g: 0, allocs: Vec::new(), feat: [0; l::N] };
+    let mut l = Loader { m, g: 0, allocs: Vec::new() };
     let g = l.alloc(G_SIZE);
     if g == 0 {
         return None;
@@ -974,17 +967,14 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     };
     // DeliTracker sets dtg_Timer to its default before InitSound, over
     // InitPlayer's: the first tick sets the tempo's
-    let mut s = IffSmus { g, timer: crate::deli::DEFAULT_TIMER, songend: false, feat: [0; f::N], paid: 0, first_at: None, second_at: Default::default(), ticked: false };
-    // the loader's time, then InitSound: the score from its start, for ever
-    let init = INIT + l.feat.iter().zip(INIT_COST).map(|(n, c)| n * c).sum::<i64>();
+    let mut s = IffSmus { g, timer: crate::deli::DEFAULT_TIMER, songend: false, seg: 0, cyc: 0, first_at: None, second_at: Default::default(), ticked: false };
+    // InitSound: the score from its start, for ever (the start-up's time does not matter: the
+    // song's ticks and Paula's DMA count from the song start, and the only wait on the beam,
+    // ENPP_DMAMask's, ends the tick's writes)
     let mut hw = Hw { bus: &mut l.m.bus };
-    hw.wait(init.max(0) as u64);
     s.start(&mut hw, score);
-    // the reference's song start is `START_LATE` after the original's timer started: the first
-    // tick falls one period after the timer's start
-    let timer_start = hw.bus.clock;
-    s.first_at = Some(timer_start + s.tick_clocks());
-    hw.bus.clock = timer_start + START_LATE;
+    // the song starts at the end of the start-up, InitPlayer's timer with it
+    s.first_at = Some(hw.bus.clock + FIRST_PERIOD);
     Some(Box::new(s))
 }
 
@@ -1016,11 +1006,10 @@ impl Replayer for IffSmus {
     fn tick(&mut self, hw: &mut Hw) {
         if self.first_at.is_none() && !self.ticked {
             self.ticked = true;
-            // the reference's second tick follows its first by a period less `SECOND_SHORT`
-            self.second_at.set(Some(hw.bus.clock + self.tick_clocks() - SECOND_SHORT));
+            self.second_at.set(Some(hw.bus.clock + FIRST_PERIOD));
         }
-        self.feat = [0; f::N];
-        self.feat[f::TICK] = 1;
+        self.rebase(hw);
+        self.c("TICK");
         self.fade(hw);
         self.sequence(hw);
         self.voices(hw);
@@ -1032,33 +1021,44 @@ impl IffSmus {
         self.g + G_VOICES + V_SIZE * ch as u32
     }
 
-    /// Lets the original's time since its last write pass before this one.
-    fn gap(&mut self, hw: &mut Hw, next: usize) {
-        let c = COST[f::N + next] + self.pending();
-        hw.wait((c - self.paid).max(0) as u64);
-        self.feat = [0; f::N];
-        self.paid = 0;
+    /// The original's code for `i` runs once.
+    fn c(&mut self, i: &'static str) {
+        self.cn(i, 1);
     }
 
-    /// The time of the code run since the last write.
-    fn pending(&self) -> i64 {
-        self.feat.iter().zip(COST).map(|(n, c)| n * c).sum()
+    /// The original's code for `i` runs `n` times.
+    fn cn(&mut self, i: &'static str, n: i64) {
+        if let Ok(k) = COSTS.binary_search_by(|e| e.0.cmp(i)) {
+            self.cyc += COSTS[k].1 * n;
+        }
+    }
+
+    /// The clock the code has reached: Paula plays up to it.
+    fn now(&mut self, hw: &mut Hw) {
+        let t = self.seg + (self.cyc.max(0) / 2) as u64;
+        if t > hw.bus.clock {
+            hw.bus.clock = t;
+        }
+    }
+
+    /// A host call (a write, `own` its kind): at the clock the cycles since the last reach.
+    fn host(&mut self, hw: &mut Hw, own: &'static str) {
+        self.c(own);
+        self.now(hw);
+        self.rebase(hw);
+    }
+
+    fn rebase(&mut self, hw: &Hw) {
+        self.seg = hw.bus.clock;
+        self.cyc = 0;
     }
 
     /// Lets the time of the code run so far pass, and Paula play up to then
     /// from memory as it is, before the code writes memory Paula reads.
     fn spend(&mut self, hw: &mut Hw) {
-        let c = self.pending() - self.paid;
-        if c > 0 {
-            hw.wait(c as u64);
-            self.paid += c;
-        }
+        self.now(hw);
         let b = &mut *hw.bus;
         b.paula.sync(b.clock, &b.ram);
-    }
-
-    fn count(&mut self, k: usize, n: i64) {
-        self.feat[k] += n;
     }
 
     /// The score's start ($10CF6 with start 0, no end, repeat for ever).
@@ -1143,27 +1143,31 @@ impl IffSmus {
             if hw.bus.r32(a4 + G_ENABLED) != 0 {
                 self.release(hw, t as usize);
             }
+            self.c("RESTART_TRACK");
             let b = &mut hw.bus;
             b.w32(a4 + G_HOLD, 0);
             b.w32(a4 + G_RELEASE, b.r8(a4 + G_POS + 0x11) as u32 + 1);
             let mut d = b.r8(a4 + G_POS + 0x10) as u32;
             if d != 0 {
+                self.c("RESTART_MAP");
+                let b = &mut hw.bus;
                 // the original reads the register map 4 bytes on per track
                 d = b.r8(score + 4 * t + S_MAP + d - 1) as u32;
                 if d != 0 {
                     d = g + G_INSTRS + 6 * (d - 1);
                 }
             }
-            b.w32(a4 + G_TRK_INSTR, d);
+            hw.bus.w32(a4 + G_TRK_INSTR, d);
         }
     }
 
     /// $111B0: a playing voice released.
     fn release(&mut self, hw: &mut Hw, ch: usize) {
-        self.count(f::RELEASE, 1);
+        self.cn("RELEASE", 1);
         let v = self.voice(ch);
         hw.bus.w8(v + V_CMD, 0);
         if hw.bus.r8(v + V_STATUS) == 1 {
+            self.c("RELEASE_ON");
             hw.bus.w8(v + V_CMD, 2);
         }
     }
@@ -1174,9 +1178,10 @@ impl IffSmus {
         let b = &mut hw.bus;
         let step = b.r16(g + G_FADE_STEP);
         if step == 0 {
+            self.c("FADE_NONE");
             return;
         }
-        self.count(f::FADE, 1);
+        self.cn("FADE", 1);
         let b = &mut hw.bus;
         let p = step as u32 * b.r16(g + G_CALC) as u32;
         if p & 0x8000_0000 == 0 {
@@ -1185,18 +1190,24 @@ impl IffSmus {
             let d1 = b.r16(g + G_FADE_VOL);
             let (mut d2, borrow) = b.r16(g + G_FADE_TARGET).overflowing_sub(d1);
             if borrow {
+                self.c("FADE_DOWN");
                 d3 = d3.wrapping_neg();
                 d2 = d2.wrapping_neg();
             }
             if d0 < d2 {
+                self.c("FADE_STEP");
                 let v = d1.wrapping_add(d3);
                 b.w16(g + G_FADE_VOL, v);
                 b.w16(g + G_VOL, v >> 8);
                 return;
             }
         }
+        self.c("FADE_DONE");
+        let b = &mut hw.bus;
         let t = b.r16(g + G_FADE_TARGET);
         if t == 0 {
+            self.c("FADE_ZERO");
+            let b = &mut hw.bus;
             let f = b.r8(g + G_FLAGS);
             b.w8(g + G_FLAGS, f & !1);
             if f & 1 != 0 {
@@ -1215,12 +1226,17 @@ impl IffSmus {
         if c != 0 {
             hw.bus.w16(g + G_COUNT, c - 1);
             if c - 1 != 0 {
+                self.c("SEQ_COUNT");
                 return self.sequence_end(hw);
             }
+            self.c("SEQ_COUNT0");
         }
+        self.c("SEQ_TEMPO");
         let b = &mut hw.bus;
         let t = b.r16(g + G_TEMPO) >> 1;
         if t != b.r16(g + G_CUR_TEMPO) {
+            self.c("SEQ_NEW_TEMPO");
+            let b = &mut hw.bus;
             b.w16(g + G_CUR_TEMPO, t);
             let tempo = TEMPO[t as usize & 0x7f];
             let speed = tempo >> 12;
@@ -1228,12 +1244,16 @@ impl IffSmus {
             let calc = divu((tempo as u32) << 15, speed << 12) as u16;
             b.w16(g + G_CALC, calc);
             self.timer = ((calc as u32 * TIMER as u32) >> 15) as u16;
+            // dtg_SetTimer
+            self.host(hw, "SETTIMER");
         }
+        let b = &mut hw.bus;
         if b.r16(g + G_REPEAT) == 0 {
+            self.c("SEQ_STOPPED");
             return self.sequence_end(hw);
         }
         b.w16(g + G_COUNT, b.r16(g + G_SPEED));
-        self.count(f::ROW, 1);
+        self.cn("ROW", 1);
         let b = &mut hw.bus;
         let score = b.r32(g + G_SCORE);
         let mut done = 0u16;
@@ -1247,16 +1267,23 @@ impl IffSmus {
             let end = b.r32(g + G_END);
             let ended = if (end as i32) >= 0 { time == end } else { done == 4 };
             if !ended {
+                self.c(if (end as i32) >= 0 { "ROW_END_TIME" } else { "ROW_END_DONE" });
                 break;
             }
+            self.c("SONG_END");
             self.songend = true;
+            self.host(hw, "SONGEND");
+            let b = &mut hw.bus;
             let r = b.r16(g + G_REPEAT);
             if (r as i16) >= 0 {
+                self.c("REPEAT_COUNT");
+                let b = &mut hw.bus;
                 b.w16(g + G_REPEAT, r.wrapping_sub(1));
                 if r.wrapping_sub(1) == 0 {
                     break;
                 }
             }
+            self.c("RESTART");
             self.restart(hw, score);
             done += 1;
         }
@@ -1265,6 +1292,7 @@ impl IffSmus {
 
     fn sequence_end(&mut self, hw: &mut Hw) {
         if hw.bus.r16(self.g + G_REPEAT) == 0 {
+            self.c("SEQ_END_STOP");
             hw.bus.w32(self.g + G_PLAYING, 0);
         }
     }
@@ -1272,13 +1300,18 @@ impl IffSmus {
     /// One track's row: its note's hold and release, then its next events.
     fn track(&mut self, hw: &mut Hw, score: u32, t: u32, done: &mut u16) {
         let a5 = self.g + 4 * t;
-        self.count(f::TRACK_WAIT, 1);
+        self.cn("TRACK_WAIT", 1);
         let b = &mut hw.bus;
         let hold = b.r32(a5 + G_HOLD);
         if hold != 0 {
             b.w32(a5 + G_HOLD, hold - 1);
-            if hold - 1 == 0 && b.r32(a5 + G_ENABLED) != 0 {
-                self.release(hw, t as usize);
+            if hold - 1 == 0 {
+                self.c("HOLD_DONE");
+                if hw.bus.r32(a5 + G_ENABLED) != 0 {
+                    self.release(hw, t as usize);
+                }
+            } else {
+                self.c("HOLD");
             }
             return;
         }
@@ -1286,25 +1319,30 @@ impl IffSmus {
         if rel != 0 {
             b.w32(a5 + G_RELEASE, rel - 1);
             if rel - 1 != 0 {
+                self.c("REL");
                 return;
             }
+            self.c("REL_DONE");
         }
-        self.count(f::TRACK_READ, 1);
+        self.cn("TRACK_READ", 1);
         let b = &mut hw.bus;
         let mut p = b.r32(a5 + G_POS);
         if p == 0 {
+            self.c("TRACK_NONE");
             *done += 1;
             return;
         }
         loop {
-            self.count(f::WORD, 1);
+            self.cn("WORD", 1);
             let b = &mut hw.bus;
             let w = b.r16(p);
             p += 2;
             if w == 0 {
+                self.c("EV_ZERO");
                 continue;
             }
             if w == 0xffff {
+                self.c("EV_END");
                 *done += 1;
                 return;
             }
@@ -1313,17 +1351,22 @@ impl IffSmus {
             let ev = (w >> 8) as u8;
             if ev & 0x80 == 0 {
                 // a note
+                self.c("EV_NOTE");
+                let b = &mut hw.bus;
                 let mut e = b.r32(a5 + G_TRK_INSTR);
                 if e == 0 {
-                    e = b.r32(score + S_DEFAULT_INSTR);
+                    self.c("EV_DEFAULT");
+                    e = hw.bus.r32(score + S_DEFAULT_INSTR);
                 }
+                let b = &mut hw.bus;
                 if b.r32(a5 + G_ENABLED) != 0 && e != 0 {
                     let note = ((b.r16(score + S_TRANSPOSE) as i16 >> 4) as u16).wrapping_sub(8).wrapping_add(ev as u16);
                     let mut vol = b.r16(score + 4 * t + S_TRK_VOL);
                     if b.r16(a5 + G_ENABLED + 2) != 1 {
+                        self.c("NOTE_HALF");
                         vol >>= 1;
                     }
-                    self.count(f::NOTE, 1);
+                    self.cn("NOTE", 1);
                     self.note_on(hw, t as usize, e, note, vol);
                     let h = ((len as u32 * 0xc000) >> 16) as u16;
                     hw.bus.w16(a5 + G_HOLD + 2, h);
@@ -1333,15 +1376,21 @@ impl IffSmus {
                 return;
             }
             if ev == 0x80 {
+                self.c("EV_REST");
                 b.w16(a5 + G_RELEASE + 2, len);
                 return;
             }
             if ev == 0x81 {
-                self.count(f::INSTR_EV, 1);
+                self.cn("INSTR_EV", 1);
                 let b = &mut hw.bus;
                 let r = b.r8(score + S_MAP + len as u32) as u32;
                 let e = if r == 0 { 0 } else { self.g + G_INSTRS + 6 * ((r - 1) & 0xff) };
                 b.w32(a5 + G_TRK_INSTR, e);
+                if r == 0 {
+                    self.c("INSTR_NONE");
+                }
+            } else {
+                self.c("EV_OTHER");
             }
         }
     }
@@ -1351,12 +1400,20 @@ impl IffSmus {
     fn note_on(&mut self, hw: &mut Hw, ch: usize, e: u32, note: u16, vol: u16) {
         let ins = hw.bus.r32(e);
         if ins == 0 {
+            self.c("NOTE_NO_INSTR");
             return;
         }
         let v = self.voice(ch);
         if hw.bus.r8(v + V_STATUS) != 0 {
+            self.c("NOTE_SOUNDING");
             let old = hw.bus.r32(v + V_INSTR);
             if hw.bus.r32(ins) != hw.bus.r32(old) {
+                self.c("NOTE_OTHER_TYPE");
+                self.c(match hw.bus.r32(old) {
+                    TYPE_SYNTH => "MUTEV_OLD_SYNTH",
+                    TYPE_SAMPLED => "MUTEV_OLD_SAMPLED",
+                    _ => "MUTEV_OLD_FORM",
+                });
                 self.mute_voice(hw, ch);
             }
         }
@@ -1372,6 +1429,7 @@ impl IffSmus {
         let v = self.voice(ch);
         hw.bus.w8(v + V_CMD, 0);
         if hw.bus.r8(v + V_STATUS) != 0 {
+            self.c("MUTEV_ON");
             hw.bus.w8(v + V_CMD, 3);
             if hw.bus.r32(v + V_INSTR) != 0 {
                 self.mute(hw, ch);
@@ -1383,9 +1441,9 @@ impl IffSmus {
 
     /// $110E2: the voice's DMA off, and period 2.
     fn mute(&mut self, hw: &mut Hw, ch: usize) {
-        self.gap(hw, w::MUTE);
+        self.host(hw, "MUTE");
         hw.dmacon(1 << ch);
-        self.gap(hw, w::MUTE_PER);
+        self.host(hw, "MUTE_PER");
         hw.per(ch, 2);
     }
 
@@ -1395,11 +1453,13 @@ impl IffSmus {
         let mut off = 0u16;
         for ch in 0..4 {
             let v = self.voice(ch);
+            let mut r_off = false;
             if hw.bus.r8(v + V_CMD) == 0 && hw.bus.r8(v + V_STATUS) == 0 {
-                self.count(f::VOICE_IDLE, 1);
+                self.cn("VOICE_IDLE", 1);
             } else {
                 let ins = hw.bus.r32(v + V_INSTR);
                 if ins == 0 {
+                    self.c("VOICE_NO_INSTR");
                     hw.bus.w8(v + V_STATUS, 0);
                     hw.bus.w8(v + V_CMD, 0);
                     continue;
@@ -1407,40 +1467,51 @@ impl IffSmus {
                 let start = hw.bus.r8(v + V_CMD) == 1;
                 let r = match hw.bus.r32(ins) {
                     TYPE_SYNTH => {
-                        self.count(f::SYNTH, 1);
-                        self.count(f::SYNTH_START, start as i64);
+                        self.cn("SYNTH", 1);
+                        self.cn("SYNTH_START", start as i64);
                         self.synth_setup(hw, ch, ins)
                     }
                     TYPE_SAMPLED => {
-                        self.count(f::SAMPLED, 1);
-                        self.count(f::SAMPLED_START, start as i64);
+                        self.cn("SAMPLED", 1);
+                        self.cn("SAMPLED_START", start as i64);
                         self.sampled_setup(hw, ch, ins)
                     }
                     _ => {
-                        self.count(f::FORM, 1);
-                        self.count(f::FORM_START, start as i64);
+                        self.cn("FORM", 1);
+                        self.cn("FORM_START", start as i64);
                         self.form_setup(hw, ch, ins)
                     }
                 };
                 if r {
                     off |= 1 << ch;
                 }
+                r_off = r;
             }
             let b = &mut hw.bus;
             match b.r8(v + V_CMD) {
-                1 => b.w8(v + V_STATUS, 1),
-                2 => b.w8(v + V_STATUS, 2),
-                _ => {}
+                1 => {
+                    b.w8(v + V_STATUS, 1);
+                    self.c("VOICE_CMD1");
+                }
+                2 => {
+                    b.w8(v + V_STATUS, 2);
+                    self.c("VOICE_CMD2");
+                }
+                0 => self.c("VOICE_CMD0"),
+                _ => self.c("VOICE_CMDX"),
             }
-            b.w8(v + V_CMD, 0);
+            if r_off {
+                self.c("VOICE_OFF");
+            }
+            hw.bus.w8(v + V_CMD, 0);
         }
-        self.gap(hw, w::DMA_OFF);
+        self.host(hw, "DMA_OFF");
         hw.dmacon(off);
         let mut on = 0x8000u16;
         for ch in 0..4 {
             let v = self.voice(ch);
             if hw.bus.r8(v + V_STATUS) == 0 {
-                self.count(f::PLAY_SKIP, 1);
+                self.cn("PLAY_SKIP", 1);
                 continue;
             }
             let ins = hw.bus.r32(v + V_INSTR);
@@ -1449,14 +1520,18 @@ impl IffSmus {
                 _ => self.sample_play(hw, ch, if hw.bus.r32(ins) == TYPE_SAMPLED { G_SAMPLED } else { G_IFF }),
             };
             if r {
+                self.c("PLAY_ON");
                 on |= 1 << ch;
             }
         }
-        self.gap(hw, w::DMA_ON);
+        self.host(hw, "DMA_ON");
         hw.dmacon(on);
         // ENPP_DMAMask waits for the DMA as dtg_WaitAudioDMA does: 10 lines on
         let now = hw.bus.clock;
         hw.wait((now / LINE + 10) * LINE - now);
+        self.rebase(hw);
+        // then ENPP_Amplifier (no write)
+        self.host(hw, "AMP");
     }
 
     /// The envelope's step toward its level at a rate ($115CA, $11C76).
@@ -1469,17 +1544,23 @@ impl IffSmus {
         let rate = b.r16(rates.wrapping_add(i));
         let sh = ((rate >> 5) ^ 7) as u32;
         let d3 = lsr_l((((rate & 0x1f) + 0x21) as u32 * calc) << 3, sh);
+        if (level as i32).wrapping_sub(d2 as i32) < 0 {
+            self.c("ENV_NEG");
+        }
         let d0 = (level as i32).wrapping_sub(d2 as i32).wrapping_abs();
         if d0 <= d3 as i32 {
-            self.feat[f::ENV_LEVEL] += 1;
+            self.c("ENV_LEVEL");
             d2 = level;
             let s = b.r16(step);
             if (s as i16) < 4 {
+                self.c("ENV_NEXT");
                 b.w16(step, s + 2);
             }
         } else if (d2 as i32) < (level as i32) {
+            self.c("ENV_UP");
             d2 = d2.wrapping_add(d3);
         } else {
+            self.c("ENV_DOWN");
             d2 = d2.wrapping_sub(d3);
         }
         b.w32(env, d2);
@@ -1495,29 +1576,36 @@ impl IffSmus {
         let calc = hw.bus.r16(g + G_CALC);
         let b = &mut hw.bus;
         match b.r8(v + V_CMD) {
-            0 => {}
+            0 => self.c("SY_CMD0"),
             1 => {
                 let n = b.r8(v + V_NOTE) as u16;
                 if !(0x24..0x6c).contains(&n) {
+                    self.c("SY_RANGE");
                     b.w8(v + V_CMD, 0);
                     if b.r8(v + V_STATUS) == 0 {
+                        self.c("SY_RANGE_OFF");
                         return false;
                     }
                 } else {
+                    self.c("SY_START");
                     let n = n - 0x24;
                     let st = b.r8(v + V_STATUS);
                     if st == 0 {
+                        self.c("SY_ST0");
                         b.w32(a2 + SV_ENV, 0);
                     }
                     if st != 1 {
+                        self.c("SY_ST_NOT1");
                         b.w16(a2 + SV_ENV_STEP, 0);
                     }
                     let (oct, rem) = (n / 12, n % 12);
                     let mut note = ((0xd5c8 * NOTE[rem as usize] as u32) >> (oct + 0x11)) as u16;
                     let old = b.r16(a2 + SV_NOTE);
                     if old == 0 {
+                        self.c("SY_PORT0");
                         b.w16(a2 + SV_PORT_COUNT, 0);
                     } else {
+                        self.c("SY_PORT");
                         let diff = note.wrapping_sub(old) as i16 as i32;
                         let q = divu((b.r16(a3 + Y_PORT) as u32) << 15, calc) as u16;
                         let count = (q >> 3).wrapping_add(1);
@@ -1529,10 +1617,12 @@ impl IffSmus {
                     b.w16(a2 + SV_NOTE, note);
                     b.w16(a2 + SV_PHASE_DIR, 1);
                     if b.r16(a3 + Y_PHASE_SPEED) == 0 {
+                        self.c("SY_PHASE0");
                         b.w16(a2 + SV_PHASE, 0);
                     }
                     b.w16(a2 + SV_LFO_WAIT, 0);
                     if b.r16(a3 + Y_LFO_MODE) != 0 {
+                        self.c("SY_LFO_MODE");
                         b.w16(a2 + SV_LFO_POS, 0);
                         let w = (divu((b.r16(a3 + Y_LFO_DELAY) as u32) << 15, calc) as u16) >> 2;
                         b.w16(a2 + SV_LFO_WAIT, w);
@@ -1541,28 +1631,48 @@ impl IffSmus {
                     b.w16(v + V_START, 0xffff);
                 }
             }
-            2 => b.w16(a2 + SV_ENV_STEP, 6),
+            2 => {
+                self.c("SY_REL");
+                b.w16(a2 + SV_ENV_STEP, 6);
+            }
             3 => {
+                self.c("SY_MUTE");
                 self.mute(hw, ch);
                 return false;
             }
-            _ => {}
+            _ => self.c("SY_CMDX"),
         }
         // the LFO
         let b = &mut hw.bus;
         let wait = b.r16(a2 + SV_LFO_WAIT) as i16;
         if wait > 0 {
+            self.c("LFO_WAIT");
             b.w16(a2 + SV_LFO_WAIT, (wait - 1) as u16);
         } else if wait == 0 {
-            self.feat[f::LFO_STEP] += 1;
+            self.c("LFO_STEP");
             let inc = ((b.r16(a3 + Y_LFO_SPEED) as u32 * calc as u32) << 6 >> 16) as u16;
             let (pos, carry) = b.r16(a2 + SV_LFO_POS).overflowing_add(inc);
+            let mode = b.r16(a3 + Y_LFO_MODE) as i16;
+            self.c(match (carry, mode.signum()) {
+                (false, 1) => "LFO_NC_POS",
+                (false, 0) => "LFO_NC_ZERO",
+                (false, _) => "LFO_NC_NEG",
+                (true, 1) => "LFO_C_POS",
+                (true, 0) => "LFO_C_ZERO",
+                (true, _) => "LFO_C_NEG",
+            });
             if carry && (b.r16(a3 + Y_LFO_MODE) as i16) > 0 {
+                self.c("LFO_STOP");
                 b.w16(a2 + SV_LFO_WAIT, 0xffff);
             } else {
+                if carry {
+                    self.c("LFO_CARRY");
+                }
                 b.w16(a2 + SV_LFO_POS, pos);
                 b.w16(a2 + SV_LFO, b.r8(a3 + Y_LFO + (pos >> 8) as u32) as i8 as i16 as u16);
             }
+        } else {
+            self.c("LFO_OFF");
         }
         self.envelope(hw, a3 + Y_LEVELS, a3 + Y_RATES, a2 + SV_ENV_STEP, a2 + SV_ENV);
         // the portamento and the octave
@@ -1571,7 +1681,7 @@ impl IffSmus {
         let mut oct: i16 = 5;
         let pc = b.r16(a2 + SV_PORT_COUNT);
         if pc != 0 {
-            self.feat[f::PORT] += 1;
+            self.c("PORT");
             b.w16(a2 + SV_PORT_COUNT, pc - 1);
             d0 = d0.wrapping_add(b.r16(a2 + SV_PORT_STEP));
             b.w16(a2 + SV_NOTE, d0);
@@ -1579,7 +1689,7 @@ impl IffSmus {
         while (d0 as i16) > 0x1ac {
             d0 >>= 1;
             oct -= 1;
-            self.feat[f::OCTAVE] += 1;
+            self.c("OCTAVE");
         }
         let oct = oct as u16;
         b.w16(a2 + SV_OCTAVE, oct);
@@ -1593,8 +1703,10 @@ impl IffSmus {
         let env = (b.r32(a2 + SV_ENV) >> 16) as u16;
         let mut vol = b.r16(a3 + Y_AMP_VOL).wrapping_add(muls_asr(lfo.wrapping_neg(), b.r16(a3 + Y_AMP_LFO), 8));
         if b.r16(a3 + Y_AMP_ENV) != 0 {
+            self.c("AMP_ENV");
             vol = (vol as u32 * env as u32) as u16 >> 8;
         } else if b.r16(a2 + SV_ENV_STEP) == 6 {
+            self.c("AMP_REL0");
             vol = 0;
         }
         let vol = (vol & 0xff) + 1;
@@ -1607,6 +1719,7 @@ impl IffSmus {
         let mut off = ((f & 0xff) >> 2) << 7;
         let mut src = b.r32(a3 + Y_TABLES);
         if src == 0 {
+            self.c("SY_OSC");
             src = a3 + Y_OSC;
             off = 0;
         }
@@ -1636,7 +1749,8 @@ impl IffSmus {
                     break;
                 }
             }
-            self.count(f::PLAIN, bytes as i64);
+            self.cn("PLAIN", bytes as i64);
+            self.c("PLAIN_SETUP");
         } else if pd == 0 {
             // mixed with itself shifted by the phase
             let mut d2 = len.wrapping_mul(2).wrapping_sub(1);
@@ -1661,7 +1775,11 @@ impl IffSmus {
             }
             a5 = a5.wrapping_sub(0x80);
             d4 = d4.wrapping_sub(1);
+            self.c("MIX_SETUP");
+            self.cn("MIX", bytes as i64);
+            bytes = 0;
             if (d4 as i16) >= 0 {
+                self.c("MIX_WRAP");
                 loop {
                     let m = mix(b, src, a5);
                     b.w8(dst, m);
@@ -1675,7 +1793,7 @@ impl IffSmus {
                     }
                 }
             }
-            self.count(f::MIX, bytes as i64);
+            self.cn("MIX2", bytes as i64);
         } else {
             // the waveform's halves squeezed and stretched by the phase
             let dir = b.r16(a2 + SV_PHASE_DIR);
@@ -1683,8 +1801,11 @@ impl IffSmus {
             let d0 = (d0 as i16 as i32).wrapping_mul(dir as i16 as i32) as u16;
             let ph = b.r16(a2 + SV_PHASE);
             let (mut s, ov) = (d0 as i16).overflowing_add(ph as i16);
+            self.c("PH_SETUP");
             if ov {
+                self.c("PH_OV");
                 if s as u16 == 0x8000 {
+                    self.c("PH_8000");
                     s = (s as u16).wrapping_add(dir) as i16;
                 }
                 b.w16(a2 + SV_PHASE_DIR, dir.wrapping_neg());
@@ -1696,9 +1817,10 @@ impl IffSmus {
             let l2 = len.wrapping_sub(d);
             for (start, l) in [(0u16, l1), (0x40, l2)] {
                 if l == 0 {
+                    self.c("PH_SEG0");
                     continue;
                 }
-                self.feat[f::PHASE_SEG] += 1;
+                self.c("PHASE_SEG");
                 let qr = divu(0x40, l);
                 let (q, r) = (qr as u16, (qr >> 16) as u16);
                 let (mut i, mut acc, mut n) = (start, 0u16, l);
@@ -1710,6 +1832,7 @@ impl IffSmus {
                     acc = a;
                     let mut x = borrow as u16;
                     if borrow {
+                        self.c("PH_BORROW");
                         let (a, c) = acc.overflowing_add(l);
                         acc = a;
                         x = c as u16;
@@ -1721,7 +1844,7 @@ impl IffSmus {
                     }
                 }
             }
-            self.count(f::PHASE, bytes as i64);
+            self.cn("PHASE", bytes as i64);
         }
         false
     }
@@ -1729,17 +1852,17 @@ impl IffSmus {
     /// $11444: location, length, period and volume; DMA on for a new note.
     fn synth_play(&mut self, hw: &mut Hw, ch: usize) -> bool {
         let v = self.voice(ch);
-        self.gap(hw, w::SYN_LOC);
+        self.host(hw, "SYN_LOC");
         hw.loc(ch, hw.bus.r32(v + V_LOC));
-        self.gap(hw, w::SYN_LEN);
+        self.host(hw, "SYN_LEN");
         hw.len(ch, hw.bus.r16(v + V_LEN));
-        self.gap(hw, w::SYN_PER);
+        self.host(hw, "SYN_PER");
         hw.per(ch, hw.bus.r16(v + V_PER));
-        self.gap(hw, w::SYN_VOL);
+        self.host(hw, "SYN_VOL");
         hw.vol(ch, hw.bus.r16(v + V_VOL));
         let s = hw.bus.r16(v + V_START);
         hw.bus.w16(v + V_START, 0);
-        self.count(f::SYN_RET, 1);
+        self.cn("SYN_RET", 1);
         s != 0
     }
 
@@ -1753,23 +1876,28 @@ impl IffSmus {
         let calc = hw.bus.r16(g + G_CALC);
         let b = &mut hw.bus;
         match b.r8(v + V_CMD) {
-            0 => {}
+            0 => self.c("SM_CMD0"),
             1 => {
                 let a5 = b.r32(a3 + P_SAMPLE);
                 let n = b.r8(v + V_NOTE) as u16;
                 let (oct, rem) = (n / 12, n % 12);
                 let d2 = 10u16.wrapping_sub(oct);
                 if (d2 as i8) > (b.r8(a5 + F_LAST) as i8) || (d2 as i8) < (b.r8(a5 + F_FIRST) as i8) {
+                    self.c(if (d2 as i8) > (b.r8(a5 + F_LAST) as i8) { "SM_RANGE_HI" } else { "SM_RANGE_LO" });
                     b.w8(v + V_CMD, 0);
                     if b.r8(v + V_STATUS) == 0 {
+                        self.c("SM_RANGE_OFF");
                         return b.r16(v + V_START) == 2;
                     }
                 } else {
+                    self.c("SM_START");
                     let st = b.r8(v + V_STATUS);
                     if st == 0 {
+                        self.c("SM_ST0");
                         b.w32(a2 + PV_ENV, 0);
                     }
                     if st != 1 {
+                        self.c("SM_ST_NOT1");
                         b.w16(a2 + PV_ENV_STEP, 0);
                     }
                     b.w16(a2 + PV_NOTE, ((0xd5c8 * NOTE[rem as usize] as u32) >> 15) as u16);
@@ -1782,6 +1910,7 @@ impl IffSmus {
                     let (mut la, mut ll) = (b.r32(g + G_WAVES) + 0x400, 4u16);
                     let lp = b.r16(a5 + F_LOOP);
                     if lp as u32 != len1 {
+                        self.c("SM_LOOP");
                         la = a0.wrapping_add(lp as u32 * (d4 & 0xffff));
                         ll = (((len1 as u16).wrapping_sub(lp) as u32 * (d4 & 0xffff)) >> 1) as u16;
                     }
@@ -1794,25 +1923,31 @@ impl IffSmus {
                     self.mute(hw, ch);
                 }
             }
-            2 => b.w16(a2 + PV_ENV_STEP, 6),
+            2 => {
+                self.c("SM_REL");
+                b.w16(a2 + PV_ENV_STEP, 6);
+            }
             3 => {
+                self.c("SM_MUTE");
                 self.mute(hw, ch);
                 return hw.bus.r16(v + V_START) == 2;
             }
-            _ => {}
+            _ => self.c("SM_CMDX"),
         }
         // the vibrato
         let b = &mut hw.bus;
         let w = b.r16(a2 + PV_VIB_WAIT);
         if w != 0 {
+            self.c("VIB_WAIT");
             b.w16(a2 + PV_VIB_WAIT, w - 1);
         } else {
-            self.feat[f::VIB_STEP] += 1;
+            self.c("VIB_STEP");
             let inc = (((b.r16(a3 + P_VIB_SPEED) as u32 * calc as u32) << 7 >> 16) as u16).wrapping_add(0x40);
             b.w16(a2 + PV_VIB_POS, b.r16(a2 + PV_VIB_POS).wrapping_add(inc));
         }
         let mut d0 = (b.r16(a2 + PV_VIB_POS) >> 7) + 0x80;
         if d0 & 0x100 != 0 {
+            self.c("VIB_NEG");
             d0 ^= 0xff;
         }
         d0 ^= 0x80;
@@ -1838,7 +1973,7 @@ impl IffSmus {
         let a2 = g + G_IFF + 10 * ch as u32;
         let b = &mut hw.bus;
         match b.r8(v + V_CMD) {
-            0 => {}
+            0 => self.c("FM_CMD0"),
             1 => {
                 let a5 = b.r32(a3 + X_BODY);
                 let n = b.r8(v + V_NOTE) as u16;
@@ -1846,17 +1981,26 @@ impl IffSmus {
                 b.w16(a2 + XV_NOTE, ((0xd5c8 * NOTE[rem as usize] as u32) >> 15) as u16);
                 let d2 = 10u16.wrapping_sub(oct).wrapping_sub(b.r16(a3 + X_SKIP));
                 if (d2 as i16) < 0 || (d2 as i8) >= (b.r8(a3 + X_OCTAVES) as i8) {
+                    self.c(if (d2 as i16) < 0 { "FM_RANGE_LO" } else { "FM_RANGE_HI" });
                     b.w8(v + V_CMD, 0);
                     if b.r8(v + V_STATUS) == 0 {
+                        self.c("FM_RANGE_OFF");
                         return b.r16(v + V_START) == 2;
                     }
                 } else {
+                    self.c("FM_START");
                     let (one, rep) = (b.r32(a3 + X_ONE_SHOT), b.r32(a3 + X_REPEAT));
                     let all = one.wrapping_add(rep);
                     let a0 = a5.wrapping_add(asl_l(all, d2 as u32).wrapping_sub(all));
                     let (one, rep) = (asl_l(one, d2 as u32) as u16, asl_l(rep, d2 as u32) as u16);
                     b.w32(v + V_LOC, a0);
                     b.w16(v + V_LEN, if one != 0 { one } else { rep } >> 1);
+                    if one == 0 {
+                        self.c("FM_NO_ONE");
+                    }
+                    if rep != 0 {
+                        self.c("FM_REP");
+                    }
                     let (la, ll) = if rep != 0 {
                         (a0.wrapping_add(one as i16 as i32 as u32), rep)
                     } else {
@@ -1869,12 +2013,16 @@ impl IffSmus {
                     hw.bus.w16(a2 + XV_ON, 1);
                 }
             }
-            2 => b.w16(a2 + XV_ON, 0),
+            2 => {
+                self.c("FM_REL");
+                b.w16(a2 + XV_ON, 0);
+            }
             3 => {
+                self.c("FM_MUTE");
                 self.mute(hw, ch);
                 return hw.bus.r16(v + V_START) == 2;
             }
-            _ => {}
+            _ => self.c("FM_CMDX"),
         }
         let b = &mut hw.bus;
         let tune = b.r16(g + G_TUNE);
@@ -1890,27 +2038,32 @@ impl IffSmus {
     fn sample_play(&mut self, hw: &mut Hw, ch: usize, kind: u32) -> bool {
         let v = self.voice(ch);
         let form = kind == G_IFF;
+        self.c("SP_ENTRY");
         let s = hw.bus.r16(v + V_START);
         let mut on = false;
         if s != 0 {
             hw.bus.w16(v + V_START, s - 1);
             let (len, loc) = if s - 1 != 0 {
+                self.c("SP_FIRST");
                 on = true;
                 (hw.bus.r16(v + V_LEN), hw.bus.r32(v + V_LOC))
             } else {
+                self.c("SP_LOOP");
                 let l = self.g + kind + if kind == G_SAMPLED { 0x14 } else { 10 } * ch as u32;
                 (hw.bus.r16(l + 4), hw.bus.r32(l))
             };
-            self.gap(hw, if form { w::FORM_LEN } else { w::SMP_LEN });
+            self.host(hw, if form { "FORM_LEN" } else { "SMP_LEN" });
             hw.len(ch, len);
-            self.gap(hw, if form { w::FORM_LOC } else { w::SMP_LOC });
+            self.c(if on { "SP_PRE_LOC_FIRST" } else { "SP_PRE_LOC_LOOP" });
+            self.host(hw, if form { "FORM_LOC" } else { "SMP_LOC" });
             hw.loc(ch, loc);
+            self.c(if on { "SP_POST_FIRST" } else { "SP_POST_LOOP" });
         }
-        self.gap(hw, if form { w::FORM_PER } else { w::SMP_PER });
+        self.host(hw, if form { "FORM_PER" } else { "SMP_PER" });
         hw.per(ch, hw.bus.r16(v + V_PER));
-        self.gap(hw, if form { w::FORM_VOL } else { w::SMP_VOL });
+        self.host(hw, if form { "FORM_VOL" } else { "SMP_VOL" });
         hw.vol(ch, hw.bus.r16(v + V_VOL));
-        self.count(if form { f::FORM_RET } else { f::SMP_RET }, 1);
+        self.c(if form { "FORM_RET" } else { "SMP_RET" });
         on
     }
 }

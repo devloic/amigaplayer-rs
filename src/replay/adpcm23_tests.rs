@@ -227,7 +227,7 @@ fn decoder_hand_values() {
     d.code(0b11, false);
     assert_eq!(d.p as i16, 7 - 10);
     // the step 0 of a call becomes 5 (the first call, or after a reset)
-    let mut a = Adpcm { d: vec![0], three: false, pos: 0, dec: Dec::default(), bufs: [0; 2], next: 0, refills: 0, songend: false };
+    let mut a = Adpcm { d: vec![0], three: false, pos: 0, dec: Dec::default(), bufs: [0; 2], next: 0, refills: 0, songend: false, start: 0 };
     let mut buf = [0u8; BUF];
     a.decode(&mut buf, 1);
     assert_eq!((a.dec.s, a.dec.p), (4, 8), "four zero codes from step 5: deltas 2 each, the step stays 4");
@@ -259,7 +259,7 @@ fn bit_order_of_the_codes() {
     // 2-bit: four codes a byte, the top pair first; 3-bit: eight codes in three bytes
     for three in [false, true] {
         let d = file(three, 8000, 24, 9);
-        let mut a = Adpcm { d: d[10..].to_vec(), three, pos: 0, dec: Dec::default(), bufs: [0; 2], next: 0, refills: 0, songend: false };
+        let mut a = Adpcm { d: d[10..].to_vec(), three, pos: 0, dec: Dec::default(), bufs: [0; 2], next: 0, refills: 0, songend: false, start: 0 };
         let mut buf = [0u8; BUF];
         a.decode(&mut buf, 24);
         let n = if three { 64 } else { 96 };
@@ -283,7 +283,7 @@ fn decoder_matches_the_reference_over_random_streams() {
 
 #[test]
 fn start_writes_and_timing() {
-    for (three, at) in [(false, 3028u64), (true, 3176)] {
+    for (three, at) in [(false, 3028 + 64u64), (true, 3176 + 128)] {
         let d = file(three, 16726, 2000, 6);
         let (m, r) = start(&d);
         let r = r.unwrap();
@@ -320,19 +320,19 @@ fn refill_timing_and_alternation() {
     let d = file(false, 8526, 2000, 7);
     let (mut m, r) = start(&d);
     let mut r = r.unwrap();
-    // the first request comes at the start of the DMA
+    // the first request, raised in the start call, is served the latency after the song start
     let t0 = m.bus.clock;
     m.bus.write_log.as_mut().unwrap().clear();
     irq(&mut r, &mut m);
     let first = m.bus.write_log.clone().unwrap();
     assert_eq!(first.len(), 4);
-    assert_eq!(first[0].2, t0 + FIRST_LATENCY);
+    assert_eq!(first[0].2, t0 + IRQ_LATENCY);
     assert_eq!(first[2].2, first[0].2 + CH_GAP);
     m.bus.write_log.as_mut().unwrap().clear();
     let t1 = m.bus.clock;
     irq(&mut r, &mut m);
     let log = m.bus.write_log.clone().unwrap();
-    assert_eq!(log[0].2, t1 + IRQ_LATENCY);
+    assert_eq!(log[0].2, t1 + LATE_LATENCY);
     assert_eq!(log[2].2, log[0].2 + 19);
     assert_eq!([log[0].0, log[1].0, log[2].0, log[3].0], [0xDFF0A0, 0xDFF0A2, 0xDFF0B0, 0xDFF0B2]);
     assert_eq!((log[0].1, log[1].1), (log[2].1, log[3].1));

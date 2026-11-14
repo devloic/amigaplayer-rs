@@ -48,16 +48,23 @@ const MUL3: [u32; 4] = [0x399A, 0x3A9F, 0x4D14, 0x6607];
 const BUF: usize = 1024;
 /// Five times the E-clock (709 379 Hz, PAL): the period is this over the rate.
 const FIVE_E: u32 = 3_546_895;
-/// Colour clocks from the start of the run to the first DMA write (2-bit, 3-bit codes).
-const START_AT: [u64; 2] = [3028, 3176];
+/// Colour clocks from the start of the run to the first DMA write (2-bit, 3-bit codes): 3028 and
+/// 3176 as the reference measures them, plus 64 and 128, which put the DMA on at the reference's
+/// phase in the raster line (where the audio DMA slots fall; its run starts at that phase).
+const START_AT: [u64; 2] = [3028 + 64, 3176 + 128];
 /// The gaps between the start writes (colour clocks): from the DMA off to the first location, then
 /// the length, period and volume of channel 0, the gap to channel 1's location, its length,
 /// period and volume, and the gap to the DMA on.
 const START_GAPS: [u64; 9] = [7787, 89, 95, 85, 91, 89, 95, 85, 102];
 /// Colour clocks from the request of the audio interrupt to the location write.
 const IRQ_LATENCY: u64 = 117;
-/// The same for the first request, which the original's host serves late (2232 to 2243 in its runs, by the raster phase of the start).
-const FIRST_LATENCY: u64 = 2238;
+/// The latency of the later requests, which the original's host serves while its foreground runs:
+/// 117 plus 0 to 73 colour clocks (the service times fall on a grid of about 73.6 colour clocks
+/// of the host's), here its mean.
+const LATE_LATENCY: u64 = 153;
+/// Colour clocks from the DMA on to the end of the original's start call, where the song starts
+/// (2-bit, 3-bit codes).
+const SONG_AT: [u64; 2] = [2281, 2296];
 /// Colour clocks between the two channels' location writes.
 const CH_GAP: u64 = 19;
 
@@ -124,6 +131,9 @@ struct Adpcm {
     /// Refills so far.
     refills: u64,
     songend: bool,
+    /// The song start: the first request, raised during the start call, is served this
+    /// interrupt latency after it.
+    start: u64,
 }
 
 impl Adpcm {
@@ -208,7 +218,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if a == 0 {
         return None;
     }
-    let r = Adpcm {
+    let mut r = Adpcm {
         d: d[10..].to_vec(),
         three,
         pos: 0,
@@ -217,6 +227,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         next: 1,
         refills: 0,
         songend: false,
+        start: 0,
     };
     let mut hw = Hw { bus: &mut m.bus };
     hw.bus.write_bytes(a, &[0u8; 2 * BUF]);
@@ -239,6 +250,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // (the interrupt enable goes to Paula unlogged: the original's host serves the refill without it)
     hw.bus.paula.write_intena(0x8080);
     hw.bus.write_word(0xDFF096, 0x8003);
+    hw.wait(SONG_AT[three as usize]);
+    r.start = hw.bus.clock;
     Some(Box::new(r))
 }
 
@@ -270,7 +283,7 @@ impl Replayer for Adpcm {
         let clock = hw.bus.clock;
         hw.bus.paula.sync(clock, &hw.bus.ram);
         hw.bus.paula.write_intreq(0x0080);
-        let latency = if self.refills == 0 { FIRST_LATENCY } else { IRQ_LATENCY };
+        let latency = if self.refills == 0 { (self.start + IRQ_LATENCY).saturating_sub(hw.bus.clock) } else { LATE_LATENCY };
         self.refill(hw, latency);
         true
     }

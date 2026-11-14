@@ -447,7 +447,226 @@ pub struct SoundImages {
     touched: Vec<u32>,
     /// The song started has voices with a header.
     had_marks: bool,
+    /// The original's time: 68000 cycles since the tick's (or the handler's) reference point `t0`
+    cyc: i64,
+    t0: u64,
+    /// the previous write's kind (`wk`), and whether the audio interrupt handler is running
+    pw: u8,
+    inh: bool,
+    tend: u64,
+    /// A pattern change in this fetch.
+    np: bool,
+    /// Each voice's envelope stage in its previous step.
+    pes: Vec<u8>,
+    /// The voice with the longest order list (the last of equals): its pattern changes take longer.
+    lead: usize,
+    costs: Costs,
 }
+
+/// Write kinds of the cost model (`wk`): DMACON on/off, INTENA on/off, INTREQ, ADKCON, then the
+/// voice registers LOC, LEN, PER, VOL, DAT at 8, 12, 16, 20, 24 + voice; `HFLAG` marks a write
+/// of the audio interrupt handler.
+const WK_START: u8 = 0xFE;
+const WK_HSTART: u8 = 0xFD;
+const WK_END: u8 = 0xFC;
+const HFLAG: u8 = 0x40;
+
+fn wk(a: u32, v: u16) -> u8 {
+    match a & 0x1FE {
+        0x096 => (v & 0x8000 == 0) as u8,
+        0x09A => 2 + (v & 0x8000 == 0) as u8,
+        0x09C => 4,
+        0x09E => 5,
+        o @ 0x0A0..=0x0DF => {
+            let k = ((o - 0xA0) >> 4) as u8;
+            8 + 4 * [0, 0, 1, 2, 3, 4, 4, 4][((o & 0xF) >> 1) as usize] + k
+        }
+        _ => 0xFB,
+    }
+}
+
+/// The cycle costs of one revision: per pair of consecutive writes, and per event of the work
+/// between them (`SoundImages::mk`).
+#[derive(Default)]
+struct Costs {
+    k: std::collections::HashMap<(u8, u8), i64>,
+    t: std::collections::HashMap<(u8, u16), i64>,
+}
+
+impl Costs {
+    fn load(rev: Rev) -> Costs {
+        let (k, t) = match rev {
+            Rev::A | Rev::R2 => (K_A, T_A),
+            Rev::A9c => (K_A9C, T_A9C),
+            Rev::B => (K_B, T_B),
+            Rev::R1 => (K_R1, T_R1),
+            Rev::R3 => (K_R3, T_R3),
+            Rev::R4 => (K_R4, T_R4),
+            Rev::R5 => (K_R5, T_R5),
+            Rev::R6 => (K_R6, T_R6),
+        };
+        Costs {
+            k: k.iter().map(|&(a, b, c)| ((a, b), c as i64)).collect(),
+            t: t.iter().map(|&(a, b, c)| ((a, b), c as i64)).collect(),
+        }
+    }
+}
+
+// The cycle costs of the original play routines, measured (see `Costs`): per revision, the
+// cycles from one register write to the next (`K`: previous write kind, next write kind) and of
+// each piece of work between them (`T`: event code, value).
+
+#[rustfmt::skip]
+const K_A: &[(u8, u8, i16)] = &[
+    (0, 4, 32), (1, 3, 898), (1, 4, 32), (2, 16, 69), (3, 1, 32), (3, 5, 446), (3, 16, 69), (3, 68, 12),
+    (4, 2, 20), (4, 3, 20), (4, 17, 282), (4, 18, 282), (4, 19, 303), (5, 16, 147), (8, 12, 125), (8, 76, 20),
+    (9, 13, 156), (9, 77, 20), (10, 14, 187), (10, 78, 20), (11, 15, 195), (11, 79, 20), (12, 3, 209), (12, 73, 23),
+    (12, 74, 13), (12, 75, 9), (13, 3, 240), (13, 67, 4), (13, 74, 17), (13, 75, 13), (14, 3, 271), (14, 67, 13),
+    (14, 75, 22), (15, 3, 279), (15, 67, 12), (16, 20, 523), (17, 21, 608), (18, 22, 683), (19, 23, 732), (20, 8, 1),
+    (20, 17, 122), (21, 9, 1), (21, 18, 122), (22, 10, 1), (22, 19, 143), (23, 11, 22), (253, 72, 133), (253, 73, 128),
+    (253, 74, 118), (253, 75, 114), (255, 252, 451),
+];
+#[rustfmt::skip]
+const T_A: &[(u8, u16, i16)] = &[
+    (1, 0, 222), (1, 1, 186), (2, 0, 4), (2, 1, 183), (3, 0, 56), (4, 1, 24), (6, 0, 98), (6, 2, 21),
+    (7, 0, 98), (7, 16, 81), (7, 17, 64), (7, 32, 102), (7, 33, 81), (7, 34, 4), (7, 48, 123), (7, 49, 65),
+    (7, 50, 4), (8, 0, 21), (8, 1, 52), (8, 2, 22), (8, 3, 30), (9, 1, 20), (10, 0, 127), (10, 1, 24),
+    (11, 0, 113), (11, 1, 88), (11, 2, 77), (11, 3, 125), (11, 4, 102), (11, 5, 102), (12, 0, 141), (12, 1, 550),
+    (13, 0, 140), (13, 5, 39), (13, 6, -24), (13, 7, 2), (13, 8, 21), (13, 10, -59), (13, 12, -119), (13, 14, -39),
+    (13, 19, 81), (14, 0, 52), (14, 4, 100), (15, 0, 143), (15, 1, 143), (17, 0, 138), (17, 1, 119), (24, 0, 24),
+    (24, 1, 10), (24, 2, 195), (24, 3, 89), (24, 4, 65), (24, 5, 164), (24, 6, 41), (25, 1, 1), (26, 1, -45),
+    (27, 1, 23), (27, 2, 28), (27, 3, 18), (27, 257, 24), (27, 258, 30), (27, 259, 46),
+];
+
+#[rustfmt::skip]
+const K_A9C: &[(u8, u8, i16)] = &[
+    (0, 4, 32), (1, 3, 898), (1, 4, 32), (2, 16, 69), (3, 1, 32), (3, 5, 446), (3, 16, 69), (3, 68, 12),
+    (4, 2, 20), (4, 3, 20), (4, 17, 282), (4, 18, 282), (4, 19, 303), (5, 16, 147), (8, 12, 125), (8, 76, 20),
+    (9, 13, 156), (9, 77, 20), (10, 14, 187), (10, 78, 20), (12, 3, 209), (12, 67, 7), (12, 73, 24), (12, 74, 14),
+    (13, 3, 240), (13, 67, 9), (13, 74, 16), (14, 3, 271), (14, 67, 7), (16, 20, 523), (17, 21, 608), (18, 22, 683),
+    (19, 23, 732), (20, 8, 8), (20, 17, 80), (21, 9, 8), (21, 18, 80), (22, 10, 8), (22, 19, 101), (253, 72, 91),
+    (253, 73, 87), (253, 74, 77), (253, 75, 114), (255, 252, 451),
+];
+#[rustfmt::skip]
+const T_A9C: &[(u8, u16, i16)] = &[
+    (1, 0, 133), (1, 1, 154), (2, 0, 29), (2, 1, 126), (3, 0, 81), (4, 1, 25), (6, 0, 98), (7, 0, 84),
+    (7, 32, 88), (7, 33, 81), (7, 34, 4), (7, 48, 87), (7, 49, 87), (7, 50, 4), (9, 1, 79), (11, 0, 258),
+    (12, 0, 87), (13, 0, 87), (13, 5, -33), (13, 7, 4), (13, 8, 8), (14, 0, 25), (15, 0, 143), (15, 1, 143),
+    (17, 0, 138), (17, 1, 117), (24, 0, 25), (24, 1, -15), (24, 2, 170), (24, 3, -35), (24, 4, 40), (24, 6, 63),
+    (25, 1, 1), (27, 1, 21), (27, 2, 17), (27, 3, 24), (27, 257, 23), (27, 258, 31),
+];
+
+#[rustfmt::skip]
+const K_B: &[(u8, u8, i16)] = &[
+    (0, 4, 32), (1, 4, 32), (2, 3, 383), (2, 16, 55), (3, 1, 32), (3, 3, 383), (3, 5, 446), (3, 16, 55),
+    (3, 68, 12), (4, 2, 20), (4, 3, 20), (4, 17, 282), (4, 18, 282), (4, 19, 282), (4, 72, 2175), (5, 16, 106),
+    (8, 12, 125), (8, 76, 20), (9, 13, 156), (9, 77, 20), (10, 14, 187), (10, 78, 20), (11, 15, 195), (11, 79, 20),
+    (12, 3, 209), (12, 67, 2), (12, 73, 23), (12, 74, 14), (12, 75, 6), (13, 3, 240), (13, 67, 5), (13, 74, 17),
+    (13, 75, 9), (14, 3, 271), (14, 67, 11), (14, 75, 15), (15, 3, 279), (15, 67, 12), (16, 20, 523), (17, 21, 608),
+    (18, 22, 683), (19, 23, 732), (20, 1, -16), (20, 8, 5), (20, 17, 129), (21, 1, -16), (21, 9, 5), (21, 18, 129),
+    (22, 10, 5), (22, 19, 129), (23, 11, 5), (253, 72, -2035), (253, 73, 137), (253, 74, 127), (253, 75, 119), (255, 252, 450),
+];
+#[rustfmt::skip]
+const T_B: &[(u8, u16, i16)] = &[
+    (1, 0, 217), (1, 1, 179), (2, 0, -5), (2, 1, 185), (3, 0, 65), (4, 1, 25), (6, 0, 98), (6, 2, 21),
+    (7, 0, 97), (7, 16, 80), (7, 17, 64), (7, 32, 101), (7, 33, 81), (7, 34, 4), (7, 48, 122), (7, 49, 65),
+    (7, 50, 4), (9, 1, 20), (11, 0, 112), (11, 1, 87), (11, 2, 77), (11, 3, 125), (11, 4, 101), (11, 5, 101),
+    (12, 0, 136), (12, 1, 483), (13, 0, 137), (13, 4, -15), (13, 5, 15), (13, 6, -21), (13, 7, 5), (13, 8, 6),
+    (13, 10, -92), (13, 14, -72), (13, 15, -5), (13, 16, 73), (14, 0, 30), (14, 32, -5), (15, 0, 108), (15, 1, 108),
+    (17, 0, 111), (17, 1, 766), (20, 1, 45), (20, 259, 99), (20, 272, 53), (24, 0, 25), (24, 1, 1), (24, 2, 186),
+    (24, 3, 55), (24, 4, 56), (24, 6, 38), (25, 1, -1), (26, 1, -45), (27, 1, 22), (27, 2, 25), (27, 3, 20),
+    (27, 256, 2176), (27, 257, 24), (27, 258, 30), (27, 259, 32), (30, 0, 2176),
+];
+
+#[rustfmt::skip]
+const K_R1: &[(u8, u8, i16)] = &[
+    (0, 4, 32), (1, 3, 646), (1, 4, 32), (2, 16, 36), (3, 1, 32), (3, 5, 446), (3, 8, -10), (3, 9, -12),
+    (3, 10, -12), (3, 16, 38), (3, 68, 12), (4, 2, 20), (4, 3, 20), (4, 9, 76), (4, 10, 75), (4, 16, 127),
+    (5, 8, -35), (8, 12, 125), (8, 76, 20), (9, 13, 156), (9, 77, 20), (10, 14, 187), (10, 78, 20), (12, 3, 184),
+    (12, 73, 24), (12, 74, 17), (13, 3, 216), (13, 10, 110), (13, 16, 161), (13, 67, 16), (13, 74, 15), (14, 3, 246),
+    (14, 67, 12), (16, 20, 477), (17, 21, 477), (18, 22, 467), (20, 17, 44), (21, 18, 44), (253, 72, 63), (253, 73, 129),
+    (253, 74, 52), (253, 75, 115), (255, 252, 450),
+];
+#[rustfmt::skip]
+const T_R1: &[(u8, u16, i16)] = &[
+    (1, 0, 51), (1, 1, 121), (2, 0, 27), (2, 1, 94), (3, 0, 35), (4, 0, -49), (4, 1, 82), (5, 255, 97),
+    (6, 0, 73), (6, 2, 21), (7, 0, 75), (7, 16, 61), (7, 17, 61), (7, 32, 79), (7, 33, 43), (7, 34, 42),
+    (7, 48, 100), (7, 49, 65), (7, 256, 1), (7, 272, 1), (8, 0, 21), (8, 1, 37), (8, 2, 37), (9, 1, 7),
+    (11, 0, 316), (12, 0, 113), (13, 0, 108), (13, 1, 7), (13, 5, 28), (13, 6, -16), (13, 7, 10), (13, 14, -36),
+    (13, 17, 21), (13, 18, 14), (13, 24, -47), (14, 0, 133), (15, 0, 15), (15, 1, -16), (16, 0, 362), (17, 0, 37),
+    (17, 1, 123), (24, 0, 35), (24, 1, 31), (24, 2, 216), (24, 6, 86), (26, 1, -45), (27, 1, 17), (27, 2, 15),
+    (27, 257, 23), (27, 258, 32),
+];
+
+#[rustfmt::skip]
+const K_R3: &[(u8, u8, i16)] = &[
+    (0, 4, 32), (1, 3, 850), (1, 4, 32), (2, 16, 46), (3, 1, 32), (3, 5, 446), (3, 16, 46), (3, 68, 12),
+    (4, 2, 20), (4, 3, 20), (4, 17, 286), (5, 16, 79), (8, 12, 125), (8, 76, 20), (12, 3, 184), (12, 67, 18),
+    (16, 20, 523), (17, 21, 608), (18, 22, 683), (19, 23, 732), (20, 8, 29), (20, 17, 56), (21, 18, 56), (22, 19, 56),
+    (253, 72, 228), (253, 73, 128), (253, 74, 118), (253, 75, 114), (255, 252, 451),
+];
+#[rustfmt::skip]
+const T_R3: &[(u8, u16, i16)] = &[
+    (1, 0, 82), (1, 1, 112), (2, 0, -4), (2, 1, 117), (3, 0, 78), (4, 1, 28), (7, 0, 198), (11, 0, 198),
+    (12, 0, 212), (12, 1, 212), (13, 0, 212), (13, 5, -15), (13, 7, -34), (14, 0, 28), (15, 0, 84), (15, 1, 84),
+    (17, 0, 91), (17, 1, 119), (24, 0, 28), (24, 1, -13), (24, 2, -15), (24, 3, -15), (24, 6, 165), (25, 1, 52),
+    (27, 1, 17), (27, 2, 17), (27, 3, 17),
+];
+
+#[rustfmt::skip]
+const K_R4: &[(u8, u8, i16)] = &[
+    (0, 4, 32), (1, 4, 32), (2, 20, 511), (3, 1, 32), (3, 20, 511), (3, 68, 12), (4, 2, 20), (4, 3, 20),
+    (4, 9, 34), (4, 10, 34), (4, 11, 34), (4, 16, 170), (8, 12, 125), (8, 76, 20), (9, 13, 156), (9, 77, 20),
+    (10, 14, 187), (10, 78, 20), (11, 15, 195), (11, 79, 20), (12, 3, 184), (12, 67, 5), (12, 73, 23), (12, 74, 15),
+    (13, 3, 215), (13, 67, 6), (13, 74, 16), (13, 75, 13), (14, 3, 246), (14, 67, 10), (14, 75, 17), (15, 3, 251),
+    (15, 67, 12), (16, 17, 20), (17, 18, 20), (18, 19, 36), (20, 21, 503), (21, 22, 493), (22, 23, 499), (23, 8, -8),
+    (23, 9, -7), (23, 11, -6), (23, 16, 127), (253, 72, 39), (253, 73, 34), (253, 74, 119), (253, 75, 23), (255, 252, 450),
+];
+#[rustfmt::skip]
+const T_R4: &[(u8, u16, i16)] = &[
+    (1, 0, 126), (1, 1, 154), (2, 0, 39), (2, 1, 115), (3, 0, 78), (4, 1, 75), (6, 0, 74), (6, 2, 20),
+    (7, 0, 56), (7, 16, 51), (7, 17, 52), (7, 32, 60), (7, 33, 81), (7, 34, 4), (7, 48, 73), (7, 49, 73),
+    (7, 50, 4), (7, 304, 1), (9, 1, 20), (11, 0, 241), (12, 0, 114), (13, 0, 115), (13, 5, -26), (13, 6, -32),
+    (13, 7, -6), (13, 20, 50), (13, 27, -51), (14, 0, 75), (15, 0, 33), (15, 1, 67), (16, 0, 293), (17, 0, 99),
+    (24, 0, 75), (24, 1, -12), (24, 2, 173), (24, 3, -26), (24, 6, 52), (26, 1, -45), (27, 1, 20), (27, 2, 23),
+    (27, 3, 21), (27, 257, 24), (27, 258, 31), (27, 259, 30),
+];
+
+#[rustfmt::skip]
+const K_R5: &[(u8, u8, i16)] = &[
+    (0, 4, 32), (1, 4, 32), (2, 16, 60), (3, 1, 32), (3, 16, 60), (3, 68, 12), (4, 2, 20), (4, 3, 20),
+    (4, 17, 302), (4, 18, 302), (8, 12, 125), (8, 76, 20), (9, 13, 156), (9, 77, 20), (11, 15, 195), (11, 79, 20),
+    (12, 3, 209), (12, 67, 8), (12, 73, 23), (12, 75, 10), (13, 3, 240), (13, 75, 11), (15, 3, 279), (15, 67, 12),
+    (16, 20, 523), (17, 21, 608), (18, 22, 683), (19, 23, 732), (20, 8, 7), (20, 17, 61), (21, 9, 7), (21, 18, 138),
+    (22, 19, 61), (23, 11, 7), (253, 72, 73), (253, 73, 68), (253, 74, 119), (253, 75, 55), (255, 252, 450),
+];
+#[rustfmt::skip]
+const T_R5: &[(u8, u16, i16)] = &[
+    (1, 0, 128), (1, 1, 151), (2, 0, 26), (2, 1, 124), (3, 0, 83), (4, 1, 19), (7, 0, 252), (9, 1, -28),
+    (11, 0, 114), (11, 1, 12), (11, 2, 40), (11, 3, 88), (11, 4, 63), (11, 5, 63), (12, 0, 106), (13, 0, 105),
+    (13, 5, -28), (13, 7, 6), (14, 0, 19), (15, 0, 60), (15, 1, 60), (17, 0, 120), (24, 0, 19), (24, 1, -17),
+    (24, 2, 168), (24, 3, -28), (24, 6, 84), (27, 1, 20), (27, 2, 32), (27, 3, 9), (27, 257, 24), (27, 259, 23),
+];
+
+#[rustfmt::skip]
+const K_R6: &[(u8, u8, i16)] = &[
+    (0, 4, 32), (1, 3, 1062), (1, 4, 32), (2, 1, 86), (2, 16, 65), (3, 1, 32), (3, 5, 446), (3, 16, 65),
+    (3, 68, 12), (4, 2, 20), (4, 3, 20), (4, 17, 282), (4, 18, 282), (4, 19, 282), (5, 16, 116), (8, 12, 125),
+    (8, 76, 20), (9, 13, 156), (9, 77, 20), (10, 14, 187), (10, 78, 20), (11, 15, 195), (11, 79, 20), (12, 3, 209),
+    (12, 67, 5), (12, 73, 23), (12, 74, 12), (12, 75, 7), (13, 3, 240), (13, 74, 17), (13, 75, 12), (14, 3, 271),
+    (14, 67, 13), (14, 75, 15), (15, 3, 279), (15, 67, 12), (16, 20, 523), (17, 21, 608), (18, 22, 683), (19, 23, 732),
+    (20, 8, 7), (20, 17, 116), (21, 9, 7), (21, 18, 116), (22, 10, 7), (22, 19, 116), (23, 11, 7), (253, 72, 111),
+    (253, 73, 128), (253, 74, 95), (253, 75, 90), (255, 252, 451),
+];
+#[rustfmt::skip]
+const T_R6: &[(u8, u16, i16)] = &[
+    (1, 0, 199), (1, 1, 174), (2, 0, 1), (2, 1, 172), (3, 0, 67), (4, 1, 25), (7, 0, 138), (7, 16, 93),
+    (7, 17, 92), (7, 32, 142), (7, 33, 81), (7, 34, 4), (9, 1, 20), (11, 0, 102), (11, 1, 77), (11, 2, 72),
+    (11, 3, 120), (11, 4, 96), (11, 5, 96), (12, 0, 129), (13, 0, 128), (13, 5, 22), (13, 6, -25), (13, 7, 1),
+    (13, 8, -11), (13, 10, -115), (13, 13, 59), (14, 0, 25), (15, 0, 121), (15, 1, 121), (17, 0, 130), (17, 1, 86),
+    (24, 0, 25), (24, 1, -1), (24, 2, 184), (24, 3, 20), (24, 4, 54), (24, 6, 52), (25, 1, -2), (26, 1, -45),
+    (27, 1, 24), (27, 2, 22), (27, 3, 18), (27, 257, 24), (27, 258, 30), (27, 259, 32),
+];
 
 impl SoundImages {
     fn build(img: Vec<u8>, base: u32, lay: Layout) -> SoundImages {
@@ -462,6 +681,7 @@ impl SoundImages {
         };
         let rest = 0x80 + lay.cmds.iter().position(|&c| c == Rest).unwrap_or(0x7F) as u8;
         let n = lay.blocks.len();
+        let costs = Costs::load(lay.rev);
         SoundImages {
             orig: img.clone(),
             img,
@@ -475,9 +695,90 @@ impl SoundImages {
             songend: false,
             touched: Vec::new(),
             had_marks: false,
+            cyc: 0,
+            t0: 0,
+            pw: WK_START,
+            inh: false,
+            tend: 0,
+            np: false,
+            pes: vec![0; n],
+            lead: usize::MAX,
+            costs,
         }
     }
-
+    /// An event of the original's work: its cycles (`Costs::t`).
+    fn mk(&mut self, code: u32, v: u16) {
+        if let Some(t) = Self::tok(code, v) {
+            self.cyc += self.costs.t.get(&t).copied().unwrap_or(0);
+        }
+    }
+    /// The cost-model token of an event.
+    fn tok(code: u32, v: u16) -> Option<(u8, u16)> {
+        let c = code as u8;
+        Some(match code {
+            1 => (c, v >> 8),
+            2 | 17 => (c, (v != 0) as u16),
+            3 | 0x1C | 0x1E => (c, 0),
+            14 => (c, v & (F_PORT | F_SLIDE5) as u16),
+            6 if v & 0x10 != 0 => return None,
+            0x1D | 0x1F => return None,
+            c if c >= 0x20 => return None,
+            _ => (c, v),
+        })
+    }
+    /// Before a write: the cycles since the previous one, and the clock at the write.
+    fn at(&mut self, hw: &mut Hw, key: u8) {
+        let next = key | if self.inh { HFLAG } else { 0 };
+        self.cyc += self.costs.k.get(&(self.pw, next)).copied().unwrap_or(0);
+        self.pw = key;
+        let t = self.t0 + (self.cyc.max(0) as u64) / 2;
+        if t > hw.bus.clock {
+            hw.bus.clock = t;
+        }
+    }
+    fn w_reg(&mut self, hw: &mut Hw, a: u32, v: u16) {
+        self.at(hw, wk(a, v));
+        hw.bus.write_word(a, v);
+    }
+    fn w_dma(&mut self, hw: &mut Hw, v: u16) {
+        self.at(hw, wk(0xDFF096, v));
+        hw.dmacon(v);
+    }
+    fn w_loc(&mut self, hw: &mut Hw, k: usize, a: u32) {
+        self.at(hw, 8 + k as u8);
+        hw.loc(k, a);
+    }
+    fn w_len(&mut self, hw: &mut Hw, k: usize, v: u16) {
+        self.at(hw, 12 + k as u8);
+        hw.len(k, v);
+    }
+    fn w_per(&mut self, hw: &mut Hw, k: usize, v: u16) {
+        self.at(hw, 16 + k as u8);
+        hw.per(k, v);
+    }
+    fn w_vol(&mut self, hw: &mut Hw, k: usize, v: u16) {
+        self.at(hw, 20 + k as u8);
+        hw.vol(k, v);
+    }
+    /// The start of the tick's (or the handler's) time, at its first write's clock.
+    fn begin(&mut self, hw: &mut Hw, handler: bool) {
+        self.t0 = hw.bus.clock;
+        self.cyc = if handler { 0 } else { 1 };
+        self.pw = if handler { WK_HSTART } else { WK_START };
+        self.inh = handler;
+    }
+    /// The end of the tick's code: the clock then (when the audio interrupts it raised are taken),
+    /// with Paula run up to it.
+    fn end(&mut self, hw: &mut Hw) {
+        let k = &self.costs.k;
+        self.cyc += k.get(&(self.pw, WK_END)).or(k.get(&(0xFF, WK_END))).copied().unwrap_or(0);
+        let t = self.t0 + (self.cyc.max(0) as u64) / 2;
+        if t > hw.bus.clock {
+            hw.bus.clock = t;
+        }
+        self.tend = hw.bus.clock;
+        let _ = hw.bus.read_word(0xDFF01E);
+    }
     // memory of the image, by file offset
     fn b(&self, o: usize) -> u8 {
         rb(&self.img, o)
@@ -602,12 +903,6 @@ impl SoundImages {
         if self.lay.music {
             self.sgb(8, 1);
         }
-        // SMGP in-game: interrupts left pending in the file; play the music instead
-        // of UADE's one-tick crash (section 9.3)
-        if self.rev() == Rev::B && self.gw(self.g.int) & 0x0780 != 0 {
-            self.sgw(self.g.dma, 0);
-            self.sgw(self.g.int, 0);
-        }
         self.marked = vec![false; self.nv()];
         self.had_marks = false;
         self.songend = false;
@@ -629,44 +924,45 @@ impl SoundImages {
         }
     }
 
-    /// The step-1 work: the pending DMACON and the audio interrupt.
-    fn pending(&mut self, hw: &mut Hw, takes_start: bool) {
+    /// The step-1 work: the pending DMACON and the audio interrupts (taken when the tick's code
+    /// has run, `audio_irq`).
+    fn pending(&mut self, hw: &mut Hw) {
         let e = self.pending_head(hw);
-        self.interrupt_handler(e, takes_start, hw);
+        self.tick_a_head(e, hw);
     }
 
     /// The tick's first write, the pending DMACON; returns the pending interrupt bits.
     fn pending_head(&mut self, hw: &mut Hw) -> u16 {
         let dma = self.gw(self.g.dma);
         let e = self.gw(self.g.int);
-        hw.dmacon(dma);
+        self.w_dma(hw, dma);
         self.sgw(self.g.dma, 0);
         self.sgw(self.g.int, 0);
         e
     }
 
-    /// The generation-A tick's next two writes (see `pending_head`), and the wait to its first
-    /// voice: the original's PERIOD comes 163 colour clocks after the DMACON write.
+    /// The tick's next two writes (see `pending_head`): the pending requests cleared, their
+    /// interrupts enabled.
     fn tick_a_head(&mut self, e: u16, hw: &mut Hw) {
-        hw.wait(16);
-        hw.bus.write_word(0xDFF09C, e & 0x7FFF);
-        hw.wait(10);
-        hw.bus.write_word(0xDFF09A, if e != 0 { 0x8000 | (e & 0x7FFF) } else { 0 });
-        hw.wait(137);
+        self.w_reg(hw, 0xDFF09C, e & 0x7FFF);
+        self.w_reg(hw, 0xDFF09A, if e != 0 { 0x8000 | (e & 0x7FFF) } else { 0 });
     }
 
-    /// The audio interrupt handler for the bits `e` (the original takes it once the tick's code
-    /// has run, or at once when the tick has none to run): sample pointer and length of each
-    /// voice whose bit is set, then the acknowledge.
-    fn interrupt_handler(&mut self, e: u16, takes_start: bool, hw: &mut Hw) {
-        // a song start in this tick turns the interrupts off before they are taken
-        if e & 0x0780 == 0 || (takes_start && self.rev() != Rev::B) {
+    fn pending_irqs(&mut self, hw: &mut Hw) -> u16 {
+        let req = hw.bus.read_word(0xDFF01E);
+        let ena = hw.bus.read_word(0xDFF01C);
+        req & ena & 0x0780
+    }
+
+    fn service(&mut self, e: u16, hw: &mut Hw) {
+        if e == 0 {
             return;
         }
-        hw.wait(300);
         let mut done = 0;
+        self.mk(0x1C, e);
         for k in 0..self.nv() {
             let bit = 0x80u16 << k;
+            self.mk(0x1B, k as u16 | ((e & bit != 0) as u16) << 8);
             if e & bit == 0 {
                 continue;
             }
@@ -685,16 +981,15 @@ impl SoundImages {
                     None => continue,
                 }
             }
-            hw.loc(k, self.vl(blk, 0x1A));
-            hw.len(k, self.vw(blk, 0x20));
+            self.w_loc(hw, k, self.vl(blk, 0x1A));
+            self.w_len(hw, k, self.vw(blk, 0x20));
             done |= bit;
         }
         if done != 0 {
             // the handler's acknowledge (also what tells its writes apart in the log)
-            hw.bus.write_word(0xDFF09A, done);
-            hw.bus.write_word(0xDFF09C, done);
+            self.w_reg(hw, 0xDFF09A, done);
+            self.w_reg(hw, 0xDFF09C, done);
         }
-        hw.wait(100);
     }
 
     /// Whether this tick's request step copies the request byte into the latch.
@@ -708,10 +1003,6 @@ impl SoundImages {
     }
 
     /// What the latch will hold in this tick's request step.
-    fn next_latch(&self) -> u8 {
-        if self.takes_latch() { self.gb(0) } else { self.gb(self.g.latch) }
-    }
-
     fn take_latch(&mut self) {
         if self.takes_latch() {
             let r = self.gb(0);
@@ -721,6 +1012,7 @@ impl SoundImages {
 
     fn request(&mut self, hw: &mut Hw) {
         let latch = self.gb(self.g.latch);
+        self.mk(17, latch as u16);
         if latch == 0 {
             return;
         }
@@ -735,8 +1027,11 @@ impl SoundImages {
         let g = self.g;
         self.sgb(g.run, n);
         if self.rev() != Rev::B {
-            hw.dmacon(0x000F);
+            self.w_dma(hw, 0x000F);
         }
+        // the audio interrupts off and the modulations cleared
+        self.w_reg(hw, 0xDFF09A, 0x0780);
+        self.w_reg(hw, 0xDFF09E, 0x00FF);
         self.sgb(g.tempo + 1, 1);
         self.sgb(g.fade, 0);
         self.sgb(0, 0);
@@ -749,6 +1044,22 @@ impl SoundImages {
             for k in 0..self.nv() {
                 let a = self.active_at(k);
                 self.sb_(a, 0);
+            }
+        }
+        self.lead = usize::MAX;
+        self.pes = vec![0; self.nv()];
+        let mut longest = 0;
+        for k in 0..self.nv() {
+            let hw_ = self.w(e + 2 * k) as usize;
+            let mut o = self.lay.sb + hw_ + 2;
+            let mut n = 0;
+            while n < 0x1000 && o + 2 <= self.img.len() && self.w(o) != 0 {
+                n += 1;
+                o += 2;
+            }
+            if n >= longest {
+                longest = n;
+                self.lead = k;
             }
         }
         for k in 0..self.nv() {
@@ -786,10 +1097,10 @@ impl SoundImages {
     /// The full stop (section 7.5).
     fn stop(&mut self, hw: &mut Hw) {
         let g = self.g;
-        hw.dmacon(0x000F);
+        self.w_dma(hw, 0x000F);
         if self.rev() == Rev::R5 {
             for c in 0..4 {
-                hw.vol(c, 0);
+                self.w_vol(hw, c, 0);
             }
         }
         let n = if self.rev() == Rev::R2 { 8 } else { 4 };
@@ -811,6 +1122,7 @@ impl SoundImages {
     fn fade(&mut self, hw: &mut Hw) {
         let g = self.g;
         let rate = self.gb(g.fade);
+        self.mk(16, (rate != 0) as u16);
         if rate == 0 {
             return;
         }
@@ -840,6 +1152,7 @@ impl SoundImages {
         let t = self.g.tempo + 1;
         let c = self.gb(t).wrapping_sub(1);
         self.sgb(t, c);
+        self.mk(15, (c == 0) as u16);
         c == 0
     }
 
@@ -853,14 +1166,12 @@ impl SoundImages {
 
     /// The generation-A tick (A, A9C, B, R3, R5, R6).
     fn tick_a(&mut self, hw: &mut Hw) {
-        let takes = self.next_latch() != 0;
         let e = self.pending_head(hw);
         self.tick_a_head(e, hw);
         // the original takes the audio interrupt after the tick's code
         self.take_latch();
         self.request(hw);
         if !self.gen_b() && !self.running() {
-            self.interrupt_handler(e, takes, hw);
             return;
         }
         let tt = self.tempo_tick();
@@ -873,21 +1184,17 @@ impl SoundImages {
             if !go {
                 continue;
             }
-            hw.per(k, self.vw(k, 0x06));
-            hw.wait(262);
-            hw.vol(k, self.volume_out(k));
+            self.w_per(hw, k, self.vw(k, 0x06));
+            self.w_vol(hw, k, self.volume_out(k));
             self.step(k, tt, hw);
-            hw.wait(277);
         }
         self.fade(hw);
         self.tempo_reload();
-        self.interrupt_handler(e, takes, hw);
     }
 
     /// R1 and R2: periods and volumes after the voices.
     fn tick_12(&mut self, hw: &mut Hw) {
-        let takes = self.next_latch() != 0;
-        self.pending(hw, takes);
+        self.pending(hw);
         self.take_latch();
         self.request(hw);
         if !self.running() {
@@ -903,22 +1210,20 @@ impl SoundImages {
             if self.rev() == Rev::R2 && k == 3 {
                 self.pulse(3, hw);
             }
-            hw.wait(150);
         }
         self.fade(hw);
         self.tempo_reload();
         if self.running() {
             for k in 0..self.nv() {
-                hw.per(k, self.vw(k, 0x06));
-                hw.vol(k, self.volume_out(k));
+                self.w_per(hw, k, self.vw(k, 0x06));
+                self.w_vol(hw, k, self.volume_out(k));
             }
         }
     }
 
     /// R4: volumes first, periods after.
     fn tick_4(&mut self, hw: &mut Hw) {
-        let takes = self.gb(8) != 0 && self.next_latch() != 0;
-        self.pending(hw, takes);
+        self.pending(hw);
         let dblk = self.l(G + 0x0A);
         for k in 0..4 {
             let v = if k == 3 {
@@ -929,7 +1234,7 @@ impl SoundImages {
             } else {
                 self.volume_out(k)
             };
-            hw.vol(k, v);
+            self.w_vol(hw, k, v);
         }
         if self.gb(8) != 0 {
             self.take_latch();
@@ -948,13 +1253,12 @@ impl SoundImages {
                     self.pulse(3, hw);
                 }
             }
-            hw.wait(150);
         }
         self.fade(hw);
         self.tempo_reload();
         // written after a stop in this tick too (the reference's last ticks)
         for k in 0..4 {
-            hw.per(k, self.vw(k, 0x06));
+            self.w_per(hw, k, self.vw(k, 0x06));
         }
     }
 
@@ -1000,6 +1304,7 @@ impl SoundImages {
 
     /// Recomputes the period from a note (section 7.3).
     fn set_period(&mut self, k: usize, note: u8) {
+        self.mk(14, self.flags(k) as u16);
         let n = note.wrapping_add(self.b(self.transp_at(k)));
         let idx = if matches!(self.rev(), Rev::R1 | Rev::R2 | Rev::R3 | Rev::R4) { n & 0x7F } else { n & 0x3F };
         let mut per = self.w(self.lay.periods + 2 * idx as usize);
@@ -1016,31 +1321,67 @@ impl SoundImages {
         self.svw(k, 0x06, per);
     }
 
+    /// The dispatch class of a stream byte: 0 note, 1 length, 2 sample, 3 envelope, 4 volume,
+    /// 5 arpeggio, 6 command.
+    fn dclass(&self, b: u8) -> u16 {
+        if b < 0x80 {
+            return 0;
+        }
+        if b >= 0xE0 {
+            return 1;
+        }
+        let r: &[(u8, u16)] = match self.rev() {
+            Rev::A | Rev::B | Rev::R5 | Rev::R6 => &[(0xD0, 2), (0xC0, 3), (0xB0, 4), (0xA0, 5)],
+            Rev::A9c => &[(0xC0, 2), (0xB0, 3), (0xA0, 4), (0x9C, 5)],
+            Rev::R3 | Rev::R4 => &[(0xC0, 2), (0xB0, 3), (0xA0, 5)],
+            Rev::R1 => &[(0xC0, 2), (0xB0, 5)],
+            Rev::R2 => &[],
+        };
+        r.iter().find(|&&(lo, _)| b >= lo).map_or(6, |&(_, c)| c)
+    }
+
     fn stream_byte(&mut self, k: usize) -> u8 {
         let s = self.vl(k, 0x12);
         self.svl(k, 0x12, s.wrapping_add(1));
-        self.b(self.off(s))
+        let b = self.b(self.off(s));
+        self.mk(3, b as u16);
+        b
     }
 
     /// One voice's work in a running tick (section 7.3).
     fn step(&mut self, k: usize, tt: bool, hw: &mut Hw) {
+        self.mk(1, k as u16 | (tt as u16) << 8);
+        // a step that reads no byte after a rest
+        if !(tt && self.vb(k, 0x17) == 1) {
+            let s = self.vl(k, 0x12);
+            if self.b(self.off(s.wrapping_sub(1))) == self.rest {
+                self.mk(0x1A, 1);
+            }
+        }
         if tt {
             let cd = self.vb(k, 0x17).wrapping_sub(1);
             self.svb(k, 0x17, cd);
+            self.mk(2, cd as u16);
             if cd == 0 {
                 self.fetch(k, hw);
                 return;
             }
             let sl = self.vb(k, 0x19);
             if sl != 0 {
+                self.mk(5, sl as u16);
                 let n = self.vb(k, 0x18).wrapping_add(sl);
                 self.svb(k, 0x18, n);
                 self.set_period(k, n);
-                hw.loc(k, self.vl(k, 0x00));
-                hw.len(k, self.vw(k, 0x04));
+                self.w_loc(hw, k, self.vl(k, 0x00));
+                self.w_len(hw, k, self.vw(k, 0x04));
             }
+        }
+        // the release point (checked in every tick)
+        let cd = self.vb(k, 0x17);
+        if self.vb(k, 0x2A) == cd {
             let next = self.b(self.off(self.vl(k, 0x12)));
-            if self.vb(k, 0x2A) == cd && next != self.rest {
+            self.mk(6, (next == self.rest) as u16 * 2 | (!tt) as u16 * 0x10);
+            if tt && next != self.rest {
                 self.svb(k, 0x2B, 1);
                 self.svb(k, 0x19, 0);
                 let f = self.flags(k) & !F_SLIDE;
@@ -1057,11 +1398,13 @@ impl SoundImages {
             self.slide(k);
         }
         if f & F_ARP != 0 && !matches!(self.rev(), Rev::R2 | Rev::R4) {
+            self.mk(10, 0);
             let pat = self.vl(k, 0x42);
             let i = self.vb(k, 0x41);
             let mut b = self.b(self.off(pat.wrapping_add(i as u32)));
             let mut ni = i.wrapping_add(1);
             if b & 0x80 != 0 {
+                self.mk(10, 1);
                 ni = 0;
                 b &= 0x7F;
             }
@@ -1089,8 +1432,17 @@ impl SoundImages {
                 false
             }
         };
+        let es = if self.vb(k, 0x2C) != 0 { 0x10 } else if self.vb(k, 0x2D) != 0 { 0x20 } else if self.vb(k, 0x2B) != 0 { 0x30 } else { 0 };
+        self.mk(7, es);
+        if self.pes.get(k).is_some_and(|&p| p != es as u8) {
+            self.mk(7, 0x100 | es);
+        }
+        if let Some(p) = self.pes.get_mut(k) {
+            *p = es as u8;
+        }
         if self.vb(k, 0x2C) != 0 {
             if timer(self, 0x3A) {
+                self.mk(7, 0x11);
                 let n = self.vb(k, 0x2C) - 1;
                 self.svb(k, 0x2C, n);
                 let s = self.vb(k, 0x25);
@@ -1098,24 +1450,34 @@ impl SoundImages {
             }
         } else if self.vb(k, 0x2D) != 0 {
             if timer(self, 0x3C) {
+                self.mk(7, 0x21);
                 let n = self.vb(k, 0x2D) - 1;
                 self.svb(k, 0x2D, n);
                 let s = self.vb(k, 0x27);
+                if s > vol {
+                    self.mk(7, 0x22);
+                }
                 self.svb(k, 0x09, vol.saturating_sub(s));
             }
         } else if self.vb(k, 0x2B) != 0 && timer(self, 0x3E) {
+            self.mk(7, 0x31);
             let s = self.vb(k, 0x29);
+            if s > vol {
+                self.mk(7, 0x32);
+            }
             self.svb(k, 0x09, vol.saturating_sub(s));
         }
     }
 
     fn slide(&mut self, k: usize) {
         let c = self.vb(k, 0x31);
+        self.mk(8, (c != 0) as u16);
         if c == 0 {
             return;
         }
         self.svb(k, 0x31, c - 1);
         let s = self.vw(k, 0x32);
+        self.mk(8, 2 | (s >> 15));
         let p = self.vw(k, 0x06);
         let p = if s & 0x8000 != 0 { p.wrapping_sub(s & 0x7FFF) } else { p.wrapping_add(s) };
         self.svw(k, 0x06, p);
@@ -1123,21 +1485,26 @@ impl SoundImages {
 
     fn vibrato(&mut self, k: usize) {
         let depth = self.vb(k, 0x2E);
-        if depth == 0 {
-            return;
-        }
         let s = self.vl(k, 0x12);
         let delay = self.vb(k, if self.rev() == Rev::R2 { 0x3F } else { 0x40 });
         let run = self.b(self.off(s.wrapping_sub(1))) == self.rest
             || self.vb(k, 0x37) as i32 - self.vb(k, 0x17) as i32 >= delay as i32;
+        // generation B looks at the delay before the depth
+        if depth == 0 && (run || !self.gen_b()) {
+            self.mk(11, 0);
+            return;
+        }
         if !run {
+            self.mk(11, 1);
             return;
         }
         let f = self.flags(k);
+        self.mk(11, 4 | (f & F_VIBDIR != 0) as u16);
         let p = self.vw(k, 0x06);
         let p = if f & F_VIBDIR != 0 { p.wrapping_add(depth as u16) } else { p.wrapping_sub(depth as u16) };
         self.svw(k, 0x06, p);
         let c = self.vb(k, 0x30).wrapping_sub(1);
+        self.mk(11, 2 + (c == 0) as u16);
         if c == 0 {
             let h = self.vb(k, 0x2F).wrapping_mul(2);
             self.svb(k, 0x30, h);
@@ -1149,11 +1516,16 @@ impl SoundImages {
 
     /// Next pattern: the next stream of the order list (section 7.4).
     fn next_pattern(&mut self, k: usize) {
+        self.np = true;
         let f = self.flags(k) & !F_ARP;
         self.set_flags(k, f);
         for _ in 0..GUARD {
             let o = self.vl(k, 0x0E);
             let w = self.w(self.off(o));
+            self.mk(12, (w == 0) as u16);
+            if k == self.lead {
+                self.mk(9, 1 + (w == 0) as u16);
+            }
             if w != 0 {
                 self.svl(k, 0x0E, o.wrapping_add(2));
                 let s = self.abs(self.lay.sb + w as usize);
@@ -1208,19 +1580,25 @@ impl SoundImages {
     }
 
     fn note(&mut self, k: usize, b: u8, hw: &mut Hw) {
+        self.mk(4, (self.flags(k) & F_TIE == 0) as u16);
         self.svb(k, 0x18, b);
         self.set_period(k, b);
         let mut f = self.flags(k);
         let start = f & F_TIE == 0;
         if start {
-            hw.loc(k, self.vl(k, 0x00));
-            hw.len(k, self.vw(k, 0x04));
+            self.w_loc(hw, k, self.vl(k, 0x00));
+            self.w_len(hw, k, self.vw(k, 0x04));
             let g = self.g;
-            let int = self.gw(g.int) | self.vw(k, 0x38);
+            let old_int = self.gw(g.int);
+            let int = old_int | self.vw(k, 0x38);
             self.sgw(g.int, int);
             let dma = self.gw(g.dma) | self.vw(k, 0x22);
             self.sgw(g.dma, dma);
-            hw.dmacon(self.vw(k, 0x22) & 0xF);
+            // the voice's interrupt off, its DMA off, and the requests of the voices started so far
+            // cleared (this one's too from generation A on)
+            self.w_reg(hw, 0xDFF09A, self.vw(k, 0x38) & 0x7FFF);
+            self.w_dma(hw, self.vw(k, 0x22) & 0xF);
+            self.w_reg(hw, 0xDFF09C, if self.old() || self.rev() == Rev::R3 { old_int } else { int } & 0x7FFF);
             let sv = self.vb(k, 0x24);
             self.svb(k, 0x09, sv);
             let a = self.vb(k, 0x26);
@@ -1253,8 +1631,14 @@ impl SoundImages {
     /// Reads the stream up to a note or a rest (section 7.4).
     fn fetch(&mut self, k: usize, hw: &mut Hw) {
         let rev = self.rev();
+        self.np = false;
         for _ in 0..GUARD {
             let b = self.stream_byte(k);
+            let c = self.dclass(b);
+            self.mk(0x18, c);
+            if c == 3 && !self.np {
+                self.mk(0x19, 1);
+            }
             if b < 0x80 {
                 self.note(k, b, hw);
                 return;
@@ -1343,6 +1727,7 @@ impl SoundImages {
 
     /// One jump-table command; false when it ends the fetch.
     fn command(&mut self, k: usize, cmd: Cmd, hw: &mut Hw) -> bool {
+        self.mk(13, cmd as u16);
         let g = self.g;
         match cmd {
             NextPat => self.next_pattern(k),
@@ -1462,10 +1847,10 @@ impl SoundImages {
                 match self.rev() {
                     Rev::B | Rev::R6 => {
                         self.svb(k, 0x09, 0);
-                        hw.dmacon(1 << k);
+                        self.w_dma(hw, 1 << k);
                         if self.rev() == Rev::R6 {
-                            hw.vol(k, 0);
-                            hw.bus.write_word(0xDFF0AA + 16 * k as u32, 0);
+                            self.w_vol(hw, k, 0);
+                            self.w_reg(hw, 0xDFF0AA + 16 * k as u32, 0);
                         }
                         let a = self.active_at(k);
                         self.sb_(a, 0);
@@ -1475,17 +1860,17 @@ impl SoundImages {
                         let a = self.active_at(k);
                         self.sb_(a, 0);
                         if self.gb(8) != 0 {
-                            hw.vol(3, 0);
-                            hw.dmacon(8);
+                            self.w_vol(hw, 3, 0);
+                            self.w_dma(hw, 8);
                         } else {
                             self.svb(k, 0x09, 0);
-                            hw.vol(k, 0);
-                            hw.dmacon(1 << k);
+                            self.w_vol(hw, k, 0);
+                            self.w_dma(hw, 1 << k);
                         }
                     }
                     _ => {
                         self.sgb(3, 0);
-                        hw.dmacon(8);
+                        self.w_dma(hw, 8);
                     }
                 }
                 return false;
@@ -1554,12 +1939,37 @@ impl Replayer for SoundImages {
         205
     }
 
+    /// An audio interrupt that came after the tick's code (its voice's DMA started late, or the
+    /// tick's note cleared its request): the handler then.
+    fn audio_irq(&mut self, hw: &mut Hw) -> bool {
+        let p = self.pending_irqs(hw);
+        if p == 0 {
+            return false;
+        }
+        self.begin(hw, true);
+        if hw.bus.clock > self.tend {
+            // raised after the tick's code
+            self.mk(0x1E, p);
+        }
+        self.service(p, hw);
+        self.inh = false;
+        true
+    }
+
     fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
         self.sub = n;
         self.started = false;
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.begin(hw, false);
+        self.tick_body(hw);
+        self.end(hw);
+    }
+}
+
+impl SoundImages {
+    fn tick_body(&mut self, hw: &mut Hw) {
         if !self.started {
             self.startup(hw);
         }
@@ -1569,10 +1979,13 @@ impl Replayer for SoundImages {
             if v == 0 {
                 return;
             }
+            self.mk(20, 1);
         }
         if let Some(h) = &self.lay.hook
             && h.applies(self.gb(1))
         {
+            let t = 0x100 | h.skip.len() as u16 | (h.only.is_some() as u16) << 4;
+            self.mk(20, t);
             let p = self.gw(8);
             self.svw(0, 0x06, p);
         }

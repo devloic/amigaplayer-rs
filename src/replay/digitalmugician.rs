@@ -35,7 +35,10 @@
 //!   853 where NostalgicPlayer's has 3820 and 854;
 //! * the subsongs are the leading slots that have a name (at most 7); the end of
 //!   a song that does not loop turns all DMA off and clears the voices;
-//! * the writes come when the original's do (`Cost`).
+//! * the writes come when the original's do (`Cost`: whole 68000 cycles per code
+//!   path, a write at the last call into the host plus half the cycles since), and
+//!   the waveform effects' stores show to Paula from the original's first custom
+//!   chip access of the tick on (`FIRST_SYNC`).
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -169,8 +172,10 @@ pub struct DigitalMugician {
     songend: bool,
     /// The first slot's 12-byte name, which InitPlayer copies.
     title: String,
-    /// Colour clocks the original spends since its last write (`Cost`).
-    spent: f64,
+    /// The 68000 cycles the original's code has run since its last call into the host (`Cost`).
+    acc: i64,
+    /// The clock of that call (or of the tick's start).
+    anchor: u64,
     fit: Option<std::io::BufWriter<std::fs::File>>,
     counts: Vec<(u8, u32)>,
     /// The first tick is still to come (its period is shortened by `START_SHIFT`).
@@ -219,7 +224,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine, v2: bool) -> Option<Box<dyn Replaye
         title: d.get(0x50..0x5c).map_or(String::new(), |t| {
             t.iter().take_while(|&&c| c != 0).map(|&c| c as char).collect()
         }),
-        spent: 0.0,
+        acc: 0,
+        anchor: 0,
         fit,
         counts: Vec::new(),
         first: std::cell::Cell::new(true),
@@ -286,9 +292,14 @@ impl Replayer for DigitalMugician {
     fn tick(&mut self, hw: &mut Hw) {
         if let Some(f) = &mut self.fit {
             use std::io::Write;
-            let _ = writeln!(f, "tick {}", hw.bus.clock);
+            let _ = writeln!(f, "{} tick", hw.bus.clock);
         }
-        self.spent = 0.0;
+        self.acc = 0;
+        self.anchor = hw.bus.clock;
+        // the original's chip RAM stores show from its first custom chip access on: Paula
+        // fetches what was there up to then
+        let t = hw.bus.clock + FIRST_SYNC;
+        hw.bus.paula.sync(t, &hw.bus.ram);
         self.counts.clear();
         self.ch_tab = [0x80; 4];
         self.ch_len = 0;
@@ -296,12 +307,12 @@ impl Replayer for DigitalMugician {
         self.sample_loops(hw);
         self.t(Cost::AfterLoops);
         for i in 0..4 {
-            self.t(Cost::NoteCall);
+            self.t([Cost::NoteCall0, Cost::NoteCall1, Cost::NoteCall2, Cost::NoteCall3][i]);
             self.play_note(i, hw);
         }
         self.t(Cost::AfterNotes);
         for i in 0..4 {
-            self.t(Cost::EffectsCall);
+            self.t([Cost::EffectsCall0, Cost::EffectsCall1, Cost::EffectsCall2, Cost::EffectsCall3][i]);
             self.effects(i, hw);
         }
         self.t(Cost::EndTick);
@@ -331,7 +342,7 @@ impl Replayer for DigitalMugician {
                         self.position = hw.bus.r8(h + 1) as u16;
                     } else {
                         // the song stops: DMA off, the voices cleared, no DMA on
-                        self.write(hw, W::DmaOff);
+                        self.write(hw, W::DmaOff(4));
                         hw.dmacon(0x000f);
                         if self.started {
                             self.started = false;
@@ -358,158 +369,181 @@ enum W {
     Len,
     Per,
     Vol,
-    DmaOff,
+    /// Of voice n (4: all).
+    DmaOff(u8),
     DmaOn,
 }
 
 macro_rules! costs {
     ($($name:ident = $c:expr,)*) => {
-        /// The original's code paths, each with the colour clocks it takes: fitted
-        /// (least squares) to the gaps between the writes of the Eagleplayer's
-        /// write logs. A write waits what the paths since the last one took.
+        /// The original's code paths, each with the 68000 cycles it takes: fitted
+        /// to the gaps between the writes of the Eagleplayer's write logs (the
+        /// cycles from a run and a second one with the count started a cycle late).
+        /// A write is a call into the host, at the previous call's clock plus half
+        /// the cycles since, rounded down.
         #[derive(Clone, Copy)]
         #[allow(dead_code)]
         enum Cost { $($name,)* }
-        const COSTS: &[f64] = &[$($c as f64,)*];
+        const COSTS: &[i64] = &[$($c,)*];
         #[allow(dead_code)]
         const COST_NAMES: &[&str] = &[$(stringify!($name),)*];
     };
 }
 
 costs! {
-    TickStart = 153.48,
-    LoopVoice = 23.48,
-    LoopPending = 70.53,
-    LoopLenLoc = -14.14,
-    LoopLocAfter = 6.15,
-    LoopEmpty = 46.01,
-    LoopLocLen = -0.24,
-    LoopLenAfter = -2.19,
-    AfterLoops = 40.90,
-    NoteCall = 16.43,
-    NoteEntry = 16.43,
-    NotePattern = 44.09,
-    NoteRowTest = 16.43,
-    NoteRow = 48.99,
-    NoteRowEmpty = 5.52,
-    NoteNote = 43.47,
-    NoteStore = 3.27,
-    NoteStoreInstrument = 17.74,
-    NoteInstrument = 43.47,
-    NoteFx40 = 8.62,
-    NoteFx1 = 34.85,
-    NoteParam = 43.47,
-    NoteNotNoWander = 3.27,
-    NoteLookupNoWander = 40.19,
-    NoteLookupBend = 34.85,
-    NoteArpCheck = 43.47,
-    NoteArpSet = 20.12,
-    NoteWave = 43.47,
-    NoteWaveCheck = 3.27,
-    NoteWaveLoc = -3.77,
-    NoteLocLen = -0.24,
-    NoteLenCheck = 13.37,
-    NoteDmaOff = 21.66,
-    NoteDmaOffAfter = 10.44,
-    NoteCopyTest = 13.49,
-    NoteCopyCmp = 12.43,
-    NoteCopy = 575.88,
-    NoteTailCmp = 12.88,
-    NoteVolReset = 15.38,
-    NoteTail = 31.60,
-    NoteSample = 47.23,
-    NoteSampleLocLen = 17.76,
-    NoteSampleLenDma = 23.41,
-    NoteSampleAfter = 18.11,
-    FxCmp = 13.99,
-    FxNone = -1.74,
-    FxLength = 16.60,
-    FxLengthSet = 16.60,
-    FxSpeed = 28.34,
-    FxSpeedSet = 28.34,
-    FxShuffle = 18.95,
-    FxShuffleTest = 18.95,
-    FxShuffleSet = 18.95,
-    NoteReturn = 4.56,
-    AfterNotes = 29.03,
-    EffectsCall = 62.56,
-    EffectsEntry = 62.56,
-    EffectsWaveCheck = 10.88,
-    ChTab = 21.30,
-    ChTabCmp = 8.81,
-    ChTabAdd = 55.44,
-    FxDec = -19.89,
-    FxRun = 75.33,
-    FxFilter = -23.31,
-    FxFilterIter = 28.58,
-    FxMixing = 35.54,
-    FxMixingIter = 36.00,
-    FxScrollLeft = -66.07,
-    FxScrollIter = 12.98,
-    FxScrollRight = 66.17,
-    FxUpsample = 30,
-    FxUpsampleIter = 13.18,
-    FxDownsample = 0.26,
-    FxDownsampleIter = 16.96,
-    FxNegate = -33.83,
-    FxMadMix = 8.31,
-    FxMadMixIter = 13.00,
-    FxAddition = 0.18,
-    FxAdditionIter = 22.78,
-    FxFilter2 = 0.30,
-    FxFilter2Iter = 37.44,
-    FxMorph = 54.33,
-    FxMorphHigh = 6.07,
-    FxMorphBit = -0.19,
-    FxIndexWrap = 7.69,
-    FxMorphIter = 87.16,
-    FxMorphF = 16.35,
-    FxFilter3 = 0.24,
-    FxFilter3Iter = 30.44,
-    FxPolygate = -6.67,
-    FxColgate = 23.54,
-    FxColgateUp = 0.10,
-    FxReturn = 75.33,
-    EffectsRestore = 62.56,
-    VolDec = 18.52,
-    VolStep = 68.65,
-    VolEnd = 14.04,
-    VolLoopTest = 10,
-    VolCalc = 54.61,
-    VolForced = 14.01,
-    VolAfter = 26.54,
-    PerStart = 34.49,
-    PerArp = 59.04,
-    PerCalc = 34.49,
-    PerBendTest = 12.33,
-    PerBend = 46.16,
-    PerBendCheck = 20.14,
-    PerBendUp = -0.31,
-    PerBendClamp = 25.76,
-    PitchTest = 34.49,
-    PitchDelay = 23.64,
-    Pitch = 101.97,
-    PitchLoop = 9.96,
-    PerWrite = 34.49,
-    PerAfter = 35.24,
-    EndTick = 1.72,
-    EndSpeed = 92.00,
-    EndRowCmp = 11.00,
-    EndPattern = 41.00,
-    EndSong = 67.00,
-    DmaOnCall = 13.00,
+    TickStart = 307,
+    LoopVoice = 47,
+    LoopPending = 142,
+    LoopLenLoc = -28,
+    LoopLocAfter = 12,
+    LoopEmpty = 92,
+    LoopLocLen = 0,
+    LoopLenAfter = -4,
+    AfterLoops = 82,
+    NoteCall0 = 33,
+    NoteCall1 = 33,
+    NoteCall2 = 33,
+    NoteCall3 = 37,
+    NoteEntry = 32,
+    NotePattern = 88,
+    NoteRowTest = 33,
+    NoteRow = 98,
+    NoteRowEmpty = 11,
+    NoteNote = 87,
+    NoteStore = 7,
+    NoteStoreInstrument = 36,
+    NoteInstrument = 87,
+    NoteFx40 = 18,
+    NoteFx1 = 70,
+    NoteParam = 87,
+    NoteNotNoWander = 7,
+    NoteLookupNoWander = 81,
+    NoteLookupBend = 70,
+    NoteArpCheck = 87,
+    NoteArpSet = 40,
+    NoteWave = 87,
+    NoteWaveCheck = 6,
+    NoteWaveLoc = -8,
+    NoteLocLen = 0,
+    NoteLenCheck = 27,
+    NoteDmaOff = 43,
+    NoteDmaOffAfter = 22,
+    NoteCopyTest = 25,
+    NoteCopyCmp = 25,
+    NoteCopy = 1152,
+    NoteTailCmp = 26,
+    NoteVolReset = 30,
+    NoteTail = 63,
+    NoteSample = 94,
+    NoteSampleLocLen = 36,
+    NoteSampleLenDma = 47,
+    NoteSampleAfter = 36,
+    FxCmp = 28,
+    FxNone = -3,
+    FxLength = 33,
+    FxLengthSet = 34,
+    FxSpeed = 57,
+    FxSpeedSet = 57,
+    FxShuffle = 38,
+    FxShuffleTest = 39,
+    FxShuffleSet = 38,
+    NoteReturn = 8,
+    AfterNotes = 58,
+    EffectsCall0 = 125,
+    EffectsCall1 = 125,
+    EffectsCall2 = 125,
+    EffectsCall3 = 125,
+    EffectsEntry = 125,
+    EffectsWaveCheck = 21,
+    ChTab = 43,
+    ChTabCmp = 18,
+    ChTabAdd = 110,
+    FxDec = -40,
+    FxRun = 150,
+    FxFilter = -26,
+    FxFilterIter = 57,
+    FxMixing = 71,
+    FxMixingIter = 72,
+    FxScrollLeft = -137,
+    FxScrollIter = 26,
+    FxScrollRight = 127,
+    FxUpsample = -137,
+    FxUpsampleIter = 26,
+    FxDownsample = -5,
+    FxDownsampleIter = 34,
+    FxNegate = -68,
+    FxMadMix = 17,
+    FxMadMixIter = 26,
+    FxAddition = -57,
+    FxAdditionIter = 46,
+    FxFilter2 = -15,
+    FxFilter2Iter = 75,
+    FxMorph = 108,
+    FxMorphHigh = 12,
+    FxMorphBit = 2,
+    FxIndexWrap = 16,
+    FxMorphIter = 160,
+    FxMorphF = 108,
+    FxFilter3 = -15,
+    FxFilter3Iter = 61,
+    FxPolygate = -14,
+    FxColgate = 67,
+    FxColgateUp = 46,
+    FxReturn = 151,
+    EffectsRestore = 125,
+    VolDec = 37,
+    VolStep = 137,
+    VolEnd = 28,
+    VolLoopTest = 25,
+    VolCalc = 109,
+    VolForced = 28,
+    VolAfter = 53,
+    PerStart = 69,
+    PerArp = 118,
+    PerCalc = 69,
+    PerBendTest = 25,
+    PerBend = 93,
+    PerBendCheck = 40,
+    PerBendUp = 0,
+    PerBendClamp = 54,
+    PerBendClampUp = 44,
+    PitchTest = 69,
+    PitchDelay = 47,
+    Pitch = 204,
+    PitchLoop = 20,
+    PerWrite = 69,
+    PerAfter = 71,
+    EndTick = 3,
+    EndSpeed = 185,
+    EndRowCmp = 21,
+    EndPattern = 81,
+    EndSong = 134,
+    DmaOnCall = 27,
     // the host calls, before and after the write
-    LocPre = 75.34,
-    LocPost = 23.43,
-    LenPre = 87.81,
-    LenPost = 31.80,
-    PerPre = 34.49,
-    PerPost = 35.24,
-    VolPre = 54.61,
-    VolPost = 26.54,
-    DmaPre = 46.79,
-    DmaPost = 28.55,
+    LocPre = 151,
+    LocPost = 47,
+    LenPre = 175,
+    LenPost = 63,
+    PerPre = 69,
+    PerPost = 70,
+    VolPre = 111,
+    VolPost = 53,
+    DmaPre = 94,
+    DmaPost = 57,
+    OffPre = 94,
+    OffPost = 57,
+    OffPost0 = 57,
+    OffPost1 = 57,
+    OffPost2 = 57,
+    OffPost3 = 57,
 }
+
+
+/// Colour clocks from the tick's start to the original's first custom chip access, when Paula
+/// catches up with the beam: what the tick's code stores into chip RAM before its first call into
+/// the host shows to the fetches from there on (measured on the reference's DMA fetches of the
+/// waveforms the effects rewrite).
+const FIRST_SYNC: u64 = 50;
 
 /// A signed byte, sign-extended to a word.
 fn ext(b: u8) -> u16 {
@@ -523,7 +557,7 @@ impl DigitalMugician {
 
     fn tn(&mut self, c: Cost, n: u32) {
         let k = c as usize;
-        self.spent += COSTS[k] * n as f64;
+        self.acc += COSTS[k] * n as i64;
         if self.fit.is_some() && n != 0 {
             match self.counts.iter_mut().find(|e| e.0 as usize == k) {
                 Some(e) => e.1 += n,
@@ -540,18 +574,29 @@ impl DigitalMugician {
             W::Len => (Cost::LenPre, Cost::LenPost),
             W::Per => (Cost::PerPre, Cost::PerPost),
             W::Vol => (Cost::VolPre, Cost::VolPost),
-            W::DmaOff | W::DmaOn => (Cost::DmaPre, Cost::DmaPost),
+            W::DmaOff(ch) => (Cost::OffPre, [Cost::OffPost0, Cost::OffPost1, Cost::OffPost2, Cost::OffPost3, Cost::OffPost][ch as usize]),
+            W::DmaOn => (Cost::DmaPre, Cost::DmaPost),
         };
         self.t(pre);
+        let at = self.anchor + (self.acc.max(0) / 2) as u64;
         if let Some(f) = &mut self.fit {
             use std::io::Write;
             let s: Vec<String> = self.counts.iter().map(|(k, n)| format!("{}:{n}", COST_NAMES[*k as usize])).collect();
-            let _ = writeln!(f, "w {} {}", hw.bus.clock + self.spent.max(0.0).round() as u64, s.join(" "));
+            let kind = match w {
+                W::Loc => "loc",
+                W::Len => "len",
+                W::Per => "per",
+                W::Vol => "vol",
+                W::DmaOff(_) => "off",
+                W::DmaOn => "on",
+            };
+            let _ = writeln!(f, "{at} {kind} {}", s.join(" "));
         }
-        // the fraction of a colour clock left over is carried to the next write
-        let c = self.spent.max(0.0).round();
-        hw.wait(c as u64);
-        self.spent -= c;
+        if hw.bus.clock < at {
+            hw.wait(at - hw.bus.clock);
+        }
+        self.anchor = hw.bus.clock;
+        self.acc = 0;
         self.counts.clear();
         self.t(post);
     }
@@ -768,7 +813,7 @@ impl DigitalMugician {
             }
             if fx != FX_NO_WANDER && fx != FX_NO_DMA {
                 self.t(Cost::NoteDmaOff);
-                self.write(hw, W::DmaOff);
+                self.write(hw, W::DmaOff(ch as u8));
                 hw.dmacon(1 << ch);
                 self.t(Cost::NoteDmaOffAfter);
             }
@@ -815,7 +860,7 @@ impl DigitalMugician {
         self.write(hw, W::Len);
         hw.len(ch, len);
         self.t(Cost::NoteSampleLenDma);
-        self.write(hw, W::DmaOff);
+        self.write(hw, W::DmaOff(ch as u8));
         hw.dmacon(1 << ch);
         self.t(Cost::NoteSampleAfter);
     }
@@ -992,7 +1037,7 @@ impl DigitalMugician {
                 }
                 let reached = if d0 & 0x8000 != 0 { p <= v.bend_end } else { p >= v.bend_end };
                 if reached {
-                    self.t(Cost::PerBendClamp);
+                    self.t(if d0 & 0x8000 != 0 { Cost::PerBendClamp } else { Cost::PerBendClampUp });
                     v.bend = v.bend_end.wrapping_sub(base);
                     v.param = 0;
                 }

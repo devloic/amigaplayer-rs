@@ -185,125 +185,241 @@ const SILENCE_SIZE: u32 = 0x20000;
 const PLAYER_MEMORY_CODE: usize = 11548;
 static PLAYER_MEMORY: &[u8; 10704] = include_bytes!("med/player_memory.bin");
 
-/// Colour clocks the original's code spends between its register writes, measured on its runs
-/// (one colour clock is two CPU cycles; the code's cycle costs are fixed, so only the path taken
-/// matters). Sizes by the tracks of the block (N): 1, 2, 3, 4, 5, 6, 8, 12 and 16.
-mod cost {
-    /// A tick's entry: from the interrupt to the soft interrupt, to the replay routine's body.
-    pub const IRQ: f64 = 97.0;
-    pub const ENTRY: f64 = 143.0;
-    /// Every tenth call (every 25th with a fast timer) costs more.
-    pub const ENTRY_NTH: f64 = 34.0;
-    /// With a timer value up to this (fast tempos) the entry takes 2 more.
-    pub const FAST: u16 = 4096;
-    pub const FAST_EXTRA: f64 = 2.0;
+/// The 68000 cycles the original's code spends between its register writes, measured on its runs
+/// (one colour clock is two CPU cycles; each register write is a call into the host, whose time
+/// is the previous call's plus the cycles since, halved and rounded down). One label per branch of
+/// the code; a cost is the label's cycles times its count. Sizes by the tracks of the block (N): 1,
+/// 2, 3, 4, 5, 6, 8, 12 and 16, linear between the sizes and beyond them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+enum K {
+    /// A tick's entry: from the interrupt to the soft interrupt, to the replay routine's body;
+    /// every tenth call (every 25th with a fast timer) costs more, and with a timer value up to
+    /// `FAST` (fast tempos) the entry takes more.
+    Entry,
+    EntryFast,
+    EntryNth,
+    /// In BPM mode a tick that plays takes more in the entry; so does a fast tempo in SPD mode.
+    BpmRow,
+    BpmEvery,
+    FastSpdRow,
+    FastSpdEvery,
     /// To the every-tick stage of a tick that is not a row's, and to the row stage.
-    pub const EVERY: f64 = 157.0;
-    pub const ROW: f64 = 169.0;
-    /// In BPM mode a tick that plays takes this much more in the entry.
-    pub const BPM_EXTRA: f64 = 21.0;
-    pub const BPM_EXTRA_EVERY: f64 = 20.0;
-    pub const FAST_SPD_EVERY: f64 = 18.0;
-    /// The track counts the tables below are measured at.
-    pub const SIZES: [usize; 9] = [1, 2, 3, 4, 5, 6, 8, 12, 16];
+    Every,
+    Row,
     /// The row read: base, per track, per note, per instrument set (MMD0, then MMD1 and 2).
-    pub const READ0: [f64; 4] = [197.0, 97.0, 9.0, 112.0];
-    pub const READ1: [f64; 4] = [194.5, 71.5, 4.0, 112.0];
-    pub const READ_INFO: f64 = 19.0;
+    Read0,
+    Read0Trk,
+    Read0Note,
+    Read0Inst,
+    Read1,
+    Read1Trk,
+    Read1Note,
+    Read1Inst,
+    ReadInfo,
     /// The row's commands: base and per track.
-    pub const CMDS0: [f64; 2] = [159.0, 31.0];
-    pub const CMDS1: [f64; 2] = [163.5, 31.0];
-    /// A track that does not play a note in the trigger loop (after the last note); before a
-    /// note the first skipped track costs 40 and each further one 39 (`skipc`).
-    pub const SKIP: f64 = 39.5;
-    pub const SKIP_FIRST: f64 = 40.0;
-    pub const SKIP_NEXT: f64 = 39.0;
+    Cmds0,
+    Cmds0Trk,
+    Cmds1,
+    Cmds1Trk,
+    /// One command of the row (sub: `RC_*`).
+    RowCmd,
+    /// A track that does not play a note in the trigger loop: after the last note, and before a
+    /// note the first and each further one.
+    Skip,
+    SkipFirst,
+    SkipNext,
     /// The line advance moving on to the next block (the end of one, or a block command).
-    pub const NEW_BLOCK: f64 = 140.0;
-    /// From the loop's start to the first note's DMA off (without skipped tracks).
-    pub const FIRST: f64 = 245.5;
-    /// From a note's length to the next note's DMA off (without skipped tracks), and after the last
-    /// to the end of the loop (per track left; the end of the loop with no note).
-    pub const NEXT: f64 = 318.0;
-    pub const LOOP_END: f64 = 88.0;
-    pub const NO_NOTE_END: f64 = 16.0;
-    /// A note that loops moves this much of the time to the following step.
-    pub const LOOPED: f64 = 10.0;
-    /// From a note's DMA off to its start, and to its length, by channel; less if its song repeat
-    /// length is over a word, and less if the instrument loops.
-    pub const NOTE: [f64; 4] = [426.0, 441.0, 457.0, 461.0];
-    pub const NOTE_REP: f64 = 3.0;
-    pub const LEN: [f64; 4] = [245.0, 261.0, 276.0, 280.0];
-    /// The line advance and hold look-ahead, by N of the block after it.
-    pub const ADV0: [f64; 9] = [563.7, 604.0, 644.2, 684.5, 771.0, 834.0, 961.0, 1169.0, 1423.0];
-    pub const ADV1: [f64; 9] = [572.0, 613.0, 653.5, 694.0, 735.0, 798.0, 925.0, 1133.0, 1387.0];
-    pub const ADV2: [f64; 9] = [607.0, 648.0, 688.0, 729.0, 769.0, 856.0, 960.0, 1053.0, 1422.0];
-    /// Each track whose hold counter runs adds this to the advance.
-    pub const ADV_HOLD: f64 = 23.0;
-    pub const ADV_EXTEND: f64 = 11.5;
-    /// The pass over the tracks every tick, up to the output pass.
-    pub const PASS0: [f64; 9] = [446.0, 639.0, 819.0, 987.0, 1120.0, 1252.0, 1492.0, 1985.0, 2452.0];
-    pub const PASS1: [f64; 9] = [441.0, 616.0, 792.0, 967.0, 1082.0, 1197.0, 1427.0, 1887.0, 2347.0];
-    /// The output pass: to the first period, from a volume to the next period, from a period to
-    /// the volume by channel.
-    pub const OUT_ENTRY: f64 = 104.0;
-    pub const PER: f64 = 172.0;
-    pub const VOL: [f64; 4] = [172.0, 183.0, 195.0, 190.0];
-    /// A synth sound's programs, each tick, and a new waveform's length, start and end.
-    pub const SYNTH: f64 = 450.0;
-    pub const WF_LEN: f64 = 60.0;
-    pub const WF_LOC: f64 = 90.0;
-    pub const WF_END: f64 = 74.0;
-    /// After the last volume to the DMA going on, with more than four tracks 29 more each.
-    pub const DMA_ON: f64 = 138.0;
-    pub const DMA_ON_TRACK: f64 = 29.0;
-    /// After the host's wait for the DMA: the first loop write by channel, the next by the
-    /// channels between, a length after its start.
-    pub const LOOP_FIRST: [f64; 4] = [148.0, 179.0, 211.0, 238.0];
-    pub const LOOP_SKIP: f64 = 12.5;
-    pub const LOOP_LEN: f64 = 112.0;
-    pub const LOOP_LEN_LONG: f64 = 110.0;
-    /// From a loop's length to the next loop's start, by the two channels.
-    pub const LOOP_NEXT: [[f64; 4]; 4] = [
-        [0.0, 154.0, 185.0, 213.0],
-        [0.0, 0.0, 154.0, 181.0],
-        [0.0, 0.0, 0.0, 150.0],
-        [0.0; 4],
-    ];
-    /// A hold expiry's DMA off in the pass, from the pass's start by channel, and between two;
-    /// from the last to the pass's end.
-    pub const HOLD_FIRST: f64 = 150.0;
-    pub const HOLD_TRACK: f64 = 74.25;
-    pub const HOLD_OFF: f64 = 134.5;
-    /// A track whose hold ends adds this to the pass, and a decay that starts then this more.
-    /// Commands that run on every tick add to the pass (a slide up or down, a tempo or special).
-    pub const CMD_SLIDE_UP: f64 = 23.0;
-    pub const CMD_SLIDE_DOWN: f64 = 8.0;
-    pub const CMD_SLIDE_DOWN2: f64 = 26.0;
-    pub const CMD_VIBRATO: f64 = 102.0;
-    pub const CMD_VOLSLIDE: f64 = 31.0;
-    pub const CMD_TEMPO: f64 = 61.5;
-    pub const CMD_TICKS: f64 = -6.0;
-    /// A volume command costs this more in the pass of the row's own tick.
-    pub const CMD_VOLUME: f64 = 6.5;
-    /// A track whose hold is running (not out) adds this to the pass; one whose volume fades,
-    /// this.
-    pub const HOLD_ACTIVE: f64 = 0.0;
-    pub const FADE: f64 = 18.0;
-    pub const HOLD_END: f64 = 25.0;
-    pub const HOLD_DECAY: f64 = 63.0;
+    NewBlock,
+    /// From the loop's start to the first note's DMA off, from a note's length to the next
+    /// note's DMA off, after the last to the end of the loop, the end of the loop with no note.
+    First,
+    Next,
+    LoopEnd,
+    NoNoteEnd,
+    /// A note that loops moves time to the following step.
+    Looped,
+    /// From a note's DMA off to its start, and to its length, by channel (sub); less if its
+    /// song repeat length is over a word, and less if the instrument loops.
+    Note,
+    NoteRep,
+    /// A multi-octave sample's note (sub: its type) takes longer to its start.
+    NoteOct,
+    Len,
+    LenLooped,
+    /// The line advance and hold look-ahead, by N of the block after it (sub), by file version.
+    Adv0,
+    Adv1,
+    Adv2,
+    /// Each track whose hold counter runs adds to the advance, and more if it is extended.
+    AdvHold,
+    AdvExtend,
+    /// A note whose instrument holds (a hold count set) takes less to its DMA off.
+    HoldNote,
+    /// The every-tick pass: to track 0's hold, each track's turn (sub: track, 4 for tracks 4
+    /// and up), a hold running, ending (synth), with the DMA off, with a decay starting, a fade;
+    /// the commands that run on every tick (sub: `PC_*`); the rest of the pass by N (sub).
+    PassStart,
+    HoldTrack,
+    HoldActive,
+    HoldEnd,
+    HoldOff,
+    HoldDecay,
+    Fade,
+    FadeEnd,
+    PassCmd,
+    PassRest0,
+    PassRest1,
+    /// The output pass: a synth sound's programs, to the first period, from a volume to the
+    /// next period, from a period to the volume by channel (sub); a new waveform's length,
+    /// start and end.
+    Synth,
+    OutEntry,
+    Per,
+    Vol,
+    WfLen,
+    WfLoc,
+    WfEnd,
+    /// After the last volume to the DMA going on, with more than four tracks more each.
+    DmaOn,
+    DmaOnTrack,
+    /// After the host's wait for the DMA: the first loop write by channel (sub), each channel
+    /// between without a loop, a length after its start, from a loop's length to the next
+    /// loop's start (sub: 4 * previous + channel).
+    LoopFirst,
+    LoopSkip,
+    LoopLen,
+    LoopLenLong,
+    LoopNext,
+}
 
-    /// A value of a table by N, linear between the sizes and beyond them.
-    pub fn by_n(t: &[f64; 9], n: usize) -> f64 {
-        let n = n.max(1);
-        let mut i = 0;
-        while i + 2 < SIZES.len() && SIZES[i + 1] < n {
-            i += 1;
-        }
-        let (a, b) = (SIZES[i] as f64, SIZES[i + 1] as f64);
-        t[i] + (t[i + 1] - t[i]) * (n as f64 - a) / (b - a)
+/// Row command kinds (`K::RowCmd` subs).
+const RC_0C_SET: u8 = 0;
+const RC_0C_DEC: u8 = 1;
+const RC_0C_HEX0: u8 = 2;
+const RC_0C_HEX1: u8 = 3;
+const RC_0B: u8 = 4;
+const RC_0F_0: u8 = 5;
+const RC_0F_BPM: u8 = 6;
+const RC_0F_LOW: u8 = 7;
+const RC_0F_TEMPO: u8 = 8;
+const RC_0F_FF: u8 = 9;
+const RC_0F_OTHER: u8 = 10;
+const RC_09_0: u8 = 11;
+const RC_09_0X: u8 = 12;
+const RC_09_1X: u8 = 13;
+const RC_08: u8 = 14;
+const RC_03_0: u8 = 15;
+const RC_03_1: u8 = 16;
+const RC_OTHER: u8 = 17;
+/// An MMD0 command costs this more (the commands that differ).
+const RC_MMD0: u8 = 18;
+/// A hexadecimal volume over 64 (not set).
+const RC_0C_HEXBAD0: u8 = 19;
+const RC_0C_HEXBAD1: u8 = 20;
+/// Every-tick command kinds (`K::PassCmd` subs).
+const PC_SLIDE_UP: u8 = 0;
+const PC_SLIDE_DOWN: u8 = 1;
+const PC_SLIDE_DOWN2: u8 = 2;
+const PC_VIBRATO: u8 = 3;
+const PC_VOLSLIDE: u8 = 4;
+const PC_TEMPO: u8 = 5;
+const PC_TICKS: u8 = 6;
+const PC_VOLUME: u8 = 7;
+const PC_VOLUME_HI: u8 = 8;
+const PC_VOLSLIDE0: u8 = 9;
+
+/// With a timer value up to this (fast tempos) the entry takes longer.
+const FAST: u16 = 4096;
+/// The track counts the tables by N are measured at.
+const SIZES: [usize; 9] = [1, 2, 3, 4, 5, 6, 8, 12, 16];
+
+/// A value of a table by N, linear between the sizes and beyond them (rounded down).
+fn by_n(t: &[i64; 9], n: usize) -> i64 {
+    let n = n.max(1);
+    let mut i = 0;
+    while i + 2 < SIZES.len() && SIZES[i + 1] < n {
+        i += 1;
+    }
+    let (a, b) = (SIZES[i] as i64, SIZES[i + 1] as i64);
+    t[i] + ((t[i + 1] - t[i]) * (n as i64 - a)).div_euclid(b - a)
+}
+
+/// The cycles of label `k` with `sub`.
+fn cyc(k: K, sub: u8) -> i64 {
+    let s = sub as usize;
+    match k {
+        K::Entry => 481,
+        K::EntryFast => 4,
+        K::EntryNth => 68,
+        K::BpmRow => 41,
+        K::BpmEvery => 41,
+        K::FastSpdRow => 38,
+        K::FastSpdEvery => 36,
+        K::Every => 313,
+        K::Row => 338,
+        K::Read0 => 392,
+        K::Read0Trk => 194,
+        K::Read0Note => 18,
+        K::Read0Inst => 224,
+        K::Read1 => 389,
+        K::Read1Trk => 143,
+        K::Read1Note => 8,
+        K::Read1Inst => 224,
+        K::ReadInfo => 38,
+        K::Cmds0 => 318,
+        K::Cmds0Trk => 62,
+        K::Cmds1 => 327,
+        K::Cmds1Trk => 62,
+        K::RowCmd => [229, 282, 204, 193, 357, 201, 612, 434, 542, 706, 261, 161, 166, 157, 177, 218, 222, 127, 10, 192, 181][s.min(20)],
+        K::Skip => 79,
+        K::SkipFirst => 79,
+        K::SkipNext => 79,
+        K::NewBlock => 281,
+        K::First => 492,
+        K::Next => 637,
+        K::LoopEnd => 178,
+        K::NoNoteEnd => 33,
+        K::Looped => 20,
+        K::Note => [852, 883, 914, 922][s & 3],
+        K::NoteRep => -6,
+        K::NoteOct => 539,
+        K::Len => [491, 522, 553, 561][s & 3],
+        K::LenLooped => -20,
+        K::Adv0 => by_n(&[1127, 1208, 1288, 1368, 1542, 1668, 1922, 2338, 2846], s),
+        K::Adv1 => by_n(&[1144, 1226, 1307, 1387, 1470, 1596, 1850, 2266, 2774], s),
+        K::Adv2 => by_n(&[1214, 1296, 1376, 1458, 1538, 1712, 1920, 2106, 2844], s),
+        K::AdvHold => [46, 67][s & 1],
+        K::AdvExtend => 23,
+        K::HoldNote => -16,
+        K::PassStart => 300,
+        K::HoldTrack => [148, 148, 148, 149, 0][s.min(4)],
+        K::HoldActive => 25,
+        K::HoldEnd => 50,
+        K::HoldOff => 271,
+        K::HoldDecay => 75,
+        K::Fade => 25,
+        K::FadeEnd => 32,
+        K::PassCmd => [46, 16, 52, 204, 62, 123, -13, 12, 12, 87][s.min(9)],
+        K::PassRest0 => by_n(&[444, 681, 893, 1080, 1346, 1610, 2090, 3076, 4010], s),
+        K::PassRest1 => by_n(&[434, 635, 839, 1040, 1270, 1500, 1960, 2880, 3800], s),
+        K::Synth => 900,
+        K::OutEntry => 209,
+        K::Per => 345,
+        K::Vol => [344, 367, 390, 380][s & 3],
+        K::WfLen => 120,
+        K::WfLoc => 180,
+        K::WfEnd => 148,
+        K::DmaOn => 276,
+        K::DmaOnTrack => 58,
+        K::LoopFirst => [296, 359, 422, 477][s & 3],
+        K::LoopSkip => 25,
+        K::LoopLen => 225,
+        K::LoopLenLong => 221,
+        K::LoopNext => [0, 308, 371, 426, 0, 0, 308, 363, 0, 0, 0, 300, 0, 0, 0, 0][s & 15],
     }
 }
+
 
 #[derive(Clone, Default)]
 struct Track {
@@ -429,10 +545,11 @@ pub struct Med {
     /// BPM tempos: timer interrupts until the song advances (every fourth).
     irqs: u8,
     songend: bool,
-    /// The timing model of the original's code: the clock the tick's time is counted from, the
-    /// half colour clocks elapsed since (the original's code runs in whole CPU cycles), the
-    /// interrupts counted since the start, the original's start-up time in colour clocks, the
-    /// track count of the block after the row's advance, and the tick's progress.
+    /// The timing model of the original's code: the clock of the last call into the host (a
+    /// register write, the tick's start, the host's wait) the time is counted from, the CPU
+    /// cycles elapsed since, the interrupts counted since the start, the original's start-up time
+    /// in colour clocks, the track count of the block after the row's advance, and the tick's
+    /// progress.
     anchor: u64,
     acc2: i64,
     calls: u32,
@@ -443,10 +560,6 @@ pub struct Med {
     first_out: bool,
     /// Whether the last note of the tick loops.
     note_loops: bool,
-    advance_cost: f64,
-    pass_start2: i64,
-    pass_extra: f64,
-    hold_extra: f64,
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -553,10 +666,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         n_after: 4,
         first_out: true,
         note_loops: false,
-        advance_cost: 0.0,
-        pass_start2: 0,
-        pass_extra: 0.0,
-        hold_extra: 0.0,
     };
     p.title = p.song_name(&m.bus);
     p.play_module(&mut m.bus, 0);
@@ -623,37 +732,36 @@ impl Replayer for Med {
             return;
         }
         // the entry: the interrupt, the soft interrupt, the routine's body
-        let fast = self.timer <= cost::FAST;
-        let mut entry = cost::IRQ + cost::ENTRY;
+        let fast = self.timer <= FAST;
+        self.anchor = hw.bus.clock;
+        self.acc2 = 0;
+        self.sp(K::Entry, 0, 1);
         if fast {
-            entry += cost::FAST_EXTRA;
+            self.sp(K::EntryFast, 0, 1);
         }
         if (call + 1) % if fast { 25 } else { 10 } == 0 {
-            entry += cost::ENTRY_NTH;
+            self.sp(K::EntryNth, 0, 1);
         }
         let row_tick = {
             let c = self.counter.wrapping_add(1);
             !((c as i8) < (self.tempo2 as i8) && c != 0)
         };
         if self.bpm {
-            entry += if row_tick { cost::BPM_EXTRA } else { cost::BPM_EXTRA_EVERY };
+            self.sp(if row_tick { K::BpmRow } else { K::BpmEvery }, 0, 1);
         } else if fast {
             // a fast tempo in SPD mode: the timer's interrupt takes longer to get to the routine
-            entry += if row_tick { cost::BPM_EXTRA - cost::FAST_EXTRA } else { cost::FAST_SPD_EVERY };
+            self.sp(if row_tick { K::FastSpdRow } else { K::FastSpdEvery }, 0, 1);
         }
-        self.anchor = hw.bus.clock;
-        self.acc2 = 0;
-        self.spend(entry);
         self.first_out = true;
         self.note_loops = false;
         self.dma_on = 0;
         let c = self.counter.wrapping_add(1);
         if (c as i8) < (self.tempo2 as i8) && c != 0 {
             self.counter = c;
-            self.spend(cost::EVERY);
+            self.sp(K::Every, 0, 1);
         } else {
             self.counter = 0;
-            self.spend(cost::ROW);
+            self.sp(K::Row, 0, 1);
             if self.block_delay == 0 || {
                 self.block_delay -= 1;
                 self.block_delay == 0
@@ -895,7 +1003,7 @@ impl Med {
         } else {
             blk + 2 + ((line * 3) & 0xffff) * self.numtracks as u32
         };
-        let (mut notes, mut insts) = (0.0, 0.0);
+        let (mut notes, mut insts) = (0i64, 0i64);
         for t in 0..self.numtracks as usize {
             let b = &*hw.bus;
             let (note, mut inum);
@@ -921,12 +1029,12 @@ impl Med {
             tr.curr_note = note;
             if note != 0 {
                 tr.prev_note = note;
-                notes += 1.0;
+                notes += 1;
             }
             tr.skip = false;
             inum &= 0x3f;
             if inum != 0 {
-                insts += 1.0;
+                insts += 1;
                 let i = (inum - 1) as usize;
                 tr.instr = i as u8;
                 let smp = smp_base + 8 * i as u32;
@@ -943,59 +1051,82 @@ impl Med {
             }
         }
         // the row read, then the commands' stage
-        let nt = self.numtracks as f64;
-        let rd = if mmd1 { cost::READ1 } else { cost::READ0 };
-        let mut c = rd[0] + rd[1] * nt + rd[2] * notes + rd[3] * insts;
+        let nt = self.numtracks as i64;
         if mmd1 {
+            self.sp(K::Read1, 0, 1);
+            self.sp(K::Read1Trk, 0, nt);
+            self.sp(K::Read1Note, 0, notes);
+            self.sp(K::Read1Inst, 0, insts);
             let info = self.ptr(hw.bus, blk + 4);
             if info != 0 && self.ptr(hw.bus, info + 0xc) == 0 {
-                c += cost::READ_INFO;
+                self.sp(K::ReadInfo, 0, 1);
             }
+            self.sp(K::Cmds1, 0, 1);
+            self.sp(K::Cmds1Trk, 0, nt);
+        } else {
+            self.sp(K::Read0, 0, 1);
+            self.sp(K::Read0Trk, 0, nt);
+            self.sp(K::Read0Note, 0, notes);
+            self.sp(K::Read0Inst, 0, insts);
+            self.sp(K::Cmds0, 0, 1);
+            self.sp(K::Cmds0Trk, 0, nt);
         }
-        self.spend(c);
-        let cm = if mmd1 { cost::CMDS1 } else { cost::CMDS0 };
-        self.spend(cm[0] + cm[1] * nt);
         if !self.row_commands(hw, blk) {
             return false;
         }
         // the trigger loop: a track that plays a note costs its note, the others a little
         let nt = self.numtracks.min(64) as usize;
         let mut last = None;
-        let mut skipped = 0.0;
+        let mut skipped = 0i64;
         for t in 0..nt {
             let tr = &self.tracks[t];
             if tr.skip || tr.curr_note == 0 || !self.playable(hw.bus, t) {
-                skipped += 1.0;
+                skipped += 1;
                 continue;
             }
             let tr = &mut self.tracks[t];
             tr.hold_cnt = if tr.hold == 0 { -1 } else { tr.hold as i8 };
             let note = tr.curr_note;
-            let gap = if last.is_none() {
-                cost::FIRST + skipc(skipped)
+            if tr.hold != 0 {
+                self.sp(K::HoldNote, 0, 1);
+            }
+            if last.is_none() {
+                self.sp(K::First, 0, 1);
             } else {
-                cost::NEXT + skipc(skipped) + if self.note_loops { cost::LOOPED } else { 0.0 }
-            };
-            self.spend(gap);
+                self.sp(K::Next, 0, 1);
+                if self.note_loops {
+                    self.sp(K::Looped, 0, 1);
+                }
+            }
+            if skipped > 0 {
+                self.sp(K::SkipFirst, 0, 1);
+                self.sp(K::SkipNext, 0, skipped - 1);
+            }
             last = Some(t);
-            skipped = 0.0;
+            skipped = 0;
             self.play_note(hw, t, note);
         }
         match last {
-            Some(_) => self.spend(
-                cost::LOOP_END + cost::SKIP * skipped + if self.note_loops { cost::LOOPED } else { 0.0 },
-            ),
-            None => self.spend(cost::SKIP * nt as f64 + cost::NO_NOTE_END),
+            Some(_) => {
+                self.sp(K::LoopEnd, 0, 1);
+                self.sp(K::Skip, 0, skipped);
+                if self.note_loops {
+                    self.sp(K::Looped, 0, 1);
+                }
+            }
+            None => {
+                self.sp(K::Skip, 0, nt as i64);
+                self.sp(K::NoNoteEnd, 0, 1);
+            }
         }
-        self.advance_cost = 0.0;
         self.advance(hw.bus);
         self.n_after = self.dims_after(hw.bus);
         let adv = match self.ver {
-            b'0' => &cost::ADV0,
-            b'1' => &cost::ADV1,
-            _ => &cost::ADV2,
+            b'0' => K::Adv0,
+            b'1' => K::Adv1,
+            _ => K::Adv2,
         };
-        self.spend(cost::by_n(adv, self.n_after) + self.advance_cost);
+        self.sp(adv, self.n_after.min(255) as u8, 1);
         true
     }
 
@@ -1032,7 +1163,11 @@ impl Med {
                     continue;
                 }
                 let cmd = if stride == 3 { c & 0xf } else { c & 0x3f };
-                self.spend(self.row_cmd_cost(cmd, arg, stride == 3));
+                let (k, m) = self.row_cmd_cost(cmd, arg, stride == 3);
+                self.sp(K::RowCmd, k, 1);
+                if m {
+                    self.sp(K::RowCmd, RC_MMD0, 1);
+                }
                 match self.row_command(hw, t, cmd, arg) {
                     Some(skip) => self.tracks[t].skip |= skip,
                     None => return false,
@@ -1045,39 +1180,40 @@ impl Med {
         }
     }
 
-    /// What the original's code spends on one command of the row (measured for the commands listed;
-    /// the others cost like the no-ops).
-    fn row_cmd_cost(&self, cmd: u8, arg: u8, mmd0: bool) -> f64 {
-        let m = if mmd0 { 5.0 } else { 0.0 };
+    /// The label of one command of the row (measured for the commands listed; the others cost
+    /// like the no-ops), and whether an MMD0 file's costs more.
+    fn row_cmd_cost(&self, cmd: u8, arg: u8, mmd0: bool) -> (u8, bool) {
         match cmd {
             0x0c => {
                 if !mmd0 && arg & 0x80 != 0 {
-                    114.5
+                    (RC_0C_SET, false)
                 } else if self.flags & FLAG_VOLHEX == 0 {
-                    141.0 + m
+                    (RC_0C_DEC, mmd0)
+                } else if arg > 0x40 {
+                    (if mmd0 { RC_0C_HEXBAD0 } else { RC_0C_HEXBAD1 }, false)
                 } else {
-                    if mmd0 { 99.9 } else { 96.5 }
+                    (if mmd0 { RC_0C_HEX0 } else { RC_0C_HEX1 }, false)
                 }
             }
-            0x0b => 178.5 + m,
+            0x0b => (RC_0B, mmd0),
             0x0f => match arg {
-                0 => 89.0,
-                1..=0xf0 if self.bpm => 306.0 + m,
-                1..=10 => 217.0 + m,
-                0x0b..=0xf0 => 271.0 + m,
-                0xff => 353.0 + m,
-                _ => 130.5 + m,
+                0 => (RC_0F_0, false),
+                1..=0xf0 if self.bpm => (RC_0F_BPM, mmd0),
+                1..=10 => (RC_0F_LOW, mmd0),
+                0x0b..=0xf0 => (RC_0F_TEMPO, mmd0),
+                0xff => (RC_0F_FF, mmd0),
+                _ => (RC_0F_OTHER, mmd0),
             },
             0x09 => {
                 if !mmd0 && arg & 0x1f == 0 {
-                    80.5
+                    (RC_09_0, false)
                 } else {
-                    if mmd0 { 83.0 } else { 78.5 }
+                    (if mmd0 { RC_09_0X } else { RC_09_1X }, false)
                 }
             }
-            0x08 => 88.5 + m,
-            0x03 => if mmd0 { 109.0 } else { 111.0 },
-            _ => 63.5 + m,
+            0x08 => (RC_08, mmd0),
+            0x03 => (if mmd0 { RC_03_0 } else { RC_03_1 }, false),
+            _ => (RC_OTHER, mmd0),
         }
     }
 
@@ -1257,7 +1393,6 @@ impl Med {
     /// The next line, block and play sequence position, then the hold of notes
     /// held on into the new row.
     fn advance(&mut self, b: &Bus) {
-        let mut hold_cost = 0.0;
         self.fx_block = self.pblock;
         self.fx_line = self.pline;
         let mut line = if self.next_line1 != 0 {
@@ -1271,7 +1406,7 @@ impl Med {
             if !self.keep_line {
                 line = 0;
             }
-            hold_cost += cost::NEW_BLOCK;
+            self.sp(K::NewBlock, 0, 1);
             let blk = self.next_pos(b, self.new_block != 0xff);
             self.pblock = if (blk as i16) < self.numblocks as i16 {
                 blk
@@ -1291,19 +1426,19 @@ impl Med {
             for t in 0..n.max(1) as usize {
                 let (b0, b1) = (b.r8(a), b.r8(a + 1));
                 a += 3;
-                let tr = &mut self.tracks[t.min(63)];
-                if tr.hold_cnt < 0 {
+                if self.tracks[t.min(63)].hold_cnt < 0 {
                     continue;
                 }
-                hold_cost += cost::ADV_HOLD;
+                self.sp(K::AdvHold, (b0 != 0) as u8, 1);
+                let tr = &mut self.tracks[t.min(63)];
                 let extend = if b0 != 0 {
                     b0 & 0x3f == 0 || b1 & 0xf == 3
                 } else {
                     b1 & 0xf0 != 0
                 };
                 if extend {
-                    hold_cost += cost::ADV_EXTEND;
                     tr.hold_cnt = tr.hold_cnt.wrapping_add(tempo2 as i8);
+                    self.sp(K::AdvExtend, 0, 1);
                 }
             }
         } else {
@@ -1312,23 +1447,22 @@ impl Med {
             for t in 0..(n & 0xff).max(1) as usize {
                 let (b0, b1, b2) = (b.r8(a), b.r8(a + 1), b.r8(a + 2));
                 a += 4;
-                let tr = &mut self.tracks[t.min(63)];
-                if tr.hold_cnt < 0 {
+                if self.tracks[t.min(63)].hold_cnt < 0 {
                     continue;
                 }
-                hold_cost += cost::ADV_HOLD;
+                self.sp(K::AdvHold, (b0 != 0) as u8, 1);
+                let tr = &mut self.tracks[t.min(63)];
                 let extend = if b0 != 0 {
                     b0 & 0x7f == 0 || b2 == 3
                 } else {
                     b1 & 0x3f != 0
                 };
                 if extend {
-                    hold_cost += cost::ADV_EXTEND;
                     tr.hold_cnt = tr.hold_cnt.wrapping_add(tempo2 as i8);
+                    self.sp(K::AdvExtend, 0, 1);
                 }
             }
         }
-        self.advance_cost = hold_cost;
     }
 
     /// The block at the next play sequence position (the same one after 0B).
@@ -1510,7 +1644,13 @@ impl Med {
         let looped = self.i_flags[tr.instr as usize % 63] & 1 != 0;
         let rep_long = self.i_replen[i] > 2;
         self.note_loops = looped;
-        self.spend(cost::NOTE[t & 3] - if rep_long { cost::NOTE_REP } else { 0.0 });
+        self.sp(K::Note, (t & 3) as u8, 1);
+        if kind != 0 && kind < 7 {
+            self.sp(K::NoteOct, kind as u8, 1);
+        }
+        if rep_long {
+            self.sp(K::NoteRep, 0, 1);
+        }
         self.flush(hw);
         hw.loc(t, s);
         let tr = &mut self.tracks[t];
@@ -1525,7 +1665,10 @@ impl Med {
             loop_end.wrapping_sub(s) >> 1
         };
         tr.per = per;
-        self.spend(cost::LEN[t & 3] - if looped { cost::LOOPED } else { 0.0 });
+        self.sp(K::Len, (t & 3) as u8, 1);
+        if looped {
+            self.sp(K::LenLooped, 0, 1);
+        }
         self.poke_len(hw, t, words);
     }
 
@@ -1588,11 +1731,9 @@ impl Med {
     fn every_tick(&mut self, hw: &mut Hw) {
         let tick = self.counter;
         let n = self.numtracks.min(64) as usize;
-        // the pass over the tracks up to the output pass takes a time by the block's track count;
-        // the writes in it (a hold's end) fall at measured places
-        self.pass_start2 = self.acc2;
-        self.pass_extra = 0.0;
-        self.hold_extra = 0.0;
+        // the pass over the tracks up to the output pass: each track's hold and decay (a hold's
+        // end can write), the commands, the rest by the block's track count
+        self.sp(K::PassStart, 0, 1);
         for t in 0..n {
             self.hold_decay(hw, t);
         }
@@ -1607,17 +1748,20 @@ impl Med {
                 a = a.wrapping_add(stride);
                 let cmd = if stride == 3 { c & 0xf } else { c & 0x1f };
                 if !self.tracks[t].skip {
-                    self.pass_extra += match cmd {
-                        0x01 => cost::CMD_SLIDE_UP,
-                        0x02 if self.ver >= b'2' => cost::CMD_SLIDE_DOWN2,
-                        0x02 => cost::CMD_SLIDE_DOWN,
-                        0x04 => cost::CMD_VIBRATO,
-                        0x0d => cost::CMD_VOLSLIDE,
-                        0x0f => cost::CMD_TEMPO,
-                        0x09 => cost::CMD_TICKS,
-                        0x0c if tick == 0 => cost::CMD_VOLUME,
-                        _ => 0.0,
+                    let pc = match cmd {
+                        0x01 => Some(PC_SLIDE_UP),
+                        0x02 if self.ver >= b'2' => Some(PC_SLIDE_DOWN2),
+                        0x02 => Some(PC_SLIDE_DOWN),
+                        0x04 => Some(PC_VIBRATO),
+                        0x0d => Some(if tick == 0 { PC_VOLSLIDE0 } else { PC_VOLSLIDE }),
+                        0x0f => Some(PC_TEMPO),
+                        0x09 => Some(PC_TICKS),
+                        0x0c if tick == 0 => Some(if arg > 0x40 { PC_VOLUME_HI } else { PC_VOLUME }),
+                        _ => None,
                     };
+                    if let Some(pc) = pc {
+                        self.sp(K::PassCmd, pc, 1);
+                    }
                     self.tick_command(hw, t, cmd, arg, tick);
                 }
             }
@@ -1626,10 +1770,8 @@ impl Med {
                 break;
             }
         }
-        let pass = if self.ver >= b'1' { &cost::PASS1 } else { &cost::PASS0 };
-        let end2 = self.pass_start2
-            + (2.0 * (cost::by_n(pass, self.n_after) + self.pass_extra + self.hold_extra)).round() as i64;
-        self.acc2 = self.acc2.max(end2);
+        let rest = if self.ver >= b'1' { K::PassRest1 } else { K::PassRest0 };
+        self.sp(rest, self.n_after.min(255) as u8, 1);
         for t in 0..self.numtracks.min(64) as usize {
             if !self.tracks[t].skip {
                 self.output(hw, t);
@@ -1639,46 +1781,51 @@ impl Med {
 
     fn hold_decay(&mut self, hw: &mut Hw, t: usize) {
         if t >= 4 {
+            self.sp(K::HoldTrack, 4, 1);
             self.tracks[t].skip = true;
             return;
         }
         let tr = &mut self.tracks[t];
+        let mut k = None;
         if tr.hold_cnt >= 0 {
             tr.hold_cnt -= 1;
             if tr.hold_cnt >= 0 {
-                self.hold_extra += cost::HOLD_ACTIVE;
+                k = Some(K::HoldActive);
             }
             if tr.hold_cnt < 0 {
                 if tr.stype != 0 {
                     // a synth sound decays by its volume program
                     tr.vol_pos = tr.decay_speed;
                     tr.vol_wait = 0;
-                    self.hold_extra += cost::HOLD_END;
+                    k = Some(K::HoldEnd);
                 } else {
                     tr.fade_speed = tr.decay_speed;
                     if tr.fade_speed == 0 {
-                        // the track's turn in the pass, then the DMA off (a track's hold has
-                        // run out in the original's first tick, where every one starts at 0)
-                        let at = cost::HOLD_FIRST + cost::HOLD_TRACK * t as f64 + self.hold_extra;
-                        self.acc2 = self.acc2.max(self.pass_start2 + (2.0 * at) as i64);
+                        // the DMA off at the track's turn (a track's hold has run out in the
+                        // original's first tick, where every one starts at 0)
                         self.dma_off(hw, t);
-                        self.hold_extra += cost::HOLD_OFF;
+                        k = Some(K::HoldOff);
                     } else {
-                        self.hold_extra += cost::HOLD_DECAY;
+                        k = Some(K::HoldDecay);
                     }
                 }
             }
         }
-        let tr = &mut self.tracks[t];
-        if tr.fade_speed != 0 {
-            self.hold_extra += cost::FADE;
+        self.sp(K::HoldTrack, t as u8, 1);
+        if let Some(k) = k {
+            self.sp(k, 0, 1);
+        }
+        if self.tracks[t].fade_speed != 0 {
+            self.sp(K::Fade, 0, 1);
+            let tr = &mut self.tracks[t];
             tr.vol = tr.vol.wrapping_sub(tr.fade_speed);
             if (tr.vol as i8) < 0 {
                 tr.vol = 0;
                 tr.fade_speed = 0;
+                self.sp(K::FadeEnd, 0, 1);
             }
         }
-        tr.skip = false;
+        self.tracks[t].skip = false;
     }
 
     fn tick_command(&mut self, hw: &mut Hw, t: usize, cmd: u8, arg: u8, tick: u8) {
@@ -1914,7 +2061,7 @@ impl Med {
     fn output(&mut self, hw: &mut Hw, t: usize) {
         let mut per = self.tracks[t].per;
         if self.tracks[t].synth != 0 {
-            self.spend(cost::SYNTH);
+            self.sp(K::Synth, 0, 1);
             per = self.synth(hw, t);
         }
         let tr = &mut self.tracks[t];
@@ -1928,11 +2075,11 @@ impl Med {
         };
         tr.out_vol = 0xff;
         let vol = ((v as u32 * tr.trk_vol as u32) as u16 >> 8) & 0x7f;
-        self.spend(if self.first_out { cost::OUT_ENTRY } else { cost::PER });
+        self.sp(if self.first_out { K::OutEntry } else { K::Per }, 0, 1);
         self.first_out = false;
         self.flush(hw);
         hw.per(t, per);
-        self.spend(cost::VOL[t & 3]);
+        self.sp(K::Vol, (t & 3) as u8, 1);
         self.flush(hw);
         hw.vol(t, vol);
     }
@@ -2041,12 +2188,12 @@ impl Med {
                     if (c as i8) >= 0 {
                         let w = self.wf(hw.bus, s, c as i8);
                         let len = hw.bus.r16(w);
-                        self.spend(cost::WF_LEN);
+                        self.sp(K::WfLen, 0, 1);
                         self.poke_len(hw, t, len as u32);
-                        self.spend(cost::WF_LOC);
+                        self.sp(K::WfLoc, 0, 1);
                         self.flush(hw);
                         hw.loc(t, w + 2);
-                        self.spend(cost::WF_END);
+                        self.sp(K::WfEnd, 0, 1);
                         break;
                     }
                     let arg = hw.bus.r8(s + 0x96 + pos as u32);
@@ -2150,8 +2297,9 @@ impl Med {
         if self.dma_on == 0 {
             return;
         }
-        let extra = self.n_after.saturating_sub(4) as f64;
-        self.spend(cost::DMA_ON + cost::DMA_ON_TRACK * extra);
+        let extra = self.n_after.saturating_sub(4) as i64;
+        self.sp(K::DmaOn, 0, 1);
+        self.sp(K::DmaOnTrack, 0, extra);
         self.flush(hw);
         hw.dmacon(0x8000 | self.dma_on);
         // as ENPP_DMAMask does, the host waits for the DMA to start: to the line ten lines on
@@ -2159,42 +2307,43 @@ impl Med {
         hw.wait((c / LINE + 10) * LINE - c);
         self.reanchor(hw);
         let mut prev: Option<usize> = None;
-        let mut unlooped = 0.0;
         for t in 0..4 {
             if self.dma_on & 1 << t == 0 {
                 continue;
             }
             if self.tracks[t].rptr == 0 {
-                unlooped += cost::LOOP_SKIP;
+                self.sp(K::LoopSkip, 0, 1);
                 continue;
             }
             let (r, l) = (self.tracks[t].rptr, self.tracks[t].rlen);
-            let gap = match prev {
-                None => cost::LOOP_FIRST[t],
-                Some(p) => cost::LOOP_NEXT[p][t],
-            };
-            self.spend(gap + unlooped);
-            unlooped = 0.0;
+            match prev {
+                None => self.sp(K::LoopFirst, t as u8, 1),
+                Some(p) => self.sp(K::LoopNext, (4 * p + t) as u8, 1),
+            }
             prev = Some(t);
             self.flush(hw);
             hw.loc(t, r);
-            self.spend(if l > 1 { cost::LOOP_LEN_LONG } else { cost::LOOP_LEN });
+            self.sp(if l > 1 { K::LoopLenLong } else { K::LoopLen }, 0, 1);
             self.poke_len(hw, t, l as u32);
         }
     }
 
-    /// Lets `c` colour clocks (in halves) of the original's code pass.
-    fn spend(&mut self, c: f64) {
-        self.acc2 += (c * 2.0).round() as i64;
+    /// Lets `n` times label `k`'s cycles of the original's code pass.
+    fn sp(&mut self, k: K, sub: u8, n: i64) {
+        if n == 0 {
+            return;
+        }
+        self.acc2 += cyc(k, sub) * n;
     }
 
-    /// Brings the clock to the time the code has got to before a write.
+    /// Brings the clock to the time the code has got to at a write (a call into the host: half
+    /// the cycles since the last, rounded down), which the time counts from after it.
     fn flush(&mut self, hw: &mut Hw) {
-        let round = (self.ver >= b'1') as i64;
-        let at = self.anchor + ((self.acc2.max(0) + round) / 2) as u64;
+        let at = self.anchor + (self.acc2.max(0) / 2) as u64;
         if hw.bus.clock < at {
             hw.bus.clock = at;
         }
+        self.reanchor(hw);
     }
 
     /// The clock jumped (the host's wait): the code's time counts from here on.
@@ -2202,11 +2351,6 @@ impl Med {
         self.anchor = hw.bus.clock;
         self.acc2 = 0;
     }
-}
-
-/// The tracks skipped before a note in the trigger loop: the first costs 40, each further one 39.
-fn skipc(n: f64) -> f64 {
-    if n > 0.0 { cost::SKIP_FIRST + cost::SKIP_NEXT * (n - 1.0) } else { 0.0 }
 }
 
 /// The 16 period tables (finetunes 0..7, -8..-1), `TABLE` words each.

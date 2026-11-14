@@ -913,7 +913,8 @@ const NK: usize = 104;
 
 /// The cycles of the original's code paths (engine 109), by path and voice: the build Ringside and
 /// funny_funk share; the other builds differ in `BUILDS`. Engine 100 is not timed by paths (its
-/// rows are 0).
+/// rows are 0). The portamento paths (0x81, the period's slide) were measured on copies of Zoom
+/// with shorter notes, which reach them within the first 20 s.
 static BASE: [[i16; 4]; NK] = {
     let mut c = [[0; 4]; NK];
     c[K_TICK] = [44, 44, 44, 44];
@@ -936,6 +937,13 @@ static BASE: [[i16; 4]; NK] = {
     c[K_ILEN] = [179, 194, 283, 281];
     c[K_ILOC] = [44, 44, 44, 44];
     c[K_IEND] = [60, 60, 60, 60];
+    c[K_81ON] = [127, 127, 127, 127];
+    c[K_81END] = [-3, -3, -3, -3];
+    c[K_EP] = [58, 58, 58, 58];
+    c[K_EPEQ] = [-64, -64, -64, -64];
+    c[K_EPUPS] = [22, 22, 22, 22];
+    c[K_EPDNS] = [22, 22, 22, 22];
+    c[K_81OFF] = [81, 81, 81, 81];
     c[K_82] = [75, 75, 75, 75];
     c[K_82ON] = [61, 61, 61, 61];
     c[K_82OFF] = [15, 15, 15, 15];
@@ -973,7 +981,7 @@ static BUILDS: &[Build] = &[
     // Ganymed
     Build { code: 0x46475265, start: 9178, over: &[(K_INL as u8, 1, 167), (K_IVOL as u8, 1, 216), (K_ILENNL as u8, 1, 170), (K_ILEN as u8, 1, 228)] },
     // Great_Giana_Sisters ingame
-    Build { code: 0x5be88c5d, start: 8751, over: &[(K_TICK as u8, 0, 5), (K_V as u8, 0, 4), (K_V as u8, 1, 89), (K_V as u8, 2, 89), (K_V as u8, 3, 107), (K_ALOC as u8, 0, 13), (K_ALOC as u8, 1, 56), (K_ALOC as u8, 2, 56), (K_ALOC as u8, 3, 65), (K_A2LOC as u8, 0, -9), (K_A2LOC as u8, 1, 34), (K_A2LOC as u8, 2, 34), (K_A2LOC as u8, 3, 43), (K_CZ as u8, 0, -6), (K_CZ as u8, 1, -6), (K_CZ as u8, 2, -6), (K_CZ as u8, 3, -6), (K_CNZ as u8, 0, 24), (K_CNZ as u8, 1, 24), (K_CNZ as u8, 2, 24), (K_CNZ as u8, 3, 24), (K_IT as u8, 0, 120), (K_IT as u8, 1, 120), (K_IT as u8, 2, 120), (K_IT as u8, 3, 120), (K_SEND as u8, 0, 56), (K_SEND as u8, 1, 56), (K_SEND as u8, 2, 56), (K_SEND as u8, 3, 56), (K_OFF as u8, 0, 65), (K_OFF as u8, 1, 65), (K_OFF as u8, 2, 65), (K_OFF as u8, 3, 65), (K_IEND as u8, 0, 47), (K_IEND as u8, 1, 47), (K_IEND as u8, 2, 47), (K_IEND as u8, 3, 47), (K_85 as u8, 0, 101), (K_85 as u8, 1, 101), (K_85 as u8, 2, 101), (K_85 as u8, 3, 101), (K_NOTE as u8, 0, 108), (K_NOTE as u8, 1, 108), (K_NOTE as u8, 2, 108), (K_NOTE as u8, 3, 108), (K_RLOC as u8, 0, 259), (K_RLOC as u8, 1, 259), (K_RLOC as u8, 2, 259), (K_RLOC as u8, 3, 259), (K_ALENX as u8, 0, 13), (K_ALENX as u8, 1, 13), (K_ALENX as u8, 2, 13), (K_ALENX as u8, 3, 13), (K_A2LENX as u8, 0, 3), (K_A2LENX as u8, 1, 3), (K_A2LENX as u8, 2, 3), (K_A2LENX as u8, 3, 3)] },
+    Build { code: 0x5be88c5d, start: 8751, over: &[(K_TICK as u8, 0, 5), (K_V as u8, 0, 4), (K_V as u8, 1, 89), (K_V as u8, 2, 89), (K_V as u8, 3, 107), (K_ALOC as u8, 0, 13), (K_ALOC as u8, 1, 56), (K_ALOC as u8, 2, 56), (K_ALOC as u8, 3, 65), (K_A2LOC as u8, 0, -9), (K_A2LOC as u8, 1, 34), (K_A2LOC as u8, 2, 34), (K_A2LOC as u8, 3, 43), (K_CZ as u8, 0, -6), (K_CZ as u8, 1, -6), (K_CZ as u8, 2, -6), (K_CZ as u8, 3, -6), (K_CNZ as u8, 0, 24), (K_CNZ as u8, 1, 24), (K_CNZ as u8, 2, 24), (K_CNZ as u8, 3, 24), (K_IT as u8, 0, 120), (K_IT as u8, 1, 120), (K_IT as u8, 2, 120), (K_IT as u8, 3, 120), (K_SEND as u8, 0, 56), (K_SEND as u8, 1, 56), (K_SEND as u8, 2, 56), (K_SEND as u8, 3, 56), (K_OFF as u8, 0, 65), (K_OFF as u8, 1, 65), (K_OFF as u8, 2, 65), (K_OFF as u8, 3, 65), (K_IEND as u8, 0, 47), (K_IEND as u8, 1, 47), (K_IEND as u8, 2, 47), (K_IEND as u8, 3, 47), (K_85 as u8, 0, 101), (K_85 as u8, 1, 101), (K_85 as u8, 2, 101), (K_85 as u8, 3, 101), (K_NOTE as u8, 0, 108), (K_NOTE as u8, 1, 108), (K_NOTE as u8, 2, 108), (K_NOTE as u8, 3, 108), (K_RLOC as u8, 0, 259), (K_RLOC as u8, 1, 259), (K_RLOC as u8, 2, 259), (K_RLOC as u8, 3, 259), (K_ALENX as u8, 0, 13), (K_ALENX as u8, 1, 13), (K_ALENX as u8, 2, 13), (K_ALENX as u8, 3, 13), (K_A2LENX as u8, 0, 3), (K_A2LENX as u8, 1, 3), (K_A2LENX as u8, 2, 3), (K_A2LENX as u8, 3, 3), (K_EA as u8, 0, 145), (K_EA as u8, 1, 145), (K_EA as u8, 2, 145), (K_EA as u8, 3, 145), (K_84 as u8, 0, 143), (K_84 as u8, 1, 143), (K_84 as u8, 2, 143), (K_84 as u8, 3, 143), (K_INL as u8, 1, 201), (K_ILENNL as u8, 1, 204)] },
     // Katakis
     Build { code: 0xbe94162e, start: 9550, over: &[(K_TICK as u8, 0, -7), (K_V as u8, 0, -7), (K_V as u8, 3, 83), (K_ALOC as u8, 0, 9), (K_ALOC as u8, 3, 54), (K_A2LOC as u8, 0, -17), (K_A2LOC as u8, 3, 28), (K_IL as u8, 0, 149), (K_IL as u8, 1, 159), (K_INL as u8, 0, 169), (K_INL as u8, 1, 179), (K_IVOL as u8, 0, 191), (K_IVOL as u8, 1, 204), (K_ILENL as u8, 0, 157), (K_ILENL as u8, 1, 171), (K_ILENNL as u8, 0, 167), (K_ILENNL as u8, 1, 181), (K_ILEN as u8, 0, 200), (K_ILEN as u8, 1, 217)] },
     // Ringside

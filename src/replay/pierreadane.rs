@@ -119,6 +119,11 @@ pub struct Pap {
     row: u8,
     dmacon: u16,
     songend: bool,
+    /// The tick's start (colour clock), the original's 68000 cycles since then and the voice the
+    /// paths are on (4: none), for the writes' times.
+    t0: u64,
+    cy: i64,
+    vk: usize,
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -160,12 +165,18 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         at = at.wrapping_add(2 * s.len as u32);
         samples.push(s);
     }
+    // every sample's first two words are cleared (the one-word loop an unlooped sample ends on
+    // is silent)
+    for s in &samples {
+        let n = (2 * s.len as usize).min(4).min(sample.len().saturating_sub(s.base as usize));
+        m.bus.write_bytes(base + s.base, &[0; 4][..n]);
+    }
     let mut p = Pap {
         d,
         w,
         samples,
         base,
-        title: file,
+        title: file.clone(),
         v: Default::default(),
         counter: 0,
         speed: 3,
@@ -173,16 +184,30 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         row: 0,
         dmacon: 0,
         songend: false,
+        t0: 0,
+        cy: 0,
+        vk: 4,
     };
+    let t0 = m.bus.clock;
+    let st = start_time(&p.d, &file);
+    p.t0 = t0;
+    p.cy = 0;
     let mut hw = Hw { bus: &mut m.bus };
-    p.start(&mut hw);
+    p.start(&mut hw, Some(t0 + st));
+    hw.bus.clock = hw.bus.clock.max(t0 + st + START_TO_SONG);
     Some(Box::new(p))
 }
 
 impl Pap {
-    fn start(&mut self, hw: &mut Hw) {
+    fn start(&mut self, hw: &mut Hw, at: Option<u64>) {
         for ch in 0..4 {
+            if let Some(t) = at {
+                hw.bus.clock = hw.bus.clock.max(t + START_VOL + 10 * ch as u64);
+            }
             hw.vol(ch, 0);
+        }
+        if let Some(t) = at {
+            hw.bus.clock = hw.bus.clock.max(t + START_VOL + 40);
         }
         hw.dmacon(0x000F);
         self.songend = false;
@@ -197,6 +222,27 @@ impl Pap {
         }
     }
 
+    /// A path of the original's code taken: its cycles, on the current voice.
+    fn c(&mut self, k: usize) {
+        self.cy += COSTS[k][self.vk] as i64;
+    }
+    /// `n` times the path `k`.
+    fn cn(&mut self, k: usize, n: u32) {
+        self.cy += COSTS[k][self.vk] as i64 * n as i64;
+    }
+    /// The colour clock the original is at now.
+    fn now(&self) -> u64 {
+        (self.t0 as i64 + self.cy.div_euclid(2)) as u64
+    }
+    /// A Paula write of kind `k` (the path to it): at the tick's start plus half the cycles so far.
+    fn at(&mut self, k: usize, hw: &mut Hw) {
+        self.c(k);
+        let t = self.now();
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+
     /// Takes the next entry of the voice's note data (a row tick).
     fn fetch(&mut self, ch: usize) {
         let v = &mut self.v[ch];
@@ -205,10 +251,12 @@ impl Pap {
             v.period = 0;
             v.byte2 = 0;
             v.byte3 = 0;
+            self.c(K_FREP);
             return;
         }
         let mut p = v.ptr;
-        if self.d.get(p) == Some(&0xFF) {
+        let pfx = self.d.get(p) == Some(&0xFF);
+        if pfx {
             v.rep = (self.d.get(p + 1).copied().unwrap_or(0) as i16).wrapping_sub(1);
             p += 2;
         }
@@ -217,12 +265,14 @@ impl Pap {
         v.byte3 = self.d.get(p + 3).copied().unwrap_or(0);
         v.ptr = p + 4;
         v.cnt = v.rep;
+        self.c(if pfx { K_FPFX } else { K_FNEW });
     }
 
     fn row_tick(&mut self, hw: &mut Hw) {
         self.counter = 0;
         self.dmacon = 0x8000;
         for ch in 0..4 {
+            self.vk = ch;
             self.fetch(ch);
             let (period, byte2, byte3) = (self.v[ch].period, self.v[ch].byte2, self.v[ch].byte3);
             let n = (byte2 >> 4) as usize;
@@ -233,31 +283,58 @@ impl Pap {
                 v.start = s.base;
                 v.len = s.len;
                 let vol = if byte2 & 15 == 12 { byte3 as u16 } else { s.vol };
+                self.c(if byte2 & 15 == 12 { K_SVOLC } else { K_SAMP });
+                self.at(K_WVOL, hw);
                 hw.vol(ch, vol & 0x7F);
+                if byte2 & 15 == 12 {
+                    self.c(K_SVOLCA);
+                }
+                let v = &mut self.v[ch];
                 if s.loop_len != 1 {
                     v.start = s.base.wrapping_add(s.loop_off as u32);
                     v.len = s.loop_len;
+                    self.c(K_SLOOP);
+                } else {
+                    self.c(K_SNOLOOP);
                 }
-                v.rl = s.loop_len;
+                self.v[ch].rl = s.loop_len;
+            } else if n != 0 {
+                self.c(K_SBAD);
+            } else {
+                self.c(K_SNONE);
             }
             if period != 0 {
                 let v = &mut self.v[ch];
                 if v.rl == 0 {
                     v.rl = 1;
+                    self.c(K_RL0);
                 }
+                let v = &mut self.v[ch];
                 v.cur = period;
+                let (start, len) = (v.start, v.len);
+                self.at(K_WDOFF, hw);
                 hw.dmacon(1 << ch);
-                hw.loc(ch, self.base.wrapping_add(v.start));
-                hw.len(ch, v.len);
+                self.at(K_WLOC, hw);
+                hw.loc(ch, self.base.wrapping_add(start));
+                self.at(K_WLEN, hw);
+                hw.len(ch, len);
+                self.at(K_WPER, hw);
                 hw.per(ch, period);
                 self.dmacon |= 1 << ch;
+                self.c(K_NEND);
             } else if byte2 != 0 || byte3 != 0 {
+                self.c(K_REFF);
                 self.effect(ch, hw);
+            } else {
+                self.c(K_RNONE);
             }
         }
+        self.vk = 4;
         self.row = (self.row + 1) & 63;
         if self.row == 0 {
             self.set_data();
+        } else {
+            self.c(K_RNEXT);
         }
     }
 
@@ -266,7 +343,9 @@ impl Pap {
         if be16(&self.d, self.w[0] + self.pos) == 0 {
             self.songend = true;
             self.pos = 0;
+            self.c(K_SEND);
         }
+        self.c(K_SET);
         for ch in 0..4 {
             self.v[ch].ptr = be16(&self.d, self.w[ch] + self.pos) as usize;
         }
@@ -279,46 +358,248 @@ impl Pap {
         match e {
             0 => {
                 let nib = match self.counter {
-                    0 | 2 | 5 => p & 15,
-                    3 | 6 => 0,
-                    _ => p >> 4,
+                    0 | 2 | 5 => {
+                        self.c(K_A025);
+                        p & 15
+                    }
+                    3 | 6 => {
+                        self.c(K_A36);
+                        0
+                    }
+                    _ => {
+                        self.c(K_AHI);
+                        p >> 4
+                    }
                 } as usize;
                 let cur = self.v[ch].cur;
                 // a base period outside the table is written as it is; a step
                 // past the table's end stays on its last note
                 let per = match PERIODS.iter().position(|&x| x == cur) {
-                    Some(i) => PERIODS[(i + nib).min(35)],
-                    None => cur,
+                    Some(i) => {
+                        self.cn(K_ASTEP, i as u32);
+                        self.c(K_AFOUND);
+                        if i + nib > 35 {
+                            self.c(K_ACLAMP);
+                        }
+                        PERIODS[(i + nib).min(35)]
+                    }
+                    None => {
+                        self.cn(K_ASTEP, 36);
+                        self.c(K_ANONE);
+                        cur
+                    }
                 };
+                self.at(K_WPERA, hw);
                 hw.per(ch, per);
+                self.c(K_XAEND);
             }
             1 => {
                 let v = &mut self.v[ch];
-                v.cur = (v.cur as i32 - (p & 15) as i32).max(0x71) as u16;
-                hw.per(ch, v.cur);
+                let x = v.cur as i32 - (p & 15) as i32;
+                v.cur = x.max(0x71) as u16;
+                let cur = v.cur;
+                self.c(if x < 0x71 { K_E1CL } else { K_E1 });
+                self.at(K_WPER1, hw);
+                hw.per(ch, cur);
+                self.c(K_X1END);
             }
             2 => {
                 let v = &mut self.v[ch];
-                v.cur = (v.cur as i32 + (p & 15) as i32).min(0x358) as u16;
-                hw.per(ch, v.cur);
+                let x = v.cur as i32 + (p & 15) as i32;
+                v.cur = x.min(0x358) as u16;
+                let cur = v.cur;
+                self.c(if x > 0x358 { K_E2CL } else { K_E2 });
+                self.at(K_WPER2, hw);
+                hw.per(ch, cur);
+                self.c(K_X2END);
             }
-            12 => hw.vol(ch, (p & 0x7F) as u16),
+            12 => {
+                self.at(K_WVOLC, hw);
+                hw.vol(ch, (p & 0x7F) as u16);
+                self.c(K_XCEND);
+            }
             15 => {
                 if p & 15 != 0 {
                     self.speed = (p & 15) as u16;
+                    self.c(K_E15);
+                } else {
+                    self.c(K_E15Z);
                 }
             }
-            _ => {}
+            _ => self.c(K_EX),
         }
     }
 
     fn mid_tick(&mut self, hw: &mut Hw) {
         for ch in 0..4 {
+            self.vk = ch;
             if self.v[ch].byte3 != 0 {
+                self.c(K_MEFF);
                 self.effect(ch, hw);
+            } else {
+                self.c(K_MSKIP);
             }
         }
+        self.vk = 4;
     }
+
+    /// The wait for the DMA: the beam's line is read, then read again every `POLL` cycles
+    /// until it is `NLINES` on.
+    fn wait_dma(&mut self) {
+        self.c(K_WPRE);
+        let l0 = self.now() / crate::paula::LINE;
+        self.c(K_WFIRST);
+        let poll = COSTS[K_POLL][4].max(1) as i64;
+        let n = COSTS[K_NLINES][4] as u64;
+        while self.now() / crate::paula::LINE < l0 + n {
+            self.cy += poll;
+        }
+    }
+}
+
+/// The paths of the original's code (the cost tables' rows).
+const K_TICK: usize = 0;
+const K_ROW: usize = 1;
+const K_MID: usize = 2;
+const K_FREP: usize = 3;
+const K_FNEW: usize = 4;
+const K_FPFX: usize = 5;
+const K_SAMP: usize = 6;
+const K_SVOLC: usize = 7;
+const K_WVOL: usize = 8;
+const K_SLOOP: usize = 9;
+const K_SNOLOOP: usize = 10;
+const K_SBAD: usize = 11;
+const K_SNONE: usize = 12;
+const K_RL0: usize = 13;
+const K_WDOFF: usize = 14;
+const K_WLOC: usize = 15;
+const K_WLEN: usize = 16;
+const K_WPER: usize = 17;
+const K_NEND: usize = 18;
+const K_REFF: usize = 19;
+const K_RNONE: usize = 20;
+const K_RNEXT: usize = 21;
+const K_SEND: usize = 22;
+const K_SET: usize = 23;
+const K_A025: usize = 24;
+const K_A36: usize = 25;
+const K_AHI: usize = 26;
+const K_ASTEP: usize = 27;
+const K_AFOUND: usize = 28;
+const K_ACLAMP: usize = 29;
+const K_ANONE: usize = 30;
+const K_WPERA: usize = 31;
+const K_E1: usize = 32;
+const K_E1CL: usize = 33;
+const K_WPER1: usize = 34;
+const K_E2: usize = 35;
+const K_E2CL: usize = 36;
+const K_WPER2: usize = 37;
+const K_WVOLC: usize = 38;
+const K_E15: usize = 39;
+const K_E15Z: usize = 40;
+const K_EX: usize = 41;
+const K_MEFF: usize = 42;
+const K_MSKIP: usize = 43;
+const K_WPRE: usize = 44;
+const K_WFIRST: usize = 45;
+const K_POLL: usize = 46;
+const K_NLINES: usize = 47;
+const K_WDON: usize = 48;
+const K_LRESET: usize = 49;
+const K_WLEN1: usize = 50;
+const K_LSKIP: usize = 51;
+const K_SVOLCA: usize = 52;
+const K_XAEND: usize = 53;
+const K_X1END: usize = 54;
+const K_X2END: usize = 55;
+const K_XCEND: usize = 56;
+const NK: usize = 57;
+/// Each path's 68000 cycles, per voice (the last column: no voice). Integer costs fitted exactly to
+/// the reference's write times; the wait's first read (row K_WFIRST), poll period (K_POLL), lines
+/// (K_NLINES) and its end to the DMA write (K_WDON) are in the last column.
+const COSTS: [[i32; 5]; NK] = [
+    [0, 0, 0, 0, 623],
+    [0, 0, 0, 0, 115],
+    [0, 0, 0, 0, 0],
+    [-67, 0, 0, 0, 0],
+    [0, 67, 67, 67, 0],
+    [52, 119, 119, 119, 0],
+    [2, 2, 2, 0, 0],
+    [0, 0, 0, 0, 0],
+    [191, 430, 621, 750, 0],
+    [50, 50, 50, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 48, 79, 0, 0],
+    [0, 0, 0, 0, 0],
+    [265, 296, 327, 335, 0],
+    [73, 73, 73, 73, 0],
+    [20, 20, 20, 20, 0],
+    [12, 12, 12, 12, 0],
+    [315, 178, 72, -136, 0],
+    [19, 95, 64, 43, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, -13],
+    [0, 0, 0, 0, 190],
+    [0, 0, 0, 0, 216],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 74, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 70, 0, 0, 0],
+    [133, 248, 439, 0, 0],
+    [76, 0, 31, 26, 0],
+    [0, 0, 0, 0, 0],
+    [0, -51, -19, 0, 0],
+    [0, 0, 0, 0, 0],
+    [-71, -147, -116, -121, 0],
+    [0, 0, 0, 0, -353],
+    [0, 0, 0, 0, 3],
+    [0, 0, 0, 0, 25],
+    [0, 0, 0, 0, 10],
+    [0, 0, 0, 0, 571],
+    [0, 0, 0, 0, 0],
+    [61, 61, 61, 61, 0],
+    [25, 25, 25, 0, 0],
+    [10, 10, 10, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [243, 106, 0, 0, 0],
+];
+/// From the first write of the player's start to the song's start, and to its last volume writes.
+const START_TO_SONG: u64 = 1951;
+const START_VOL: u64 = 1717;
+
+/// The time from the player's start to its first write: the check and init's cycles halved, by
+/// the file's name, the sample records, the position lists' length and the one known-bad file's
+/// repair.
+fn start_time(d: &[u8], file: &str) -> u64 {
+    let Some((w, l)) = layout(d) else { return 0 };
+    let name = file.rsplit(['/', ':']).next().unwrap_or(file).len() as u64;
+    let mut r = 0u64;
+    while r < MAX_SAMPLES as u64 && d.get(8 + 8 * r as usize).is_some_and(|&b| b != 0xFF) {
+        r += 1;
+    }
+    let mut e = 0;
+    if 2 * w[3] - w[2] == 2604 {
+        e += 26;
+        if be16(d, 16) == 0x06FC {
+            e += 16;
+        }
+    }
+    (5872 + 21 * name + e) / 2 + 111 * r / 2 + 64 * l as u64
 }
 
 impl Replayer for Pap {
@@ -335,23 +616,34 @@ impl Replayer for Pap {
     }
 
     fn set_subsong(&mut self, _n: u16, hw: &mut Hw) {
-        self.start(hw);
+        self.start(hw, None);
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t0 = hw.bus.clock;
+        self.cy = 0;
+        self.vk = 4;
+        self.c(K_TICK);
         self.counter = self.counter.wrapping_add(1);
         if self.counter == self.speed {
+            self.c(K_ROW);
             self.row_tick(hw);
         } else {
+            self.c(K_MID);
             self.mid_tick(hw);
         }
-        // the second half of a tick: the DMA settles first
-        hw.wait(2000);
+        self.wait_dma();
+        self.at(K_WDON, hw);
         hw.dmacon(self.dmacon);
         for ch in 0..4 {
+            self.vk = ch;
             if self.v[ch].rl == 1 {
                 self.v[ch].rl = 0;
+                self.c(K_LRESET);
+                self.at(K_WLEN1, hw);
                 hw.len(ch, 1);
+            } else {
+                self.c(K_LSKIP);
             }
         }
     }

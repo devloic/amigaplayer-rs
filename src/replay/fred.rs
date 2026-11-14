@@ -35,8 +35,10 @@
 //!   overflows);
 //! * a position list's negative entry is a jump that ends the song, and $FFFF
 //!   stops the player for good (no song end), even in the middle of a tick;
-//! * the writes are spaced as the original's code spaces them (`At::cost`), and
-//!   the host's ENPP_DMAMask waits 10 lines after a DMA on.
+//! * the writes fall at the original's colour clocks (see `cyc`): the original writes each
+//!   register through the host (ENPP_PokeAdr, ENPP_PokeLen, ...), so each write is a host call
+//!   at the 68000 cycles its code took since the last one, halved and rounded down, and the
+//!   host's ENPP_DMAMask waits 10 lines after a DMA on.
 
 use super::{be16, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -81,126 +83,127 @@ const POSITIONS: usize = 13;
 /// start is past its end, a blend of 0): the port gives up after this many turns.
 const MAX_TURNS: u32 = 256;
 
-/// Code points of the original's interrupt, where it spends the time between its
-/// writes. Paula stops a playing voice only at the end of its word, and the
-/// writes of a tick take some 10 000 colour clocks, so the port lets the time pass
-/// that the original's code takes.
-#[derive(Clone, Copy)]
-enum At {
-    /// From the tick to the fourth voice. (The reference's write log runs some
-    /// 6 580 colour clocks behind the port's: its 68k InitPlayer and InitSound
-    /// delay its timer and the start of its render alike.)
-    Start,
-    /// A voice, and the loop written for its last note.
-    Entry,
-    Loop,
-    LoopLen,
-    LoopEnd,
-    /// The DMA off a tick before a row.
-    Mute,
-    /// Each track byte read: the commands, then a note's location.
-    Inst,
-    Tempo,
-    Port,
-    Pause,
-    End,
-    Jump,
-    Wait,
-    Note,
-    PulseCreate,
-    /// Each byte of a new pulse waveform.
-    PulseByte,
-    BlendCreate,
-    /// Between a note's writes, and from its DMA on (after the host's wait) to
-    /// its effects.
-    NoteLen,
-    NoteVol,
-    NotePer,
-    NoteDma,
-    NoteFx,
-    /// The effects of a voice whose DMA is off; of one whose DMA is on, up to
-    /// the period.
-    FxSkip,
-    Fx,
-    ArpNext,
-    PortDelay,
-    PortStep,
-    VibDelay,
-    Vib,
-    /// From the period to the volume.
-    Env,
-    /// After the volume: a sample, or the synth sounds' steps.
-    Sample,
-    PulseDelay,
-    PulseSpeed,
-    PulseBlocked,
-    PulseWrite,
-    /// Each change of direction of a pulse (and of a blend, `BlendTurn`).
-    PulseTurn,
-    BlendDelay,
-    BlendBlocked,
-    BlendTurn,
-    BlendBuild,
-}
+/// Colour clocks from the start of the song (the host's call of InitPlayer) to its end
+/// (InitSound returned): the time the original's InitPlayer and InitSound take on the 68000,
+/// measured in the reference runs (song start 6736 against the port's 100). A module with a
+/// name (its init routine past $12; one in the reference set, voodoo-2) takes 27 more, the
+/// cost of the original's ending of the name at the init routine. It sets the beam's phase
+/// against the writes, which the waits after a DMA on depend on, and the render's sample grid.
+/// The later replayer (`REFS_V2`), which no Eagleplayer plays, starts without it.
+const INIT_CLOCKS: u64 = 6636;
+const INIT_NAME_CLOCKS: u64 = 27;
 
-impl At {
-    /// Colour clocks, fitted to the Eagleplayer's write logs of the 54 modules
-    /// it plays (least squares over 364 000 gaps; median error 3 clocks). No
-    /// module has a blend sound or a tempo command: their times are estimated
-    /// from the cycles of the original's instructions.
-    fn cost(self) -> u64 {
-        use At::*;
-        match self {
-            Start => 50,
-            Entry => 107,
-            Loop => 28,
-            LoopLen => 109,
-            LoopEnd => 24,
-            Mute => 170,
-            Inst => 96,
-            Tempo => 60,
-            Port => 273,
-            Pause => 263,
-            End => 170,
-            Jump => 80,
-            Wait => 128,
-            Note => 291,
-            PulseCreate => 105,
-            PulseByte => 13,
-            BlendCreate => 410,
-            NoteLen => 115,
-            NoteVol => 107,
-            NotePer => 181,
-            NoteDma => 178,
-            NoteFx => 6,
-            FxSkip => 19,
-            Fx => 209,
-            ArpNext => 37,
-            PortDelay => 25,
-            PortStep => 161,
-            VibDelay => 62,
-            Vib => 146,
-            Env => 300,
-            Sample => 0,
-            PulseDelay => 34,
-            PulseSpeed => 45,
-            PulseBlocked => 64,
-            PulseWrite => 129,
-            PulseTurn => 30,
-            BlendDelay => 34,
-            BlendBlocked => 64,
-            BlendTurn => 40,
-            BlendBuild => 1800,
+/// 68000 cycles of the original's code between its host calls, by the path it takes. The
+/// engine counts a fixed figure per instruction (crates/m68k-rc/src/cycles.rs), so a path's
+/// time does not depend on the data, only the branches do; a register write is a host call,
+/// which lands at the clock the cycles since the last host call reach (halved, rounded
+/// down: a half cycle left over is lost at each call). Fitted as integers to every write
+/// gap of the reference's write logs of the nine Fred modules the Eagleplayer plays (60 562
+/// gaps over 20 s each, all exact), and of 40 modified copies of four of them (one change
+/// each: a sample or synth loop, a blend sound, a voice the module disables, tempo commands,
+/// a song end), which take the paths the nine do not (290 477 gaps, all exact). The fit fixes
+/// only the sums along each path, so where a cost could move to its neighbour (the voice's
+/// entry against what follows the loop check, the effects against the portamento and
+/// vibrato) one split was chosen. UNSURE: a path no module took.
+mod cyc {
+    /// From the tick (the host's call of the interrupt) to the fourth voice.
+    pub const START: u64 = 25;
+    /// A voice's entry, then its loop check: nothing to write, or the loop of the note
+    /// started last tick (the empty sample, a sample or synth loop, or none: repeat bit 15).
+    pub const ENTRY: u64 = 100;
+    pub const LOOP_DONE: u64 = 152;
+    pub const LOOP_EMPTY: u64 = 287;
+    pub const LOOP_SAMPLE: u64 = 363;
+    pub const LOOP_SYNTH: u64 = 371;
+    pub const LOOP_NONE: u64 = 206;
+    /// From the loop's location to its length (the empty sample's, or one computed from the
+    /// instrument), and from the length on.
+    pub const LOOP_LEN: u64 = 218;
+    pub const LOOP_LEN_REPEAT: u64 = 222;
+    pub const LOOP_END_REPEAT: u64 = 128;
+    pub const LOOP_END: u64 = 118;
+    /// The duration counted down: more to wait, the tick before a row (no mute), the mute.
+    pub const DUR_OTHER: u64 = 0;
+    pub const DUR_LAST: u64 = 23;
+    pub const MUTE: u64 = 266;
+    /// After the DMA off of a mute or a pause (the host's return).
+    pub const HOST_OFF: u64 = 70;
+    /// A track's commands, each from its byte read on.
+    pub const INST: u64 = 208;
+    pub const TEMPO: u64 = 135;
+    pub const PORT: u64 = 546;
+    pub const PAUSE: u64 = 331;
+    pub const PAUSE_RET: u64 = 69;
+    pub const END: u64 = 304;
+    pub const JUMP: u64 = 166;
+    pub const WAIT: u64 = 255;
+    /// A note, to its location: a sample, or a synth sound (with or without an instrument
+    /// command before it in the row).
+    pub const NOTE_SAMPLE: u64 = 495;
+    pub const NOTE_SYNTH: u64 = 508;
+    pub const NOTE_SYNTH_INST: u64 = 481;
+    pub const PULSE_CREATE: u64 = 212;
+    pub const PULSE_BYTE: u64 = 26;
+    pub const BLEND_CREATE: u64 = 893;
+    /// Between a note's writes; a portamento running, and one starting from this note, add
+    /// to the period's; from the DMA on (after the host's wait) to the effects.
+    pub const NOTE_LEN: u64 = 230;
+    pub const NOTE_VOL: u64 = 214;
+    pub const NOTE_PER: u64 = 362;
+    pub const NOTE_PORT_RUNNING: u64 = 23;
+    pub const NOTE_PORT_START: u64 = 72;
+    pub const NOTE_DMA: u64 = 357;
+    pub const NOTE_FX: u64 = 86;
+    pub const NOTE_NO_DMA: u64 = 109;
+    /// The effects of a voice whose DMA is off; of one whose DMA is on, then its steps.
+    pub const FX_SKIP: u64 = 0;
+    pub const FX: u64 = 400;
+    pub const ARP_NEXT: u64 = 71;
+    pub const ARP_WRAP: u64 = 87;
+    pub const PORT_OFF: u64 = 62;
+    pub const PORT_DELAY: u64 = 111;
+    pub const PORT_STEP: u64 = 384;
+    pub const PORT_DONE: u64 = 36;
+    pub const VIB_DELAY: u64 = 0;
+    pub const VIB_OFF: u64 = 0; // UNSURE
+    /// The vibrato's step: up, or down; up turning at the amplitude, reaching 0 (down: and
+    /// turning); then less when the period goes down.
+    pub const VIB_UP: u64 = 139;
+    pub const VIB_DOWN: u64 = 123;
+    pub const VIB_UP_TURN: u64 = 30;
+    pub const VIB_UP_ZERO: u64 = 20;
+    pub const VIB_DOWN_ZERO: u64 = 40;
+    pub const VIB_SUB_LESS: u64 = 10;
+    /// From the period to the volume, by the envelope's state before and after.
+    pub fn env(from: u8, to: u8) -> u64 {
+        match (from, to) {
+            (0, 0) => 577,
+            (0, _) => 615,
+            (1, 1) => 604,
+            (1, _) => 643,
+            (2, _) => 600,
+            (3, 3) => 659,
+            (3, _) => 696,
+            _ => 589,
         }
     }
-}
-
-fn at(hw: &mut Hw, e: At) {
-    at_n(hw, e, 1)
-}
-
-fn at_n(hw: &mut Hw, e: At, n: u64) {
-    hw.wait(e.cost() * n);
+    /// After the volume: a sample; a pulse waiting, at its speed, blocked, or written (in the
+    /// direction it went, or after a turn: plus `PULSE_TURN` each).
+    pub const SAMPLE: u64 = 38;
+    pub const PULSE_DELAY: u64 = 104;
+    pub const PULSE_SPEED: u64 = 127;
+    pub const PULSE_BLOCKED: u64 = 161;
+    pub const PULSE_WRITE: u64 = 294;
+    pub const PULSE_FWD_TURNED: u64 = 215;
+    pub const PULSE_BACK_TURNED: u64 = 205;
+    pub const PULSE_TURN: u64 = 144;
+    /// A blend's steps: waiting, blocked, each turn, the waveform built; a step up without a
+    /// turn takes `BLEND_UP` more.
+    pub const BLEND_DELAY: u64 = 104;
+    pub const BLEND_BLOCKED: u64 = 128;
+    pub const BLEND_TURN: u64 = 155;
+    pub const BLEND_BUILD: u64 = 3617;
+    pub const BLEND_UP: u64 = 24;
 }
 
 /// The original's voice structure ($80 bytes): field offsets.
@@ -340,6 +343,10 @@ pub struct Fred {
     base: u32,
     /// Where the byte that enables the voices lies (after the later replayer's extra word).
     voice_mask_at: u32,
+    /// The clock of the last host call (the tick's start, or a write), and the 68000 cycles
+    /// spent since (`cyc`).
+    seg: u64,
+    cyc: u64,
 }
 
 /// What the voice loop does after a voice.
@@ -353,6 +360,10 @@ enum Next {
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let (init, a) = refs(d)?;
+    let v2 = refs_with(d, &REFS).is_none();
+    if !v2 {
+        m.bus.clock += INIT_CLOCKS + if init > 0x12 { INIT_NAME_CLOCKS } else { 0 };
+    }
     let b = &mut m.bus;
     // InitPlayer ends the module name at the init routine
     if init > 0x12 {
@@ -360,8 +371,18 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     let last_subsong = b.r8(base.wrapping_add(a[LAST_SUBSONG])) as u16;
     let p = a.map(|o| base.wrapping_add(o));
-    let v2 = refs_with(d, &REFS).is_none();
-    let mut f = Fred { module: base, p, dma: 0, sub: 0, last_subsong, songend: false, base: if v2 { base.wrapping_sub(0x44) } else { base }, voice_mask_at: if v2 { 0x12 } else { 0x10 } };
+    let mut f = Fred {
+        module: base,
+        p,
+        dma: 0,
+        sub: 0,
+        last_subsong,
+        songend: false,
+        base: if v2 { base.wrapping_sub(0x44) } else { base },
+        voice_mask_at: if v2 { 0x12 } else { 0x10 },
+        seg: b.clock,
+        cyc: 0,
+    };
     f.init_sound(0, &mut Hw { bus: b });
     Some(Box::new(f))
 }
@@ -391,15 +412,17 @@ impl Replayer for Fred {
         if hw.bus.r8(self.p[STOPPED]) != 0 {
             return;
         }
-        at(hw, At::Start);
+        self.seg = hw.bus.clock;
+        self.cyc = cyc::START;
         let mut ch = 3;
         loop {
             match self.voice(ch, hw) {
                 Next::Voice if ch > 0 => ch -= 1,
                 Next::Again => {}
-                _ => return,
+                _ => break,
             }
         }
+        hw.bus.clock = hw.bus.clock.max(self.seg + self.cyc / 2);
     }
 }
 
@@ -435,6 +458,46 @@ impl Fred {
         b.w8(self.p[FADING], 0);
     }
 
+    fn spend(&mut self, cycles: u64) {
+        self.cyc += cycles;
+    }
+
+    /// A host call: it runs at the clock the cycles since the last one reach.
+    fn host(&mut self, hw: &mut Hw) {
+        hw.bus.clock = hw.bus.clock.max(self.seg + self.cyc / 2);
+    }
+
+    /// The code goes on from the host call's return.
+    fn rebase(&mut self, hw: &Hw) {
+        self.seg = hw.bus.clock;
+        self.cyc = 0;
+    }
+
+    /// ENPP_PokeAdr, ENPP_PokeLen, ENPP_PokePer, ENPP_PokeVol.
+    fn loc(&mut self, ch: usize, a: u32, hw: &mut Hw) {
+        self.host(hw);
+        hw.loc(ch, a);
+        self.rebase(hw);
+    }
+
+    fn len(&mut self, ch: usize, n: u16, hw: &mut Hw) {
+        self.host(hw);
+        hw.len(ch, n);
+        self.rebase(hw);
+    }
+
+    fn per(&mut self, ch: usize, p: u16, hw: &mut Hw) {
+        self.host(hw);
+        hw.per(ch, p);
+        self.rebase(hw);
+    }
+
+    fn vol(&mut self, ch: usize, v: u16, hw: &mut Hw) {
+        self.host(hw);
+        hw.vol(ch, v);
+        self.rebase(hw);
+    }
+
     /// The player's DMA switch, through ENPP_DMAMask: bit 15 of `d0` on or off.
     fn dma_mask(&mut self, d0: u16, hw: &mut Hw) {
         let bits = d0 & 0xf;
@@ -443,6 +506,7 @@ impl Fred {
         } else {
             self.dma |= bits;
         }
+        self.host(hw);
         hw.dmacon(bits | (d0 & 0x8000));
         if d0 & 0x8000 != 0 {
             // the host's ENPP_DMAMask waits for the DMA as dtg_WaitAudioDMA does:
@@ -450,6 +514,7 @@ impl Fred {
             let now = hw.bus.clock;
             hw.wait((now / LINE + 10) * LINE - now);
         }
+        self.rebase(hw);
     }
 
     fn tempo(&self, hw: &Hw) -> u16 {
@@ -466,32 +531,38 @@ impl Fred {
         let va = self.voice_at(ch);
         let bit = 1u16 << ch;
         let mut inst_change = false;
-        at(hw, At::Entry);
+        self.spend(cyc::ENTRY);
         let b = &mut *hw.bus;
         let track = b.r32(va + v::TRACK);
         // the loop of the note started in the last tick
         if b.r8(va + v::LOOP_DONE) == 0 {
-            at(hw, At::Loop);
-            let b = &mut *hw.bus;
             b.w8(va + v::LOOP_DONE, 0xff);
             let inst = b.r32(va + v::INSTRUMENT);
             let repeat = b.r16(inst + ins::REPEAT);
             if repeat == 0 {
-                hw.loc(ch, self.p[EMPTY]);
-                at(hw, At::LoopLen);
-                hw.len(ch, 0x32);
-                at(hw, At::LoopEnd);
+                self.spend(cyc::LOOP_EMPTY);
+                self.loc(ch, self.p[EMPTY], hw);
+                self.spend(cyc::LOOP_LEN);
+                self.len(ch, 0x32, hw);
+                self.spend(cyc::LOOP_END);
             } else if repeat & 0x8000 == 0 {
                 let mut a = self.base.wrapping_add(b.r32(inst + ins::SAMPLE)).wrapping_add(repeat as u32);
                 let len = b.r16(inst + ins::LENGTH).wrapping_sub(repeat);
                 if b.r8(inst + ins::TYPE) != 0 {
                     a = va + v::WAVE;
+                    self.spend(cyc::LOOP_SYNTH);
+                } else {
+                    self.spend(cyc::LOOP_SAMPLE);
                 }
-                hw.loc(ch, a);
-                at(hw, At::LoopLen);
-                hw.len(ch, len);
-                at(hw, At::LoopEnd);
+                self.loc(ch, a, hw);
+                self.spend(cyc::LOOP_LEN_REPEAT);
+                self.len(ch, len, hw);
+                self.spend(cyc::LOOP_END_REPEAT);
+            } else {
+                self.spend(cyc::LOOP_NONE);
             }
+        } else {
+            self.spend(cyc::LOOP_DONE);
         }
 
         let b = &mut *hw.bus;
@@ -502,8 +573,13 @@ impl Fred {
                 return next;
             }
         } else if duration == 1 && (b.r8(track).wrapping_sub(0xa0) as i8) < 0 {
-            at(hw, At::Mute);
+            self.spend(cyc::MUTE);
             self.dma_mask(bit, hw);
+            self.spend(cyc::HOST_OFF);
+        } else if duration == 1 {
+            self.spend(cyc::DUR_LAST);
+        } else {
+            self.spend(cyc::DUR_OTHER);
         }
         self.effects(ch, hw)
     }
@@ -519,14 +595,14 @@ impl Fred {
             let cmd = b.r8(t);
             t += 1;
             let tempo = self.tempo(hw);
-            at(hw, match cmd {
-                0x00..=0x7f => At::Note,
-                0x83 => At::Inst,
-                0x82 => At::Tempo,
-                0x81 => At::Port,
-                0x84 => At::Pause,
-                0x80 => At::End,
-                _ => At::Wait,
+            self.spend(match cmd {
+                0x00..=0x7f => 0,
+                0x83 => cyc::INST,
+                0x82 => cyc::TEMPO,
+                0x81 => cyc::PORT,
+                0x84 => cyc::PAUSE,
+                0x80 => cyc::END,
+                _ => cyc::WAIT,
             });
             let b = &mut *hw.bus;
             match cmd {
@@ -561,6 +637,7 @@ impl Fred {
                 // pause: the voice is muted, and its effects do not run
                 0x84 => {
                     self.dma_mask(bit, hw);
+                    self.spend(cyc::HOST_OFF + cyc::PAUSE_RET);
                     let b = &mut *hw.bus;
                     b.w16(va + v::DURATION, tempo);
                     b.w8(va + v::LOOP_DONE, 0xff);
@@ -592,7 +669,9 @@ impl Fred {
             }
             if e & 0x8000 != 0 {
                 // a jump: dtg_SongEnd
-                at(hw, At::Jump);
+                self.spend(cyc::JUMP);
+                self.host(hw);
+                self.rebase(hw);
                 self.songend = true;
                 off = (e & 0x7fff) as u32;
                 continue;
@@ -621,6 +700,11 @@ impl Fred {
         b.w8(va + v::VIB_VALUE, 0);
         let kind = b.r8(inst + ins::TYPE);
         let sync = b.r8(inst + ins::SYNC);
+        self.spend(match (kind, inst_change) {
+            (0, _) => cyc::NOTE_SAMPLE,
+            (_, false) => cyc::NOTE_SYNTH,
+            (_, true) => cyc::NOTE_SYNTH_INST,
+        });
         if kind == 1 && (inst_change || sync & 2 != 0) {
             self.create_pulse(va, inst, hw);
         } else if kind == 2 && (inst_change || sync & 8 != 0) {
@@ -634,38 +718,43 @@ impl Fred {
             a = va + v::WAVE;
         }
         let len = b.r16(inst + ins::LENGTH);
-        hw.loc(ch, a);
-        at(hw, At::NoteLen);
-        hw.len(ch, len);
-        at(hw, At::NoteVol);
+        self.loc(ch, a, hw);
+        self.spend(cyc::NOTE_LEN);
+        self.len(ch, len, hw);
+        self.spend(cyc::NOTE_VOL);
         hw.bus.w8(va + v::VOLUME, 0);
-        hw.vol(ch, 0);
-        at(hw, At::NotePer);
+        self.vol(ch, 0, hw);
+        self.spend(cyc::NOTE_PER);
         let b = &mut *hw.bus;
         b.w8(va + v::ENV_STATE, 0);
         b.w8(va + v::SUSTAIN, b.r8(inst + ins::SUSTAIN));
         let period = self.period(hw, note, inst);
-        hw.per(ch, period);
+        self.per(ch, period, hw);
         let b = &mut *hw.bus;
         b.w16(va + v::PERIOD, period);
-        if b.r8(va + v::PORT_RUNNING) != 0 && b.r16(va + v::PORT_START) == 0 {
-            b.w16(va + v::PORT_DIFF, b.r16(va + v::PORT_LIMIT).wrapping_sub(period));
-            b.w16(va + v::PORT_COUNTER, 1);
-            b.w16(va + v::PORT_START, period);
+        if b.r8(va + v::PORT_RUNNING) != 0 {
+            self.cyc += cyc::NOTE_PORT_RUNNING;
+            if b.r16(va + v::PORT_START) == 0 {
+                self.cyc += cyc::NOTE_PORT_START;
+                b.w16(va + v::PORT_DIFF, b.r16(va + v::PORT_LIMIT).wrapping_sub(period));
+                b.w16(va + v::PORT_COUNTER, 1);
+                b.w16(va + v::PORT_START, period);
+            }
         }
         if b.r8(self.module + self.voice_mask_at) & bit as u8 == 0 {
             // a voice the module does not enable: no DMA, no effects
+            self.spend(cyc::NOTE_NO_DMA);
             return Some(Next::Voice);
         }
-        at(hw, At::NoteDma);
+        self.spend(cyc::NOTE_DMA);
         self.dma_mask(0x8200 | bit, hw);
-        at(hw, At::NoteFx);
+        self.spend(cyc::NOTE_FX);
         hw.bus.w8(va + v::LOOP_DONE, 0);
         None
     }
 
-    fn create_pulse(&self, va: u32, inst: u32, hw: &mut Hw) {
-        at(hw, At::PulseCreate);
+    fn create_pulse(&mut self, va: u32, inst: u32, hw: &mut Hw) {
+        self.spend(cyc::PULSE_CREATE);
         let b = &mut *hw.bus;
         b.w8(va + v::PULSE_SHOT, b.r8(inst + ins::PULSE_SHOT));
         b.w8(va + v::PULSE_DELAY, b.r8(inst + ins::PULSE_DELAY));
@@ -687,11 +776,11 @@ impl Fred {
             b.w8(a, plus);
             a += 1;
         }
-        at_n(hw, At::PulseByte, (a - va - v::WAVE) as u64);
+        self.spend(cyc::PULSE_BYTE * (a - va - v::WAVE) as u64);
     }
 
-    fn create_blend(&self, va: u32, inst: u32, hw: &mut Hw) {
-        at(hw, At::BlendCreate);
+    fn create_blend(&mut self, va: u32, inst: u32, hw: &mut Hw) {
+        self.spend(cyc::BLEND_CREATE);
         let b = &mut *hw.bus;
         b.w8(va + v::BLEND_WAY, 0);
         b.w16(va + v::BLEND_POS, 1);
@@ -707,10 +796,10 @@ impl Fred {
     /// whose DMA is on; writes its period and volume.
     fn effects(&mut self, ch: usize, hw: &mut Hw) -> Next {
         if self.dma & (1 << ch) == 0 {
-            at(hw, At::FxSkip);
+            self.spend(cyc::FX_SKIP);
             return Next::Voice;
         }
-        at(hw, At::Fx);
+        self.spend(cyc::FX);
         let va = self.voice_at(ch);
         let b = &mut *hw.bus;
         let inst = b.r32(va + v::INSTRUMENT);
@@ -721,11 +810,11 @@ impl Fred {
         let speed = b.r8(va + v::ARP_SPEED).wrapping_sub(1);
         b.w8(va + v::ARP_SPEED, speed);
         if speed == 0 {
-            at(hw, At::ArpNext);
-            let b = &mut *hw.bus;
             b.w8(va + v::ARP_SPEED, b.r8(inst + ins::ARP_SPEED));
             let pos = pos.wrapping_add(1);
-            b.w8(va + v::ARP_POS, if pos == b.r8(inst + ins::ARP_COUNT) { 0 } else { pos });
+            let wrap = pos == b.r8(inst + ins::ARP_COUNT);
+            self.cyc += if wrap { cyc::ARP_WRAP } else { cyc::ARP_NEXT };
+            b.w8(va + v::ARP_POS, if wrap { 0 } else { pos });
         }
         let period = self.period(hw, note, inst);
         let b = &mut *hw.bus;
@@ -735,10 +824,10 @@ impl Fred {
         if b.r8(va + v::PORT_RUNNING) != 0 {
             let delay = b.r16(va + v::PORT_DELAY);
             if delay != 0 {
-                at(hw, At::PortDelay);
+                self.cyc += cyc::PORT_DELAY;
                 hw.bus.w16(va + v::PORT_DELAY, delay - 1);
             } else {
-                at(hw, At::PortStep);
+                self.cyc += cyc::PORT_STEP;
                 let b = &mut *hw.bus;
                 let counter = b.r16(va + v::PORT_COUNTER);
                 let speed = b.r16(va + v::PORT_SPEED) as i16;
@@ -754,10 +843,13 @@ impl Fred {
                 let counter = counter.wrapping_add(1);
                 b.w16(va + v::PORT_COUNTER, counter);
                 if counter as i16 > speed {
+                    self.cyc += cyc::PORT_DONE;
                     b.w8(va + v::NOTE, b.r8(va + v::PORT_NOTE));
                     b.w8(va + v::PORT_RUNNING, 0);
                 }
             }
+        } else {
+            self.spend(cyc::PORT_OFF);
         }
 
         // vibrato
@@ -765,23 +857,29 @@ impl Fred {
         let mut period = b.r16(va + v::PERIOD);
         let delay = b.r8(va + v::VIB_DELAY);
         if delay != 0 {
-            at(hw, At::VibDelay);
+            self.cyc += cyc::VIB_DELAY;
             hw.bus.w8(va + v::VIB_DELAY, delay - 1);
         } else if b.r8(va + v::VIB_FLAGS) != 0 {
-            at(hw, At::Vib);
-            let b = &mut *hw.bus;
             let mut flags = b.r8(va + v::VIB_FLAGS);
             let value;
+            let mut c;
             if flags & 0x80 != 0 {
+                c = cyc::VIB_UP;
                 value = b.r8(va + v::VIB_VALUE).wrapping_add(b.r8(va + v::VIB_SPEED));
                 b.w8(va + v::VIB_VALUE, value);
                 if value == b.r8(va + v::VIB_AMPL) {
+                    c += cyc::VIB_UP_TURN;
                     flags ^= 0x80;
                 }
+                if value == 0 {
+                    c += cyc::VIB_UP_ZERO;
+                }
             } else {
+                c = cyc::VIB_DOWN;
                 value = b.r8(va + v::VIB_VALUE).wrapping_sub(b.r8(va + v::VIB_SPEED));
                 b.w8(va + v::VIB_VALUE, value);
                 if value == 0 {
+                    c += cyc::VIB_DOWN_ZERO;
                     flags ^= 0x80;
                 }
             }
@@ -790,10 +888,17 @@ impl Fred {
             }
             b.w8(va + v::VIB_FLAGS, flags);
             let d = value as i8 as u16;
-            period = if flags & 1 != 0 { period.wrapping_add(d) } else { period.wrapping_sub(d) };
+            period = if flags & 1 != 0 {
+                period.wrapping_add(d)
+            } else {
+                c -= cyc::VIB_SUB_LESS;
+                period.wrapping_sub(d)
+            };
+            self.cyc += c;
+        } else {
+            self.cyc += cyc::VIB_OFF;
         }
-        hw.per(ch, period);
-        at(hw, At::Env);
+        self.per(ch, period, hw);
 
         // envelope: the sums and differences are words
         let b = &mut *hw.bus;
@@ -804,7 +909,8 @@ impl Fred {
             (r(ins::DECAY_SPEED), r(ins::DECAY_VOL)),
             (r(ins::RELEASE_SPEED), r(ins::RELEASE_VOL)),
         );
-        match b.r8(va + v::ENV_STATE) {
+        let state = b.r8(va + v::ENV_STATE);
+        match state {
             0 => {
                 let x = vol + attack.0;
                 b.w8(va + v::VOLUME, x as u8);
@@ -836,38 +942,38 @@ impl Fred {
         let fade = b.r16(self.p[FADE_VOLUME]) as u32;
         let env_vol = (b.r8(inst + ins::ENV_VOL) as u32 * fade) >> 12;
         let vol = (b.r8(va + v::VOLUME) as u32 * (env_vol & 0xffff)) >> 9;
-        hw.vol(ch, vol as u16);
+        self.cyc += cyc::env(state, b.r8(va + v::ENV_STATE));
+        self.vol(ch, vol as u16, hw);
 
         let b = &mut *hw.bus;
         match b.r8(inst + ins::TYPE) {
-            0 => at(hw, At::Sample),
+            0 => self.spend(cyc::SAMPLE),
             2 => self.blend(va, inst, hw),
             _ => self.pulse(va, inst, hw),
         }
         Next::Voice
     }
 
-    fn pulse(&self, va: u32, inst: u32, hw: &mut Hw) {
+    fn pulse(&mut self, va: u32, inst: u32, hw: &mut Hw) {
         let b = &mut *hw.bus;
         let delay = b.r8(va + v::PULSE_DELAY);
         if delay != 0 {
             b.w8(va + v::PULSE_DELAY, delay - 1);
-            return at(hw, At::PulseDelay);
+            return self.spend(cyc::PULSE_DELAY);
         }
         let speed = b.r8(va + v::PULSE_SPEED);
         if speed != 0 {
             b.w8(va + v::PULSE_SPEED, speed - 1);
-            return at(hw, At::PulseSpeed);
+            return self.spend(cyc::PULSE_SPEED);
         }
         if b.r8(inst + ins::SYNC) & 1 != 0 && b.r8(va + v::PULSE_SHOT) == 0 {
-            return at(hw, At::PulseBlocked);
+            return self.spend(cyc::PULSE_BLOCKED);
         }
-        at(hw, At::PulseWrite);
-        let b = &mut *hw.bus;
         b.w8(va + v::PULSE_SPEED, b.r8(inst + ins::PULSE_SPEED));
         let mut pos = b.r8(va + v::PULSE_POS);
         let (start, end) = (b.r8(inst + ins::PULSE_START) as i8, b.r8(inst + ins::PULSE_END) as i8);
         let mut back = b.r8(va + v::PULSE_WAY) & 4 != 0;
+        let was_back = back;
         let shot = |b: &mut crate::bus::Bus| b.w8(va + v::PULSE_SHOT, b.r8(va + v::PULSE_SHOT).wrapping_sub(1));
         let mut turns = 0;
         while turns < MAX_TURNS {
@@ -882,6 +988,7 @@ impl Fred {
                 pos = pos.wrapping_sub(1);
                 turns += 1;
             }
+            back = true;
             if pos as i8 >= start {
                 b.w8(va + v::WAVE + pos as u32, b.r8(inst + ins::PULSE_PLUS));
                 b.w8(va + v::PULSE_POS, pos.wrapping_sub(1));
@@ -893,22 +1000,26 @@ impl Fred {
             back = false;
             turns += 1;
         }
-        at_n(hw, At::PulseTurn, turns as u64);
+        // the direction written: back unless the last pass wrote forward
+        self.spend(match (was_back, back) {
+            _ if turns == 0 => cyc::PULSE_WRITE,
+            (_, false) => cyc::PULSE_FWD_TURNED,
+            (_, true) => cyc::PULSE_BACK_TURNED,
+        } + cyc::PULSE_TURN * turns as u64);
     }
 
-    fn blend(&self, va: u32, inst: u32, hw: &mut Hw) {
+    fn blend(&mut self, va: u32, inst: u32, hw: &mut Hw) {
         let b = &mut *hw.bus;
         let delay = b.r8(va + v::BLEND_DELAY);
         if delay != 0 {
             b.w8(va + v::BLEND_DELAY, delay - 1);
-            return at(hw, At::BlendDelay);
+            return self.spend(cyc::BLEND_DELAY);
         }
         let blend = b.r8(inst + ins::BLEND) as u32;
         let mut turns = 0;
         let pos = loop {
             if b.r8(inst + ins::SYNC) & 4 != 0 && b.r8(va + v::BLEND_SHOT) == 0 {
-                at_n(hw, At::BlendTurn, turns as u64);
-                return at(hw, At::BlendBlocked);
+                return self.spend(cyc::BLEND_TURN * turns as u64 + cyc::BLEND_BLOCKED);
             }
             let pos = b.r16(va + v::BLEND_POS);
             let turn = if b.r8(va + v::BLEND_WAY) == 0 {
@@ -918,7 +1029,14 @@ impl Fred {
                 pos == 1
             };
             if !turn {
-                let pos = if b.r8(va + v::BLEND_WAY) == 0 { pos.wrapping_add(1) } else { pos.wrapping_sub(1) };
+                let pos = if b.r8(va + v::BLEND_WAY) == 0 {
+                    if turns == 0 {
+                        self.cyc += cyc::BLEND_UP;
+                    }
+                    pos.wrapping_add(1)
+                } else {
+                    pos.wrapping_sub(1)
+                };
                 b.w16(va + v::BLEND_POS, pos);
                 break pos;
             }
@@ -929,8 +1047,7 @@ impl Fred {
                 return;
             }
         };
-        at_n(hw, At::BlendTurn, turns as u64);
-        at(hw, At::BlendBuild);
+        self.spend(cyc::BLEND_TURN * turns as u64 + cyc::BLEND_BUILD);
         let b = &mut *hw.bus;
         // the sample's first half, plus the second half (read as words) times
         // the position, shifted down logically by the blend

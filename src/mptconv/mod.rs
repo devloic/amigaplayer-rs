@@ -2,6 +2,7 @@
 //! and put into an Impulse Tracker or Scream Tracker 3 module for the libxmp port's own IT / S3M
 //! loader (the format OpenMPT itself would save them as, `CSoundFile::GetBestSaveFormat`):
 //!
+//! - [`mt2`]: MadTracker 2 (`MT20`, `.mt2`), `Load_mt2.cpp`, as IT;
 //! - [`dsm`]: Digisound Interface Kit (DSIK) internal format (`RIFF` / `DSMF`, `.dsm`),
 //!   `Load_dsm.cpp`, as S3M;
 //! - [`ams`]: Velvet Studio (`AMShdr`) and Extreme's Tracker (`Extreme`, `.ams`), `Load_ams.cpp`,
@@ -26,6 +27,7 @@
 
 pub mod ams;
 pub mod dsm;
+pub mod mt2;
 
 use crate::mo3::{Cell as NCell, Env, Ins, Kind, Smp, Song};
 use crate::xmp::module::{self as xm, ModuleData};
@@ -1327,14 +1329,19 @@ mod tests {
     }
 
     /// Damaged files (cut short, bytes changed) load or are refused, never panic; the same for
-    /// the AMS loader on a DSM file given its magic.
+    /// the MadTracker 2 and AMS loaders on a DSM file given their magic.
     #[test]
     fn damaged_files() {
         let dsm = synth_dsm();
         let mut ams = b"AMShdr\x1A\x04tiny\x02\x02\x01\x01\x00\x01\x00".to_vec();
         ams.extend_from_slice(&dsm[12..]);
+        let mut mt2 = b"MT20\0\0\0\0\x05\x02".to_vec();
+        mt2.resize(126 + 256, 0);
+        mt2[112] = 1;
+        mt2.extend_from_slice(&dsm[12..]);
         type Load = fn(&mut ModuleData, &mut Hio) -> Result<(), ()>;
-        let loaders: [(&[u8], Load); 2] = [(&dsm, super::dsm::load), (&ams, super::ams::load)];
+        let loaders: [(&[u8], Load); 3] =
+            [(&dsm, super::dsm::load), (&ams, super::ams::load), (&mt2, super::mt2::load)];
         for (f, load) in loaders {
             for n in 0..f.len() {
                 let _ = load(&mut ModuleData::default(), &mut Hio::new(&f[..n]));
@@ -1349,7 +1356,7 @@ mod tests {
         }
     }
 
-    /// The same on the DSM and AMS files in `$MPTCONV_FUZZ_IN` (cut at 64 points, 300
+    /// The same on the MT2, DSM and AMS files in `$MPTCONV_FUZZ_IN` (cut at 64 points, 300
     /// bytes changed each).
     #[test]
     #[ignore]
@@ -1365,7 +1372,9 @@ mod tests {
         let load = |f: &[u8]| {
             let mut m = ModuleData::default();
             let mut h = Hio::new(f);
-            let _ = if super::dsm::test(f) {
+            let _ = if super::mt2::test(f) {
+                super::mt2::load(&mut m, &mut h)
+            } else if super::dsm::test(f) {
                 super::dsm::load(&mut m, &mut h)
             } else {
                 super::ams::load(&mut m, &mut h)

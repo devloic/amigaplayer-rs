@@ -990,9 +990,10 @@ BLACKBOX_PREFIX = ('delusiondigitalmusicformat',)
 # the port lifts libxmp's 512 KB cap on a packed 8-bit sample. Un4seen MO3: libxmp has no loader (the
 # port reads the file as libopenmpt 0.8.7 does and plays the module put back into its format on the
 # libxmp port's loader of that format). The port plays them on libxmp's mixer, openmpt123 on its own:
-# at best SIMILAR. DSIK RIFF DSM and Velvet Studio / Extreme's Tracker AMS: no libxmp loader either (the
-# port reads them as libopenmpt 0.8.7 does and plays them put into IT or S3M, src/mptconv).
-XMP_REFUSED_BLACKBOX = ('digitrakker', 'un4seenmo3', 'dsikriffdsm', 'velvetstudioams', 'extremestrackerams')
+# at best SIMILAR. MadTracker 2, DSIK RIFF DSM and Velvet Studio / Extreme's Tracker AMS: no libxmp loader
+# either (the port reads them as libopenmpt 0.8.7 does and plays them put into IT or S3M, src/mptconv).
+XMP_REFUSED_BLACKBOX = ('digitrakker', 'un4seenmo3', 'madtracker2', 'dsikriffdsm', 'velvetstudioams',
+                        'extremestrackerams')
 
 
 def blackbox_key(fmt):

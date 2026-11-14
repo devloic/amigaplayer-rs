@@ -53,9 +53,10 @@ pub static LOADERS: &[Loader] = &[
     // Un4seen MO3 (`.mo3`): IT, XM, S3M, MOD and MTM modules with packed music data and
     // compressed samples, put back into their format for that format's loader (see `mo3`).
     Loader { name: "Un4seen MO3", test: crate::mo3::test, load: crate::mo3::load },
-    // DSIK (RIFF DSMF) and Velvet Studio / Extreme's Tracker AMS: no libxmp
+    // MadTracker 2, DSIK (RIFF DSMF) and Velvet Studio / Extreme's Tracker AMS: no libxmp
     // loader; read as libopenmpt reads them and put into IT or S3M for that loader (see
     // `mptconv`).
+    Loader { name: "MadTracker 2", test: crate::mptconv::mt2::test, load: crate::mptconv::mt2::load },
     Loader { name: "DSIK RIFF DSM", test: crate::mptconv::dsm::test, load: crate::mptconv::dsm::load },
     Loader { name: "Velvet Studio AMS", test: crate::mptconv::ams::test, load: crate::mptconv::ams::load },
     Loader { name: "Impulse Tracker", test: loaders::it::test, load: loaders::it::load },

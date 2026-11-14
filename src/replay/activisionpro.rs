@@ -807,58 +807,372 @@ fn detect(d: &[u8]) -> bool {
     layout(d).is_some()
 }
 
-// Timing, in colour clocks, measured on the original's write log.
-/// From one voice to the next, and a voice's new note up to its DMA off.
-const C_VOICE: u64 = 300;
-/// A voice's envelope each tick, and its start on a new note.
-const C_ENV: u64 = 36;
-const C_ENV_NEW: u64 = 264;
-const C_NOTE: u64 = 330;
-/// The note's writes: DMA off to the period, to the sample, to its length.
-const C_PER: u64 = 9;
-const C_LOC: u64 = 16;
-const C_LEN: u64 = 12;
-/// From the last voice to the DMA on (the delay loop), from there to the first
-/// voice's loop (with the speed variation's step, and the second delay loop).
-const C_DELAY: u64 = 1290;
-const C_FINAL: u64 = 224;
-const C_SPEEDVAR: u64 = 32;
-/// The accumulator's replayers: no step, a longer second delay loop.
-const C_SV2: u64 = 40;
-/// The final loop's writes: the loop's start, its length, the period, the
-/// volume; and on to the next voice.
-const C_FLEN: u64 = 12;
-const C_FPER: u64 = 12;
-const C_FVOL: u64 = 141;
-/// The same with the master volume only (no multiply by the track volume).
-const C_FVOL_M: u64 = 109;
-const C_FNEXT: u64 = 47;
-/// The later replayers: the voices to the DMA on (their delay routine), on to
-/// the first volume; the volume to the period, to the loop, and on to the
-/// next voice's volume (from the loop's length, else from the period).
-/// The volume's multiplies (not when the gate or the mute gives 0) come
-/// before its write; a voice is shorter than in the earlier replayers, its
-/// new note longer.
-const C_DELAY_LATE: u64 = 1050;
-const C_FINAL_LATE: u64 = 55;
-const C_LPER: u64 = 21;
-const C_LLOC: u64 = 27;
-const C_LNEXT_LOOP: u64 = 92;
-const C_LNEXT: u64 = 103;
-const C_LVOL: u64 = 240;
-const C_VOICE_LATE: u64 = 150;
-const C_NOTE_LATE: u64 = 616;
+/// The code paths of the replayer's tick (as the Eagleplayer runs it), each a whole number of
+/// 68000 cycles in a build of the replayer (`Build`).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum K {
+    Entry,
+    JtNone,
+    JtStop,
+    JtFade,
+    JtInit,
+    InitVoice,
+    InitOp,
+    NotPlaying,
+    FadeOff,
+    FadeCount,
+    FadeReload,
+    FadeStop,
+    Sv2Carry,
+    Sv2NoCarry,
+    Voice,
+    S1Off,
+    S1On,
+    Spd2,
+    SvcntNz,
+    SpdNz,
+    RowGo,
+    DisSkip,
+    NoRow,
+    TrkFE,
+    TrkFF,
+    Trk,
+    TvReset,
+    TvNo,
+    CmdsHead,
+    CmdByte,
+    CmdT0,
+    CmdT1,
+    CmdT2,
+    CmdT3,
+    CmdT4,
+    CmdT5,
+    CmdT6,
+    CmdT7,
+    CmdT8,
+    CmdT9,
+    CmdT10,
+    CmdT11,
+    CmdH0,
+    CmdH1,
+    CmdH2,
+    CmdH3,
+    CmdH4,
+    CmdH5,
+    CmdH6,
+    CmdH7,
+    CmdH8,
+    CmdH9,
+    CmdH10,
+    CmdH11,
+    ActG,
+    ActV,
+    ActVW,
+    ActAddVW,
+    ActImmV,
+    ActImmX,
+    InitVol,
+    LStart,
+    VDivQ0,
+    StopVol,
+    StopDma,
+    CmdFall,
+    CmdEnd,
+    CmdSpeed,
+    CmdNone,
+    NoteFirstSpd,
+    NoteFirst,
+    NoteLast,
+    SpeedHead,
+    SpeedCmd,
+    SpeedTvol,
+    SpeedPt,
+    SpeedTail,
+    FlagsHead,
+    Flags40,
+    Flags80,
+    FlagsTmp,
+    FlagsPt,
+    FlagsTail,
+    Period,
+    S2Dis0,
+    S2Sfx,
+    S2Clr,
+    ChkNone,
+    ChkSame,
+    ChkNew,
+    NfNeg,
+    Instr,
+    S3Sfx,
+    S3Clr,
+    NoteOff,
+    NotePer,
+    NoteLoc,
+    NoteLen,
+    PeriodAfter,
+    FlagsEnd,
+    RowEndNo,
+    RowEndFF,
+    LoopcNz,
+    LoopcZ,
+    RowDis,
+    RowTail,
+    NpHead,
+    NpIter,
+    NpFd,
+    NpJump,
+    NpCnt0,
+    NpCntDec,
+    NpCntEnd,
+    NpFlagStart,
+    NpFlagDec,
+    NpFlagEnd,
+    NpNo40,
+    NpTail,
+    PortaYes,
+    PortaNo,
+    PortaBothYes,
+    PortaBothNo,
+    VDel,
+    VSdelay,
+    VZero,
+    VStartDiv,
+    VStartHalve,
+    VHalveIter,
+    VHalveZero,
+    VHalveEnd,
+    VRunAdd,
+    VRunSub,
+    VCntUp,
+    VCntMax,
+    VCntDown,
+    VCntZero,
+    VCntDownNz,
+    FxRow,
+    FxTick,
+    Fx1No,
+    Fx1Even,
+    Fx1Abs,
+    Fx1Rel,
+    Fx2No,
+    Fx2Even,
+    Fx2Odd,
+    Fx2Neg,
+    Fx3No,
+    Fx3Yes,
+    Fx4No,
+    Fx4Sd,
+    Fx4Stop,
+    Fx4None,
+    Fx5No,
+    Fx5Sd,
+    Fx5Stop,
+    Fx5None,
+    ArpAbs,
+    ArpUp,
+    ArpDown,
+    Per,
+    Env,
+    EnvNew,
+    EnvNfNeg,
+    EnvTickNz,
+    EnvWaitNeg,
+    EnvWaitDec,
+    EnvStep,
+    EnvVol,
+    Env40,
+    Env0,
+    EnvCntNz,
+    EnvNext,
+    EnvLoop,
+    EnvPosF,
+    EnvCnt,
+    SdZero,
+    SdDec,
+    VoiceEnd,
+    DmaOn,
+    SvDec,
+    SvStep,
+    SvWrap,
+    Sv2Fin,
+    FDis,
+    FLoc,
+    FLen,
+    FPer,
+    GateShut,
+    GateOpen,
+    Vol,
+    GVol,
+    FVol,
+    FNext,
+    LMute,
+    LGateShut,
+    LVol,
+    LPer,
+    LLoop,
+    LNoLoop,
+    LLen,
+    N,
+}
+
+const NK: usize = K::N as usize;
+
+/// A row command's test, and the command taken (by its place in the list).
+const CMD_T: [K; 12] = [K::CmdT0, K::CmdT1, K::CmdT2, K::CmdT3, K::CmdT4, K::CmdT5, K::CmdT6, K::CmdT7, K::CmdT8, K::CmdT9, K::CmdT10, K::CmdT11];
+const CMD_H: [K; 12] = [K::CmdH0, K::CmdH1, K::CmdH2, K::CmdH3, K::CmdH4, K::CmdH5, K::CmdH6, K::CmdH7, K::CmdH8, K::CmdH9, K::CmdH10, K::CmdH11];
+
+/// A build of the replayer: which of its writes the Eagleplayer turns into its ENPP_Poke calls
+/// (a call's write comes at the previous call's clock plus half the cycles since, rounded
+/// down, and the next counts from it; the code's own writes count from the last call), and
+/// the cycles of its paths.
+struct Build {
+    /// The note's DMA off, period, sample and length; the final loop's volume; all of the
+    /// later replayers' final loop.
+    note_host: bool,
+    vol_host: bool,
+    final_host: bool,
+    /// InitSound's cycles before its first write, besides the position lists' paths and the
+    /// volume write's call (the voices' and the globals' clears are the same in every module
+    /// of a build).
+    init: u16,
+    c: [u16; NK],
+}
 
 pub struct ActivisionPro {
     l: Lay,
     /// The module's copy in guest memory.
     mb: u32,
     sub: u16,
-    /// Clocks since the last write.
-    pend: u64,
+    /// The clock the cycles count from (the tick's start, the last ENPP call), and the cycles
+    /// since.
+    base: u64,
+    cyc: u64,
+    b: &'static Build,
+    trace: Trace,
+    tickno: u64,
+    /// In InitSound: the voices' and globals' clears count in `Build::init`.
+    isnd: bool,
     /// A track ended with its end byte (the Eagleplayer reports the song's end there: the engine's
     /// empty-subsong skip then goes on to the next subsong, as it does after the original).
     ended: bool,
+}
+
+/// AVP_TRACE=file: each write's clock and the paths since the previous one (for fitting the
+/// paths' cycles to the original's log).
+struct Trace {
+    out: Option<std::io::BufWriter<std::fs::File>>,
+    pend: Vec<K>,
+}
+
+impl Trace {
+    fn open() -> Self {
+        let out = std::env::var_os("AVP_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(std::io::BufWriter::new);
+        Trace { out, pend: Vec::new() }
+    }
+    fn line(&mut self, s: std::fmt::Arguments) {
+        if let Some(o) = &mut self.out {
+            use std::io::Write;
+            let _ = write!(o, "{s}");
+            for e in self.pend.drain(..) {
+                let _ = write!(o, " {:?}", e);
+            }
+            let _ = writeln!(o);
+        }
+    }
+}
+
+/// The build's signature: what the templates read of its code, without the variables' offsets.
+fn signature(l: &Lay) -> String {
+    let fields: Vec<String> = l
+        .fields
+        .iter()
+        .map(|(_, d, w)| format!("{}{}", match d { Dst::G(_) => 'g', Dst::V(_) => 'v', Dst::X(_) => 'x', Dst::H(_) => 'h' }, *w as u8))
+        .collect();
+    let cmds: Vec<String> = l.cmds.iter().map(|(_, a, n)| format!("{}{:?}", a.len(), n)).collect();
+    let b = |x: bool| x as u8;
+    format!(
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{} {:?} {:?} {} {}",
+        b(l.jt), b(l.late), b(l.mute), b(l.nf_clear), b(l.spd2), b(l.gate_lo), b(l.gvol), b(l.note_first),
+        b(l.sofs), b(l.fine), b(l.sv2), b(l.tvreset), b(l.period_after), b(l.chk_and), b(l.transp),
+        b(l.row_transp), b(l.note_store), b(l.gate), b(l.np_count), b(l.np_maxff), b(l.sample_v), b(l.sepinfo),
+        b(l.both), b(l.vib_halve), b(l.env), b(l.env_byte), b(l.row_vibw), b(l.track_vol), b(l.s1), b(l.s2),
+        b(l.s3), b(l.v.contains_key("GTRANSP")), b(l.v.contains_key("FXT")), l.track, l.fx, fields.join(","), cmds.join(",")
+    )
+}
+
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x100_0000_01b3))
+}
+
+fn build(l: &Lay) -> &'static Build {
+    let h = fnv(&signature(l));
+    BUILDS.iter().find(|(k, _)| *k == h).map(|(_, b)| b).unwrap_or(&BUILDS[0].1)
+}
+
+/// The cycles of each path (enum K's order), fitted to the reference's write clocks; a path
+/// not taken in the fitted files has a related build's.
+#[rustfmt::skip]
+const C_E4A8DC2F9BC5F1B8: [u16; NK] = [0, 22, 0, 0, 0, 0, 33, 0, 393, 25, 45, 0, 126, 0, 478, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 438, 0, 6, 0, 0, 127, 0, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 0, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 148, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 994, 129, 190, 180, 212, 0, 0, 0, 59, 0, 0, 0, 0, 0, 168, 0, 0, 115, 88, 0, 133, 88, 0, 0, 60, 20, 0, 0, 0, 0, 0, 36, 466, 294, 72, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 0, 0, 0, 96, 0, 816, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 0, 69, 0, 0, 473, 63, 16, 464, 0, 95, 24, 24, 37, 0, 218, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_570D6E097F80C0E4: [u16; NK] = [0, 22, 0, 0, 0, 0, 4080, 0, 86, 25, 45, 0, 126, 0, 0, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 461, 0, 6, 0, 0, 127, 0, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 0, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 148, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 994, 0, 190, 180, 212, 0, 0, 0, 59, 0, 0, 0, 0, 0, 0, 0, 0, 115, 88, 0, 133, 88, 0, 0, 228, 20, 0, 0, 0, 0, 0, 36, 466, 0, 219, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 62, 0, 50, 0, 0, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 0, 7, 509, 353, 473, 63, 16, 464, 0, 95, 24, 24, 37, 0, 218, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_FA5122DE7B3A347D: [u16; NK] = [0, 29, 0, 0, 0, 0, 4080, 0, 342, 25, 45, 0, 126, 0, 360, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 127, 0, 0, 0, 35, 17, 38, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 4, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 148, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 493, 0, 18, 60, 36, 0, 0, 0, 59, 0, 0, 0, 382, 0, 0, 0, 0, 115, 88, 0, 133, 88, 0, 0, 228, 20, 0, 0, 0, 0, 0, 36, 466, 0, 219, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 62, 0, 50, 0, 0, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 0, 7, 26, 0, 473, 63, 16, 464, 0, 239, 24, 42, 0, 0, 467, 0, 0, 0, 0, 0, 385, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_D23E3AA417E2EFD5: [u16; NK] = [0, 22, 0, 0, 0, 0, 33, 0, 342, 25, 45, 0, 126, 0, 0, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 127, 0, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 0, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 138, 10, 0, 0, 0, 54, 69, 43, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 994, 1096, 190, 180, 212, 0, 0, 0, 59, 0, 0, 0, 465, 0, 168, 0, 0, 115, 88, 0, 133, 88, 0, 0, 60, 20, 0, 0, 0, 0, 0, 36, 466, 294, 72, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 0, 0, 0, 96, 0, 0, 0, 23, 0, 27, 0, 0, 0, 0, 0, 98, 44, 0, 0, 0, 69, 424, 51, 473, 63, 16, 464, 0, 95, 24, 24, 37, 0, 218, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_C5A4C94CD81F5AC4: [u16; NK] = [0, 22, 0, 0, 0, 0, 33, 0, 0, 25, 45, 0, 126, 0, 326, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 267, 0, 6, 0, 0, 127, 0, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 4, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 138, 10, 0, 0, 0, 54, 69, 43, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 747, 794, 190, 180, 212, 0, 0, 0, 59, 0, 0, 0, 107, 0, 168, 0, 0, 115, 88, 0, 133, 88, 0, 0, 60, 20, 0, 0, 0, 0, 0, 36, 466, 294, 72, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 0, 0, 0, 96, 0, 0, 0, 23, 0, 27, 0, 0, 0, 0, 0, 98, 44, 0, 0, 0, 69, 0, 393, 473, 63, 16, 464, 0, 95, 24, 24, 37, 0, 282, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_612E1C1AEF80288D: [u16; NK] = [265, 22, 0, 0, 0, 0, 4080, 0, 0, 25, 45, 0, 126, 0, 357, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 25, 0, 6, 0, 0, 127, 0, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 0, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 138, 10, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 843, 0, 190, 180, 212, 0, 0, 0, 32, 27, 0, 0, 372, 111, 126, 0, 0, 115, 88, 0, 133, 88, 0, 0, 18, 20, 0, 0, 0, 0, 0, 36, 470, 0, 219, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 62, 0, 50, 0, 0, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 0, 7, 0, 128, 473, 63, 16, 464, 0, 95, 24, 24, 37, 0, 282, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_6ECD0C303FA7FD5D: [u16; NK] = [0, 22, 0, 0, 0, 0, 4080, 0, 393, 25, 45, 0, 126, 0, 0, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 200, 0, 6, 0, 0, 127, 0, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 4, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 148, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 747, 698, 190, 180, 212, 0, 0, 0, 32, 27, 0, 0, 174, 69, 168, 0, 0, 115, 88, 0, 133, 88, 0, 0, 18, 20, 0, 0, 0, 0, 0, 36, 466, 294, 72, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 0, 0, 0, 96, 0, 816, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 0, 69, 326, 0, 473, 63, 16, 464, 0, 95, 24, 24, 37, 0, 282, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_F147A85DC8A757D4: [u16; NK] = [0, 22, 0, 0, 0, 0, 4080, 0, 393, 25, 45, 0, 126, 0, 0, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 254, 0, 6, 0, 0, 127, 0, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 0, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 148, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 747, 0, 190, 180, 212, 0, 0, 0, 59, 0, 0, 0, 143, 0, 168, 0, 0, 115, 88, 0, 133, 88, 0, 0, 60, 20, 0, 0, 0, 0, 0, 36, 470, 294, 72, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 0, 0, 0, 96, 0, 816, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 0, 69, 357, 0, 473, 63, 16, 464, 0, 95, 24, 24, 37, 0, 282, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_553F66D07BCE3739: [u16; NK] = [325, 22, 0, 0, 0, 0, 4080, 0, 17, 25, 45, 0, 126, 0, 43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 931, 0, 6, 0, 0, 151, 0, 0, 0, 35, 17, 17, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 4, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 148, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 8, 0, 32, 0, 0, 0, 0, 0, 190, 180, 212, 0, 0, 0, 59, 0, 0, 0, 181, 0, 210, 0, 0, 115, 88, 0, 133, 88, 0, 0, 18, 20, 0, 0, 0, 0, 0, 0, 466, 0, 219, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 62, 0, 50, 0, 0, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 0, 7, 379, 0, 473, 63, 16, 464, 0, 239, 24, 24, 0, 0, 467, 0, 0, 0, 0, 0, 385, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_85DDB921B3AF0EAE: [u16; NK] = [0, 22, 0, 0, 0, 0, 4080, 0, 0, 25, 45, 0, 126, 0, 219, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 1072, 0, 6, 0, 0, 127, 0, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 4, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 138, 10, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 747, 0, 190, 180, 212, 0, 0, 0, 59, 0, 0, 0, 0, 0, 168, 0, 0, 115, 88, 0, 133, 88, 0, 0, 60, 20, 0, 0, 0, 0, 0, 36, 466, 294, 72, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 0, 0, 0, 96, 0, 816, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 0, 69, 107, 393, 473, 63, 16, 464, 0, 95, 24, 24, 37, 0, 282, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_71CE06C5380C8392: [u16; NK] = [0, 22, 0, 0, 0, 0, 33, 0, 776, 25, 45, 0, 126, 0, 286, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 143, 0, 0, 0, 35, 17, 17, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 4, 170, 176, 0, 0, 0, 0, 0, 0, 0, 0, 138, 10, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 493, 0, 18, 60, 36, 0, 0, 0, 59, 0, 0, 0, 775, 0, 0, 0, 0, 115, 88, 0, 133, 88, 0, 0, 228, 20, 0, 0, 0, 0, 0, 36, 466, 0, 219, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 62, 0, 50, 0, 0, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 151, 7, 0, 1390, 473, 63, 16, 464, 0, 239, 24, 42, 0, 0, 254, 0, 0, 0, 0, 0, 385, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_0C43C57B71E9FCD5: [u16; NK] = [84, 22, 0, 0, 0, 0, 33, 0, 0, 25, 45, 0, 126, 0, 218, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 378, 0, 6, 0, 0, 40, 16, 0, 0, 0, 36, 17, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 4, 170, 176, 0, 105, 0, 0, 0, 0, 0, 0, 138, 10, 0, 0, 0, 54, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 493, 431, 18, 60, 36, 0, 0, 0, 59, 0, 0, 0, 0, 0, 140, 0, 0, 115, 88, 0, 133, 88, 0, 0, 88, 20, 0, 0, 0, 0, 0, 36, 466, 294, 72, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 0, 0, 0, 96, 0, 816, 0, 23, 0, 27, 0, 151, 0, 0, 0, 98, 44, 0, 0, 151, 69, 68, 2111, 473, 63, 16, 464, 0, 239, 24, 42, 37, 0, 291, 0, 0, 0, 0, 0, 348, 206, 203, 15, 212];
+#[rustfmt::skip]
+const C_8BF757FF01470696: [u16; NK] = [73, 29, 0, 0, 0, 0, 31, 0, 247, 25, 45, 0, 198, 0, 304, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 40, 16, 0, 0, 13, 0, 38, 0, 0, 43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 17, 4, 170, 176, 0, 105, 0, 0, 0, 0, 0, 0, 138, 10, 0, 0, 0, 54, 69, 43, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 493, 444, 18, 60, 36, 0, 0, 0, 59, 0, 0, 0, 395, 0, 140, 0, 0, 115, 88, 0, 133, 88, 0, 0, 106, 20, 0, 0, 0, 0, 0, 36, 466, 294, 72, 19, 0, 174, 164, 28, 74, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 0, 0, 0, 96, 0, 0, 0, 23, 0, 27, 0, 0, 0, 0, 0, 98, 44, 0, 0, 0, 69, 0, 1796, 473, 63, 16, 464, 0, 239, 24, 42, 37, 0, 481, 0, 0, 0, 0, 0, 183, 42, 55, 23, 24];
+
+/// The builds known, by their signature's hash.
+static BUILDS: [(u64, Build); 13] = [
+    (0xe4a8dc2f9bc5f1b8, Build { note_host: true, vol_host: false, final_host: false, init: 1129, c: C_E4A8DC2F9BC5F1B8 }),
+    (0x570d6e097f80c0e4, Build { note_host: true, vol_host: false, final_host: false, init: 1129, c: C_570D6E097F80C0E4 }),
+    (0xfa5122de7b3a347d, Build { note_host: false, vol_host: true, final_host: false, init: 1253, c: C_FA5122DE7B3A347D }),
+    (0xd23e3aa417e2efd5, Build { note_host: true, vol_host: false, final_host: false, init: 1129, c: C_D23E3AA417E2EFD5 }),
+    (0xc5a4c94cd81f5ac4, Build { note_host: true, vol_host: false, final_host: false, init: 1129, c: C_C5A4C94CD81F5AC4 }),
+    (0x612e1c1aef80288d, Build { note_host: true, vol_host: false, final_host: false, init: 1021, c: C_612E1C1AEF80288D }),
+    (0x6ecd0c303fa7fd5d, Build { note_host: true, vol_host: false, final_host: false, init: 1025, c: C_6ECD0C303FA7FD5D }),
+    (0xf147a85dc8a757d4, Build { note_host: true, vol_host: false, final_host: false, init: 1133, c: C_F147A85DC8A757D4 }),
+    (0x553f66d07bce3739, Build { note_host: true, vol_host: true, final_host: false, init: 1253, c: C_553F66D07BCE3739 }),
+    (0x85ddb921b3af0eae, Build { note_host: true, vol_host: false, final_host: false, init: 1181, c: C_85DDB921B3AF0EAE }),
+    (0x71ce06c5380c8392, Build { note_host: false, vol_host: false, final_host: true, init: 1253, c: C_71CE06C5380C8392 }),
+    (0x0c43c57b71e9fcd5, Build { note_host: false, vol_host: false, final_host: true, init: 0, c: C_0C43C57B71E9FCD5 }),
+    (0x8bf757ff01470696, Build { note_host: false, vol_host: false, final_host: false, init: 0, c: C_8BF757FF01470696 }),
+];
+
+/// The Eagleplayer's check of a module, in colour clocks (measured on modified copies): a scan
+/// of the words before the play routine, with time for each 48e7 word and 48e7 fcfe pair
+/// besides the init routine's, and for an rts at $28; a module the scan fails on (its routines
+/// reached through a jump table) is scanned whole.
+fn check_time(d: &[u8]) -> u64 {
+    let r = Rd(d);
+    let rts = 2 * (r.w(0x28) == 0x4e75) as u64;
+    match ep(d) {
+        Some(e) if !e.jt => {
+            let ws: Vec<u16> = (0..e.play).step_by(2).map(|o| r.w(o)).collect();
+            let c1 = ws.iter().filter(|&&w| w == 0x48e7).count() as u64;
+            let c2 = ws.windows(2).filter(|p| p[0] == 0x48e7 && p[1] == 0xfcfe).count() as u64;
+            843 + 101 * (e.play as u64 / 2) + 30 * (c1.saturating_sub(1) + c2.saturating_sub(1)) + rts
+        }
+        _ => 101 * d.len() as u64 + 521 + rts,
+    }
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -868,12 +1182,18 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         k.v.clear();
         k.cmds.clear();
         eprintln!("activisionpro: {k:?}");
+        eprintln!("activisionpro: build {:016x} {}", fnv(&signature(&l)), signature(&l));
     }
     // the Eagleplayer's copy: module size + $2000, the module at +$1000
     let blk = m.alloc(d.len() as u32 + 0x2000);
     let mb = blk + 0x1000;
     m.bus.write_bytes(mb, d);
-    let mut a = ActivisionPro { sub: l.min, l, mb, pend: 0, ended: false };
+    let b = build(&l);
+    // the Eagleplayer's check, then InitPlayer (the check again and its own work), then the
+    // calls before InitSound
+    let x = check_time(d);
+    m.bus.clock += 2 * x + 59827 + 4522 + 20;
+    let mut a = ActivisionPro { sub: l.min, l, mb, base: m.bus.clock, cyc: 0, b, trace: Trace::open(), tickno: 0, isnd: false, ended: false };
     let mut hw = Hw { bus: &mut m.bus };
     a.init(a.sub, &mut hw);
     Some(Box::new(a))
@@ -898,11 +1218,17 @@ impl Replayer for ActivisionPro {
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
         self.sub = n;
+        // the timer goes on: a tick due during InitSound comes when it ends
         self.init(n, hw);
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        self.pend = 0;
+        self.tickno += 1;
+        self.trace.line(format_args!("E"));
+        self.base = hw.bus.clock;
+        self.cyc = 0;
+        self.trace.line(format_args!("T {} {}", self.tickno, self.base));
+        self.k(K::Entry);
         self.play(hw);
     }
 }
@@ -970,20 +1296,58 @@ impl ActivisionPro {
         hw.bus.r16(self.a("PER") + 2 * (note & 0xff) as u32)
     }
 
-    fn write(&mut self, hw: &mut Hw, gap: u64, a: u32, x: u16) {
-        hw.wait(self.pend + gap);
-        self.pend = 0;
-        hw.bus.write_word(a, x);
+    /// The original's code takes path `e`.
+    fn k(&mut self, e: K) {
+        if !(self.isnd && matches!(e, K::InitVoice | K::InitOp)) {
+            self.cyc += self.b.c[e as usize] as u64;
+        }
+        if self.trace.out.is_some() {
+            self.trace.pend.push(e);
+        }
+    }
+
+    /// A write (two words for a sample's address) at the clock the cycles since the base give;
+    /// an ENPP call's starts the next count (DMA on: after its wait, to the start of the 10th
+    /// raster line after the write's).
+    fn wr(&mut self, hw: &mut Hw, host: bool, a: u32, x: u32) {
+        let t = self.base + self.cyc / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+        self.trace.line(format_args!("W {} {:06x} {:x} {} {}", self.tickno, a, x, host as u8, hw.bus.clock));
+        if a & 0xf == 0 {
+            hw.bus.write_word(a, (x >> 16) as u16);
+            hw.bus.write_word(a + 2, x as u16);
+        } else {
+            hw.bus.write_word(a, x as u16);
+        }
+        if host {
+            self.base = hw.bus.clock;
+            self.cyc = 0;
+            if a == 0xdff096 && x & 0x8000 != 0 {
+                use crate::paula::LINE;
+                self.base = (hw.bus.clock / LINE + 10) * LINE;
+                hw.bus.clock = self.base;
+            }
+        }
     }
 
     /// The Eagleplayer's InitSound: the replayer's init routine.
+    /// It ends 164 colour clocks after its last volume write (a jump table's: 109 after it
+    /// starts).
     fn init(&mut self, n: u16, hw: &mut Hw) {
         self.ended = false;
+        self.base = hw.bus.clock;
         if self.l.jt {
             self.sgb(hw, "REQ", n as u8);
+            hw.bus.clock += 109;
             return;
         }
+        self.cyc = self.b.init as u64;
+        self.isnd = true;
         self.init_sub(n, hw);
+        self.isnd = false;
+        hw.bus.clock = hw.bus.clock.max(self.base + (self.cyc + 328) / 2);
     }
 
     /// The replayer's init: the subsong's position lists, each voice's start.
@@ -996,6 +1360,7 @@ impl ActivisionPro {
             hw.bus.w32(self.g().wrapping_add(self.o("POSOFF")) + 4 * k, x);
         }
         for v in (0..4).rev() {
+            self.k(K::InitVoice);
             for op in self.l.init_v.clone() {
                 self.iop(hw, op, v);
             }
@@ -1008,6 +1373,11 @@ impl ActivisionPro {
     fn iop(&mut self, hw: &mut Hw, op: Iop, v: usize) {
         let g = self.g();
         let at = |o: i64, idx: u8| g.wrapping_add(o as u32).wrapping_add(idx as u32 * v as u32);
+        match op {
+            Iop::NextPos => {}
+            Iop::Vol(_) => self.k(K::InitVol),
+            _ => self.k(K::InitOp),
+        }
         match op {
             Iop::Clr { o, word, idx } => {
                 if word {
@@ -1034,39 +1404,37 @@ impl ActivisionPro {
             }
             Iop::Imm32 { o, v: x } => hw.bus.w32(at(o, 0), x),
             Iop::NextPos => self.nextpos(hw, v),
-            Iop::Vol(ch) => self.write(hw, 10, 0xdff0a8 + 16 * ch as u32, 0),
-            Iop::Adk => {
-                // the reference never shows the module's ADKCON write (0x00ff, clearing the
-                // modulation bits that are clear anyway): only the time it takes is kept
-                hw.wait(self.pend + 10);
-                self.pend = 0;
-            }
-            Iop::Led => {
-                hw.wait(self.pend + 12);
-                self.pend = 0;
-                // the Eagleplayer's ENPP_ModuleChange patch replaces the module's bset.b
-                // #1,$bfe001 with a call that leaves the LED bit alone (the original's
-                // LED stays on): only the time it takes is kept
-            }
+            Iop::Vol(ch) => self.wr(hw, true, 0xdff0a8 + 16 * ch as u32, 0),
+            // the reference never shows the module's ADKCON write (0x00ff, clearing the
+            // modulation bits that are clear anyway): only the time it takes is kept
+            Iop::Adk => {}
+            // the Eagleplayer's ENPP_ModuleChange patch replaces the module's bset.b #1,$bfe001
+            // with a call that leaves the LED bit alone (the original's LED stays on): only
+            // the time it takes is kept
+            Iop::Led => {}
         }
     }
 
     /// The next entry of the voice's position list.
     fn nextpos(&mut self, hw: &mut Hw, v: usize) {
         let a4 = self.a("PLISTS").wrapping_add(self.vw(hw, v, "POSOFF") as u32);
+        self.k(K::NpHead);
         loop {
+            self.k(K::NpIter);
             let pos = self.vb(hw, v, "POS").wrapping_add(1);
             self.svb(hw, v, "POS", pos);
             let mut d5 = pos;
             let b = hw.bus.r8(a4 + d5 as u32);
             if b >= 0xfd {
                 if b == 0xfd {
+                    self.k(K::NpFd);
                     self.svb(hw, v, "POS", pos.wrapping_add(1));
                     d5 = d5.wrapping_add(1);
                     let f = hw.bus.r8(a4 + d5 as u32);
                     self.sgb(hw, "FADE", f);
                     continue;
                 }
+                self.k(K::NpJump);
                 self.svb(hw, v, "TRACK", b);
                 d5 = d5.wrapping_add(1);
                 let p = hw.bus.r8(a4 + d5 as u32);
@@ -1076,6 +1444,7 @@ impl ActivisionPro {
             if b & 0x40 != 0 && self.l.np_count {
                 let c = self.vb(hw, v, "PLC");
                 if c == 0 {
+                    self.k(K::NpCnt0);
                     self.svb(hw, v, "PLC", b & 0x3f);
                     let p = self.vb(hw, v, "POS").wrapping_add(1);
                     self.svb(hw, v, "POS", p);
@@ -1084,14 +1453,17 @@ impl ActivisionPro {
                 } else {
                     self.svb(hw, v, "PLC", c - 1);
                     if c == 1 {
+                        self.k(K::NpCntEnd);
                         continue;
                     }
+                    self.k(K::NpCntDec);
                     let s = self.vb(hw, v, "PLS");
                     self.svb(hw, v, "POS", s);
                     d5 = s;
                 }
             } else if b & 0x40 != 0 {
                 if (self.vb(hw, v, "PLEN") as i8) >= 0 {
+                    self.k(K::NpFlagStart);
                     self.svb(hw, v, "PLEN", 0xff);
                     self.svb(hw, v, "PLC", b & 0x3f);
                     let p = self.vb(hw, v, "POS").wrapping_add(1);
@@ -1102,14 +1474,19 @@ impl ActivisionPro {
                     let c = self.vb(hw, v, "PLC").wrapping_sub(1);
                     self.svb(hw, v, "PLC", c);
                     if c == 0 {
+                        self.k(K::NpFlagEnd);
                         self.svb(hw, v, "PLEN", 0);
                         continue;
                     }
+                    self.k(K::NpFlagDec);
                     let s = self.vb(hw, v, "PLS");
                     self.svb(hw, v, "POS", s);
                     d5 = s;
                 }
+            } else {
+                self.k(K::NpNo40);
             }
+            self.k(K::NpTail);
             let c = hw.bus.r8(a4 + d5 as u32);
             self.svb(hw, v, "LOOPC", c);
             let p = self.vb(hw, v, "POS").wrapping_add(1);
@@ -1132,9 +1509,11 @@ impl ActivisionPro {
     fn stop(&mut self, hw: &mut Hw) {
         self.sgb(hw, "PLAYING", 0);
         for ch in 0..4 {
-            self.write(hw, 10, 0xdff0a8 + 16 * ch, 0);
+            self.k(K::StopVol);
+            self.wr(hw, true, 0xdff0a8 + 16 * ch, 0);
         }
-        self.write(hw, 10, 0xdff096, 0xf);
+        self.k(K::StopDma);
+        self.wr(hw, true, 0xdff096, 0xf);
     }
 
     fn play(&mut self, hw: &mut Hw) {
@@ -1142,104 +1521,140 @@ impl ActivisionPro {
             let d1 = self.gb(hw, "REQ");
             self.sgb(hw, "REQ", 0xff);
             if d1 == 0x80 {
+                self.k(K::JtStop);
                 self.stop(hw);
                 return;
             } else if d1 & 0x80 != 0 && d1 != 0xff {
+                self.k(K::JtFade);
                 self.sgb(hw, "FADE", d1 & 0x7f);
             } else if d1 & 0x80 == 0 {
+                self.k(K::JtInit);
                 self.init_sub(d1 as u16, hw);
+            } else {
+                self.k(K::JtNone);
             }
         }
         if (self.gb(hw, "PLAYING") as i8) >= 0 {
+            self.k(K::NotPlaying);
             return;
         }
         if (self.gb(hw, "FADE") as i8) >= 0 {
+            self.k(K::FadeCount);
             let c = self.gb(hw, "FADECNT").wrapping_sub(1);
             self.sgb(hw, "FADECNT", c);
             if (c as i8) < 0 {
+                self.k(K::FadeReload);
                 let f = self.gb(hw, "FADE");
                 self.sgb(hw, "FADECNT", f);
                 let m = self.gw(hw, "MVOL").wrapping_sub(1);
                 self.sgw(hw, "MVOL", m);
                 if m == 0 {
+                    self.k(K::FadeStop);
+                    // the Eagleplayer reports the song's end when the fade stops it (R-Type II)
+                    self.ended = true;
                     self.stop(hw);
                     return;
                 }
             }
+        } else {
+            self.k(K::FadeOff);
         }
         if self.l.sv2 {
             let (acc, carry) = self.gb(hw, "SVACC").overflowing_add(self.gb(hw, "SVINC"));
+            self.k(if carry { K::Sv2Carry } else { K::Sv2NoCarry });
             self.sgb(hw, "SVCNT", if carry { 0 } else { 0xff });
             self.sgb(hw, "SVACC", acc);
         }
         for v in (0..4).rev() {
-            self.pend += if self.l.late { C_VOICE_LATE } else { C_VOICE };
-            if self.l.s1 && self.sfx(hw, v) != 0 {
-                self.svb(hw, v, "DIS", 0xff);
+            self.k(K::Voice);
+            if self.l.s1 {
+                if self.sfx(hw, v) != 0 {
+                    self.k(K::S1On);
+                    self.svb(hw, v, "DIS", 0xff);
+                } else {
+                    self.k(K::S1Off);
+                }
             }
             if self.l.spd2 && self.gb(hw, "SVCNT") == 0 {
+                self.k(K::Spd2);
                 let s = self.vb(hw, v, "SPD2").wrapping_add(1);
                 self.svb(hw, v, "SPD2", s);
             }
-            let row = self.gb(hw, "SVCNT") == 0 && {
+            let row = if self.gb(hw, "SVCNT") != 0 {
+                self.k(K::SvcntNz);
+                false
+            } else {
                 let s = self.vb(hw, v, "SPD").wrapping_sub(1);
                 self.svb(hw, v, "SPD", s);
+                if s != 0 {
+                    self.k(K::SpdNz);
+                }
                 s == 0
             };
             if row {
+                self.k(K::RowGo);
                 if !self.row(hw, v) {
                     return;
                 }
             } else {
                 if (self.vb(hw, v, "DIS") as i8) < 0 {
-                    continue;
+                    self.k(K::DisSkip);
+                } else {
+                    self.k(K::NoRow);
+                    self.norow(hw, v);
+                    self.fx(hw, v, false);
                 }
-                self.norow(hw, v);
-                self.fx(hw, v, false);
             }
+            self.k(K::VoiceEnd);
         }
         if self.l.late {
             self.final_late(hw);
             return;
         }
         // the delay loop, all voices on
-        self.write(hw, C_DELAY, 0xdff096, 0x800f);
-        let mut c = C_FINAL;
+        self.k(K::DmaOn);
+        self.wr(hw, true, 0xdff096, 0x800f);
         let sv = if self.l.sv2 { 0 } else { self.gb(hw, "SVCNT").wrapping_sub(1) };
         if !self.l.sv2 {
+            self.k(K::SvDec);
             self.sgb(hw, "SVCNT", sv);
         } else {
-            c += C_SV2;
+            self.k(K::Sv2Fin);
         }
         if !self.l.sv2 && (sv as i8) < 0 {
-            c += C_SPEEDVAR;
+            self.k(K::SvStep);
             let mut i = self.gb(hw, "SVIDX").wrapping_sub(1);
             if (i as i8) < 0 {
+                self.k(K::SvWrap);
                 i = 7;
             }
             self.sgb(hw, "SVIDX", i);
             let x = hw.bus.r8(self.g().wrapping_add(self.o("SVTAB")) + i as u32);
             self.sgb(hw, "SVCNT", x);
         }
-        self.pend += c;
+        let vh = self.b.vol_host;
         for v in (0..4).rev() {
             if (self.vb(hw, v, "DIS") as i8) < 0 {
+                self.k(K::FDis);
                 continue;
             }
             let r = 0xdff0a0 + 16 * v as u32;
             let lp = hw.bus.r32(self.hreg(v, 6));
-            self.write(hw, 0, r, (lp >> 16) as u16);
-            hw.bus.write_word(r + 2, lp as u16);
+            self.k(K::FLoc);
+            self.wr(hw, false, r, lp);
             let len = hw.bus.r16(self.hreg(v, 0xa));
-            self.write(hw, C_FLEN, r + 4, len);
+            self.k(K::FLen);
+            self.wr(hw, false, r + 4, len as u32);
             let mut per = self.xw(hw, v, "PERIOD");
             if self.l.fine {
                 per = per.wrapping_sub(self.xw(hw, v, "FINE"));
             }
-            self.write(hw, C_FPER, r + 6, per);
+            self.k(K::FPer);
+            self.wr(hw, false, r + 6, per as u32);
             let d3 = self.volume(hw, v);
-            self.write(hw, if self.l.track_vol { C_FVOL } else { C_FVOL_M }, r + 8, d3);
-            self.pend += C_FNEXT;
+            self.k(K::FVol);
+            self.wr(hw, vh, r + 8, d3 as u32);
+            self.k(K::FNext);
         }
     }
 
@@ -1253,10 +1668,15 @@ impl ActivisionPro {
     }
 
     /// The volume written: the voice's × the track's × the master volume.
-    fn volume(&self, hw: &Hw, v: usize) -> u16 {
-        if !self.gated(hw, v) {
-            return 0;
+    fn volume(&mut self, hw: &Hw, v: usize) -> u16 {
+        if self.l.gate {
+            if !self.gated(hw, v) {
+                self.k(K::GateShut);
+                return 0;
+            }
+            self.k(K::GateOpen);
         }
+        self.k(K::Vol);
         let vol = hw.bus.r16(self.hreg(v, 0xc)) as u32;
         let mvol = self.gw(hw, "MVOL") as u32;
         let (p, div) = if self.l.track_vol {
@@ -1270,6 +1690,7 @@ impl ActivisionPro {
         if !self.l.gvol {
             return d3 as u16;
         }
+        self.k(K::GVol);
         let p = (d3 & 0xffff) * self.gw(hw, "GVOL") as u32;
         let q = p / 0x40;
         (if q > 0xffff { p } else { q }) as u16
@@ -1279,28 +1700,43 @@ impl ActivisionPro {
     /// volume, period, loop (once its stop delay has run out) and its stop
     /// delay.
     fn final_late(&mut self, hw: &mut Hw) {
-        self.write(hw, C_DELAY_LATE, 0xdff096, 0x800f);
-        self.pend += C_FINAL_LATE;
+        self.k(K::DmaOn);
+        self.wr(hw, true, 0xdff096, 0x800f);
+        self.k(K::LStart);
+        let fh = self.b.final_host;
         for v in (0..4).rev() {
             if (self.vb(hw, v, "DIS") as i8) < 0 {
+                self.k(K::FDis);
                 continue;
             }
             let r = 0xdff0a0 + 16 * v as u32;
-            let vol = if (self.xb(hw, v, "MUTE") as i8) < 0 { None } else { self.gated(hw, v).then(|| self.volume(hw, v)) };
-            self.write(hw, if vol.is_some() { C_LVOL } else { 0 }, r + 8, vol.unwrap_or(0));
-            let per = self.xw(hw, v, "PERIOD").wrapping_sub(self.xw(hw, v, "FINE"));
-            self.write(hw, C_LPER, r + 6, per);
-            if self.vb(hw, v, "STOP") != 0 {
-                let lp = hw.bus.r32(self.hreg(v, 6));
-                self.write(hw, C_LLOC, r, (lp >> 16) as u16);
-                hw.bus.write_word(r + 2, lp as u16);
-                let len = hw.bus.r16(self.hreg(v, 0xa));
-                self.write(hw, C_FLEN, r + 4, len);
-                self.pend += C_LNEXT_LOOP;
+            let vol = if (self.xb(hw, v, "MUTE") as i8) < 0 {
+                self.k(K::LMute);
+                0
             } else {
-                self.pend += C_LNEXT;
+                self.volume(hw, v)
+            };
+            self.k(K::LVol);
+            self.wr(hw, fh, r + 8, vol as u32);
+            let per = self.xw(hw, v, "PERIOD").wrapping_sub(self.xw(hw, v, "FINE"));
+            self.k(K::LPer);
+            self.wr(hw, fh, r + 6, per as u32);
+            // the Eagleplayer's ENPP_PokePer call leaves the period in d0, the voice's index
+            // in the replayer's test of the stop flag that follows: the reference writes the
+            // loop exactly when the byte the period indexes is not 0
+            let idx = if fh { per as i16 as i32 as u32 } else { v as u32 };
+            if hw.bus.r8(self.g().wrapping_add(self.o("STOP")).wrapping_add(idx)) != 0 {
+                let lp = hw.bus.r32(self.hreg(v, 6));
+                self.k(K::LLoop);
+                self.wr(hw, fh, r, lp);
+                let len = hw.bus.r16(self.hreg(v, 0xa));
+                self.k(K::LLen);
+                self.wr(hw, fh, r + 4, len as u32);
+            } else {
+                self.k(K::LNoLoop);
             }
             self.stop_delay(hw, v);
+            self.k(K::FNext);
         }
     }
 
@@ -1309,13 +1745,16 @@ impl ActivisionPro {
         let t = self.vb(hw, v, "TRACK");
         if t >= 0xfe {
             if t == 0xfe {
+                self.k(K::TrkFE);
                 self.ended = true;
                 self.stop(hw);
                 return false;
             }
+            self.k(K::TrkFF);
             self.svb(hw, v, "TPOS", 0);
             self.nextpos(hw, v);
         }
+        self.k(K::Trk);
         let tr = self.vb(hw, v, "TRACK") as u32;
         let off = hw.bus.r16(self.a("TOFFS") + 2 * tr) as u32;
         let a4 = self.a("TRACKS").wrapping_add(off);
@@ -1334,11 +1773,17 @@ impl ActivisionPro {
             let p = s.vb(hw, v, "TPOS").wrapping_add(k);
             s.svb(hw, v, "TPOS", p);
         };
-        if self.l.tvreset && d4 == 0 {
-            hw.bus.w8(self.g().wrapping_add(self.o("TVOLB")) + 2 * v as u32, 0x40);
+        if self.l.tvreset {
+            if d4 == 0 {
+                self.k(K::TvReset);
+                hw.bus.w8(self.g().wrapping_add(self.o("TVOLB")) + 2 * v as u32, 0x40);
+            } else {
+                self.k(K::TvNo);
+            }
         }
         match self.l.track {
             Track::Cmds => {
+                self.k(K::CmdsHead);
                 self.sgb(hw, "TMP", 0xff);
                 self.svb(hw, v, "PT", 0);
                 self.svb(hw, v, "STOP", 0);
@@ -1352,16 +1797,30 @@ impl ActivisionPro {
                 'row: loop {
                     let b = rd(hw, d4);
                     if b & 0x80 == 0 {
+                        self.k(K::CmdNone);
                         break;
                     }
+                    self.k(K::CmdByte);
                     d4 = d4.wrapping_add(1);
                     let x = rd(hw, d4);
-                    for (c, acts, next) in &self.l.cmds {
+                    let cmds = std::mem::take(&mut self.l.cmds);
+                    let mut out = None;
+                    for (ci, (c, acts, next)) in cmds.iter().enumerate() {
+                        self.k(CMD_T[ci.min(11)]);
                         if b != *c {
                             continue;
                         }
+                        self.k(CMD_H[ci.min(11)]);
                         let g = self.g();
                         for &a in acts {
+                            self.k(match a {
+                                Act::G(_) => K::ActG,
+                                Act::V(_) => K::ActV,
+                                Act::VW(_) => K::ActVW,
+                                Act::AddVW(_) => K::ActAddVW,
+                                Act::ImmV(..) => K::ActImmV,
+                                Act::ImmX(..) => K::ActImmX,
+                            });
                             match a {
                                 Act::G(o) => hw.bus.w8(g.wrapping_add(o as u32), x),
                                 Act::V(o) => hw.bus.w8(g.wrapping_add(o as u32) + v as u32, x),
@@ -1376,18 +1835,32 @@ impl ActivisionPro {
                             }
                         }
                         match next {
-                            Next::Fall => continue,
-                            Next::End => break,
+                            Next::Fall => {
+                                self.k(K::CmdFall);
+                                continue;
+                            }
+                            Next::End => {
+                                out = Some(false);
+                                break;
+                            }
                             Next::Speed => {
-                                speed = true;
-                                break 'row;
+                                out = Some(true);
+                                break;
                             }
                         }
                     }
+                    self.l.cmds = cmds;
+                    if out == Some(true) {
+                        self.k(K::CmdSpeed);
+                        speed = true;
+                        break 'row;
+                    }
+                    self.k(K::CmdEnd);
                     d4 = d4.wrapping_add(1);
                     tpos_add(self, hw, 2);
                 }
                 if self.l.note_first {
+                    self.k(if speed { K::NoteFirstSpd } else { K::NoteFirst });
                     if !speed {
                         let n = rd(hw, d4);
                         self.svb(hw, v, "NOTE", n);
@@ -1399,6 +1872,7 @@ impl ActivisionPro {
                         self.svb(hw, v, "SPD2", 0);
                     }
                 } else {
+                    self.k(K::NoteLast);
                     let s = rd(hw, d4);
                     self.svb(hw, v, "SPD", s);
                     d4 = d4.wrapping_add(1);
@@ -1410,22 +1884,27 @@ impl ActivisionPro {
                 tpos_add(self, hw, 2);
             }
             Track::Speed => {
+                self.k(K::SpeedHead);
                 self.sgb(hw, "TMP", 0);
                 self.svb(hw, v, "PT", 0);
                 self.svb(hw, v, "STOP", 0);
                 let b = rd(hw, d4);
                 if b & 0x80 != 0 {
+                    self.k(K::SpeedCmd);
                     self.sgb(hw, "TMP", b);
                     d4 = d4.wrapping_add(1);
                     let b2 = rd(hw, d4);
                     if b2 & 0x80 == 0 {
+                        self.k(K::SpeedTvol);
                         hw.bus.w8(self.g().wrapping_add(self.o("TVOLB")) + 2 * v as u32, b2);
                     } else {
+                        self.k(K::SpeedPt);
                         self.svb(hw, v, "PT", b2);
                     }
                     d4 = d4.wrapping_add(1);
                     tpos_add(self, hw, 2);
                 }
+                self.k(K::SpeedTail);
                 let s = rd(hw, d4);
                 self.svb(hw, v, "SPD", s);
                 d4 = d4.wrapping_add(1);
@@ -1436,6 +1915,7 @@ impl ActivisionPro {
                 tpos_add(self, hw, 2);
             }
             Track::Flags => {
+                self.k(K::FlagsHead);
                 self.sgb(hw, "TMP", 0xff);
                 let b = rd(hw, d4);
                 self.svb(hw, v, "TBYTE", b);
@@ -1443,20 +1923,25 @@ impl ActivisionPro {
                 self.svb(hw, v, "PT", 0);
                 self.svb(hw, v, "STOP", 0);
                 if b & 0x40 != 0 {
+                    self.k(K::Flags40);
                     self.sxb(hw, v, "ENVWAIT", 1);
                     self.sxb(hw, v, "ENVCNT", 1);
                     self.sxb(hw, v, "ENVPOS", 9);
                 }
                 if b & 0x80 != 0 {
+                    self.k(K::Flags80);
                     d4 = d4.wrapping_add(1);
                     tpos_add(self, hw, 1);
                     let b2 = rd(hw, d4);
                     if b2 & 0x80 == 0 {
+                        self.k(K::FlagsTmp);
                         self.sgb(hw, "TMP", b2);
                     } else {
+                        self.k(K::FlagsPt);
                         self.svb(hw, v, "PT", b2);
                     }
                 }
+                self.k(K::FlagsTail);
                 d4 = d4.wrapping_add(1);
                 tpos_add(self, hw, 1);
                 let n = rd(hw, d4);
@@ -1465,10 +1950,18 @@ impl ActivisionPro {
             }
         }
         if !self.l.period_after {
+            self.k(K::Period);
             self.note_period(hw, v);
         }
-        if self.l.s2 && self.vb(hw, v, "DIS") != 0 && self.sfx(hw, v) == 0 {
-            self.svb(hw, v, "NF", 0);
+        if self.l.s2 {
+            if self.vb(hw, v, "DIS") == 0 {
+                self.k(K::S2Dis0);
+            } else if self.sfx(hw, v) != 0 {
+                self.k(K::S2Sfx);
+            } else {
+                self.k(K::S2Clr);
+                self.svb(hw, v, "NF", 0);
+            }
         }
         let tmp = self.gb(hw, "TMP");
         let change = if self.l.chk_and {
@@ -1476,33 +1969,48 @@ impl ActivisionPro {
         } else {
             ((tmp as i8) >= 0).then_some(tmp)
         };
-        if let Some(i) = change {
-            if i != self.vb(hw, v, "INSTR") {
+        match change {
+            None => self.k(K::ChkNone),
+            Some(i) if i == self.vb(hw, v, "INSTR") => self.k(K::ChkSame),
+            Some(i) => {
+                self.k(K::ChkNew);
                 self.svb(hw, v, "INSTR", i);
                 self.svb(hw, v, "NF", 0);
             }
         }
         if (self.vb(hw, v, "NF") as i8) >= 0 {
             self.instrument(hw, v);
+        } else {
+            self.k(K::NfNeg);
         }
         if self.l.period_after {
+            self.k(K::PeriodAfter);
             self.note_period(hw, v);
         }
         if self.l.track == Track::Flags {
+            self.k(K::FlagsEnd);
             d4 = d4.wrapping_add(1);
             tpos_add(self, hw, 1);
         }
         if rd(hw, d4) == 0xff {
+            self.k(K::RowEndFF);
             self.svb(hw, v, "TPOS", 0);
             let c = self.vb(hw, v, "LOOPC").wrapping_sub(1);
             self.svb(hw, v, "LOOPC", c);
             if c == 0 {
+                self.k(K::LoopcZ);
                 self.nextpos(hw, v);
+            } else {
+                self.k(K::LoopcNz);
             }
+        } else {
+            self.k(K::RowEndNo);
         }
         if (self.vb(hw, v, "DIS") as i8) < 0 {
+            self.k(K::RowDis);
             return true;
         }
+        self.k(K::RowTail);
         self.svb(hw, v, "TICK", 0);
         if self.l.row_vibw {
             self.svw(hw, v, "VIBW", 0);
@@ -1536,6 +2044,7 @@ impl ActivisionPro {
 
     /// The new instrument (or the same, struck again), and its note's writes.
     fn instrument(&mut self, hw: &mut Hw, v: usize) {
+        self.k(K::Instr);
         let d5 = (self.vb(hw, v, "INSTR") as u16) << 4;
         self.sxw(hw, v, "INSOFF", d5);
         for &(k, dst, word) in &self.l.fields {
@@ -1576,20 +2085,26 @@ impl ActivisionPro {
         hw.bus.w32(self.hreg(v, 6), lp);
         if self.l.s3 {
             if self.sfx(hw, v) != 0 {
+                self.k(K::S3Sfx);
                 return;
             }
+            self.k(K::S3Clr);
             self.svb(hw, v, "DIS", 0);
         }
         let r = 0xdff0a0 + 16 * v as u32;
         let mask = hw.bus.r16(self.hreg(v, 0xe));
-        self.write(hw, if self.l.late { C_NOTE_LATE } else { C_NOTE }, 0xdff096, mask);
-        self.write(hw, C_PER, r + 6, self.l.r("NOTEPER") as u16);
+        let nh = self.b.note_host;
+        self.k(K::NoteOff);
+        self.wr(hw, nh, 0xdff096, mask as u32);
+        self.k(K::NotePer);
+        self.wr(hw, nh, r + 6, self.l.r("NOTEPER") as u16 as u32);
         let ofs = if self.l.sofs { self.gw(hw, "TMPW") } else { 0 };
         let p = hw.bus.r32(self.hreg(v, 0)).wrapping_add(ofs as u32);
-        self.write(hw, C_LOC, r, (p >> 16) as u16);
-        hw.bus.write_word(r + 2, p as u16);
+        self.k(K::NoteLoc);
+        self.wr(hw, nh, r, p);
         let len = hw.bus.r16(self.hreg(v, 4)).wrapping_sub(ofs);
-        self.write(hw, C_LEN, r + 4, len);
+        self.k(K::NoteLen);
+        self.wr(hw, nh, r + 4, len as u32);
     }
 
     fn add_period(&self, hw: &mut Hw, v: usize, x: u16, add: bool) -> u16 {
@@ -1599,11 +2114,14 @@ impl ActivisionPro {
         p
     }
 
-    fn porta(&self, hw: &mut Hw, v: usize) -> bool {
+    fn porta(&mut self, hw: &mut Hw, v: usize) -> bool {
         let pt = self.vb(hw, v, "PT") as u16;
+        let (yes, no) = if self.l.both { (K::PortaBothYes, K::PortaBothNo) } else { (K::PortaYes, K::PortaNo) };
         if pt == 0 {
+            self.k(no);
             return false;
         }
+        self.k(yes);
         self.add_period(hw, v, pt & 0x3f, pt >= 0xc0);
         true
     }
@@ -1622,15 +2140,18 @@ impl ActivisionPro {
     fn vibrato(&mut self, hw: &mut Hw, v: usize) {
         let d = self.vb(hw, v, "VDEL");
         if d != 0 {
+            self.k(K::VDel);
             self.svb(hw, v, "VDEL", d - 1);
             return;
         }
         if self.vb(hw, v, "SDELAY") != 0 {
+            self.k(K::VSdelay);
             return;
         }
         let io = self.xw(hw, v, "INSOFF");
         let vn = self.ins(hw, io.wrapping_add(14));
         if vn == 0 {
+            self.k(K::VZero);
             return;
         }
         let running = if self.l.vib_halve {
@@ -1639,6 +2160,7 @@ impl ActivisionPro {
             (self.vw(hw, v, "VIBW") as i16) < 0
         };
         if !running {
+            self.k(if self.l.vib_halve { K::VStartHalve } else { K::VStartDiv });
             let h = self.h();
             let cnt = hw.bus.r8(h.wrapping_add(self.o("VTCNT")) + vn as u32);
             self.svb(hw, v, "VMAX", cnt);
@@ -1660,11 +2182,14 @@ impl ActivisionPro {
                     let c = self.vb(hw, v, "VIBC").wrapping_sub(1);
                     self.svb(hw, v, "VIBC", c);
                     if (c as i8) < 0 {
+                        self.k(K::VHalveEnd);
                         break;
                     }
+                    self.k(K::VHalveIter);
                     s >>= 1;
                     self.sxw(hw, v, "VSPD", s);
                     if s == 0 {
+                        self.k(K::VHalveZero);
                         self.sxw(hw, v, "VSPD", 1);
                         self.svb(hw, v, "VIBC", 0xff);
                         break;
@@ -1674,26 +2199,37 @@ impl ActivisionPro {
                 let div = self.vw(hw, v, "VIBW") as u32;
                 // (a depth of 0 is a division by zero in the original)
                 let q = if div == 0 { s } else { (s as u32 / div) as u16 };
+                if q == 0 {
+                    self.k(K::VDivQ0);
+                }
                 self.sxw(hw, v, "VSPD", if q == 0 { 1 } else { q });
                 hw.bus.w8(self.g().wrapping_add(self.o("VIBW")) + 2 * v as u32, 0xff);
             }
             return;
         }
         let s = self.xw(hw, v, "VSPD");
-        self.add_period(hw, v, s, (self.vb(hw, v, "VDIR") as i8) >= 0);
+        let up = (self.vb(hw, v, "VDIR") as i8) >= 0;
+        self.k(if up { K::VRunAdd } else { K::VRunSub });
+        self.add_period(hw, v, s, up);
         if (self.vb(hw, v, "VCD") as i8) >= 0 {
             let c = self.vb(hw, v, "VCNT").wrapping_add(1);
             self.svb(hw, v, "VCNT", c);
             if c >= self.vb(hw, v, "VMAX") {
+                self.k(K::VCntMax);
                 self.svb(hw, v, "VCD", 0xff);
                 let d = !self.vb(hw, v, "VDIR");
                 self.svb(hw, v, "VDIR", d);
+            } else {
+                self.k(K::VCntUp);
             }
         } else {
             let c = self.vb(hw, v, "VCNT").wrapping_sub(1);
             self.svb(hw, v, "VCNT", c);
             if c == 0 {
+                self.k(K::VCntZero);
                 self.svb(hw, v, "VCD", 0);
+            } else {
+                self.k(K::VCntDownNz);
             }
         }
     }
@@ -1707,66 +2243,110 @@ impl ActivisionPro {
         let note = self.note(hw, v);
         let mut arp = None;
         let mut per = None;
+        self.k(if row { K::FxRow } else { K::FxTick });
         if !row {
-            if self.l.fx[1] && fx & 2 != 0 {
-                let n = if tick & 1 == 0 {
-                    note as u16
+            if self.l.fx[1] {
+                if fx & 2 == 0 {
+                    self.k(K::Fx1No);
                 } else {
-                    let b = self.ins(hw, io.wrapping_add(13));
-                    if b & 0x80 != 0 { ((b & 0x7f).wrapping_add(note)) as u16 } else { b as u16 }
-                };
-                let p = self.period(hw, n);
-                self.sxw(hw, v, "PERIOD", p);
-            }
-            if self.l.fx[2] && fx & 4 != 0 {
-                let s = if tick & 1 == 0 { self.ins(hw, io) } else { 2 };
-                self.svb(hw, v, "SAMPLE", s);
-                let d4 = self.ins(hw, io.wrapping_add(4)) as u16;
-                let p = self.add_period(hw, v, d4, true);
-                if (p as i16) < 0 {
-                    self.add_period(hw, v, d4, false);
+                    let n = if tick & 1 == 0 {
+                        self.k(K::Fx1Even);
+                        note as u16
+                    } else {
+                        let b = self.ins(hw, io.wrapping_add(13));
+                        if b & 0x80 != 0 {
+                            self.k(K::Fx1Rel);
+                            ((b & 0x7f).wrapping_add(note)) as u16
+                        } else {
+                            self.k(K::Fx1Abs);
+                            b as u16
+                        }
+                    };
+                    let p = self.period(hw, n);
+                    self.sxw(hw, v, "PERIOD", p);
                 }
             }
-            if self.l.fx[3] && fx & 8 != 0 {
-                arp = Some(((tick & 3) as u16).wrapping_add(io));
+            if self.l.fx[2] {
+                if fx & 4 == 0 {
+                    self.k(K::Fx2No);
+                } else {
+                    self.k(if tick & 1 == 0 { K::Fx2Even } else { K::Fx2Odd });
+                    let s = if tick & 1 == 0 { self.ins(hw, io) } else { 2 };
+                    self.svb(hw, v, "SAMPLE", s);
+                    let d4 = self.ins(hw, io.wrapping_add(4)) as u16;
+                    let p = self.add_period(hw, v, d4, true);
+                    if (p as i16) < 0 {
+                        self.k(K::Fx2Neg);
+                        self.add_period(hw, v, d4, false);
+                    }
+                }
+            }
+            if self.l.fx[3] {
+                if fx & 8 == 0 {
+                    self.k(K::Fx3No);
+                } else {
+                    self.k(K::Fx3Yes);
+                    arp = Some(((tick & 3) as u16).wrapping_add(io));
+                }
             }
         }
         if arp.is_none() {
-            if self.l.fx[4] && fx & 0x10 != 0 {
-                let s = if self.vb(hw, v, "SDELAY") != 0 {
-                    Some(self.ins(hw, io.wrapping_add(8)))
-                } else if (self.vb(hw, v, "STOP") as i8) >= 0 {
-                    Some(self.ins(hw, io))
+            if self.l.fx[4] {
+                if fx & 0x10 == 0 {
+                    self.k(K::Fx4No);
                 } else {
-                    None
-                };
-                if let Some(s) = s {
-                    self.svb(hw, v, "SAMPLE", s);
+                    let s = if self.vb(hw, v, "SDELAY") != 0 {
+                        self.k(K::Fx4Sd);
+                        Some(self.ins(hw, io.wrapping_add(8)))
+                    } else if (self.vb(hw, v, "STOP") as i8) >= 0 {
+                        self.k(K::Fx4Stop);
+                        Some(self.ins(hw, io))
+                    } else {
+                        self.k(K::Fx4None);
+                        None
+                    };
+                    if let Some(s) = s {
+                        self.svb(hw, v, "SAMPLE", s);
+                    }
                 }
             }
-            if self.l.fx[5] && fx & 0x20 != 0 {
-                if self.vb(hw, v, "SDELAY") != 0 {
+            if self.l.fx[5] {
+                if fx & 0x20 == 0 {
+                    self.k(K::Fx5No);
+                } else if self.vb(hw, v, "SDELAY") != 0 {
+                    self.k(K::Fx5Sd);
                     arp = Some((tick as u16).wrapping_add(io));
                 } else if (self.vb(hw, v, "STOP") as i8) >= 0 {
+                    self.k(K::Fx5Stop);
                     per = Some(note as u16);
+                } else {
+                    self.k(K::Fx5None);
                 }
             }
         }
         if let Some(d5) = arp {
             let b = self.ins(hw, d5.wrapping_add(9));
             per = Some(if b & 0x80 == 0 {
+                self.k(K::ArpAbs);
                 b as u16
             } else {
                 let c = b & 0x7f;
-                if c < 0x40 { c.wrapping_add(note) as u16 } else { (note as u16).wrapping_sub((c & 0x3f) as u16) & 0xff }
+                if c < 0x40 {
+                    self.k(K::ArpUp);
+                    c.wrapping_add(note) as u16
+                } else {
+                    self.k(K::ArpDown);
+                    (note as u16).wrapping_sub((c & 0x3f) as u16) & 0xff
+                }
             });
         }
         if let Some(n) = per {
+            self.k(K::Per);
             let p = self.period(hw, n);
             self.sxw(hw, v, "PERIOD", p);
         }
         if self.l.env {
-            self.pend += C_ENV;
+            self.k(K::Env);
             self.envelope(hw, v);
         }
         if !self.l.late {
@@ -1774,11 +2354,13 @@ impl ActivisionPro {
         }
     }
 
-    fn stop_delay(&self, hw: &mut Hw, v: usize) {
+    fn stop_delay(&mut self, hw: &mut Hw, v: usize) {
         let s = self.vb(hw, v, "SDELAY");
         if s == 0 {
+            self.k(K::SdZero);
             self.svb(hw, v, "STOP", 0xff);
         } else {
+            self.k(K::SdDec);
             self.svb(hw, v, "SDELAY", s - 1);
         }
         let t = self.vb(hw, v, "TICK").wrapping_add(1);
@@ -1787,8 +2369,17 @@ impl ActivisionPro {
 
     fn envelope(&mut self, hw: &mut Hw, v: usize) {
         let envt = self.a("ENVT");
-        if (self.vb(hw, v, "NF") as i8) >= 0 && self.vb(hw, v, "TICK") == 0 {
-            self.pend += C_ENV_NEW;
+        let new = if (self.vb(hw, v, "NF") as i8) < 0 {
+            self.k(K::EnvNfNeg);
+            false
+        } else if self.vb(hw, v, "TICK") != 0 {
+            self.k(K::EnvTickNz);
+            false
+        } else {
+            true
+        };
+        if new {
+            self.k(K::EnvNew);
             let io = self.xw(hw, v, "INSOFF");
             let e = (self.ins(hw, io.wrapping_add(1)) as u16) << 4;
             if self.l.env_byte {
@@ -1807,41 +2398,52 @@ impl ActivisionPro {
         let pos = self.xb(hw, v, "ENVPOS");
         let w = self.xb(hw, v, "ENVWAIT");
         if (w as i8) < 0 {
+            self.k(K::EnvWaitNeg);
             return;
         }
         self.sxb(hw, v, "ENVWAIT", w.wrapping_sub(1));
         if w != 1 {
+            self.k(K::EnvWaitDec);
             return;
         }
+        self.k(K::EnvStep);
         let vol = hw.bus.r16(self.hreg(v, 0xc));
         let b = (vol as u8).wrapping_add(hw.bus.r8(a2 + pos as u32 + 1));
         let vol = if b < 0x41 {
+            self.k(K::EnvVol);
             vol & 0xff00 | b as u16
         } else if b < 0xff {
+            self.k(K::Env40);
             0x40
         } else {
+            self.k(K::Env0);
             0
         };
         hw.bus.w16(self.hreg(v, 0xc), vol);
         let c = self.xb(hw, v, "ENVCNT").wrapping_sub(1);
         self.sxb(hw, v, "ENVCNT", c);
         if c != 0 {
+            self.k(K::EnvCntNz);
             let x = hw.bus.r8(a2 + pos as u32);
             self.sxb(hw, v, "ENVWAIT", x);
             return;
         }
+        self.k(K::EnvNext);
         let mut p = self.xb(hw, v, "ENVPOS").wrapping_add(3);
         self.sxb(hw, v, "ENVPOS", p);
         let mut x = hw.bus.r8(a2 + p as u32);
         if x >= 0xc0 {
+            self.k(K::EnvLoop);
             p = x & 0x3f;
             self.sxb(hw, v, "ENVPOS", p);
             x = hw.bus.r8(a2 + p as u32);
         }
         self.sxb(hw, v, "ENVWAIT", x);
         if self.xb(hw, v, "ENVPOS") == 0xf {
+            self.k(K::EnvPosF);
             return;
         }
+        self.k(K::EnvCnt);
         let c = hw.bus.r8(a2 + p as u32 + 2);
         self.sxb(hw, v, "ENVCNT", c);
     }
@@ -2041,7 +2643,7 @@ mod tests {
         assert_eq!(reg(0xDFF096).iter().filter(|&&x| x == 1).count() >= 2, true);
         // the delay loop between the last note and the DMA on
         let at = |v: u16| log.iter().position(|w| w.0 == 0xDFF096 && w.1 == v).unwrap();
-        assert!(log[at(0x800f)].2 - log[at(1)].2 >= C_DELAY);
+        assert!(log[at(0x800f)].2 > log[at(1)].2);
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
     }
 }

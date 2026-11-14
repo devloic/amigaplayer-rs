@@ -15,6 +15,14 @@
 //! & Ice, Uridium 2, Empire Soccer 94 and the Xmas demo (16-bit offsets), and the
 //! one of Realms (32-bit offsets, pre-multiplied opcodes). A third, ViroCop's, is
 //! not in any corpus and is declined.
+//!
+//! Timing follows the EP206 "Jason Page New" Eagleplayer, which writes Paula
+//! directly: every write is at the tick's start plus half the 68000 cycles of the
+//! code paths taken since (`Clk`, the labels in the code), with integer cycles per
+//! path fitted to every write gap of black-box runs of that player (parity from a run
+//! started a cycle late): one table per layout, `COSTS1` (exact on 172,375 gaps of 10
+//! files, and on the 6 files held out) and `COSTS3` (exact on 35,959 gaps of the two
+//! Realms files). The silent set points a channel at address 0, as that player does.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -38,6 +46,87 @@ const IDLE3: [u16; 4] = [0x0018, 0, 0x0048, 0x001C];
 /// Commands run per voice and tick, and steps of order lists and patterns, before
 /// the player gives up on a stream or list that never ends.
 const GUARD: u32 = 4096;
+
+/// 68000 cycles of the code paths (the labels passed to `Clk::k`) of layout 1 and of
+/// layout 3; a path not listed costs nothing. The split between labels that always
+/// occur together is the fit's, not the original's.
+const COSTS1: &[(&str, i32)] = &[
+    ("b", 106), ("b.dur", 35), ("b.fe", 107), ("b.ff", 212), ("env.b", 29), ("env.c", 47), ("env.d", 63),
+    ("env.d.bot", 20), ("env.none", 26), ("o", 16), ("o.fe", 162), ("op", 55), ("op11", 56), ("op13", 104),
+    ("op14", 48), ("op15", 48), ("op16", 66), ("op19", 112), ("op2", 114), ("op20", 94), ("op21", 86),
+    ("op22.ok", 760), ("op3", 80), ("op4", 69), ("op4.nz", 20), ("op5", 16), ("op6", 132), ("op7", 89),
+    ("op7.done", 18), ("op7.loop", 27), ("op7.pop", 32), ("op8", 68), ("p.run", 249), ("p.v", 94), ("sil", 108),
+    ("sil.v", 168), ("ss.len", 248), ("ss.loc", 28), ("ss.per", 20), ("st", 416), ("st.w", -47), ("st.w0", 72),
+    ("tr.ok", 363), ("u", 9), ("u.pend", 344), ("u.v0", 229), ("vib", 63), ("vib.turn", 14), ("wr", 376),
+    ("wr.len", 20), ("wr.per", 20), ("wr.s", 115), ("wr.s.tail", 354), ("wr.sil", 27), ("wr.v0", 279), ("wr.v2", 7),
+    ("wr.v3", 34),
+];
+const COSTS3: &[(&str, i32)] = &[
+    ("b", 106), ("b.dur", 35), ("b.ff", 237), ("env.a.top", 34), ("env.c", 47), ("env.d", 63), ("env.d.bot", 20),
+    ("env.none", 26), ("op", 111), ("op16", 27), ("op19", 100), ("op21", 22), ("op22.ok", 692), ("op3", 76),
+    ("op4.nz", 20), ("op5", 68), ("op6", 43), ("op6.d", 1), ("p.run", 258), ("p.v", 73), ("sil.s", 17),
+    ("ss.len", 275), ("ss.loc", 28), ("ss.per", 20), ("st.w", 4), ("tr.ok", 405), ("u", 136), ("u.pend", 362),
+    ("u.v0", 730), ("vib.turn", 14), ("wr", 762), ("wr.len", 24), ("wr.per", 24), ("wr.s", 121), ("wr.s.tail", 354),
+    ("wr.v1", 17), ("wr.v2", 24), ("wr.v3", 51),
+];
+
+/// The original's clock: every Paula write is at the tick's start plus half the cycles of the
+/// code paths taken since.
+struct Clk {
+    cy: i64,
+    tl: u64,
+    costs: &'static [(&'static str, i32)],
+}
+
+impl Clk {
+    fn new(f3: bool) -> Clk {
+        Clk { cy: 0, tl: 0, costs: if f3 { COSTS3 } else { COSTS1 } }
+    }
+
+    fn k(&mut self, l: &'static str) {
+        if let Ok(i) = self.costs.binary_search_by(|e| e.0.cmp(l)) {
+            self.cy += self.costs[i].1 as i64;
+        }
+    }
+
+    fn start(&mut self, hw: &mut Hw) {
+        self.tl = hw.bus.clock;
+        self.cy = 0;
+    }
+
+    /// Up to the clock of the next write.
+    fn at(&mut self, hw: &mut Hw) {
+        let t = self.tl + self.cy.max(0) as u64 / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+
+    fn dmacon(&mut self, hw: &mut Hw, v: u16) {
+        self.at(hw);
+        hw.dmacon(v);
+    }
+
+    fn loc(&mut self, hw: &mut Hw, ch: usize, a: u32) {
+        self.at(hw);
+        hw.loc(ch, a);
+    }
+
+    fn len(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.at(hw);
+        hw.len(ch, v);
+    }
+
+    fn per(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.at(hw);
+        hw.per(ch, v);
+    }
+
+    fn vol(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.at(hw);
+        hw.vol(ch, v);
+    }
+}
 
 fn rb(d: &[u8], o: usize) -> u8 {
     d.get(o).copied().unwrap_or(0)
@@ -141,6 +230,7 @@ pub struct Jpn {
     cnt: i32,
     v: [Voice; 4],
     songend: bool,
+    c: Clk,
 }
 
 /// The ingame file of Realms is one long tune; its four order lists, 194 bytes apart,
@@ -225,8 +315,9 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         ((a / 2).clamp(1, 16)) as u16
     };
     let base = m.alloc((pristine.len() as u32).max(4));
-    let silent = m.alloc(4);
-    if base == 0 || silent == 0 {
+    // the silent set points the channel at address 0, as the EP206 player does
+    let silent = 0;
+    if base == 0 {
         return None;
     }
     let mut r = Jpn {
@@ -244,6 +335,7 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         cnt: 0,
         v: Default::default(),
         songend: false,
+        c: Clk::new(f3),
     };
     let mut hw = Hw { bus: &mut m.bus };
     hw.dmacon(0x000F);
@@ -328,10 +420,14 @@ impl Jpn {
         h << 16 | self.nw(k) as u32
     }
 
-    fn silent_set(&self, k: usize, hw: &mut Hw) {
-        hw.len(k, 1);
-        hw.loc(k, self.silent);
-        hw.per(k, self.v[k].period);
+    fn silent_set(&mut self, k: usize, hw: &mut Hw) {
+        self.c.k("ss.len");
+        self.c.len(hw, k, 1);
+        self.c.k("ss.loc");
+        self.c.loc(hw, k, self.silent);
+        self.c.k("ss.per");
+        let p = self.v[k].period;
+        self.c.per(hw, k, p);
     }
 
     fn sample_loc(&self, k: usize) -> u32 {
@@ -342,10 +438,12 @@ impl Jpn {
     /// The pattern engine for one tick; true if a voice met the end of the tune.
     fn patterns(&mut self) -> bool {
         for k in 0..4 {
+            self.c.k("p.v");
             self.v[k].tc -= 1;
             if self.v[k].tc >= 0 {
                 continue;
             }
+            self.c.k("p.run");
             self.v[k].tc = self.v[k].tr;
             if self.step(k) {
                 return true;
@@ -360,8 +458,10 @@ impl Jpn {
         let prio = if self.f3 { self.w(0x4C0 + 2 * id as usize) } else { self.w(self.w(10) as usize + 2 * id as usize) & 0xFF };
         let v = &mut self.v[k];
         if prio < v.prio {
+            self.c.k("tr.rej");
             return false;
         }
+        self.c.k("tr.ok");
         v.prio = prio;
         v.pending = Some(id);
         true
@@ -371,6 +471,7 @@ impl Jpn {
     fn step(&mut self, k: usize) -> bool {
         for _ in 0..GUARD {
             if self.v[k].fetch {
+                self.c.k("o");
                 let e = self.w(self.v[k].ostart + self.v[k].opos);
                 let (hi, lo) = ((e >> 8) as u8, e as u8);
                 match hi {
@@ -380,14 +481,22 @@ impl Jpn {
                         } else {
                             (self.w(46) as usize).wrapping_add(self.w(self.w(44) as usize + 2 * hi as usize) as usize)
                         };
+                        self.c.k("o.pat");
                         let v = &mut self.v[k];
                         v.pat = pat;
                         v.trans = lo;
                         v.fetch = false;
                     }
-                    0xFF => return true,
-                    0xFD => self.v[k].opos += 2,
+                    0xFF => {
+                        self.c.k("o.end");
+                        return true;
+                    }
+                    0xFD => {
+                        self.c.k("o.fd");
+                        self.v[k].opos += 2
+                    }
                     _ => {
+                        self.c.k(if hi == 0xFC { "o.fc" } else { "o.fe" });
                         self.v[k].opos = lo as usize * 2;
                         self.v[k].looped = true;
                     }
@@ -396,6 +505,15 @@ impl Jpn {
             }
             let at = self.v[k].pat.wrapping_add(self.v[k].ppos as usize);
             let b = rb(&self.d, at);
+            self.c.k("b");
+            self.c.k(match b {
+                0xFF => "b.ff",
+                0xF9 => "b.f9",
+                0xFE => "b.fe",
+                0x80..=0xFD => "b.ins",
+                0x40..=0x7F => "b.dur",
+                _ => "b.note",
+            });
             let v = &mut self.v[k];
             match b {
                 0xFF => {
@@ -425,11 +543,14 @@ impl Jpn {
                     v.ppos = v.ppos.wrapping_add(1);
                     let cur = v.cur;
                     let trans = v.trans;
-                    if cur != 0x78 && !self.trigger(k, cur) {
+                    if cur == 0x78 {
+                        self.c.k("b.n78");
+                    } else if !self.trigger(k, cur) {
                         return false;
                     }
                     let mut t = b.wrapping_add(trans) as i8;
                     if t >= 0x54 {
+                        self.c.k("b.nclip");
                         t = 0x54;
                     }
                     let v = &mut self.v[k];
@@ -444,13 +565,14 @@ impl Jpn {
 
     /// DMA off, and the silent registers (layout 1 also clears the volume).
     fn silence(&mut self, k: usize, hw: &mut Hw) {
-        hw.dmacon(1 << k);
-        hw.wait(150);
+        self.c.k("sil");
+        self.c.dmacon(hw, 1 << k);
         if !self.f3 {
-            hw.vol(k, 0);
+            self.c.k("sil.v");
+            self.c.vol(hw, k, 0);
         }
+        self.c.k("sil.s");
         self.silent_set(k, hw);
-        hw.wait(150);
     }
 
     fn clear(&mut self, k: usize) {
@@ -461,6 +583,7 @@ impl Jpn {
     }
 
     fn start_sound(&mut self, k: usize, id: u8, hw: &mut Hw) {
+        self.c.k("snd.start");
         self.silence(k, hw);
         let sp = if self.f3 {
             be32(&self.d, 0x84 + 4 * id as usize) as usize
@@ -485,6 +608,7 @@ impl Jpn {
     }
 
     fn stop_voice(&mut self, k: usize, hw: &mut Hw) {
+        self.c.k("stop");
         self.v[k].idle = true;
         self.v[k].sp = 0;
         self.v[k].prio = 0;
@@ -503,15 +627,24 @@ impl Jpn {
 
     /// The commands of a voice's stream for this tick.
     fn stream(&mut self, k: usize, hw: &mut Hw) {
+        const OPS: [&str; 25] = [
+            "op0", "op1", "op2", "op3", "op4", "op5", "op6", "op7", "op8", "op9", "op10", "op11", "op12", "op13",
+            "op14", "op15", "op16", "op17", "op18", "op19", "op20", "op21", "op22", "op23", "op.x",
+        ];
+        self.c.k("st");
         if self.v[k].wait != 0 {
+            self.c.k("st.w");
             self.v[k].wait -= 1;
             if self.v[k].wait != 0 {
                 return;
             }
+            self.c.k("st.w0");
         }
         for _ in 0..GUARD {
             let word = self.nw(k);
             let op = if self.f3 { word >> 2 } else { word & 0xFF };
+            self.c.k("op");
+            self.c.k(OPS[(op as usize).min(24)]);
             match op {
                 0 => {
                     self.stop_voice(k, hw);
@@ -539,6 +672,7 @@ impl Jpn {
                     let x = self.nl(k);
                     self.v[k].srem = x;
                     if x != 0 {
+                        self.c.k("op4.nz");
                         self.v[k].slen = (x as u16) >> 1;
                     }
                 }
@@ -551,6 +685,7 @@ impl Jpn {
                     let pos = self.v[k].sp;
                     let v = &mut self.v[k];
                     if v.depth > 0 {
+                        self.c.k("op6.d");
                         v.top = (v.top + 1) & 3;
                     }
                     v.stack[v.top] = (pos, c);
@@ -560,15 +695,19 @@ impl Jpn {
                     let v = &mut self.v[k];
                     let (pos, c) = v.stack[v.top];
                     if c == 0 {
+                        self.c.k("op7.inf");
                         v.sp = pos;
                     } else {
                         v.stack[v.top].1 = c - 1;
                         if c - 1 == 0 {
+                            self.c.k("op7.done");
                             if v.depth > 1 {
+                                self.c.k("op7.pop");
                                 v.top = (v.top + 3) & 3;
                                 v.depth -= 1;
                             }
                         } else {
+                            self.c.k("op7.loop");
                             v.sp = pos;
                         }
                     }
@@ -608,8 +747,8 @@ impl Jpn {
                     self.v[k].lvl = x;
                 }
                 16 => {
-                    hw.dmacon(if self.f3 { 0x8000 } else { 0x8200 } | 1 << k);
-                    hw.wait(150);
+                    let v = if self.f3 { 0x8000 } else { 0x8200 } | 1 << k;
+                    self.c.dmacon(hw, v);
                 }
                 17 => {
                     if !self.f3 {
@@ -641,6 +780,7 @@ impl Jpn {
                     let src = self.starts.get((x >> 8) as usize).copied().unwrap_or(0) as usize;
                     let dst = self.starts.get((x & 0xFF) as usize).copied().unwrap_or(0) as usize;
                     if src + 128 <= self.area.len() && dst + 128 <= self.area.len() {
+                        self.c.k("op22.ok");
                         self.area.copy_within(src..src + 128, dst);
                         self.poke_area(dst, hw);
                     }
@@ -650,13 +790,18 @@ impl Jpn {
                     let dst = self.v[k].sbase as usize;
                     let src = self.starts.get(n).copied().unwrap_or(0) as usize;
                     if src + 128 <= self.area.len() && dst + 128 <= self.area.len() {
+                        self.c.k("op23.ok");
                         for i in 0..128 {
                             let t = self.area[src + i];
                             let c = &mut self.area[dst + i];
                             if *c > t {
+                                self.c.k("op23.gt");
                                 *c -= 1;
                             } else if *c < t {
+                                self.c.k("op23.lt");
                                 *c += 1;
+                            } else {
+                                self.c.k("op23.eq");
                             }
                         }
                         self.poke_area(dst, hw);
@@ -669,12 +814,17 @@ impl Jpn {
 
     /// Vibrato, portamento and the envelope.
     fn sound(&mut self, k: usize) {
+        let c_ = &mut self.c;
         let v = &mut self.v[k];
+        c_.k("snd");
         if v.vibd != 0 || self.f3 {
+            c_.k("vib");
             v.period = v.period.wrapping_add(v.vibd);
             if v.vibc != 0 {
+                c_.k("vib.c");
                 v.vibc -= 1;
             } else {
+                c_.k("vib.turn");
                 v.vibc = v.vibl;
                 v.vibd = v.vibd.wrapping_neg();
             }
@@ -682,64 +832,94 @@ impl Jpn {
         v.period = v.period.wrapping_add(v.porta);
         let [a, b, c, d] = v.env;
         if a & 0xFF != 0xFF {
+            c_.k("env.a");
             v.env[0] = (a & 0xFF00) | ((a & 0xFF).wrapping_sub(1) & 0xFF);
             match v.lvl.checked_add(a & 0xFF00) {
                 Some(l) => v.lvl = l,
                 None => {
+                    c_.k("env.a.top");
                     v.lvl = 0xFF00;
                     v.env[0] = 0xFFFF;
                 }
             }
             v.vol = v.lvl;
         } else if b & 0xFF != 0xFF {
+            c_.k("env.b");
             v.env[1] = (b & 0xFF00) | ((b & 0xFF).wrapping_sub(1) & 0xFF);
             match v.lvl.checked_sub(b & 0xFF00) {
                 Some(l) => v.lvl = l,
                 None => {
+                    c_.k("env.b.bot");
                     v.lvl = 0;
                     v.env[1] = 0xFFFF;
                 }
             }
             v.vol = v.lvl;
         } else if c != 0xFFFF {
+            c_.k("env.c");
             v.env[2] = c.wrapping_sub(1);
             v.vol = v.lvl;
         } else if d != 0xFFFF {
+            c_.k("env.d");
             match v.lvl.checked_sub(d) {
                 Some(l) => v.lvl = l,
                 None => {
+                    c_.k("env.d.bot");
                     v.lvl = 0;
                     v.env[3] = 0xFFFF;
                 }
             }
             v.vol = v.lvl;
+        } else {
+            c_.k("env.none");
         }
     }
 
     /// The registers of a voice at the end of its turn.
     fn write(&mut self, k: usize, hw: &mut Hw) {
-        let v = &self.v[k];
-        hw.vol(k, (v.vol >> 10).min(63));
-        if self.f3 {
-            hw.per(k, v.period);
-            if v.srem != 0 {
-                hw.loc(k, self.sample_loc(k));
-                hw.len(k, v.slen);
-            } else {
-                self.silent_set(k, hw);
-            }
-        } else if v.srem != 0 {
-            hw.loc(k, self.sample_loc(k));
-            hw.len(k, v.slen);
-            hw.per(k, v.period);
-        } else {
-            self.silent_set(k, hw);
+        let (vol, per, srem, slen) = (self.v[k].vol, self.v[k].period, self.v[k].srem, self.v[k].slen);
+        self.c.k("wr");
+        self.c.k(["wr.v0", "wr.v1", "wr.v2", "wr.v3"][k]);
+        if vol >> 10 > 63 {
+            self.c.k("wr.vclip");
         }
-        hw.wait(100);
+        self.c.vol(hw, k, (vol >> 10).min(63));
+        if self.f3 {
+            self.c.k("wr.per");
+            self.c.per(hw, k, per);
+            if srem != 0 {
+                self.c.k("wr.s");
+                let a = self.sample_loc(k);
+                self.c.loc(hw, k, a);
+                self.c.k("wr.len");
+                self.c.len(hw, k, slen);
+                self.c.k("wr.s.tail");
+            } else {
+                self.c.k("wr.sil");
+                self.silent_set(k, hw);
+                self.c.k("wr.sil.tail");
+            }
+        } else if srem != 0 {
+            self.c.k("wr.s");
+            let a = self.sample_loc(k);
+            self.c.loc(hw, k, a);
+            self.c.k("wr.len");
+            self.c.len(hw, k, slen);
+            self.c.k("wr.per");
+            self.c.per(hw, k, per);
+            self.c.k("wr.s.tail");
+        } else {
+            self.c.k("wr.sil");
+            self.silent_set(k, hw);
+            self.c.k("wr.sil.tail");
+        }
     }
 
     fn turn(&mut self, k: usize, hw: &mut Hw) {
+        self.c.k("u");
+        self.c.k(["u.v0", "u.v1", "u.v2", "u.v3"][k]);
         if let Some(id) = self.v[k].pending {
+            self.c.k("u.pend");
             self.start_sound(k, id, hw);
         }
         self.stream(k, hw);
@@ -772,10 +952,12 @@ impl Replayer for Jpn {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        hw.wait(1500);
+        self.c.start(hw);
+        self.c.k("t");
         let mut ended = false;
         self.cnt -= 1;
         if self.cnt < 0 {
+            self.c.k("t.pat");
             self.cnt = self.speed as i32;
             ended = self.patterns();
         }
@@ -783,16 +965,19 @@ impl Replayer for Jpn {
             self.turn(k, hw);
         }
         if !self.f3 {
+            self.c.k("t.wr");
             for k in 0..4 {
                 self.write(k, hw);
             }
         }
         if ended {
+            self.c.k("t.end");
             self.songend = true;
             self.start(self.sub, hw, false);
             if self.f3 {
                 for k in 0..4 {
-                    hw.vol(k, 0);
+                    self.c.k("t.end.v");
+                    self.c.vol(hw, k, 0);
                 }
             }
         } else if self.v.iter().all(|v| v.looped) {

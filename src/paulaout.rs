@@ -40,7 +40,8 @@ pub struct OutputStage {
     interval: f32,
     next: f32,
     acc: [i32; 4],
-    acc_time: [i32; 4],
+    /// Colour clocks in `acc` (the same for the four channels, which UADE counts apart).
+    acc_time: i32,
     filter: Filter,
     /// The LED filter (CIA-A PRA bit 1 low).
     pub led: bool,
@@ -59,7 +60,7 @@ impl OutputStage {
             // one, so its first sample window is always 44.1 kHz long
             next: COLOUR_CLOCKS_PAL as f32 / UADE_RESET_RATE as f32,
             acc: [0; 4],
-            acc_time: [0; 4],
+            acc_time: 0,
             filter,
             led: false,
             a500_a0: (rc_a0(rate, 6200), rc_a0(rate, 20000)),
@@ -115,27 +116,31 @@ impl OutputStage {
         self.step_rounded(out, clocks, rounded)
     }
 
-    /// `step` with `until_sample()` already known (`rounded`).
-    #[inline]
+    /// `step` with `until_sample()` already known (`rounded`). Inlined into its callers so
+    /// that `out` stays in registers (built there as four words and read back as one
+    /// vector, it stalls on store forwarding).
+    #[inline(always)]
     pub fn step_rounded(&mut self, out: [i32; 4], clocks: u32, rounded: u32) -> Option<(i16, i16)> {
         debug_assert_eq!(rounded, self.until_sample());
         debug_assert!(clocks <= rounded);
         self.next -= clocks as f32;
         for i in 0..4 {
             self.acc[i] += out[i] * clocks as i32;
-            self.acc_time[i] += clocks as i32;
         }
+        self.acc_time += clocks as i32;
         if clocks != rounded {
             return None;
         }
         self.next += self.interval;
         let mut o = [0i32; 4];
-        for i in 0..4 {
-            // C integer division (towards zero)
-            o[i] = if self.acc_time[i] != 0 { self.acc[i] / self.acc_time[i] } else { 0 };
+        if self.acc_time != 0 {
+            for i in 0..4 {
+                // C integer division (towards zero)
+                o[i] = self.acc[i] / self.acc_time;
+            }
         }
         self.acc = [0; 4];
-        self.acc_time = [0; 4];
+        self.acc_time = 0;
         // channel outputs are -128*64..127*64; two of them, shifted to 16 bits
         let (l, r) = ((o[0] + o[3]) << 1, (o[1] + o[2]) << 1);
         if self.filter == Filter::None {

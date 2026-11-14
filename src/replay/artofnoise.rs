@@ -66,6 +66,9 @@ const DATA_SIZE: u32 = 0x104;
 
 /// $9052D / tempo is the timer; $1279 at tempo 125.
 const TIMER: u16 = 0x1279;
+/// Colour clocks from the host's start to the timer's, beyond EP_NewModuleInfo
+/// and InitSound.
+const START: u64 = 4710;
 
 // The player's variables (from G).
 const G_SPEED: u32 = 0x20;
@@ -206,8 +209,7 @@ fn new8(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
 
 /// The code paths whose time is counted (`Art::spent`), by the original's
 /// addresses.
-#[derive(Clone, Copy)]
-#[repr(usize)]
+#[derive(Clone, Copy, Debug)]
 enum C {
     /// $10AF4: the tick's interrupt, to the voices' effects.
     Tick,
@@ -318,22 +320,349 @@ enum C {
     Loops,
     /// $11962: a voice's loop.
     Loop,
-    /// A poke for a channel past 3 when the host dropped them (8 voices, before
-    /// the amplifier): kept for the fitted table's layout, no longer counted.
-    #[allow(dead_code)]
-    Drop,
-    Count,
+    ArpEnd,
+    ArpReset,
+    BreakFirst,
+    CellD,
+    CellDLast,
+    CellDelaySet,
+    CellLoop,
+    CellLoopEnd,
+    CellLoopSet,
+    CmpMiss,
+    CmpMissAll,
+    E4,
+    ECut,
+    ECutEnd,
+    EStep,
+    EStepEnd,
+    EnvAttack,
+    EnvAttackTop,
+    EnvDecayEnd,
+    EnvH,
+    EnvKeep,
+    ExtraMiss,
+    F10,
+    F10Set,
+    F12,
+    F13,
+    F13Set,
+    F14,
+    F15,
+    F16,
+    F17,
+    F18,
+    F19,
+    F1a,
+    F1b,
+    F1c,
+    F1d,
+    F1e,
+    F21,
+    F21Set,
+    FilterOn,
+    FineVolClamp,
+    FineVolD,
+    FineVolDown,
+    FineVolUp,
+    FxArp,
+    FxFrame0,
+    FxSet,
+    FxVibOff,
+    LoopEd,
+    NewInstrPorta,
+    NewInstrPortaOnly,
+    NewInstrSame,
+    NoInstrNoNote,
+    NoInstrNone,
+    NoInstrPorta,
+    NoteHigh,
+    NoteNone,
+    NoteOld,
+    NoteOldHigh,
+    PerClamp,
+    PosBreak,
+    PosEnd,
+    RepOnlySame,
+    RepOnlySynth,
+    RowLast,
+    RowLoop,
+    SampleE9,
+    SampleEd,
+    SampleLoopLen,
+    SampleNote,
+    SampleOffsetEnd,
+    SetLoop,
+    SetLoopNew,
+    SpeedSet,
+    SpeedZero,
+    SynthCont,
+    SynthE9,
+    SynthEd,
+    SynthH,
+    SynthHold,
+    SynthNoNote,
+    SynthSame,
+    SynthStop,
+    SynthTickFlag,
+    SynthTickNoWave,
+    SynthTickSynth,
+    SynthVibNone,
+    SynthVibOff,
+    ToneEnd,
+    ToneOn,
+    ToneStep,
+    ToneUp,
+    VibDelayEnd,
+    VibDone,
+    VibDown,
+    VibHalf,
+    VibOn,
+    VibParamDepth,
+    VibParamSet,
+    VibParamSpeed,
+    VibRamp,
+    VibSquare,
+    VolSlideDown,
+    VolSlideTop,
+    VolSlideZero,
+    WaveBack,
+    WaveCtrl1,
+    WaveCtrl1Turn,
+    WaveCtrl2,
+    WriteEd,
+    WriteKeep,
+    WriteNoise,
+    WriteOld,
+    SampleLoopStart,
+    WaveBackCtrl2,
+    WaveBackReset,
+    WaveCtrl1Stop,
+    SampleLoopWhole,
+    Row8,
+    Tick4,
 }
 
-/// Colour clocks for each of `C`, fitted by least squares to the Eagleplayer's
-/// write logs of 33 AON4 and 12 AON8 modules (rms 6.0 colour clocks over 818163
-/// writes): with 4 voices alone a tick's and its voices' costs cannot be told
-/// apart. Tags counted together on every path share their sum arbitrarily.
-const COST: [i64; C::Count as usize] = [
-    105, 325, 40, 325, 67, 121, 5, 65, 42, 14, 164, -9, 115, 171, 0, 171, 115, 49, 156, 5, 34, 64,
-    56, 210, 94, 69, 41, 29, 99, 107, 44, 9, 33, 56, 52, 180, 68, 28, 18, 0, 60, 16, 43, 139, 17,
-    36, 107, 48, 76, 46, 38, 15, 68, 11, 130, 177, 102, 97, 135, 164, 50, 69, 0,
-];
+impl C {
+    /// 68000 cycles of each path, fitted as integers to the Eagleplayer's host-call
+    /// gaps (AON_TRACE against the reference's DELI_TRACE): each host call lands at
+    /// the cycles since the previous one (or the interrupt's start), halved and
+    /// rounded down.
+    fn cycles(self) -> u64 {
+        use C::*;
+        match self {
+            Tick => 161,
+            Row => 649,
+            Delay => 195,
+            RowEnd => 649,
+            NextPos => 120,
+            Cell => 231,
+            CellFx => 9,
+            NoInstr => 130,
+            RepOnly => 86,
+            NewInstr => 0,
+            Start => 237,
+            EnvNone => 0,
+            Synth => 174,
+            SynthWave => 82,
+            SynthOffset => 82,
+            SynthSetup => 548,
+            SynthVib => 222,
+            Sample => 93,
+            SampleSet => 392,
+            SampleNoLoop => 0,
+            SampleLoop => 34,
+            SampleOffset => 101,
+            Volume => 87,
+            Note => 409,
+            NoteSlide => 129,
+            ArpPt => 126,
+            ArpPro => 91,
+            ArpByte => 76,
+            ArpNone => 177,
+            Fx => 180,
+            ArpStep => 71,
+            Cmp => 11,
+            Slide => 45,
+            Tone => 102,
+            VibParam => 98,
+            Vib => 317,
+            VolSlide => 165,
+            FineVol => 64,
+            SetVol => 1,
+            Jump => 9,
+            Break => 81,
+            Extra => 41,
+            Speed => 79,
+            Tempo => 281,
+            Misc => 34,
+            Filter => 30,
+            SynthTick => 216,
+            WaveStep => 52,
+            WaveMove => 156,
+            WaveReset => 87,
+            Env => 86,
+            VibDelay => 27,
+            Write => 136,
+            WriteNew => 29,
+            Per => 237,
+            Vol => 355,
+            Adr => 207,
+            Len => 195,
+            DmaOff => 246,
+            DmaOn => 328,
+            Loops => 101,
+            Loop => 135,
+            ArpEnd => 2,
+            ArpReset => 32,
+            BreakFirst => 3,
+            CellD => 45,
+            CellDLast => 0,
+            CellDelaySet => 0,
+            CellLoop => 16,
+            CellLoopEnd => 64,
+            CellLoopSet => 12,
+            CmpMiss => 104,
+            CmpMissAll => 99,
+            E4 => 3,
+            ECut => 42,
+            ECutEnd => 54,
+            EStep => 16,
+            EStepEnd => 19,
+            EnvAttack => 0,
+            EnvAttackTop => 18,
+            EnvDecayEnd => 28,
+            EnvH => 0,
+            EnvKeep => 0,
+            ExtraMiss => 67,
+            F10 => 0,
+            F10Set => 0,
+            F12 => 67,
+            F13 => 54,
+            F13Set => 12,
+            F14 => 108,
+            F15 => 0,
+            F16 => 0,
+            F17 => 46,
+            F18 => 0,
+            F19 => 132,
+            F1a => 73,
+            F1b => 0,
+            F1c => 80,
+            F1d => 129,
+            F1e => 176,
+            F21 => 0,
+            F21Set => 0,
+            FilterOn => 0,
+            FineVolClamp => 49,
+            FineVolD => 72,
+            FineVolDown => 25,
+            FineVolUp => 41,
+            FxArp => 62,
+            FxFrame0 => 27,
+            FxSet => 0,
+            FxVibOff => 0,
+            LoopEd => 0,
+            NewInstrPorta => 4,
+            NewInstrPortaOnly => 0,
+            NewInstrSame => 108,
+            NoInstrNoNote => 0,
+            NoInstrNone => 0,
+            NoInstrPorta => 0,
+            NoteHigh => 0,
+            NoteNone => 0,
+            NoteOld => 0,
+            NoteOldHigh => 0,
+            PerClamp => 4,
+            PosBreak => 92,
+            PosEnd => 0,
+            RepOnlySame => 31,
+            RepOnlySynth => 2,
+            RowLast => 0,
+            RowLoop => 62,
+            SampleE9 => 0,
+            SampleEd => 0,
+            SampleLoopLen => 39,
+            SampleNote => 0,
+            SampleOffsetEnd => 0,
+            SetLoop => 29,
+            SetLoopNew => 30,
+            SpeedSet => 0,
+            SpeedZero => 0,
+            SynthCont => 2,
+            SynthE9 => 1,
+            SynthEd => 162,
+            SynthH => 0,
+            SynthHold => 16,
+            SynthNoNote => 0,
+            SynthSame => 102,
+            SynthStop => 1,
+            SynthTickFlag => 0,
+            SynthTickNoWave => 0,
+            SynthTickSynth => 49,
+            SynthVibNone => 1,
+            SynthVibOff => 0,
+            ToneEnd => 27,
+            ToneOn => 10,
+            ToneStep => 23,
+            ToneUp => 0,
+            VibDelayEnd => 10,
+            VibDone => 30,
+            VibDown => 10,
+            VibHalf => 40,
+            VibOn => 1,
+            VibParamDepth => 2,
+            VibParamSet => 0,
+            VibParamSpeed => 101,
+            VibRamp => 27,
+            VibSquare => 27,
+            VolSlideDown => 25,
+            VolSlideTop => 1,
+            VolSlideZero => 16,
+            WaveBack => 0,
+            WaveCtrl1 => 0,
+            WaveCtrl1Turn => 0,
+            WaveCtrl2 => 59,
+            WriteEd => 4,
+            WriteKeep => 28,
+            WriteNoise => 71,
+            WriteOld => 25,
+            SampleLoopStart => 0,
+            WaveBackCtrl2 => 7,
+            WaveBackReset => 3,
+            WaveCtrl1Stop => 0,
+            SampleLoopWhole => 18,
+            Row8 => 64,
+            Tick4 => 48,
+        }
+    }
+}
+
+/// The trace of code paths for fitting their cycles (AON_TRACE=file): each host
+/// call's clock and the paths since the previous one.
+#[derive(Default)]
+struct Trace {
+    out: Option<std::io::BufWriter<std::fs::File>>,
+    pend: Vec<C>,
+}
+
+impl Trace {
+    fn open() -> Self {
+        let out = std::env::var_os("AON_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(std::io::BufWriter::new);
+        Trace { out, pend: Vec::new() }
+    }
+
+    fn write(&mut self, hw: &Hw, what: &str) {
+        if let Some(o) = &mut self.out {
+            use std::io::Write;
+            let _ = write!(o, "{} {}", hw.bus.clock, what);
+            for e in self.pend.drain(..) {
+                let _ = write!(o, " {:?}", e);
+            }
+            let _ = writeln!(o);
+        }
+    }
+}
 
 pub struct Art {
     /// The code and data hunks' images.
@@ -344,10 +673,11 @@ pub struct Art {
     timer: u16,
     title: String,
     songend: bool,
-    /// Colour clocks the original spends since its last write.
-    spent: i64,
-    /// AON_FIT: the code paths taken since the last write are printed with it.
-    fit: Option<[u32; C::Count as usize]>,
+    /// The clock of the last host call (or the interrupt's start), and the
+    /// 68000 cycles the original spent since.
+    seg: u64,
+    cyc: u64,
+    trace: Trace,
     /// The chunk searches' steps so far, for the start's time.
     searched: u64,
 }
@@ -377,20 +707,21 @@ fn new(d: &[u8], base: u32, m: &mut Machine, voices: u32) -> Option<Box<dyn Repl
         timer: TIMER,
         title: String::new(),
         songend: false,
-        spent: 0,
-        fit: std::env::var_os("AON_FIT").map(|_| [0; C::Count as usize]),
+        seg: 0,
+        cyc: 0,
+        trace: Trace::open(),
         searched: 0,
     };
-    let start = a.module_info(m, base);
+    // The timer starts when the original's EP_NewModuleInfo and InitSound have
+    // run: their chunk searches go through the module by words (58 cycles a
+    // step), EP_NewModuleInfo copies the names and the remark, InitSound fills its
+    // tables (14660 colour clocks). Paula's DMA runs in slots of each line, so
+    // where in a line the ticks come changes the sound.
+    let info = a.module_info(m, base) + 58 * a.searched;
+    a.searched = 0;
     a.init_sound(m, base);
-    // The timer starts when it does after the original's EP_NewModuleInfo and
-    // InitSound, whose chunk searches go through the module by words (29 colour
-    // clocks a step) and which copy the names and the remark: Paula's DMA runs in
-    // slots of each line, so where in a line the ticks come changes the sound.
-    // The times were fitted to the reference's start on 33 modules (rms 2 colour
-    // clocks; the first writes within 5 of the reference's, 8 voices too).
-    let t = start + 29.0 * a.searched as f64;
-    Hw { bus: &mut m.bus }.wait(t.round() as u64);
+    let t = START + info / 2 + 14660 + 29 * a.searched;
+    Hw { bus: &mut m.bus }.wait(t);
     Some(Box::new(a))
 }
 
@@ -416,11 +747,11 @@ impl Replayer for Art {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        self.spent = 0;
+        self.seg = hw.bus.clock;
+        self.cyc = 0;
         // paths counted after the last interrupt's last write belong to no write
-        if let Some(f) = &mut self.fit {
-            *f = [0; C::Count as usize];
-        }
+        self.trace.pend.clear();
+        self.trace.write(hw, "tick");
         let g = self.code + G;
         match hw.bus.r8(g + G_PHASE) {
             0 => self.play(hw),
@@ -436,6 +767,7 @@ impl Replayer for Art {
                     self.cost(C::Loop);
                     let v = self.voice(i);
                     if hw.bus.r16(v + V_FX) & 0xff0 == 0xed0 {
+                        self.cost(C::LoopEd);
                         continue;
                     }
                     self.poke_adr(hw, i, hw.bus.r32(v + V_REPEAT));
@@ -462,9 +794,9 @@ impl Art {
     }
 
     fn costs(&mut self, c: C, n: u32) {
-        self.spent += COST[c as usize] * n as i64;
-        if let Some(f) = &mut self.fit {
-            f[c as usize] += n;
+        self.cyc += c.cycles() * n as u64;
+        if self.trace.out.is_some() {
+            self.trace.pend.extend(std::iter::repeat(c).take(n as usize));
         }
     }
 
@@ -491,7 +823,7 @@ impl Art {
     /// chunk searches: it looks for INFO, PLST, INST, WAVE, AUTH, NAME and RMRK,
     /// takes the highest pattern of the position list, copies the author and the
     /// name (100 bytes at most) and the remark (2000), with its tabs expanded.
-    fn module_info(&mut self, m: &Machine, base: u32) -> f64 {
+    fn module_info(&mut self, m: &Machine, base: u32) -> u64 {
         self.chunk(m, base, *b"INFO");
         let plst = self.chunk(m, base, *b"PLST");
         self.chunk(m, base, *b"INST");
@@ -501,58 +833,60 @@ impl Art {
         let rmrk = self.chunk(m, base, *b"RMRK");
         let len = |a: u32| if a == 0 { 0 } else { m.bus.r32(a - 4) };
         let text = |a: u32| (len(a) as i16).clamp(0, 100) as u32;
-        // the position list's highest pattern: 28 cycles an entry, 12 more for a
-        // new highest
-        let mut cycles = 0u64;
-        let mut top = 0u8;
+        // 68000 cycles, fitted exactly to the reference's durations on 14 modules and
+        // ~200 copies changing one text, the remark or the position list. UNSURE: a
+        // text of length 0 (or negative), and a chunk not found (no module did).
+        let mut cycles = 1324u64;
+        // the position list's highest pattern (signed): 27 cycles an entry, 12 more
+        // for a new highest
+        let mut top = 0i8;
         for k in 0..len(plst) {
-            let b = m.bus.r8(plst.wrapping_add(k));
-            cycles += 28;
+            let b = m.bus.r8(plst.wrapping_add(k)) as i8;
+            cycles += 27;
             if b > top {
                 cycles += 12;
                 top = b;
             }
         }
-        // 8 voices take 16 colour clocks more (measured on 12 modules)
-        let eight = if self.voices == 8 { 16.0 } else { 0.0 };
-        let mut t = 20046.0 + eight + 0.969 * cycles as f64 / 2.0 + 11.035 * (text(auth) + text(name)) as f64;
-        // the remark: 48 cycles a character, 82 a control character, 94 a line
-        // feed, 104 + 18 a space for a tab
+        // the author and the name: 22 cycles a character, 4 more for a length clamped
+        for a in [auth, name] {
+            cycles += 22 * text(a) as u64 + 4 * (a != 0 && len(a) as i16 > 100) as u64;
+        }
+        // the remark (2000 characters at most, 8 cycles to clamp): 90 cycles to start,
+        // 47 a character, 81 a control character, 95 a line feed, 103 + 18 a space for
+        // a tab
         let n = len(rmrk).min(2000);
         if n != 0 {
-            let (mut cycles, mut col, mut extra) = (0u64, 0u32, 43.2);
+            cycles += 90 + 8 * (len(rmrk) > 2000) as u64;
+            let mut col = 0u32;
             for k in 0..n {
                 match m.bus.r8(rmrk + k) {
                     0x20.. => {
-                        cycles += 48;
+                        cycles += 47;
                         col += 1;
                     }
                     9 => {
                         let s = ((col + 8) & !7) - col;
-                        cycles += 104 + 18 * s as u64;
+                        cycles += 103 + 18 * s as u64;
                         col += s;
-                        extra += 2.0;
                     }
                     10 => {
-                        cycles += 94;
+                        cycles += 95;
                         col = 0;
-                        extra += 1.58;
                     }
                     _ => {
-                        cycles += 82;
+                        cycles += 81;
                         col += 1;
-                        extra += 0.93;
                     }
                 }
             }
-            t += 0.979 * cycles as f64 / 2.0 + extra;
         }
         // the song name (EP_NewModuleInfo's)
         if name != 0 {
             let s: Vec<u8> = (0..text(name)).map(|k| m.bus.r8(name + k)).take_while(|&c| c != 0).collect();
             self.title = s.iter().map(|&c| c as char).collect::<String>().trim().to_string();
         }
-        t
+        cycles
     }
 
     /// InitSound.
@@ -598,14 +932,17 @@ impl Art {
     // channels for 4 voices, the amplifier's virtual voices for 8.
     fn wait(&mut self, hw: &mut Hw, c: C) {
         self.cost(c);
-        hw.wait(self.spent.max(0) as u64);
-        self.spent = 0;
-        if let Some(f) = &mut self.fit {
-            let s: Vec<String> =
-                f.iter().enumerate().filter(|x| *x.1 != 0).map(|(k, n)| format!("{k}:{n}")).collect();
-            eprintln!("FIT {} {}", hw.bus.clock, s.join(" "));
-            *f = [0; C::Count as usize];
-        }
+        hw.bus.clock = hw.bus.clock.max(self.seg + self.cyc / 2);
+        let kind = match c {
+            C::Per => "per",
+            C::Vol => "vol",
+            C::Adr => "loc",
+            C::Len => "len",
+            _ => "dma",
+        };
+        self.trace.write(hw, kind);
+        self.seg = hw.bus.clock;
+        self.cyc = 0;
     }
 
     fn poke_per(&mut self, hw: &mut Hw, i: u32, v: u16) {
@@ -662,6 +999,9 @@ impl Art {
     fn play(&mut self, hw: &mut Hw) {
         let g = self.code + G;
         self.cost(C::Tick);
+        if self.voices == 4 {
+            self.cost(C::Tick4);
+        }
         let f = hw.bus.r8(g + G_FRAME).wrapping_add(1);
         hw.bus.w8(g + G_FRAME, f);
         let speed = hw.bus.r8(g + G_SPEED);
@@ -690,6 +1030,7 @@ impl Art {
         let v = self.voice(i);
         self.cost(C::Write);
         if hw.bus.r16(v + V_FX) & 0xff0 == 0xed0 {
+            self.cost(C::WriteEd);
             return;
         }
         let new = hw.bus.r8(v + V_FLAG) & 2 != 0;
@@ -698,13 +1039,21 @@ impl Art {
             let old = hw.bus.r16(v + V_OLD_LENGTH);
             let len = hw.bus.r16(v + V_LENGTH);
             // noise avoid: a short sample after a short one is not restarted
-            let keep = hw.bus.r8(g + G_NOISE_AVOID) != 0 && old <= 0xff && old != 0 && len as i16 <= 0xff;
+            let mut keep = false;
+            if hw.bus.r8(g + G_NOISE_AVOID) != 0 {
+                self.cost(C::WriteNoise);
+                if old <= 0xff && old != 0 && len as i16 <= 0xff {
+                    self.cost(C::WriteKeep);
+                    keep = true;
+                }
+            }
             if !keep {
                 *mask |= 1 << i;
             }
         }
         let mut per = hw.bus.r16(v + V_PERIOD).wrapping_add(hw.bus.r16(v + V_SLIDE));
         if per < 0x67 {
+            self.cost(C::PerClamp);
             per = 0x67;
         }
         self.poke_per(hw, i, per);
@@ -714,14 +1063,19 @@ impl Art {
         if new {
             self.poke_adr(hw, i, hw.bus.r32(v + V_WAVE));
             self.poke_len(hw, i, hw.bus.r16(v + V_LENGTH));
+        } else {
+            self.cost(C::WriteOld);
         }
     }
 
     /// The next row ($10BE6): a position jump or pattern break first.
     fn new_step(&mut self, hw: &mut Hw) {
         let g = self.code + G;
-        if hw.bus.r8(g + G_BREAK) == 0xff && !self.next_position(hw) {
-            return;
+        if hw.bus.r8(g + G_BREAK) == 0xff {
+            self.cost(C::BreakFirst);
+            if !self.next_position(hw) {
+                return;
+            }
         }
         self.row(hw);
     }
@@ -749,7 +1103,11 @@ impl Art {
                 cell = cell.wrapping_add(4);
             }
             self.cost(C::RowEnd);
+            if n == 8 {
+                self.cost(C::Row8);
+            }
             if hw.bus.r8(g + G_LOOP) != 0 {
+                self.cost(C::RowLoop);
                 hw.bus.w8(g + G_LOOP, 0);
                 hw.bus.w8(g + G_ROW, hw.bus.r8(g + G_LOOP_ROW));
                 return;
@@ -759,6 +1117,7 @@ impl Art {
             if r != 0 {
                 return;
             }
+            self.cost(C::RowLast);
             if !self.next_position(hw) {
                 return;
             }
@@ -775,12 +1134,14 @@ impl Art {
         hw.bus.w8(g + G_POSITION, pos);
         let info = hw.bus.r32(g + G_INFO);
         if hw.bus.r8(info + 1) <= pos {
+            self.cost(C::PosEnd);
             hw.bus.w8(g + G_POSITION, hw.bus.r8(info + 2));
             self.songend = true;
         }
         if hw.bus.r8(g + G_BREAK) == 0 {
             return false;
         }
+        self.cost(C::PosBreak);
         hw.bus.w8(g + G_BREAK, 0);
         let pos = hw.bus.r8(g + G_POSITION) as u32;
         let pat = hw.bus.r8(hw.bus.r32(g + G_PLST).wrapping_add(pos));
@@ -800,8 +1161,12 @@ impl Art {
         let arg = b(hw, 3);
         hw.bus.w8(v + V_FX, fx);
         hw.bus.w8(v + V_ARG, arg);
-        if fx == 0xd && hw.bus.r8(g + G_ROW) == 0xfc {
-            hw.bus.w8(g + G_ROW, 0xf8);
+        if fx == 0xd {
+            self.cost(C::CellD);
+            if hw.bus.r8(g + G_ROW) == 0xfc {
+                self.cost(C::CellDLast);
+                hw.bus.w8(g + G_ROW, 0xf8);
+            }
         }
         // the effect and the argument's high nibble, as a word
         let ex = (fx as u16) << 8 | (arg & 0xf0) as u16;
@@ -818,15 +1183,21 @@ impl Art {
             hw.bus.w8(v + V_STEP, lo);
         } else if ex == 0xee0 {
             if neg8(hw.bus.r8(g + G_PATTERN_DELAY)) {
+                self.cost(C::CellDelaySet);
                 hw.bus.w8(g + G_PATTERN_DELAY, lo);
             }
         } else if ex == 0xe60 {
             let c = hw.bus.r8(g + G_LOOP_COUNT);
             if c != 0xf0 && lo != 0 {
+                self.cost(C::CellLoop);
                 if c == 0 {
+                    self.cost(C::CellLoopSet);
                     hw.bus.w8(g + G_LOOP_COUNT, lo);
                 }
                 let c = hw.bus.r8(g + G_LOOP_COUNT).wrapping_sub(1);
+                if c == 0 {
+                    self.cost(C::CellLoopEnd);
+                }
                 hw.bus.w8(g + G_LOOP_COUNT, if c == 0 { 0xf0 } else { c });
                 hw.bus.w8(g + G_LOOP, 0xff);
             }
@@ -843,19 +1214,28 @@ impl Art {
                 self.cost(C::NoInstr);
                 a2 = hw.bus.r32(v + V_INSTRUMENT);
                 if a2 == 0 {
+                    self.cost(C::NoInstrNone);
                     return;
                 }
                 if note == 0 {
+                    self.cost(C::NoInstrNoNote);
                     break 'instr;
                 }
                 old = true;
                 if porta {
+                    self.cost(C::NoInstrPorta);
                     break 'instr;
                 }
             } else if note == 0 {
                 self.cost(C::RepOnly);
                 a2 = hw.bus.r32(g + G_INSTRUMENTS + ((ins << 2) as u32));
-                if hw.bus.r8(a2 + I_TYPE) != 0 || a2 == hw.bus.r32(v + V_INSTRUMENT) {
+                if hw.bus.r8(a2 + I_TYPE) != 0 {
+                    self.cost(C::RepOnlySynth);
+                    self.take_volume(hw, v, a2, old);
+                    break 'instr;
+                }
+                if a2 == hw.bus.r32(v + V_INSTRUMENT) {
+                    self.cost(C::RepOnlySame);
                     self.take_volume(hw, v, a2, old);
                     break 'instr;
                 }
@@ -868,9 +1248,15 @@ impl Art {
                 self.cost(C::NewInstr);
                 hw.bus.w32(v + V_OFFSET, 0);
                 a2 = hw.bus.r32(g + G_INSTRUMENTS + ((ins << 2) as u32));
-                if a2 == hw.bus.r32(v + V_INSTRUMENT) && porta {
-                    self.take_volume(hw, v, a2, old);
-                    break 'instr;
+                if a2 == hw.bus.r32(v + V_INSTRUMENT) {
+                    self.cost(C::NewInstrSame);
+                    if porta {
+                        self.cost(C::NewInstrPorta);
+                        self.take_volume(hw, v, a2, old);
+                        break 'instr;
+                    }
+                } else if porta {
+                    self.cost(C::NewInstrPortaOnly);
                 }
                 hw.bus.w32(v + V_INSTRUMENT, a2);
             }
@@ -887,9 +1273,11 @@ impl Art {
                 let ex = hw.bus.r16(v + V_FX) & 0xfff0;
                 let lo = hw.bus.r8(v + V_ARG) & 0xf;
                 if ex == 0xed0 {
+                    self.cost(C::SampleEd);
                     hw.bus.w8(v + V_STEP, lo);
                 } else {
                     if ex == 0xe90 {
+                        self.cost(C::SampleE9);
                         hw.bus.w8(v + V_STEP, lo);
                     }
                     hw.bus.w8(v + V_FLAG, 3);
@@ -911,8 +1299,12 @@ impl Art {
 
     /// $1120E: the envelope, unless H's bit 0 keeps it.
     fn init_envelope(&mut self, hw: &mut Hw, v: u32, a2: u32) {
-        if hw.bus.r8(v + V_FX) == 0x11 && hw.bus.r8(v + V_ARG) & 1 != 0 {
-            return;
+        if hw.bus.r8(v + V_FX) == 0x11 {
+            self.cost(C::EnvH);
+            if hw.bus.r8(v + V_ARG) & 1 != 0 {
+                self.cost(C::EnvKeep);
+                return;
+            }
         }
         hw.bus.w8(v + V_ENV_VOL, hw.bus.r8(a2 + I_ENV_START));
         let add = hw.bus.r8(a2 + I_ENV_ADD);
@@ -936,18 +1328,27 @@ impl Art {
         let ex = hw.bus.r16(v + V_FX) & 0xfff0;
         let arg = hw.bus.r8(v + V_ARG);
         if ex == 0xe90 {
+            self.cost(C::SynthE9);
             hw.bus.w8(v + V_STEP, arg & 0xf);
         }
         if note == 0 {
+            self.cost(C::SynthNoNote);
             return;
         }
         hw.bus.w16(v + V_SLIDE, 0);
-        let h = if hw.bus.r8(v + V_FX) == 0x11 { arg } else { 0 };
+        let h = if hw.bus.r8(v + V_FX) == 0x11 {
+            self.cost(C::SynthH);
+            arg
+        } else {
+            0
+        };
         'wave: {
             if h & 0x10 != 0 {
+                self.cost(C::SynthHold);
                 break 'wave;
             }
             if ex == 0xed0 {
+                self.cost(C::SynthEd);
                 hw.bus.w8(v + V_STEP, arg & 0xf);
             } else {
                 hw.bus.w8(v + V_FLAG, 3);
@@ -956,8 +1357,10 @@ impl Art {
             hw.bus.w8(v + V_WAVE_NR, nr as u8);
             let mut w = hw.bus.r32(g + G_WAVES + 4 * nr);
             if w == hw.bus.r32(v + V_WAVE) {
+                self.cost(C::SynthSame);
                 hw.bus.w8(v + V_FLAG, 0);
                 if hw.bus.r8(v + V_WAVE_CONT) != 0 {
+                    self.cost(C::SynthCont);
                     break 'wave;
                 }
             }
@@ -969,12 +1372,14 @@ impl Art {
                 self.cost(C::SynthOffset);
                 w = (hw.bus.r8(v + V_ARG) as u32 * len).wrapping_add(w);
                 if stop {
+                    self.cost(C::SynthStop);
                     hw.bus.w32(v + V_WAVE_ACT, w);
                     hw.bus.w32(v + V_REPEAT, w);
                     break 'wave;
                 }
             }
             if stop {
+                self.cost(C::SynthStop);
                 break 'wave;
             }
             self.cost(C::SynthSetup);
@@ -999,6 +1404,7 @@ impl Art {
         // $10F6E: the vibrato
         hw.bus.w8(v + V_VIB_ON, 0);
         if hw.bus.r8(a2 + I_VIB_WAVE) == 3 {
+            self.cost(C::SynthVibOff);
             hw.bus.w8(v + V_VIB_ON, 0x21);
             return;
         }
@@ -1006,6 +1412,7 @@ impl Art {
         self.cost(C::SynthVib);
         let p = hw.bus.r8(a2 + I_VIB_PARAM);
         if p == 0 {
+            self.cost(C::SynthVibNone);
             hw.bus.w16(v + V_VIB_DELAY, 0xfffe);
             return;
         }
@@ -1021,6 +1428,7 @@ impl Art {
         let g = self.code + G;
         self.cost(C::SampleSet);
         if note != 0 {
+            self.cost(C::SampleNote);
             hw.bus.w16(v + V_SLIDE, 0);
         }
         let nr = hw.bus.r8(a2 + I_WAVE) as u32;
@@ -1038,6 +1446,11 @@ impl Art {
             let lp = hw.bus.r32(a2 + I_LOOP);
             let ll = hw.bus.r16(a2 + I_LOOP_LENGTH + 2);
             if !oversize && lp == 0 {
+                self.cost(C::SampleLoopStart);
+                if ll as u32 == len & 0xffff {
+                    // the loop is the whole sample
+                    self.cost(C::SampleLoopWhole);
+                }
                 hw.bus.w32(v + V_REPEAT, w);
                 hw.bus.w16(v + V_REPEAT_LENGTH, ll);
             } else {
@@ -1045,6 +1458,7 @@ impl Art {
                 hw.bus.w32(v + V_REPEAT, lp.wrapping_mul(2).wrapping_add(w));
                 hw.bus.w16(v + V_REPEAT_LENGTH, ll);
                 if !oversize {
+                    self.cost(C::SampleLoopLen);
                     hw.bus.w16(v + V_LENGTH, ll.wrapping_add(lp as u16));
                 }
             }
@@ -1061,6 +1475,7 @@ impl Art {
             if l as i16 >= 0 {
                 hw.bus.w32(v + V_OFFSET, off.wrapping_add(d3));
             } else {
+                self.cost(C::SampleOffsetEnd);
                 hw.bus.w32(v + V_WAVE, hw.bus.r32(v + V_REPEAT));
                 hw.bus.w16(v + V_LENGTH, hw.bus.r16(v + V_REPEAT_LENGTH));
                 return;
@@ -1076,14 +1491,21 @@ impl Art {
         self.cost(C::Note);
         let mut d0 = note;
         if d0 == 0 {
+            self.cost(C::NoteOld);
             d0 = hw.bus.r8(v + V_NOTE);
-            if d0 == 0 || d0 > 60 {
+            if d0 == 0 {
+                self.cost(C::NoteNone);
+                return;
+            }
+            if d0 > 60 {
+                self.cost(C::NoteOldHigh);
                 return;
             }
         } else {
             hw.bus.w8(v + V_SLIDING, 0);
             hw.bus.w8(v + V_NOTE, d0);
             if d0 > 60 {
+                self.cost(C::NoteHigh);
                 return;
             }
         }
@@ -1102,6 +1524,7 @@ impl Art {
         }
         let mut t = v + V_ARP;
         if hw.bus.r16(t + 2) == 0xffff {
+            self.cost(C::ArpReset);
             hw.bus.w16(v + V_ARP_POS, 0);
             hw.bus.w8(v + V_ARP_COUNT, 0);
         }
@@ -1153,11 +1576,13 @@ impl Art {
         let v = self.voice(i);
         self.cost(C::Fx);
         if hw.bus.r8(v + V_VIB_CONT) == 0 {
+            self.cost(C::FxVibOff);
             hw.bus.w8(v + V_VIB_ON, 0x21);
         }
         let c = hw.bus.r8(v + V_ARP_COUNT).wrapping_add(1);
         hw.bus.w8(v + V_ARP_COUNT, c);
         if (hw.bus.r8(v + V_ARP_SPEED) as i8) <= c as i8 {
+            self.cost(C::FxArp);
             hw.bus.w8(v + V_ARP_COUNT, 0);
             // an arpeggio of end marks alone would loop for ever
             for _ in 0..2 {
@@ -1165,6 +1590,7 @@ impl Art {
                 let pos = hw.bus.r16(v + V_ARP_POS) as i16 as i32;
                 let d7 = hw.bus.r16((v + V_ARP).wrapping_add(pos as u32));
                 if (d7 as i16) < 0 {
+                    self.cost(C::ArpEnd);
                     hw.bus.w16(v + V_ARP_POS, 0);
                     continue;
                 }
@@ -1184,12 +1610,23 @@ impl Art {
                 0xb, 0xc, 0xd, 0xe, 0xf, 0x10, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
                 0x1d, 0x1e, 0x21,
             ];
-            let chain = |t: &[u8], n: usize| t[..n].iter().position(|&x| x == fx).map_or(n, |k| k + 1) as u32;
+            self.cost(C::FxSet);
+            let chain = |t: &[u8], n: usize| t[..n].iter().position(|&x| x == fx).map_or((n, true), |k| (k + 1, false));
             if frame != 0 {
-                self.costs(C::Cmp, chain(&FIRST, 7));
+                let (k, miss) = chain(&FIRST, 7);
+                self.costs(C::Cmp, k as u32);
+                if miss {
+                    self.cost(C::CmpMiss);
+                }
+            } else {
+                self.cost(C::FxFrame0);
             }
             if frame == 0 || !self.slide_effect(hw, v, fx, d1) {
-                self.costs(C::Cmp, chain(&EVERY, 20));
+                let (k, miss) = chain(&EVERY, 20);
+                self.costs(C::Cmp, k as u32);
+                if miss {
+                    self.cost(C::CmpMissAll);
+                }
                 self.effect(hw, v, fx, d1);
             }
         }
@@ -1237,17 +1674,30 @@ impl Art {
         if hw.bus.r8(v + V_SLIDING) == 0 {
             return;
         }
+        self.cost(C::ToneOn);
         let d = hw.bus.r8(v + V_GLISS) as u16;
         let s = hw.bus.r16(v + V_SLIDE);
         if s == 0 {
             return;
         }
+        self.cost(C::ToneStep);
         let n = if (s as i16) < 0 {
+            self.cost(C::ToneUp);
             let n = s.wrapping_add(d);
-            if (n as i16) < 0 { n } else { 0 }
+            if (n as i16) < 0 {
+                n
+            } else {
+                self.cost(C::ToneEnd);
+                0
+            }
         } else {
             let n = s.wrapping_sub(d);
-            if (n as i16) >= 0 { n } else { 0 }
+            if (n as i16) >= 0 {
+                n
+            } else {
+                self.cost(C::ToneEnd);
+                0
+            }
         };
         hw.bus.w16(v + V_SLIDE, n);
     }
@@ -1258,10 +1708,13 @@ impl Art {
         if d1 == 0 {
             return;
         }
+        self.cost(C::VibParamSet);
         if d1 >> 4 != 0 {
+            self.cost(C::VibParamSpeed);
             hw.bus.w8(v + V_VIB_SPEED, d1 >> 4);
         }
         if d1 & 0xf != 0 {
+            self.cost(C::VibParamDepth);
             let a = hw.bus.r8(v + V_VIB_AMPL) & 0xf0 | d1 & 0xf;
             hw.bus.w8(v + V_VIB_AMPL, a);
         }
@@ -1270,6 +1723,7 @@ impl Art {
     /// $11512: the vibrato, once a tick.
     fn vibrato(&mut self, hw: &mut Hw, v: u32) {
         if hw.bus.r8(v + V_VIB_DONE) != 0 {
+            self.cost(C::VibDone);
             return;
         }
         hw.bus.w8(v + V_VIB_DONE, 1);
@@ -1277,18 +1731,30 @@ impl Art {
         let a = hw.bus.r8(v + V_VIB_AMPL);
         let tab = match a & 0x60 {
             0 => 0,
-            0x20 => 1,
-            _ => 2,
+            0x20 => {
+                self.cost(C::VibRamp);
+                1
+            }
+            _ => {
+                self.cost(C::VibSquare);
+                2
+            }
         };
         let pos = hw.bus.r8(v + V_VIB_POS) as u32;
         let x = hw.bus.r8(self.code + VIB_TABLES + 32 * tab + pos) as u16;
         let d = (x * (a & 0xf) as u16) >> 7;
         let p = hw.bus.r16(v + V_PERIOD);
-        let p = if a & 0x80 != 0 { p.wrapping_sub(d) } else { p.wrapping_add(d) };
+        let p = if a & 0x80 != 0 {
+            self.cost(C::VibDown);
+            p.wrapping_sub(d)
+        } else {
+            p.wrapping_add(d)
+        };
         hw.bus.w16(v + V_PERIOD, p);
         let pos = (pos as u8).wrapping_add(hw.bus.r8(v + V_VIB_SPEED));
         hw.bus.w8(v + V_VIB_POS, pos);
         if pos & 0x20 != 0 {
+            self.cost(C::VibHalf);
             hw.bus.w8(v + V_VIB_POS, pos & 0x1f);
             hw.bus.w8(v + V_VIB_AMPL, hw.bus.r8(v + V_VIB_AMPL) ^ 0x80);
         }
@@ -1300,13 +1766,16 @@ impl Art {
         let (hi, lo) = (d1 >> 4, d1 & 0xf);
         let mut vol = hw.bus.r8(v + V_VOLUME);
         if hi == 0 {
+            self.cost(C::VolSlideDown);
             vol = vol.wrapping_sub(lo);
             if neg8(vol) {
+                self.cost(C::VolSlideZero);
                 vol = 0;
             }
         }
         vol = vol.wrapping_add(hi);
         if vol > 0x40 {
+            self.cost(C::VolSlideTop);
             vol = 0x40;
         }
         hw.bus.w8(v + V_VOLUME, vol);
@@ -1318,17 +1787,25 @@ impl Art {
         if hw.bus.r8(self.code + G + G_FRAME) != 0 {
             return;
         }
+        self.cost(C::FineVolUp);
         let vol = hw.bus.r8(v + V_VOLUME).wrapping_add(d1);
+        if vol as i8 > 0x40 {
+            self.cost(C::FineVolClamp);
+        }
         hw.bus.w8(v + V_VOLUME, if vol as i8 > 0x40 { 0x40 } else { vol });
     }
 
     /// $11766: EB's fine volume slide down, on a row's first tick.
     fn fine_volume_down(&mut self, hw: &mut Hw, v: u32, d1: u8) {
-        self.cost(C::FineVol);
+        self.cost(C::FineVolD);
         if hw.bus.r8(self.code + G + G_FRAME) != 0 {
             return;
         }
+        self.cost(C::FineVolDown);
         let vol = hw.bus.r8(v + V_VOLUME).wrapping_sub(d1);
+        if neg8(vol) {
+            self.cost(C::FineVolClamp);
+        }
         hw.bus.w8(v + V_VOLUME, if neg8(vol) { 0 } else { vol });
     }
 
@@ -1361,10 +1838,25 @@ impl Art {
         let frame = hw.bus.r8(g + G_FRAME);
         self.cost(match fx {
             0xb => C::Jump,
-            0xc | 0x14 | 0x1b => C::SetVol,
+            0xc => C::SetVol,
             0xd => C::Break,
             0xe => C::Extra,
             0xf => C::Speed,
+            0x10 => C::F10,
+            0x12 => C::F12,
+            0x13 => C::F13,
+            0x14 => C::F14,
+            0x15 => C::F15,
+            0x16 => C::F16,
+            0x17 => C::F17,
+            0x18 => C::F18,
+            0x19 => C::F19,
+            0x1a => C::F1a,
+            0x1b => C::F1b,
+            0x1c => C::F1c,
+            0x1d => C::F1d,
+            0x1e => C::F1e,
+            0x21 => C::F21,
             _ => C::Misc,
         });
         match fx {
@@ -1383,10 +1875,12 @@ impl Art {
             0xe => self.extra(hw, v, d1),
             0xf => {
                 if d1 == 0 {
+                    self.cost(C::SpeedZero);
                     hw.bus.w8(g + G_SPEED, 0);
                     hw.bus.w8(g + G_TEMPO, 0x7d);
                     self.timer = TIMER;
                 } else if d1 <= 0x20 {
+                    self.cost(C::SpeedSet);
                     hw.bus.w8(g + G_SPEED, d1);
                 } else if d1 <= 0xc8 {
                     self.cost(C::Tempo);
@@ -1397,6 +1891,7 @@ impl Art {
             0x10 => {
                 let s = hw.bus.r8(v + V_STEP);
                 if s == 0 {
+                    self.cost(C::F10Set);
                     hw.bus.w8(v + V_VOLUME, (d1 >> 4).wrapping_mul(4).wrapping_add(4));
                 } else {
                     hw.bus.w8(v + V_STEP, s - 1);
@@ -1405,6 +1900,7 @@ impl Art {
             0x12 => hw.bus.w8(v + V_WAVE_SPEED, d1 >> 4),
             0x13 => {
                 if d1 & 0xf != 0 {
+                    self.cost(C::F13Set);
                     hw.bus.w8(v + V_ARP_SPEED, d1 & 0xf);
                 }
             }
@@ -1439,6 +1935,7 @@ impl Art {
             }
             0x21 => {
                 if frame == 0 {
+                    self.cost(C::F21Set);
                     hw.bus.w8(self.code + EVENTS, d1);
                 }
             }
@@ -1455,12 +1952,18 @@ impl Art {
         if d1 & 0xf0 != 0 {
             let k = CHAIN.iter().position(|&x| x == d1 & 0xf0).map_or(10, |k| k + 1);
             self.costs(C::Cmp, k as u32);
+            if !CHAIN.contains(&(d1 & 0xf0)) {
+                self.cost(C::ExtraMiss);
+            }
         }
         match d1 & 0xf0 {
             0x00 => {
                 // the LED filter, with a BSET or BCLR on the CIA's port
                 use m68k::AddressBus;
                 self.cost(C::Filter);
+                if lo != 0 {
+                    self.cost(C::FilterOn);
+                }
                 let p = hw.bus.read_byte(0xbfe001);
                 hw.bus.write_byte(0xbfe001, if lo != 0 { p | 2 } else { p & !2 });
             }
@@ -1475,6 +1978,7 @@ impl Art {
                 }
             }
             0x40 => {
+                self.cost(C::E4);
                 let a = hw.bus.r8(v + V_VIB_AMPL) & 0x9f | (lo & 3).rotate_right(3);
                 hw.bus.w8(v + V_VIB_AMPL, a);
             }
@@ -1485,8 +1989,10 @@ impl Art {
                 }
             }
             0x90 | 0xd0 => {
+                self.cost(C::EStep);
                 let s = hw.bus.r8(v + V_STEP);
                 if s == 0 {
+                    self.cost(C::EStepEnd);
                     hw.bus.w8(v + V_FLAG, 3);
                     hw.bus.w8(v + V_FX, 0xef);
                 } else {
@@ -1496,8 +2002,10 @@ impl Art {
             0xa0 => self.fine_volume_up(hw, v, lo),
             0xb0 => self.fine_volume_down(hw, v, lo),
             0xc0 => {
+                self.cost(C::ECut);
                 let s = hw.bus.r8(v + V_STEP);
                 if s == 0 {
+                    self.cost(C::ECutEnd);
                     hw.bus.w8(v + V_VOLUME, 0);
                 } else {
                     hw.bus.w8(v + V_STEP, s - 1);
@@ -1510,8 +2018,10 @@ impl Art {
     /// $11716: E5's loop point, the row before the next.
     fn set_loop(&mut self, hw: &mut Hw) {
         let g = self.code + G;
+        self.cost(C::SetLoop);
         let r = hw.bus.r8(g + G_ROW).wrapping_sub(4);
         if r != hw.bus.r8(g + G_LOOP_ROW) {
+            self.cost(C::SetLoopNew);
             hw.bus.w8(g + G_LOOP_ROW, r);
             hw.bus.w8(g + G_LOOP_COUNT, 0);
         }
@@ -1523,10 +2033,13 @@ impl Art {
         hw.bus.w8(v + V_VIB_DONE, 0);
         'env: {
             if hw.bus.r8(v + V_FLAG) != 0 {
+                self.cost(C::SynthTickFlag);
                 break 'env;
             }
             if hw.bus.r8(v + V_SYNTH) != 0 {
+                self.cost(C::SynthTickSynth);
                 if hw.bus.r32(v + V_WAVE) == 0 {
+                    self.cost(C::SynthTickNoWave);
                     break 'env;
                 }
                 if hw.bus.r8(v + V_WAVE_STOP) == 0 {
@@ -1539,8 +2052,10 @@ impl Art {
                 self.cost(C::Env);
                 let mut d0 = hw.bus.r8(v + V_ENV_VOL);
                 if env == 1 {
+                    self.cost(C::EnvAttack);
                     d0 = d0.wrapping_add(hw.bus.r8(v + V_ENV_ADD));
                     if neg8(d0) {
+                        self.cost(C::EnvAttackTop);
                         d0 = 0x7f;
                         hw.bus.w8(v + V_ENV, 2);
                     }
@@ -1548,6 +2063,7 @@ impl Art {
                     d0 = d0.wrapping_sub(hw.bus.r8(v + V_ENV_SUB));
                     let end = hw.bus.r8(v + V_ENV_END);
                     if d0 as i8 <= end as i8 {
+                        self.cost(C::EnvDecayEnd);
                         d0 = end;
                         hw.bus.w8(v + V_ENV, 0);
                     }
@@ -1559,6 +2075,7 @@ impl Art {
                 self.cost(C::VibDelay);
                 let d = hw.bus.r16(v + V_VIB_DELAY);
                 if d == 0xffff {
+                    self.cost(C::VibDelayEnd);
                     hw.bus.w8(v + V_VIB_ON, 1);
                 } else {
                     hw.bus.w16(v + V_VIB_DELAY, d.wrapping_sub(1));
@@ -1566,6 +2083,7 @@ impl Art {
             }
         }
         if hw.bus.r8(v + V_VIB_ON) == 1 {
+            self.cost(C::VibOn);
             self.vibrato(hw, v);
         }
     }
@@ -1584,9 +2102,15 @@ impl Art {
         let add = r32(hw, V_WAVE_ADD);
         let act = r32(hw, V_WAVE_ACT).wrapping_add(add);
         hw.bus.w32(v + V_WAVE_ACT, act as u32);
+        if add < 0 {
+            self.cost(C::WaveBack);
+        }
         let past = if add >= 0 { r32(hw, V_WAVE_END) <= act } else { r32(hw, V_WAVE_REP) > act };
         if past {
             self.cost(C::WaveReset);
+            if add < 0 {
+                self.cost(C::WaveBackReset);
+            }
             match hw.bus.r8(v + V_WAVE_CTRL) {
                 0 => {
                     hw.bus.w32(v + V_WAVE_ACT, r32(hw, V_WAVE_REP) as u32);
@@ -1594,11 +2118,15 @@ impl Art {
                 }
                 1 => {
                     // backwards, from the loop's end
+                    self.cost(C::WaveCtrl1);
                     hw.bus.w32(v + V_WAVE_ACT, r32(hw, V_WAVE_REP_END) as u32);
                     let mut d0 = r32(hw, V_WAVE_ADD);
                     if d0 >= 0 {
+                        self.cost(C::WaveCtrl1Turn);
                         d0 = d0.wrapping_neg();
-                        if hw.bus.r8(v + V_WAVE_STOP) == 0 {
+                        if hw.bus.r8(v + V_WAVE_STOP) != 0 {
+                            self.cost(C::WaveCtrl1Stop);
+                        } else {
                             let a = r32(hw, V_WAVE_ACT).wrapping_add(d0);
                             hw.bus.w32(v + V_WAVE_ACT, a as u32);
                             hw.bus.w32(v + V_WAVE_ADD, d0 as u32);
@@ -1611,6 +2139,10 @@ impl Art {
                 }
                 _ => {
                     // ping-pong
+                    self.cost(C::WaveCtrl2);
+                    if add < 0 {
+                        self.cost(C::WaveBackCtrl2);
+                    }
                     hw.bus.w32(v + V_WAVE_END, r32(hw, V_WAVE_REP_END) as u32);
                     let d0 = r32(hw, V_WAVE_ADD);
                     let a = r32(hw, V_WAVE_ACT).wrapping_sub(d0);

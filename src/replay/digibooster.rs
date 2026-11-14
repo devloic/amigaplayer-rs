@@ -22,7 +22,6 @@
 //! play) forwards. DigiBooster Pro (`DBM0`) is another format, left out.
 
 use super::{be16, be32, Hw, Open, Replayer};
-use crate::amplifier::aus;
 use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "Digibooster", detect, new };
@@ -44,6 +43,171 @@ fn hex(i: u8) -> i8 {
     ((i / 16) * 10 + (i % 16)).min(63) as i8
 }
 
+/// The Eagleplayer's code paths between two of its host calls (ENPP_Poke*, ENPP_DMAMask), for
+/// the times of its writes: each call lands at the 68000 cycles its code took since the previous
+/// call (or the timer interrupt's start), halved and rounded down. The effect classes are the
+/// effect number, and $E0 + x for Exy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum C {
+    /// The interrupt's start, and the row's work on a tick that takes one.
+    Tick,
+    Row,
+    /// Each voice, on a tick after a row and on the others.
+    VoiceRow,
+    Voice,
+    /// The tick after a row: the period again after an empty row, a note's DMA off, length,
+    /// address and period, the effect's period and the volume.
+    RowA,
+    /// A row's sample number, a note's DMA off, and more for a sample whose loop starts
+    /// past its start.
+    Sample,
+    NoteDma,
+    NoteLoopStart,
+    NoteOffset,
+    NoteNine,
+    NoteLen,
+    NoteLoc,
+    NotePer,
+    NoNote,
+    RowPer(u8),
+    RowVol(u8),
+    /// The other ticks: the effect's period and the volume.
+    Per(u8),
+    Vol(u8),
+    DmaOn,
+    Clamp,
+    GlissTarget(u8),
+    GlissDown,
+    Gliss(u8),
+    OffsetNear,
+    /// A row's Fxx of 32 or more: the timer's new period.
+    Tempo,
+    SlideDown,
+    /// To the wait for the beam after a row, and each voice's loop.
+    WaitStart,
+    LoopLoc,
+    LoopLen,
+    LoopLenLoop,
+    LoopLenEnd,
+}
+
+impl C {
+    /// 68000 cycles of each path, fitted as integers to the Eagleplayer's write log.
+    fn cycles(self) -> u64 {
+        match self {
+            C::Clamp => 16,
+            C::DmaOn => 298,
+            C::GlissDown => 16,
+            C::LoopLen => 209,
+            C::LoopLenEnd => 209,
+            C::LoopLenLoop => 205,
+            C::LoopLoc => 208,
+            C::NoNote => 68,
+            C::NoteDma => 664,
+            C::NoteLen => 295,
+            C::NoteLoc => 182,
+            C::NoteLoopStart => 64,
+            C::NoteNine => 4,
+            C::NoteOffset => 237,
+            C::NotePer => 211,
+            C::OffsetNear => 34,
+            C::Per(1) => 245,
+            C::Per(10) => 258,
+            C::Per(12) => 258,
+            C::Per(13) => 258,
+            C::Per(15) => 258,
+            C::Per(2) => 264,
+            C::Per(3) => 533,
+            C::Per(4) => 516,
+            C::Per(6) => 457,
+            C::Per(9) => 258,
+            C::Row => 193,
+            C::RowA => 196,
+            C::RowPer(0) => 378,
+            C::RowPer(1) => 378,
+            C::RowPer(10) => 378,
+            C::RowPer(2) => 378,
+            C::RowPer(225) => 566,
+            C::RowPer(226) => 585,
+            C::RowPer(3) => 378,
+            C::RowPer(4) => 378,
+            C::RowPer(5) => 378,
+            C::RowPer(6) => 378,
+            C::RowVol(0) => 383,
+            C::RowVol(1) => 383,
+            C::RowVol(10) => 383,
+            C::RowVol(12) => 634,
+            C::RowVol(13) => 695,
+            C::RowVol(15) => 660,
+            C::RowVol(2) => 383,
+            C::RowVol(224) => 666,
+            C::RowVol(225) => 383,
+            C::RowVol(226) => 383,
+            C::RowVol(227) => 813,
+            C::RowVol(228) => 813,
+            C::RowVol(230) => 745,
+            C::RowVol(231) => 750,
+            C::RowVol(234) => 855,
+            C::RowVol(235) => 858,
+            C::RowVol(3) => 383,
+            C::RowVol(4) => 383,
+            C::RowVol(5) => 383,
+            C::RowVol(6) => 383,
+            C::RowVol(9) => 616,
+            C::Sample => 496,
+            C::SlideDown => 8,
+            C::Tempo => 497,
+            C::Tick => 123,
+            C::Voice => 410,
+            C::VoiceRow => 181,
+            C::Vol(0) => 189,
+            C::Vol(1) => 275,
+            C::Vol(10) => 429,
+            C::Vol(12) => 333,
+            C::Vol(13) => 333,
+            C::Vol(15) => 333,
+            C::Vol(2) => 275,
+            C::Vol(224) => 474,
+            C::Vol(225) => 462,
+            C::Vol(226) => 481,
+            C::Vol(227) => 621,
+            C::Vol(228) => 621,
+            C::Vol(230) => 500,
+            C::Vol(231) => 558,
+            C::Vol(234) => 576,
+            C::Vol(235) => 595,
+            C::Vol(3) => 327,
+            C::Vol(4) => 349,
+            C::Vol(5) => 484,
+            C::Vol(6) => 471,
+            C::Vol(9) => 333,
+            C::WaitStart => 0,
+            C::GlissTarget(i) => 466 + 44 * i as u64,
+            C::Gliss(g) => g as u64,
+            _ => 0,
+        }
+    }
+}
+
+/// The trace of code paths for fitting their cycles (DIGI_TRACE=file): each host call's
+/// clock, what it writes, and the paths since the previous one.
+#[derive(Default)]
+struct Trace {
+    out: Option<std::io::BufWriter<std::fs::File>>,
+    pend: Vec<C>,
+}
+
+/// Raster lines the Eagleplayer waits for after a row's DMA on, and the colour clock of the
+/// line where its next write comes (measured: always 130).
+const WAIT_LINES: u64 = 10;
+const GLISS_FIRST: u64 = 28;
+const GLISS_REACH_DOWN: u64 = 36;
+const GLISS_REACH_UP: u64 = 46;
+/// The vibrato's above its middle, and its row giving a speed (measured).
+const VIB_UP: u64 = 10;
+const VIB_MOVE: u64 = 12;
+const WAIT_PHASE: u64 = 26;
+
 const E_ARPEGGIO: u8 = 0;
 const E_PORTAMENTO_UP: u8 = 1;
 const E_PORTAMENTO_DOWN: u8 = 2;
@@ -64,7 +228,6 @@ const X_FILTER: u8 = 0x00;
 const X_FINE_SLIDE_UP: u8 = 0x10;
 const X_FINE_SLIDE_DOWN: u8 = 0x20;
 const X_BACKWARD: u8 = 0x30;
-const X_STOP: u8 = 0x40;
 const X_CHANNEL_ON_OFF: u8 = 0x50;
 const X_LOOP: u8 = 0x60;
 const X_SAMPLE_OFFSET: u8 = 0x80;
@@ -86,6 +249,16 @@ struct TrackLine {
     arg: u8,
 }
 
+/// A period stretched by 12 cents per step of the fine tune, 2^(-ft/100), and rounded down
+/// (measured: 285 at +2 is 281, 170 at -4 is 174): not by NostalgicPlayer's tables, which
+/// round to ProTracker's.
+fn tune(period: u16, ft: i8) -> u16 {
+    if ft == 0 {
+        return period;
+    }
+    (period as f64 * 2f64.powf(-(ft as f64) / 100.0)) as u16
+}
+
 fn track_line(data: u32) -> TrackLine {
     TrackLine {
         period: ((data >> 16) & 0x0fff) as u16,
@@ -100,6 +273,9 @@ struct Sample {
     length: u32,
     loop_start: u32,
     loop_len: u32,
+    /// The loop's start as the module gives it (where a sample without a loop goes on).
+    raw_loop_start: u32,
+    raw_loop_len: u32,
     volume: u8,
     fine_tune: i8,
     /// Offset of its data in the module.
@@ -121,7 +297,7 @@ fn load(d: &[u8]) -> Option<Song> {
     if !detect(d) {
         return None;
     }
-    let (version, channels, packed) = (d[24], d[25] as usize, d[26] != 0);
+    let (channels, packed) = (d[25] as usize, d[26] != 0);
     let patterns_n = d[46].wrapping_add(1) as usize;
     let length = d[47].wrapping_add(1);
     let mut orders = [0u8; 128];
@@ -134,10 +310,10 @@ fn load(d: &[u8]) -> Option<Song> {
         };
         let (ls, ll) = (be32(d, 300 + 4 * i), be32(d, 424 + 4 * i));
         s.volume = d[548 + i];
+        // the Eagleplayer tunes the samples of every version (NostalgicPlayer leaves those of
+        // 1.0 to 1.3 untuned)
         s.fine_tune = d[579 + i] as i8;
-        if (0x10..=0x13).contains(&version) {
-            s.fine_tune = 0;
-        }
+        (s.raw_loop_start, s.raw_loop_len) = (ls, ll);
         let (mut ls, mut ll) = (ls, ll);
         if ls > s.length || ll == 0 {
             ls = 0;
@@ -193,11 +369,10 @@ fn load(d: &[u8]) -> Option<Song> {
         patterns.push(pat);
     }
     for s in samples.iter_mut() {
-        if s.length != 0 {
-            // a file cut short plays on into whatever follows it in memory, as the original's
-            s.data = Some(p);
-            p += s.length as usize;
-        }
+        // a file cut short plays on into whatever follows it in memory, as the original's;
+        // a sample of no bytes is played too, from where the next one starts (measured)
+        s.data = Some(p);
+        p += s.length as usize;
     }
     Some(Song { channels, length, orders, name, samples, patterns })
 }
@@ -226,8 +401,8 @@ struct Chan {
     loop_song_pos: u8,
     loop_how_many: u8,
     backward: u8,
-    porta_up_old: u8,
-    porta_down_old: u8,
+    /// The portamento's value, one for up and down.
+    porta_old: u8,
     vibrato_period: u16,
     vibrato_value: i8,
     vibrato_old: u8,
@@ -243,7 +418,26 @@ struct Chan {
     sample_data: Option<usize>,
     start_offset: u32,
     row: (u16, u8, u8, u8),
-    twice: bool,
+    /// The row before was empty (no note, no effect), or there was none.
+    prev_empty: bool,
+    /// The period written last.
+    last_per: u16,
+    /// The glissando moved the period on its last step (the Eagleplayer writes it only then).
+    gliss_moved: bool,
+    /// ... and the period it wrote then.
+    gliss_out: u16,
+    /// A volume slide met its end (0 or 64) since the last volume write: 16 cycles more.
+    clamped: bool,
+    /// The glissando's and vibrato's extra cycles since the last write: the glissando's first
+    /// tick in a row and reaching its target down or up, the vibrato's above its middle and
+    /// moving (measured).
+    gliss_cost: u64,
+    /// The last sample offset went past half its sample.
+    offset_far: bool,
+    /// ... and slid down (8 cycles more than up).
+    slide_down: bool,
+    /// ... or slid at all.
+    slid: bool,
     /// The colour clock at which a sample with no loop has played out.
     ends_at: u64,
     looped: bool,
@@ -253,6 +447,9 @@ pub struct DigiBooster {
     song: Song,
     base: u32,
     cia_tempo: u16,
+    /// The tempo the timer runs at: the original sets the CIA timer a tick after the port's
+    /// row parse (the new period counts from the second underflow after the parse).
+    cia_out: u16,
     tempo: u8,
     count: u8,
     song_pos: u8,
@@ -264,29 +461,125 @@ pub struct DigiBooster {
     visited: [bool; 256],
     songend: bool,
     row_out: bool,
+    /// This tick takes a row.
+    parse_tick: bool,
     title: String,
+    /// The clock of the last host call (or the interrupt's start), and the 68000 cycles the
+    /// original spent since.
+    seg: u64,
+    cyc: u64,
+    trace: Trace,
+}
+
+/// The colour clocks the Eagleplayer takes from loading to starting its amplifier, and from
+/// there to the song's first tick (it starts the amplifier again then). Before the song it
+/// walks the positions but the last, unpacking each pattern and going through its rows as
+/// they play (loops, breaks, speeds); the time is a fit of the file's counts to the
+/// reference's start in 238 modules (black box): the header's 2175 + 21 a pattern is exact,
+/// the walk is within 4600 colour clocks on average (the loops and some commands are not
+/// walked as the original does), the time to the first tick within 33.
+fn start_clocks(s: &Song, packed: bool) -> (u64, u64) {
+    let npat = s.patterns.len() as f64;
+    let nsmp = s.samples.iter().filter(|x| x.length != 0).count() as f64;
+    let mut f = [0f64; 12];
+    let (pos, rows, ticks, cell, fx, ecmd, fspeed, fbpm, f0, loops, stop, delay) = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+    let mut speed = 6u8;
+    for k in 0..(s.length as usize).saturating_sub(1) {
+        let Some(pat) = s.patterns.get(s.orders[k] as usize) else { continue };
+        f[pos] += 1.0;
+        let (mut rw, mut guard) = (0usize, 0);
+        let (mut lp, mut cnt) = ([0usize; 8], [0u8; 8]);
+        while rw < 64 && guard < 5000 {
+            guard += 1;
+            f[rows] += 1.0;
+            let (mut nxt, mut brk) = (rw + 1, false);
+            for (ch, c) in pat[rw].iter().enumerate() {
+                let (e, a) = (c.effect, c.arg);
+                if c.period != 0 || c.sample != 0 || e != 0 || a != 0 {
+                    f[cell] += 1.0;
+                }
+                if e != 0 || a != 0 {
+                    f[fx] += 1.0;
+                    match e {
+                        E_EXTRA => {
+                            f[ecmd] += 1.0;
+                            if a & 0xf0 == X_LOOP {
+                                f[loops] += 1.0;
+                            }
+                        }
+                        E_SET_SPEED if a == 0 => f[f0] += 1.0,
+                        E_SET_SPEED if a < 32 => f[fspeed] += 1.0,
+                        E_SET_SPEED => f[fbpm] += 1.0,
+                        _ => {}
+                    }
+                }
+                if e == E_PATTERN_BREAK || e == E_SONG_REPEAT {
+                    brk = true;
+                }
+                if e == E_EXTRA && a & 0xf0 == X_LOOP {
+                    match (a & 15, cnt[ch]) {
+                        (0, 0) => lp[ch] = rw,
+                        (0, _) => {}
+                        (_, 0) => {
+                            cnt[ch] = a & 15;
+                            nxt = lp[ch];
+                        }
+                        _ => {
+                            cnt[ch] -= 1;
+                            if cnt[ch] != 0 {
+                                nxt = lp[ch];
+                            }
+                        }
+                    }
+                }
+            }
+            for c in &pat[rw] {
+                if c.effect == E_SET_SPEED && c.arg != 0 && c.arg < 32 {
+                    speed = c.arg;
+                }
+            }
+            for c in &pat[rw] {
+                if c.effect == E_EXTRA && c.arg & 0xf0 == X_PATTERN_DELAY {
+                    f[delay] += speed as f64 * (c.arg & 15) as f64;
+                }
+            }
+            f[ticks] += speed as f64;
+            if brk {
+                f[stop] += 1.0;
+                break;
+            }
+            rw = nxt;
+        }
+    }
+    const W: [f64; 12] = [13445.046, 647.649, 13.772, 0.506, 33.951, 27.672, 16.957, 39.694, 1967.99, -298.774, 380.002, -0.688];
+    let walk: f64 = f.iter().zip(W).map(|(x, w)| x * w).sum();
+    let amp = 2175.0 + 21.0 * npat + 5560.538 + 32.464 * npat + 187.331 * nsmp + walk;
+    // to the first tick: exact for unpacked modules, within 33 colour clocks for packed ones
+    let tail = if packed { 16832.0 + 35.772 * npat + 3.45 * nsmp } else { 11190.0 + 15.0 * npat + 2.0 * nsmp };
+    (amp.max(0.0).round() as u64, tail.round() as u64)
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let song = load(d)?;
-    let structs = m.alloc(8 * aus::SIZE);
-    if structs == 0 {
-        return None;
-    }
-    // left, left, right, right, right, right, left, left
-    for v in 0..8u32 {
-        let pan: u16 = if matches!(v, 0 | 1 | 6 | 7) { 1 } else { 0xFFFF };
-        m.bus.w16(structs + v * aus::SIZE + aus::PAN, pan);
-    }
+    // the time to the amplifier's start and to the song's: the port's first tick comes
+    // 100 colour clocks after its start
+    let (amp, tail) = start_clocks(&song, d[26] != 0);
+    m.bus.clock += amp.saturating_sub(100);
+    // left, left, right, right, right, right, left, left; the original's AudioStructs are
+    // its own, so the amplifier's buffers come right after the module (what a sample that
+    // plays past the module's end plays, measured)
     use crate::eagle::epamb;
-    if !crate::amplifier::start(m, 8, structs, epamb::DIRECT | epamb::BIT8 | epamb::CHIP_RAM) {
+    if !crate::amplifier::start_panned(m, 8, epamb::DIRECT | epamb::BIT8 | epamb::CHIP_RAM, &[1, 1, -1, -1, -1, -1, 1, 1], 100) {
         return None;
     }
+    m.bus.clock += tail;
+    crate::amplifier::restart(&mut m.bus);
     let channels = song.channels.clamp(1, 8);
     let title = song.name.clone();
     let mut o = DigiBooster {
         base,
         cia_tempo: 125,
+        cia_out: 125,
         tempo: 6,
         count: 2,
         song_pos: 0,
@@ -294,11 +587,18 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         row: [TrackLine::default(); 8],
         pause_vbl: 0,
         pause_enabled: false,
-        chans: vec![Chan::default(); channels],
+        chans: vec![Chan { prev_empty: true, ..Chan::default() }; channels],
         visited: [false; 256],
         songend: false,
         row_out: false,
+        parse_tick: false,
         title,
+        seg: 0,
+        cyc: 0,
+        trace: Trace {
+            out: std::env::var_os("DIGI_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(std::io::BufWriter::new),
+            pend: Vec::new(),
+        },
         song,
     };
     o.visited[0] = true;
@@ -319,16 +619,24 @@ impl Replayer for DigiBooster {
     }
 
     fn tick_clocks(&self) -> u64 {
-        (1_773_447 / self.cia_tempo.max(1) as u64 + 1) * 5
+        (1_773_447 / self.cia_out.max(1) as u64 + 1) * 5
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.seg = hw.bus.clock;
+        self.cyc = 0;
+        self.trace.pend.clear();
+        if let Some(o) = &mut self.trace.out {
+            use std::io::Write;
+            let _ = writeln!(o, "T {}", hw.bus.clock);
+        }
         self.play(hw);
     }
 }
 
 impl DigiBooster {
     fn play(&mut self, hw: &mut Hw) {
+        self.cia_out = self.cia_tempo;
         let current = self.song_pos;
         let n = self.chans.len();
         if self.count >= self.tempo {
@@ -355,17 +663,36 @@ impl DigiBooster {
                 self.row = p[(self.pattern_pos.clamp(0, 63)) as usize];
             }
         }
+        self.cost(C::Tick);
+        if self.row_out {
+            self.cost(C::Row);
+        }
         let mut dma_on = 0u32;
         for v in 0..n {
+            self.cost(if self.row_out { C::VoiceRow } else { C::Voice });
             self.play_voice(hw, v, &mut dma_on);
         }
         if dma_on != 0 {
+            self.cost(C::DmaOn);
+            self.call(hw, "dma");
             hw.voice_dma(dma_on, true);
         }
         if self.row_out {
+            // the original waits for the beam before it writes the loops
+            if dma_on == 0 {
+                // the time of the DMA on goes by with no voice to start (measured: the wait
+                // counts its lines from 149 colour clocks after the last volume)
+                self.cost(C::DmaOn);
+            }
+            self.cost(C::WaitStart);
+            hw.bus.clock = self.seg + self.cyc / 2;
+            hw.wait_lines(WAIT_LINES, WAIT_PHASE);
+            (self.seg, self.cyc) = (hw.bus.clock, 0);
+            self.trace.pend.clear();
             self.write_loops(hw);
         }
         let parsed = self.tempo != 0 && self.count >= self.tempo;
+        self.parse_tick = parsed;
         for v in 0..n {
             let row = self.row[v];
             self.parse_voice(v, row);
@@ -396,80 +723,134 @@ impl DigiBooster {
     }
 
     /// Plays the voice from what the previous tick worked out, writing what the
-    /// Eagleplayer writes: a voice playing a note has its period and volume set
-    /// on the tick after its row (and its sample started, if it is a new note),
-    /// its volume on every tick, its period on every tick that an effect is on.
+    /// Eagleplayer writes (measured on its virtual voices' write log): on the tick
+    /// after a row, the period once more if the row before it was empty (no note, no
+    /// effect), a new note's sample and period, and the period again for the effects
+    /// that work on it (0-7, A, E1x, E2x); on the other ticks the period for every
+    /// effect but 0 and Ex; the volume on every tick.
     fn play_voice(&mut self, hw: &mut Hw, v: usize, dma_on: &mut u32) {
         let mut c = std::mem::take(&mut self.chans[v]);
         let row_tick = self.row_out;
-        // a row with an effect has the effect's code write the period once, in place of the second write
-        let row_fx = matches!(c.row.2, E_SONG_REPEAT | E_SET_VOLUME | E_PATTERN_BREAK | E_EXTRA | E_SET_SPEED);
+        let (eff, x) = (c.row.2, c.row.3 & 0xf0);
         // E1x and E2x: the period before the slide, and after it
-        let slide = c.row.2 == E_EXTRA && matches!(c.row.3 & 0xf0, X_FINE_SLIDE_UP | X_FINE_SLIDE_DOWN);
-        if c.main_period != 0 {
-            let mut retrig = false;
-            if c.off_enable {
-                c.off_enable = false;
-                retrig = true;
-                if c.play_pointer && matches!(c.last.effect, E_GLISSANDO | E_GLISSANDO_VOLSLIDE) {
-                    retrig = false;
-                }
-            }
-            if c.main_period == -1 {
-                hw.voice_per(v, 0);
-                hw.voice_vol(v, 0);
-                c.play_pointer = true;
-                c.main_period = 0;
-            } else {
-                let per = c.main_period as u16;
-                let vol = c.main_volume.min(64) as u16;
-                if retrig {
-                    hw.voice_per(v, 0);
-                    if let Some(i) = c.sample_data {
-                        // Paula plays up to the end of the loop first
-                        let smp = &self.song.samples[i];
-                        let end = if smp.loop_len > 0 { smp.loop_start + smp.loop_len } else { smp.length };
-                        let len = end.saturating_sub(c.start_offset);
-                        let loc = self.sample_addr(i, c.start_offset);
-                        c.looped = smp.loop_len > 0;
-                        c.ends_at = hw.bus.clock + len as u64 * per as u64;
-                        hw.voice_dma(1 << v, false);
-                        hw.voice_len(v, (len / 2) as u16);
-                        hw.voice_loc(v, loc);
-                        *dma_on |= 1 << v;
-                    }
-                    if slide {
-                        hw.voice_per(v, c.original_period);
-                    }
-                    hw.voice_per(v, per);
-                    if !row_fx {
-                        hw.voice_per(v, per);
-                    }
-                    c.twice = false;
-                } else if row_tick {
-                    if !row_fx {
-                        hw.voice_per(v, per);
-                        if c.twice {
-                            hw.voice_per(v, per);
-                        }
-                    }
-                    c.twice = true;
-                } else if c.row.2 != 0 {
-                    hw.voice_per(v, per);
-                }
-                hw.voice_vol(v, vol);
-                c.play_pointer = true;
-            }
+        let slide = eff == E_EXTRA && matches!(x, X_FINE_SLIDE_UP | X_FINE_SLIDE_DOWN);
+        let again = row_tick && c.prev_empty;
+        let fx_per = if row_tick {
+            eff <= E_VIBRATO_VOLSLIDE || eff == 7 || eff == E_VOLUME_SLIDE || slide
+        } else if matches!(eff, E_GLISSANDO | E_GLISSANDO_VOLSLIDE) {
+            c.gliss_moved
         } else {
-            if row_tick {
-                hw.voice_per(v, 0);
-                if !row_fx {
-                    hw.voice_per(v, 0);
+            eff != 0 && eff != E_EXTRA
+        };
+        if row_tick {
+            c.prev_empty = c.row.0 == 0 && eff == 0;
+        }
+        let mut retrig = false;
+        if c.main_period > 0 && c.off_enable {
+            c.off_enable = false;
+            retrig = !(c.play_pointer && matches!(c.last.effect, E_GLISSANDO | E_GLISSANDO_VOLSLIDE));
+        }
+        let per = c.main_period.max(0) as u16;
+        let class = if eff == E_EXTRA { 0xe0 | x >> 4 } else { eff };
+        if again {
+            self.cost(C::RowA);
+            self.call(hw, "per");
+            hw.voice_per(v, c.last_per);
+        }
+        if row_tick && c.row.1 != 0 {
+            self.cost(C::Sample);
+        }
+        if retrig {
+            if let Some(i) = c.sample_data {
+                // Paula plays up to the end of the loop first
+                let smp = &self.song.samples[i];
+                // to the loop's end as the module gives it, even past the sample's end
+                // (measured), or to the sample's end when it gives none
+                let end = match smp.raw_loop_start + smp.raw_loop_len {
+                    0 => smp.length,
+                    e => e,
+                };
+                let len = end.saturating_sub(c.start_offset);
+                let loc = self.sample_addr(i, c.start_offset);
+                c.looped = smp.loop_len > 0;
+                let late_loop = smp.raw_loop_start != 0;
+                self.cost(C::NoteDma);
+                if late_loop {
+                    self.cost(C::NoteLoopStart);
                 }
-            } else if c.row.2 != 0 {
-                hw.voice_per(v, 0);
+                if eff == E_SAMPLE_OFFSET {
+                    self.cost(C::NoteOffset);
+                }
+                // sample 9's notes take 4 cycles more (measured in 7 modules, every note of it)
+                if c.row.1 == 9 {
+                    self.cost(C::NoteNine);
+                }
+                self.call(hw, "dmaoff");
+                c.ends_at = hw.bus.clock + len as u64 * per as u64;
+                hw.voice_dma(1 << v, false);
+                self.cost(C::NoteLen);
+                if len / 2 == 0 {
+                    self.cost(C::NoteNine);
+                }
+                self.call(hw, "len");
+                hw.voice_len(v, (len / 2) as u16);
+                self.cost(C::NoteLoc);
+                self.call(hw, "loc");
+                hw.voice_loc(v, loc);
+                *dma_on |= 1 << v;
             }
-            hw.voice_vol(v, 0);
+            let p = if slide { c.original_period } else { per };
+            self.cost(C::NotePer);
+            self.call(hw, "per");
+            hw.voice_per(v, p);
+            c.last_per = p;
+        } else if row_tick {
+            self.cost(C::NoNote);
+        }
+        let g = std::mem::take(&mut c.gliss_cost);
+        if g != 0 {
+            self.cost(C::Gliss(g as u8));
+        }
+        if row_tick && eff == E_GLISSANDO && c.row.0 != 0 {
+            // the target's place in the period table, searched from the top (measured: 44
+            // cycles a note), 16 more sliding down
+            let idx = PERIODS[8].iter().position(|&q| c.row.0 >= q).unwrap_or(36) as u8;
+            self.cost(C::GlissTarget(idx));
+            if c.last.period > c.row.0 {
+                self.cost(C::GlissDown);
+            }
+        }
+        if fx_per {
+            let p = if !row_tick && matches!(eff, E_GLISSANDO | E_GLISSANDO_VOLSLIDE) { c.gliss_out } else { per };
+            self.cost(if row_tick { C::RowPer(class) } else { C::Per(class) });
+            self.call(hw, "per");
+            hw.voice_per(v, p);
+            c.last_per = p;
+        }
+        let vol = if c.main_period > 0 { c.main_volume.min(64) as u16 } else { 0 };
+        self.cost(if row_tick { C::RowVol(class) } else { C::Vol(class) });
+        if row_tick && eff == E_SAMPLE_OFFSET && !c.offset_far {
+            self.cost(C::OffsetNear);
+        }
+        if row_tick && eff == E_SET_SPEED && c.row.3 >= 32 {
+            self.cost(C::Tempo);
+        }
+        // a slide's row on a voice without a period: the original slides down from 0 (measured)
+        let idle_slide = !row_tick && eff == E_VOLUME_SLIDE && !c.slid && c.main_period == 0 && c.row.3 < 0x10;
+        if std::mem::take(&mut c.clamped) || idle_slide {
+            self.cost(C::Clamp);
+        }
+        if std::mem::take(&mut c.slide_down) || idle_slide {
+            self.cost(C::SlideDown);
+        }
+        c.slid = false;
+        self.call(hw, "vol");
+        hw.voice_vol(v, vol);
+        if c.main_period != 0 {
+            c.play_pointer = true;
+        }
+        if c.main_period == -1 {
+            c.main_period = 0;
         }
         // whether the voice still plays: the original knows from the end of the sample's first block
         c.is_active = c.main_period > 0 && c.sample_data.is_some() && (c.looped || hw.bus.clock < c.ends_at);
@@ -478,21 +859,48 @@ impl DigiBooster {
 
     /// The loops of all voices, written after a row: the sample's loop, or its start with
     /// no length; nothing for a voice with no sample.
-    fn write_loops(&self, hw: &mut Hw) {
+    fn write_loops(&mut self, hw: &mut Hw) {
         for v in 0..8 {
-            let (loc, len) = match self.chans.get(v).and_then(|c| c.sample_data.map(|i| (i, c.start_offset))) {
-                Some((i, off)) if self.chans[v].main_period != 0 => {
+            let (loc, len) = match self.chans.get(v).and_then(|c| c.sample_data) {
+                Some(i) if self.chans[v].main_period != 0 => {
                     let s = &self.song.samples[i];
                     if s.loop_len > 0 {
                         (self.sample_addr(i, s.loop_start), (s.loop_len / 2) as u16)
                     } else {
-                        (self.sample_addr(i, off), 0)
+                        // the loop's start as the module has it (often the sample's end),
+                        // whatever offset the note played from
+                        (self.sample_addr(i, s.raw_loop_start), 0)
                     }
                 }
                 _ => (0, 0),
             };
+            self.cost(C::LoopLoc);
+            self.call(hw, "loc");
             hw.voice_loc(v, loc);
+            self.cost(if len != 0 { C::LoopLenLoop } else if loc != 0 { C::LoopLenEnd } else { C::LoopLen });
+            self.call(hw, "len");
             hw.voice_len(v, len);
+        }
+    }
+
+    fn cost(&mut self, c: C) {
+        self.cyc += c.cycles();
+        if self.trace.out.is_some() {
+            self.trace.pend.push(c);
+        }
+    }
+
+    /// A host call: its clock is the cycles since the previous one, halved and rounded down.
+    fn call(&mut self, hw: &mut Hw, what: &str) {
+        hw.bus.clock = self.seg + self.cyc / 2;
+        (self.seg, self.cyc) = (hw.bus.clock, 0);
+        if let Some(o) = &mut self.trace.out {
+            use std::io::Write;
+            let _ = write!(o, "{} {}", hw.bus.clock, what);
+            for e in self.trace.pend.drain(..) {
+                let _ = write!(o, " {:?}", e);
+            }
+            let _ = writeln!(o);
         }
     }
 
@@ -500,10 +908,19 @@ impl DigiBooster {
         let mut c = std::mem::take(&mut self.chans[v]);
         c.volume = c.old_volume;
         if self.tempo != 0 && self.count >= self.tempo {
+            // a vibrato's row has ended: its period back (it runs to the row's last tick)
+            if c.vibrato_period != 0 {
+                c.last.period = c.vibrato_period;
+                c.vibrato_period = 0;
+            }
             self.parse_row_data(&mut c, row);
             self.do_trigger_effects(&mut c);
         }
-        if self.tempo.wrapping_sub(1) == self.count {
+        // the slides go on to the row's last tick (measured: ticks 1 to speed-1 after the
+        // row's, where NostalgicPlayer slides on the row's tick and stops a tick early)
+        let clear = self.tempo.wrapping_sub(1) == self.count;
+        let late = matches!(c.last.effect, E_PORTAMENTO_UP | E_PORTAMENTO_DOWN | E_VOLUME_SLIDE | E_GLISSANDO_VOLSLIDE | E_VIBRATO_VOLSLIDE);
+        if clear && !late {
             let effect = c.last.effect;
             if effect == E_GLISSANDO_VOLSLIDE {
                 c.last.effect = E_GLISSANDO;
@@ -522,6 +939,11 @@ impl DigiBooster {
         self.test_period(&mut c);
         self.effect_commands(&mut c);
         self.test_period(&mut c);
+        if clear && late {
+            // the glissando goes on without the slide
+            c.last.effect = if c.last.effect == E_GLISSANDO_VOLSLIDE { E_GLISSANDO } else { 0 };
+            c.last.arg = 0;
+        }
         c.glissando_old_period = c.last.period;
         c.old_volume = c.volume;
         if c.last.period == 0 {
@@ -548,6 +970,8 @@ impl DigiBooster {
                 c.glissando_new_period = 0;
             }
             c.vibrato_period = 0;
+            // a note starts the vibrato's wave again (measured)
+            c.vibrato_value = 0;
             c.off_enable = true;
             c.original_period = self.find_period(c, t);
             c.last.period = c.original_period;
@@ -564,7 +988,12 @@ impl DigiBooster {
                 if t.sample != 0 {
                     let number = if sample == 0 { c.old_sample } else { sample };
                     if old_period && number != 0 {
-                        c.volume = self.samples_volume(number);
+                        // a sample without a note: its volume, and its loop for the voice
+                        // (measured: the Eagleplayer's next loop write is the new sample's)
+                        c.volume = self.samples_volume(t.sample);
+                        c.sample_data = self.sample_with_data(t.sample);
+                        c.old_sample = t.sample;
+                        sample = t.sample;
                     } else {
                         sample = t.sample;
                         if effect == E_GLISSANDO {
@@ -628,13 +1057,12 @@ impl DigiBooster {
             return 0;
         }
         let Some(s) = self.song.samples.get(number as usize - 1) else { return 0 };
-        if s.fine_tune == 0 {
-            return t.period;
-        }
-        // a period is stretched by an eighth of a semitone per step of the fine
-        // tune, 2^(-ft/96): not by NostalgicPlayer's tables, which round to
-        // ProTracker's
-        (t.period as f64 * 2f64.powf(-(s.fine_tune as f64) / 96.0)) as u16
+        tune(t.period, s.fine_tune)
+    }
+
+    /// The fine tune of sample `number` (1-based), 0 for none.
+    fn fine_tune(&self, number: u8) -> i8 {
+        (number as usize).checked_sub(1).and_then(|i| self.song.samples.get(i)).map_or(0, |s| s.fine_tune)
     }
 
     fn test_period(&self, c: &mut Chan) {
@@ -656,10 +1084,8 @@ impl DigiBooster {
             c.last.sample = 0;
         }
         self.effect_commands2(c);
+        // E40 does not stop the sample in the Eagleplayer (measured: the voice plays on)
         if c.on_off {
-            c.last = LastRound::default();
-        } else if c.last.effect == E_EXTRA && c.last.arg == X_STOP {
-            c.off_enable = true;
             c.last = LastRound::default();
         }
     }
@@ -674,6 +1100,9 @@ impl DigiBooster {
                 c.start_offset =
                     c.start_offset.wrapping_add(c.sample_offset as u32 * 65536 + arg as u32 * 256);
                 let len = c.sample_data.map_or(0, |i| self.song.samples[i].length);
+                // past half the sample (and within it) the original takes 34 cycles less
+                // (measured)
+                c.offset_far = c.start_offset <= len && 2 * c.start_offset > len;
                 if c.start_offset > len {
                     c.start_offset = len;
                 }
@@ -743,7 +1172,11 @@ impl DigiBooster {
                     X_LOOP => self.do_loop(c, arg),
                     X_SAMPLE_OFFSET => c.sample_offset = arg,
                     X_FINE_VOL_UP => {
-                        c.volume = c.volume.wrapping_add(arg).min(64);
+                        c.volume = c.volume.wrapping_add(arg);
+                        if c.volume >= 64 {
+                            c.volume = 64;
+                            c.clamped = true;
+                        }
                         c.last.effect = 0;
                         c.last.arg = 0;
                     }
@@ -751,6 +1184,7 @@ impl DigiBooster {
                         c.volume = c.volume.wrapping_sub(arg);
                         if (c.volume as i8) < 0 {
                             c.volume = 0;
+                            c.clamped = true;
                         }
                         c.last.effect = 0;
                         c.last.arg = 0;
@@ -796,17 +1230,25 @@ impl DigiBooster {
         }
         match effect {
             E_ARPEGGIO => self.arpeggio(c, arg),
+            // the slides by the value kept from before, then a new one kept (measured: a first
+            // slide moves on the second tick after its row)
+            E_PORTAMENTO_UP if self.parse_tick => {}
+            E_PORTAMENTO_DOWN if self.parse_tick => {}
             E_PORTAMENTO_UP => {
-                let a = if arg == 0 { c.porta_up_old } else { arg };
-                c.porta_up_old = a;
+                let a = c.porta_old;
+                if arg != 0 {
+                    c.porta_old = arg;
+                }
                 c.last.period = c.last.period.wrapping_sub(a as u16);
                 if c.last.period < 113 {
                     c.last.period = 113;
                 }
             }
             E_PORTAMENTO_DOWN => {
-                let a = if arg == 0 { c.porta_down_old } else { arg };
-                c.porta_down_old = a;
+                let a = c.porta_old;
+                if arg != 0 {
+                    c.porta_old = arg;
+                }
                 c.last.period = c.last.period.wrapping_add(a as u16);
                 if c.last.period > 856 {
                     c.last.period = 856;
@@ -814,15 +1256,25 @@ impl DigiBooster {
             }
             E_GLISSANDO => self.glissando(c, arg),
             E_VIBRATO => self.vibrato(c, arg),
+            // the volume slides, not on the tick that takes the row (measured: the
+            // Eagleplayer's volumes go a step behind NostalgicPlayer's)
             E_GLISSANDO_VOLSLIDE => {
-                self.volume_slide(c, arg);
+                if !self.parse_tick {
+                    self.volume_slide(c, arg);
+                }
                 self.glissando(c, 0);
             }
             E_VIBRATO_VOLSLIDE => {
-                self.volume_slide(c, arg);
+                if !self.parse_tick {
+                    self.volume_slide(c, arg);
+                }
                 self.vibrato(c, 0);
             }
-            E_VOLUME_SLIDE => self.volume_slide(c, arg),
+            E_VOLUME_SLIDE => {
+                if !self.parse_tick {
+                    self.volume_slide(c, arg);
+                }
+            }
             E_EXTRA => {
                 let x = arg & 0xf0;
                 let a = arg & 0x0f;
@@ -854,15 +1306,22 @@ impl DigiBooster {
     fn volume_slide(&self, c: &mut Chan, arg: u8) {
         let a = if arg == 0 { c.slide_volume_old } else { arg };
         c.slide_volume_old = a;
+        c.slid = true;
         if a < 0x10 {
             c.volume = c.volume.wrapping_sub(a);
-            if (c.volume as i8) < 0 {
-                c.volume = 0;
+            // a voice without a period slides from 0 (measured: its time is that of the clamp)
+            if (c.volume as i8) < 0 || c.main_period == 0 {
+                if (c.volume as i8) < 0 {
+                    c.volume = 0;
+                }
+                c.clamped = true;
             }
+            c.slide_down = true;
         } else {
             c.volume = c.volume.wrapping_add(a >> 4);
-            if c.volume > 64 {
+            if c.volume >= 64 {
                 c.volume = 64;
+                c.clamped = true;
             }
         }
     }
@@ -889,9 +1348,13 @@ impl DigiBooster {
     }
 
     fn glissando(&self, c: &mut Chan, arg: u8) {
+        c.gliss_moved = false;
         let mut a = if arg == 0 { c.glissando_old_value } else { arg };
         if self.count == 1 {
             c.glissando_old_value = a;
+            if c.last.effect == E_GLISSANDO {
+                c.gliss_cost += GLISS_FIRST;
+            }
         }
         if c.glissando_old_period == 0 {
             return;
@@ -907,34 +1370,45 @@ impl DigiBooster {
             if c.glissando_new_period < c.last.period {
                 c.glissando_enable = true;
             }
+        } else if self.parse_tick {
+            // no step on the row's tick (measured: the steps come on ticks 1 to speed-1)
+            c.last.period = c.glissando_old_period;
         } else {
+            c.gliss_moved = true;
             if c.glissando_enable {
-                c.glissando_old_period = c.glissando_old_period.wrapping_sub(a as u16);
+                // a step past the target stops at it (measured), not wrapping round
+                c.glissando_old_period = c.glissando_old_period.saturating_sub(a as u16);
                 if c.glissando_old_period <= c.glissando_new_period {
                     c.glissando_old_period = c.glissando_new_period;
                     c.glissando_new_period = 0;
+                    c.gliss_cost += GLISS_REACH_DOWN;
                 }
             } else {
-                c.glissando_old_period = c.glissando_old_period.wrapping_add(a as u16);
+                c.glissando_old_period = c.glissando_old_period.saturating_add(a as u16);
                 if c.glissando_old_period >= c.glissando_new_period {
                     c.glissando_old_period = c.glissando_new_period;
                     c.glissando_new_period = 0;
+                    c.gliss_cost += GLISS_REACH_UP;
                 }
             }
             c.last.period = c.glissando_old_period;
+            // what goes out is the period tuned once more (measured: a note of 480 at +1,
+            // 476, is reached as 472, and plays at 476 after the glissando)
+            c.gliss_out = tune(c.last.period, self.fine_tune(c.old_sample));
         }
         let _ = &mut a;
     }
 
     fn vibrato(&self, c: &mut Chan, arg: u8) {
         let mut effect_arg = arg;
-        if self.count == self.tempo && c.vibrato_period == 0 {
+        if c.vibrato_period == 0 {
             c.vibrato_period = c.last.period;
         }
         let mut period = c.vibrato_period;
+        // the row's tick plays the period as it is, the vibrato runs on ticks 1 to speed-1
+        // after it (measured: a tick behind NostalgicPlayer's)
         'body: {
-            if self.count == self.tempo.wrapping_sub(1) {
-                c.vibrato_period = 0;
+            if self.parse_tick {
                 break 'body;
             }
             if effect_arg & 0x0f == 0 {
@@ -950,6 +1424,10 @@ impl DigiBooster {
                 period = period.wrapping_sub(vib);
             } else {
                 period = period.wrapping_add(vib);
+                c.gliss_cost += VIB_UP;
+            }
+            if arg & 0xf0 != 0 {
+                c.gliss_cost += VIB_MOVE;
             }
             c.vibrato_value = c.vibrato_value.wrapping_add(((effect_arg >> 2) & 0x3c) as i8);
         }

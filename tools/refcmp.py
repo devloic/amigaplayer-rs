@@ -1492,6 +1492,12 @@ def process(ctx, f):
         stage_fixed_companions(path, mod)
         stage_maxtrax_samples(mod)
         pw, pplay, pout, pled, plines = render_engine(ctx, mod, True, None)
+        if pout and _norm(parse_output(pout).get('format', '')) == 'tfmxpro' and retext_empty(ctx, mod) != mod:
+            # a TFMX Pro "(Empty) " module's original runs on a retexted copy (retext_empty): the port too, as
+            # the original's start-up time depends on the path it loads the samples from (the port's model
+            # of it too), and the port plays both texts alike
+            mod = retext_empty(ctx, mod)
+            pw, pplay, pout, pled, plines = render_engine(ctx, mod, True, None)
         row['out_port'] = pout or ''
         row['led_port'] = pled or ''
         if not pw or not pplay:

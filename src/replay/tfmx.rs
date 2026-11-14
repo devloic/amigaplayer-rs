@@ -269,6 +269,184 @@ const COST: [u64; At::Count as usize] = [
 
 /// The TFMX-Pro-TFHD player's costs (to fit): the same code paths as `COST`, but no waits
 /// for the audio DMA.
+/// The macro commands' names, for `COSTS`.
+/// The labels of the code after a LOC/LEN write, by the command that made it (and the AddBegin effect).
+const TAILS: [&str; 0x35] = ["T_00", "T_01", "T_02", "T_03", "T_04", "T_05", "T_06", "T_07", "T_08", "T_09", "T_0A", "T_0B", "T_0C", "T_0D", "T_0E", "T_0F", "T_10", "T_11", "T_12", "T_13", "T_14", "T_15", "T_16", "T_17", "T_18", "T_19", "T_1A", "T_1B", "T_1C", "T_1D", "T_1E", "T_1F", "T_20", "T_21", "T_22", "T_23", "T_24", "T_25", "T_26", "T_27", "T_28", "T_29", "T_2A", "T_2B", "T_2C", "T_2D", "T_2E", "T_2F", "T_30", "T_31", "T_32", "T_33", "T_AB"];
+
+const MACRO_NAMES: [&str; 0x34] = [
+    "M_00", "M_01", "M_02", "M_03", "M_04", "M_05", "M_06", "M_07", "M_08", "M_09", "M_0A", "M_0B", "M_0C", "M_0D",
+    "M_0E", "M_0F", "M_10", "M_11", "M_12", "M_13", "M_14", "M_15", "M_16", "M_17", "M_18", "M_19", "M_1A", "M_1B",
+    "M_1C", "M_1D", "M_1E", "M_1F", "M_20", "M_21", "M_22", "M_23", "M_24", "M_25", "M_26", "M_27", "M_28", "M_29",
+    "M_2A", "M_2B", "M_2C", "M_2D", "M_2E", "M_2F", "M_30", "M_31", "M_32", "M_33",
+];
+
+/// `At`'s names, for `COSTS`.
+const AT_NAMES: [&str; At::Count as usize] = [
+    "TICK", "OFF_START", "OFF_PER", "VOICE", "PENDING", "MACRO", "EFFECTS", "ADD_BEGIN", "VIBRATO", "PORTA",
+    "ENV", "RANDOM", "FADE", "VOLUME", "SID_START", "SID_BYTE", "TRACKS", "ROW", "PATTERN_CMD", "NOTE",
+    "TRACK_STEP", "PER_OUT", "WAIT_ON", "WAIT_SID", "WAIT_BEGIN", "WAIT_END",
+];
+
+/// 68000 cycles of the original's tick, by code path (the names `c` takes, sorted; a name not
+/// listed costs 0). A write lands at the tick's start plus half the cycles counted since the tick
+/// began, rounded down; a wait for the DMA polls the beam (`dma_wait`).
+const COSTS: &[(&str, i64)] = &[
+    ("AB_FLIP", 44),
+    ("ADD_BEGIN", 28),
+    ("CO_DMA", 23),
+    ("CO_DMA_POST_1", 74),
+    ("CO_DMA_POST_2", 74),
+    ("CO_DMA_POST_3", 74),
+    ("END_DMA", 86),
+    ("ENV", 47),
+    ("ENV_DONE", 36),
+    ("ENV_DOWN", 95),
+    ("ENV_DOWN_NEG", 74),
+    ("ENV_UP", 76),
+    ("ENV_UP_DONE", 10),
+    ("FADE_DIR", 65),
+    ("FADE_STEP", 81),
+    ("LEN_POST_1", 31),
+    ("LEN_POST_2", 62),
+    ("LEN_POST_3", 70),
+    ("LOCK_NEG", 6),
+    ("LOC_POST_1", 31),
+    ("LOC_POST_2", 62),
+    ("LOC_POST_3", 70),
+    ("LOOP_DEC", 7),
+    ("LOOP_END", 134),
+    ("M00_DMA_POST_0", -40),
+    ("M00_DMA_POST_1", -40),
+    ("M00_DMA_POST_2", -40),
+    ("M00_DMA_POST_3", -40),
+    ("M00_LATER", 1),
+    ("M01_INTREQ", 23),
+    ("M04_RND_GO", 153),
+    ("M10_UP", 86),
+    ("M14_UP", 86),
+    ("M18_LEN", 12),
+    ("MACRO", 65),
+    ("MV_FULL", 19),
+    ("MV_SCALE", 63),
+    ("M_00", 245),
+    ("M_01", 103),
+    ("M_04", 32),
+    ("M_05", 25),
+    ("M_06", 122),
+    ("M_09", 2),
+    ("M_0B", 343),
+    ("M_0C", 418),
+    ("M_0D", 188),
+    ("M_0E", 156),
+    ("M_0F", 191),
+    ("M_10", 48),
+    ("M_11", 67),
+    ("M_12", 152),
+    ("M_14", 48),
+    ("M_18", 69),
+    ("M_19", 73),
+    ("M_1F", 10),
+    ("NOTE", 223),
+    ("NOTE_WAIT", 36),
+    ("NO_SID", 106),
+    ("NPER_OUT", 321),
+    ("NP_INTREQ", 23),
+    ("NP_INTREQ_POST_0", 174),
+    ("NP_INTREQ_POST_1", 174),
+    ("NP_INTREQ_POST_2", 174),
+    ("NP_INTREQ_POST_3", 174),
+    ("NP_NEWMAC", 16),
+    ("NP_NOTE", 563),
+    ("N_EFX", 137),
+    ("N_PAUSE", 206),
+    ("N_PAUSE_OFF", 201),
+    ("N_READ", 136),
+    ("N_STEP", 5),
+    ("OFF_PER", 3),
+    ("OFF_SKIP", 20),
+    ("OFF_START", 31),
+    ("OV_B3", 84),
+    ("PATTERN_CMD", 151),
+    ("PER_POST_0", -3),
+    ("PER_POST_1", -2),
+    ("PER_POST_2", -1),
+    ("PER_PRE_0", 35),
+    ("PER_PRE_1", 34),
+    ("PER_PRE_2", 33),
+    ("PER_PRE_3", 32),
+    ("PORTA", 410),
+    ("PORTA_REACHED", 28),
+    ("PORTA_UP", 10),
+    ("PORTA_UP_REACHED", -10),
+    ("P_F0_LAST", 164),
+    ("P_F1", 55),
+    ("P_F1_DEC", 5),
+    ("P_F1_END", -4),
+    ("P_F3", 20),
+    ("P_F5", 473),
+    ("P_F6", 516),
+    ("P_F7", 489),
+    ("P_FC", 384),
+    ("ROW", 133),
+    ("ROW_FE", 115),
+    ("ROW_WAIT", 16),
+    ("SE_ALL", 64),
+    ("SE_TRACK", 33),
+    ("TICK", 486),
+    ("TRACKS", 221),
+    ("TR_PASS", 132),
+    ("TR_RESTART", 351),
+    ("TS_PAT", 104),
+    ("T_02", 120),
+    ("T_03", 164),
+    ("T_11", 1),
+    ("T_12", 156),
+    ("T_19", 31),
+    ("T_AB", 106),
+    ("VIB_FLIP", 56),
+    ("VIB_MUL", 100),
+    ("VIB_OUT", 158),
+    ("VOICE", 223),
+    ("VOICE_1", 41),
+    ("VOICE_2", 41),
+    ("VOICE_3", 23),
+    ("VOLUME", 271),
+    ("VOL_POST_0", 45),
+    ("VOL_POST_1", 76),
+    ("VOL_POST_2", 107),
+    ("VOL_POST_3", 115),
+    ("VOL_PRE_1", 17),
+    ("VOL_PRE_2", 24),
+    ("VOL_PRE_3", 51),
+    ("WAIT_BEGIN", 146),
+    ("WAIT_DEC", 47),
+    ("WAIT_ON", 36),
+];
+/// The cycles a name costs more (or less) in one context: 0-3 voice `i`'s code, 10-17 track `k - 10`'s.
+const COSTS_CTX: &[(&str, u8, i64)] = &[
+    ("M_0C", 1, 31),
+    ("M_0C", 2, 62),
+    ("M_0C", 3, 70),
+    ("NPER_OUT", 0, -62),
+    ("NPER_OUT", 1, -31),
+    ("NPER_OUT", 3, 8),
+    ("ROW_NONE", 10, -20),
+    ("ROW_NONE", 11, -20),
+    ("ROW_NONE", 12, -20),
+    ("ROW_NONE", 13, -20),
+    ("ROW_NONE", 14, -20),
+    ("T_18", 0, 31),
+    ("T_18", 2, -31),
+    ("T_18", 3, -39),
+    ("T_19", 1, -31),
+    ("T_19", 2, -62),
+    ("T_19", 3, -70),
+];
+/// The cycles up to a write landing (a word, a LOC's pair) and to a read of the beam line.
+const EV_W: i64 = 1;
+const EV_L: i64 = 75;
+const EV_A: i64 = 62;
+
 const COST_TFHD: [u64; At::Count as usize] = [
     300, 0, 27, 244, 160, 134, 0, 78, 109, 84, 56, 150, 263, 0, 191, 43, 50, 71, 127, 442, 304, 29, 0, 0, 5, 20,
 ];
@@ -317,6 +495,14 @@ pub struct Pro {
     spent: u64,
     counts: [u32; At::Count as usize],
     trace: Option<std::fs::File>,
+    /// In the plain player's tick: the tick's start and the 68000 cycles counted since (`COSTS`).
+    in_tick: bool,
+    seg: u64,
+    cyc: i64,
+    names: Vec<(&'static str, u32, u8)>,
+    /// Whose code runs: 0-3 a voice's, 10-17 a track's, 9 neither (the costs differ).
+    ctx: u8,
+    site: u8,
 }
 
 /// Check2: a TFMX-SONG (or tfmxsong) module that is not 7 voices, with the
@@ -380,6 +566,243 @@ fn detect_pro(d: &[u8]) -> bool {
         a += 4;
     }
     true
+}
+
+/// The colour clock the plain player's song starts on (its InitPlayer and InitSound have run): the
+/// original's start-up measured as a black box, gap by gap between the host's calls and traps (in
+/// 68000 cycles, each gap's time halved and rounded down), and modelled on the module's counts.
+/// `dir_len` and `name_len` are the lengths of the module's directory (with its last "/") and file
+/// name, which the companion file's load costs per character.
+fn pro_song_start(d: &[u8], dir_len: usize, name_len: usize) -> u64 {
+    let w = |o: usize| if o + 2 <= d.len() { be16(d, o) } else { 0 };
+    let l = |o: usize| if o + 4 <= d.len() { be32(d, o) } else { 0 };
+    let packed = l(0x1d0) != 0;
+    let flag2 = d[0xb] == 2;
+    // a module of sound effects only (its pattern table is its macro table)
+    let sfx = packed && l(0x1d4) == l(0x1d8);
+    let ts = if packed { l(0x1d0) as usize } else { 0x800 };
+    let (first, end) =
+        if packed { (l(l(0x1d8) as usize) as usize, l(0x1d4) as usize) } else { (l(0x600) as usize, l(0x7fc) as usize) };
+    // the check: the macro region's steps, the songs' starts and the $EFFE steps they begin with
+    let a = if flag2 {
+        137
+    } else {
+        let (mut k, mut m) = (0i64, 0i64);
+        for s in 0..32 {
+            let mut p = w(0x100 + 2 * s) as usize;
+            if p == 0x1ff {
+                continue;
+            }
+            m += 1;
+            while k < 0x10000 && w(ts + 16 * p) == 0xeffe {
+                k += 1;
+                p += 1;
+            }
+        }
+        (if packed { 1578 } else { 1749 }) + 44 * (end.saturating_sub(first) / 4) as i64 + 68 * k + 57 * m
+    };
+    let b9 = 472 + 17 * dir_len as i64 + 21 * name_len as i64;
+    // InitPlayer: the walk back from the pattern table to the last macro's start (packed), the patterns
+    // 8 bytes long (unpacked), and the scan of the macros for the samples they play
+    let (mut back, mut pat8) = (0i64, 0i64);
+    let (mut count, table) = if packed {
+        let mut a3 = l(0x1d4) as usize;
+        let mut g = 0;
+        loop {
+            a3 = a3.wrapping_sub(4);
+            g += 1;
+            if l(a3) == 0x0700_0000 || g > 100_000 {
+                break;
+            }
+        }
+        let d4a = a3;
+        loop {
+            back += 1;
+            if l(a3) == 0x2020_2020 {
+                a3 = d4a;
+                while a3 < d.len() && d[a3] < 0x80 && g < 200_000 {
+                    a3 = a3.wrapping_sub(4);
+                    g += 1;
+                }
+                break;
+            }
+            a3 = a3.wrapping_sub(4);
+            g += 1;
+            if l(a3) == 0x0700_0000 || g > 200_000 {
+                break;
+            }
+        }
+        let last = a3.wrapping_add(4) as u32;
+        let mt = l(0x1d8) as usize;
+        let (mut a1, mut n) = (mt, 0u32);
+        loop {
+            n += 1;
+            let x = l(a1);
+            a1 += 4;
+            if x == 0 || x >= 0x8000_0000 || x == last || a1 >= d.len() {
+                break;
+            }
+        }
+        (n, mt)
+    } else {
+        let (mut a1, mut k) = (0x400usize, 0x7fu32);
+        'p: while k != 0 {
+            k -= 1;
+            loop {
+                let d1 = l(a1);
+                a1 += 4;
+                if l(a1).wrapping_sub(d1) as u16 == 8 {
+                    pat8 += 1;
+                    continue 'p;
+                }
+                k = (k & 0xffff_0000) | (k as u16).wrapping_sub(1) as u32;
+                if k as u16 == 0xffff {
+                    break 'p;
+                }
+            }
+        }
+        (0x7f, 0x600)
+    };
+    let (mut adv, mut f22, mut ends, mut upd, mut visited) = (0i64, 0i64, 0i64, 0i64, 0i64);
+    let (mut mx, mut a4, mut last_end, mut guard) = (0u32, table, false, 0u32);
+    'm: while count != 0 {
+        count -= 1;
+        loop {
+            let d1 = l(a4) as usize;
+            a4 += 4;
+            if !packed && (l(a4) as usize).wrapping_sub(d1) as u16 == 8 {
+                last_end = false;
+                continue 'm;
+            }
+            visited += 1;
+            let mut a1 = d1;
+            let mut found = None;
+            loop {
+                guard += 1;
+                if guard > 0x40_0000 {
+                    break 'm;
+                }
+                let b = d.get(a1).copied().unwrap_or(0);
+                if b == 2 || b == 0x22 {
+                    found = Some(b);
+                    break;
+                }
+                let x = l(a1);
+                a1 += 4;
+                if x == 0x0700_0000 {
+                    break;
+                }
+                adv += 1;
+            }
+            let Some(b) = found else {
+                ends += 1;
+                last_end = true;
+                continue 'm;
+            };
+            last_end = false;
+            f22 += i64::from(b == 0x22);
+            let e = (l(a1) & 0xff_ffff).wrapping_add(2 * w(a1 + 6) as u32);
+            if e >= mx {
+                mx = e;
+                upd += 1;
+            }
+            count = (count & 0xffff_0000) | (count as u16).wrapping_sub(1) as u32;
+            if count as u16 == 0xffff {
+                break 'm;
+            }
+        }
+    }
+    let mut c = 81 * adv + 31 * f22 - 28 * ends + 4 * upd - 8 * i64::from(last_end);
+    c += if packed { 12349 + 237 * visited + 60 * back + 82 * i64::from(sfx) } else { 33321 + 107 * visited + 3 * pat8 };
+    // the test for the known module whose song end InitPlayer fixes
+    if w(0xe) == 0xa40 {
+        c += if w(0x112) == 0x26 { 106 } else { 25 };
+    }
+    // the subsong list's tests: each song taken, and some of the ways to a test
+    let mut zero = false;
+    for i in 0..31 {
+        let a1 = 2 * i;
+        let (d2, d3) = (w(a1 + 0x102), w(a1 + 0x142));
+        let last = a1 >= 0x3c;
+        let mut p = String::new();
+        p.push(if d3 == 0 { 'Z' } else { 'z' });
+        if d3 == 0 {
+            p.push(if zero { 'S' } else { 's' });
+            if zero {
+                continue;
+            }
+        }
+        if d2 == 0x1ff {
+            continue;
+        }
+        p.push('u');
+        if last {
+            if d3 == w(a1 + 0x140) {
+                continue;
+            }
+            p.push('l');
+        }
+        if d3 == w(a1 + 0x144) {
+            p.push('A');
+            if d2 == w(a1 + 0x104) {
+                p.push('B');
+                if !zero {
+                    zero = true;
+                    if d3 == w(a1 + 0x140) {
+                        c -= 17;
+                        continue;
+                    }
+                    p.push('q');
+                }
+                if d3 == d2 || !last || d3 == w(a1 + 0x146) {
+                    continue;
+                }
+                p.push('r');
+            } else {
+                p.push('b');
+            }
+        } else {
+            p.push('a');
+        }
+        c += 44;
+        match p.as_str() {
+            "Zsua" => c += 17,
+            "zuAb" | "zula" => c += 21,
+            _ => {}
+        }
+    }
+    let dd = if flag2 { 1910 } else if packed { 1724 } else { 1670 };
+    // InitSound: song 0's first step (its $EFFE commands, then the tracks it starts)
+    let mut f = 1702 + 164 * i64::from(w(0x180) >= 16) + 186 * i64::from(flag2);
+    let mut o = ts + 16 * w(0x100) as usize;
+    let mut stop = false;
+    for _ in 0..16 {
+        if w(o) != 0xeffe {
+            break;
+        }
+        let (cmd, w2, w3) = (w(o + 2), w(o + 4), w(o + 6));
+        f += match cmd {
+            0 => {
+                stop = true;
+                -6
+            }
+            2 if w3 & 0x8000 != 0 => 227,
+            2 if w3 == 0 => 248,
+            2 => 524,
+            4 => 342 - 2 * i64::from(w2 != 0),
+            _ => 227,
+        };
+        if stop {
+            break;
+        }
+        o += 16;
+    }
+    if !stop {
+        f += 104 * (0..8).filter(|j| w(o + 2 * j) >> 8 < 0x80).count() as i64;
+    }
+    let g = 233 + 624 * i64::from(sfx);
+    let half = |x: i64| (x.max(0) / 2) as u64;
+    2789 + half(a) + half(b9) + half(c) + half(dd) + half(f) + half(g)
 }
 
 /// A divu.w: the quotient, or the dividend's low word when it overflows.
@@ -448,6 +871,12 @@ fn make_pro(d: &[u8], base: u32, smpl: u32, m: &mut Machine, tfhd: Option<u8>) -
         spent: 0,
         counts: [0; At::Count as usize],
         trace: std::env::var_os("TFMX_TRACE").and_then(|p| std::fs::File::create(p).ok()),
+        in_tick: false,
+        seg: 0,
+        cyc: 0,
+        names: Vec::new(),
+        ctx: 9,
+        site: 0xff,
     };
     p.g.sw(G_CIA, 0x7fff);
     p.g.sw(G_MASTER, 0x4040);
@@ -468,17 +897,79 @@ fn make_pro(d: &[u8], base: u32, smpl: u32, m: &mut Machine, tfhd: Option<u8>) -
     if tfhd.is_some() {
         p.tfhd_started(&mut hw);
     }
+    if tfhd.is_none() {
+        let dir = m.deli.module_dir.to_string_lossy();
+        let dir_len = dir.len() + usize::from(!dir.ends_with('/'));
+        let file = m.bus.read_cstr(m.deli.file_buf);
+        let name_len = file.rsplit('/').next().unwrap_or(&file).len();
+        let start = pro_song_start(d, dir_len, name_len);
+        m.bus.clock = m.bus.clock.max(start);
+    }
     Some(Box::new(p))
 }
 
 impl Pro {
     fn at(&mut self, a: At) {
+        if self.in_tick {
+            return self.c(AT_NAMES[a as usize]);
+        }
         self.spent += if self.tfhd { COST_TFHD[a as usize] } else { COST[a as usize] };
         self.counts[a as usize] += 1;
     }
 
+    /// The original's code for `name` runs once (in the plain player's tick).
+    fn c(&mut self, name: &'static str) {
+        if !self.in_tick {
+            return;
+        }
+        if let Ok(k) = COSTS.binary_search_by(|e| e.0.cmp(name)) {
+            self.cyc += COSTS[k].1;
+        }
+        if let Some(e) = COSTS_CTX.iter().find(|e| e.0 == name && e.1 == self.ctx) {
+            self.cyc += e.2;
+        }
+        if self.trace.is_some() {
+            let v = self.ctx;
+            match self.names.iter_mut().find(|e| e.0 == name && e.2 == v) {
+                Some(e) => e.1 += 1,
+                None => self.names.push((name, 1, v)),
+            }
+        }
+    }
+
+    /// The tick's code has reached its cycle count: the clock it falls on.
+    fn now(&self) -> u64 {
+        self.seg + (self.cyc.max(0) / 2) as u64
+    }
+
+    fn trace_cyc(&mut self, hw: &Hw, what: &str) {
+        if let Some(f) = &mut self.trace {
+            use std::io::Write;
+            let c: Vec<String> = self
+                .names
+                .iter()
+                .map(|(n, k, v)| if *v < 4 { format!("{n}#{v}:{k}") } else if (10..18).contains(v) { format!("{n}@{}:{k}", v - 10) } else { format!("{n}:{k}") })
+                .collect();
+            let _ = writeln!(f, "{} {} {} {}", hw.bus.clock, what, self.cyc, c.join(","));
+        }
+        self.names.clear();
+    }
+
     /// Lets the time pass the original took since its last write.
     fn flush(&mut self, hw: &mut Hw, what: &str) {
+        if self.in_tick {
+            self.cyc += match what {
+                "w" => EV_W,
+                "L" => EV_L,
+                "A" => EV_A,
+                _ => 0,
+            };
+            let t = self.now();
+            if t > hw.bus.clock {
+                hw.bus.clock = t;
+            }
+            return self.trace_cyc(hw, what);
+        }
         hw.wait(self.spent);
         self.spent = 0;
         if let Some(f) = &mut self.trace {
@@ -516,21 +1007,37 @@ impl Pro {
     }
 
     fn loc(&mut self, hw: &mut Hw, ch: usize, a: u32) {
-        self.flush(hw, "w");
+        self.c(["LOC_PRE_0", "LOC_PRE_1", "LOC_PRE_2", "LOC_PRE_3"][ch]);
+        self.flush(hw, "L");
         hw.loc(ch, a);
+        self.c(["LOC_POST_0", "LOC_POST_1", "LOC_POST_2", "LOC_POST_3"][ch]);
+        self.tail();
     }
 
     fn len(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.c(["LEN_PRE_0", "LEN_PRE_1", "LEN_PRE_2", "LEN_PRE_3"][ch]);
         self.reg(hw, 0xdff0a4 + 16 * ch as u32, v);
+        self.c(["LEN_POST_0", "LEN_POST_1", "LEN_POST_2", "LEN_POST_3"][ch]);
+        self.tail();
+    }
+
+    fn tail(&mut self) {
+        if (self.site as usize) < TAILS.len() {
+            self.c(TAILS[self.site as usize]);
+        }
     }
 
     fn per(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.c(["PER_PRE_0", "PER_PRE_1", "PER_PRE_2", "PER_PRE_3"][ch]);
         self.reg(hw, 0xdff0a6 + 16 * ch as u32, v);
+        self.c(["PER_POST_0", "PER_POST_1", "PER_POST_2", "PER_POST_3"][ch]);
     }
 
     /// $1134c: the volume, through the Eagleplayer's volume (64: unchanged).
     fn vol(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.c(["VOL_PRE_0", "VOL_PRE_1", "VOL_PRE_2", "VOL_PRE_3"][ch]);
         self.reg(hw, 0xdff0a8 + 16 * ch as u32, v & 0x7f);
+        self.c(["VOL_POST_0", "VOL_POST_1", "VOL_POST_2", "VOL_POST_3"][ch]);
     }
 
     /// $107ee: waits for the beam to start 9 new lines.
@@ -539,6 +1046,25 @@ impl Pro {
             // the TFHD player has none of these waits, only its code's own time there
             self.at(place);
             return;
+        }
+        if self.in_tick {
+            // nine times: a read of the line, then reads every 25 cycles until it changes
+            self.at(place);
+            self.flush(hw, "A");
+            let line = |c: i64| (self.seg + (c / 2) as u64) / LINE;
+            let mut c = self.cyc;
+            for k in 0..9 {
+                let l = line(c);
+                c += 16;
+                while line(c) == l {
+                    c += 25;
+                }
+                if k < 8 {
+                    c += 35;
+                }
+            }
+            self.cyc = c;
+            return self.flush(hw, "X");
         }
         self.flush(hw, "d");
         let now = hw.bus.clock;
@@ -1022,6 +1548,7 @@ impl Pro {
             if d0 == 0xeffe {
                 let c = hw.bus.r16(a0 + 2).wrapping_mul(4);
                 let a0 = a0 + 4;
+                self.c(["TS_C0", "TS_C1", "TS_C2", "TS_C3", "TS_C4"][if c < 0x14 { c / 4 } else { 0 } as usize]);
                 match if c < 0x14 { c / 4 } else { 0 } {
                     0 => {
                         self.g.sb(G_ON, 0);
@@ -1031,11 +1558,13 @@ impl Pro {
                     1 => {
                         let c = self.g.w(G_TRACK_LOOP);
                         if c == 0 {
+                            self.c("TS_LOOP_END");
                             self.g.sw(G_TRACK_LOOP, 0xffff);
                             self.p.sw(P_POS, self.p.w(P_POS).wrapping_add(1));
                             continue;
                         }
                         if (c as i16) < 0 {
+                            self.c("TS_LOOP_SET");
                             let n = hw.bus.r16(a0 + 2);
                             // the TFHD player signals the song end at the first pass
                             if (n as i16) <= 0 || self.tfhd {
@@ -1053,6 +1582,7 @@ impl Pro {
                         self.g.sw(G_SPEED_CNT, s);
                         let t = hw.bus.r16(a0 + 2);
                         if (t as i16) >= 0 && t & 0x1ff != 0 {
+                            self.c("TS_CIA");
                             self.g.sw(G_CIA, divu(0x1b51f8, t & 0x1ff));
                         }
                         self.p.sw(P_POS, self.p.w(P_POS).wrapping_add(1));
@@ -1060,6 +1590,7 @@ impl Pro {
                     _ => {
                         self.p.sw(P_POS, self.p.w(P_POS).wrapping_add(1));
                         if self.fade_lock == 0 {
+                            self.c("TS_FADE");
                             self.fade_lock = 1;
                             let (b1, b3) = (hw.bus.r8(a0 + 1), hw.bus.r8(a0 + 3));
                             self.fade(b1, b3);
@@ -1071,11 +1602,13 @@ impl Pro {
             for k in 0..8 {
                 let w = hw.bus.r16(a0 + 2 * k as u32);
                 if k == 7 && self.g.w(G_SFX7) != 0 {
+                    self.c("TS_SFX7");
                     break;
                 }
                 let o = 4 * k;
                 self.p.sw(P_NUM + o, w);
                 if (w as i16) >= 0 {
+                    self.c("TS_PAT");
                     let pa = self.pattern_addr(hw, (w >> 8) as u32);
                     self.p.sl(P_PTR + o, pa);
                     self.p.sl(P_STEP + o, 0);
@@ -1091,13 +1624,17 @@ impl Pro {
         self.g.sb(G_FADE_END, end);
         self.g.sb(G_FADE_CNT, speed);
         self.g.sb(G_FADE_RESET, speed);
+        self.c("FD");
         if speed == 0 {
+            self.c("FD_NOW");
             self.g.sb(G_MASTER, end);
         } else {
             self.g.sb(G_FADE_DIR, 1);
             let m = self.g.b(G_MASTER);
             if m != end {
+                self.c("FD_GO");
                 if m > end {
+                    self.c("FD_DOWN");
                     self.g.sb(G_FADE_DIR, 0xff);
                 }
                 return;
@@ -1113,8 +1650,10 @@ impl Pro {
         let c = self.g.w(G_SPEED_CNT).wrapping_sub(1);
         self.g.sw(G_SPEED_CNT, c);
         if (c as i16) >= 0 {
+            self.c("TR_WAIT");
             return;
         }
+        self.c("TR_ROWS");
         self.g.sw(G_SPEED_CNT, self.p.w(P_SPEED));
         for k in 0..8 {
             // the TFHD player has no track mute table
@@ -1122,10 +1661,14 @@ impl Pro {
             self.p.sw(P_MUTE + 4 * k, w);
         }
         'again: for _ in 0..256 {
+            self.c("TR_PASS");
             self.g.sb(G_RESTART, 0);
             for k in 0..8 {
+                self.ctx = 10 + k as u8;
                 self.pattern(hw, 4 * k);
+                self.ctx = 9;
                 if self.g.b(G_RESTART) != 0 {
+                    self.c("TR_RESTART");
                     continue 'again;
                 }
             }
@@ -1139,15 +1682,22 @@ impl Pro {
         let num = self.p.b(P_NUM + o);
         if num >= 0x90 {
             if num == 0xfe {
+                self.c("ROW_FE");
                 self.p.sb(P_NUM + o, 0xff);
                 if self.p.w(P_MUTE + o) == 0 {
                     self.channel_off(hw, self.p.b(P_XPOSE + o));
+                }
+            } else {
+                self.c("ROW_NONE");
+                if num != 0xff {
+                    self.c("ROW_NONE_X");
                 }
             }
             return;
         }
         let w = self.p.b(P_WAIT + o);
         if w != 0 {
+            self.c("ROW_WAIT");
             self.p.sb(P_WAIT + o, w - 1);
             return;
         }
@@ -1160,6 +1710,13 @@ impl Pro {
             let step_on = |s: &mut Self| s.p.sw(P_STEP + o, s.p.w(P_STEP + o).wrapping_add(1));
             if b0 < 0xf0 {
                 self.at(At::Note);
+                self.c(if (0x7f..0xc0).contains(&b0) {
+                    "NOTE_WAIT"
+                } else if b0 < 0xc0 {
+                    "NOTE_PLAIN"
+                } else {
+                    "NOTE_PORTA"
+                });
                 if (0x7f..0xc0).contains(&b0) {
                     self.p.sb(P_WAIT + o, cmd as u8);
                     self.g.sb(G_CMD + 3, 0);
@@ -1171,6 +1728,8 @@ impl Pro {
                 self.g.sb(G_CMD, d0);
                 if self.p.w(P_MUTE + o) == 0 {
                     self.note_port(hw, self.g.l(G_CMD));
+                } else {
+                    self.c("NOTE_MUTED");
                 }
                 step_on(self);
                 if (0x7f..0xc0).contains(&b0) {
@@ -1179,12 +1738,18 @@ impl Pro {
                 continue;
             }
             self.at(At::PatternCmd);
+            const PC: [&str; 16] = [
+                "P_F0", "P_F1", "P_F2", "P_F3", "P_F4", "P_F5", "P_F6", "P_F7", "P_F8", "P_F9", "P_FA", "P_FB", "P_FC",
+                "P_FD", "P_FE", "P_FF",
+            ];
+            self.c(PC[(b0 & 0xf) as usize]);
             let (b1, b2, b3) = ((cmd >> 16) as u8, (cmd >> 8) as u8, cmd as u8);
             let w1 = cmd as u16;
             match b0 & 0xf {
                 0 => {
                     self.p.sb(P_NUM + o, 0xff);
                     if self.p.w(P_POS) == self.p.w(P_LAST) {
+                        self.c("P_F0_LAST");
                         self.p.sw(P_POS, self.p.w(P_FIRST));
                         self.songend = true;
                     } else {
@@ -1197,12 +1762,15 @@ impl Pro {
                 1 => {
                     let c = self.p.b(P_LOOP + o);
                     if c != 0 {
+                        self.c("P_F1_DEC");
                         self.p.sb(P_LOOP + o, c - 1);
                         if c == 1 {
+                            self.c("P_F1_END");
                             step_on(self);
                             continue;
                         }
                     } else {
+                        self.c("P_F1_SET");
                         self.p.sb(P_LOOP + o, b1);
                     }
                     self.p.sw(P_STEP + o, w1);
@@ -1275,8 +1843,14 @@ impl Pro {
         let i = (d0 & 3) as usize;
         if self.v[i].b(V_SFX) == 0 {
             let (int_off, dma_off) = (self.v[i].w(V_INT_OFF), self.v[i].w(V_DMA_OFF));
+            self.c("CO_INTENA");
+            self.c(["CO_INTENA_PRE_0", "CO_INTENA_PRE_1", "CO_INTENA_PRE_2", "CO_INTENA_PRE_3"][i]);
             self.intena(hw, int_off);
+            self.c(["CO_INTENA_POST_0", "CO_INTENA_POST_1", "CO_INTENA_POST_2", "CO_INTENA_POST_3"][i]);
+            self.c("CO_DMA");
+            self.c(["CO_DMA_PRE_0", "CO_DMA_PRE_1", "CO_DMA_PRE_2", "CO_DMA_PRE_3"][i]);
             self.dmacon(hw, dma_off);
+            self.c(["CO_DMA_POST_0", "CO_DMA_POST_1", "CO_DMA_POST_2", "CO_DMA_POST_3"][i]);
             let v = &mut self.v[i];
             v.sb(V_RUN, 0);
             v.sw(V_SID, 0);
@@ -1291,9 +1865,19 @@ impl Pro {
         let [b0, b1, b2, b3] = d0.to_be_bytes();
         let i = (b2 & 3) as usize;
         if b0 == 0xfc {
+            self.c("NP_FC");
             self.v[i].sb(V_SFX, b1);
             self.v[i].sw(V_LOCK, b3 as u16);
-        } else if self.v[i].b(V_SFX) == 0 {
+        } else if self.v[i].b(V_SFX) != 0 {
+            self.c("NP_SFX");
+        } else {
+            self.c(match b0 {
+                0xf7 => "NP_F7",
+                0xf6 => "NP_F6",
+                0xf5 => "NP_F5",
+                0xbf.. => "NP_PORTA",
+                _ => "NP_NOTE",
+            });
             if b0 == 0xf7 {
                 let v = &mut self.v[i];
                 v.sb(V_ENV + 3, b1);
@@ -1318,13 +1902,18 @@ impl Pro {
                 v.sb(V_PORTA_TIME, 1);
                 if v.w(V_PORTA_RATE) == 0 {
                     v.sw(V_PORTA_PER, v.w(V_PER));
+                    self.c("NP_PORTA_START");
                 }
+                let v = &mut self.v[i];
                 v.sw(V_PORTA_RATE, b3 as u16);
                 let n = b0 & 0x3f;
                 v.sb(V_NOTE, n);
                 v.sw(V_PER, PERIODS[n as usize]);
             } else {
                 let ma = self.macro_addr(hw, b1 as u32);
+                if ma != self.v[i].l(V_MACRO) {
+                    self.c("NP_NEWMAC");
+                }
                 let v = &mut self.v[i];
                 v.sw(V_FINE, b3 as i8 as u16);
                 v.sb(V_VEL + 1, (b2 >> 4) & 0xf);
@@ -1341,8 +1930,14 @@ impl Pro {
                 v.sb(V_RUN, 0xff);
                 self.set_dma_count(i, 0);
                 let m = self.v[i].w(V_INT_OFF);
+                self.c("NP_INTENA");
+                self.c(["NP_INTENA_PRE_0", "NP_INTENA_PRE_1", "NP_INTENA_PRE_2", "NP_INTENA_PRE_3"][i]);
                 self.intena(hw, m);
+                self.c(["NP_INTENA_POST_0", "NP_INTENA_POST_1", "NP_INTENA_POST_2", "NP_INTENA_POST_3"][i]);
+                self.c("NP_INTREQ");
+                self.c(["NP_INTREQ_PRE_0", "NP_INTREQ_PRE_1", "NP_INTREQ_PRE_2", "NP_INTREQ_PRE_3"][i]);
                 self.intreq(hw, m);
+                self.c(["NP_INTREQ_POST_0", "NP_INTREQ_POST_1", "NP_INTREQ_POST_2", "NP_INTREQ_POST_3"][i]);
                 self.v[i].sb(V_KEY, 1);
             }
         }
@@ -1351,12 +1946,19 @@ impl Pro {
 
     /// $11ab0: voice `i`'s tick: a sound effect's note, the macro, the effects.
     fn voice(&mut self, hw: &mut Hw, i: usize) {
+        self.ctx = i as u8;
         self.at(At::VoiceStart);
+        self.c(["VOICE_0", "VOICE_1", "VOICE_2", "VOICE_3"][i]);
+        if self.dma_flag[i] {
+            self.c("IRQ_FLAG");
+        }
         self.irq_flag(i);
         let lock = self.v[i].w(V_LOCK);
         if (lock as i16) >= 0 {
+            self.c("LOCK_DEC");
             self.v[i].sw(V_LOCK, lock.wrapping_sub(1));
         } else {
+            self.c("LOCK_NEG");
             self.v[i].sb(V_SFX, 0);
             self.v[i].sb(V_PRIO, 0);
         }
@@ -1371,10 +1973,13 @@ impl Pro {
         if self.v[i].b(V_RUN) != 0 {
             let w = self.v[i].w(V_WAIT);
             if w != 0 {
+                self.c("WAIT_DEC");
                 self.v[i].sw(V_WAIT, w - 1);
             } else {
                 self.run_macro(hw, i);
             }
+        } else {
+            self.c("NOT_RUN");
         }
         self.effects(hw, i);
     }
@@ -1391,10 +1996,12 @@ impl Pro {
         let mut d0 = PERIODS[n as usize] as u32;
         let d1 = self.v[i].w(V_FINE).wrapping_add(self.g.w(G_CMD + 2));
         if d1 != 0 {
+            self.c("NPER_FINE");
             d0 = (d0 * d1.wrapping_add(0x100) as u32) >> 8;
         }
         self.v[i].sw(V_PER, d0 as u16);
         if self.v[i].w(V_PORTA_RATE) == 0 {
+            self.c("NPER_OUT");
             self.v[i].sw(V_PER_OUT, d0 as u16);
         }
     }
@@ -1404,10 +2011,13 @@ impl Pro {
     fn off_volume(&mut self, hw: &mut Hw, i: usize) {
         let (b2, b3) = (self.g.b(G_CMD + 2), self.g.b(G_CMD + 3));
         let d0 = if b2 != 0 {
+            self.c("OV_B2");
             b3 as u16
         } else if b3 != 0 {
+            self.c("OV_B3");
             self.v[i].w(V_VEL).wrapping_mul(3).wrapping_add(self.g.w(G_CMD + 2))
         } else {
+            self.c("OV_NONE");
             return;
         };
         self.v[i].sb(V_VOL, d0 as u8);
@@ -1419,10 +2029,16 @@ impl Pro {
     fn master_volume(&mut self, hw: &mut Hw, i: usize, lock_test: bool) {
         let d1 = self.g.b(G_MASTER) as u16;
         let mut d0 = self.v[i].b(V_VOL) as u16;
-        if (!lock_test || (self.v[i].w(V_LOCK) as i16) < 0) && d1 & 0x40 == 0 {
+        if lock_test && (self.v[i].w(V_LOCK) as i16) >= 0 {
+            self.c("MV_LOCKED");
+        } else if d1 & 0x40 == 0 {
+            self.c(if lock_test { "MV_SCALE" } else { "MV_SCALE_OFF" });
             d0 = (d0.wrapping_mul(4) as u32 * d1 as u32) as u16 >> 8;
+        } else {
+            self.c(if lock_test { "MV_FULL" } else { "MV_FULL_OFF" });
         }
         self.at(At::Volume);
+        self.c(["VOLUME_0", "VOLUME_1", "VOLUME_2", "VOLUME_3"][i]);
         self.vol(hw, i, d0);
     }
 
@@ -1433,18 +2049,30 @@ impl Pro {
             let a0 = self.v[i].l(V_MACRO).wrapping_add(self.v[i].w(V_STEP).wrapping_mul(4) as i16 as u32);
             let cmd = hw.bus.r32(a0);
             self.g.sl(G_CMD, cmd & 0x00ff_ffff);
-            let next = self.macro_cmd(hw, i, (cmd >> 24) as u8, a0);
+            let op = (cmd >> 24) as u8;
+            self.c(MACRO_NAMES.get(op as usize).copied().unwrap_or("M_BAD"));
+            self.site = if op < 0x34 { op } else { 0xff };
+            let next = self.macro_cmd(hw, i, op, a0);
+            self.site = 0xff;
             match next {
-                Next::Read => {}
-                Next::Step => self.step_on(i),
+                Next::Read => self.c("N_READ"),
+                Next::Step => {
+                    self.c("N_STEP");
+                    self.step_on(i)
+                }
                 Next::Pause => {
                     self.step_on(i);
                     if self.v[i].b(V_OFF_DONE) != 0 {
+                        self.c("N_PAUSE");
                         return;
                     }
+                    self.c("N_PAUSE_OFF");
                     self.v[i].sb(V_OFF_DONE, 0xff);
                 }
-                Next::Effects => return,
+                Next::Effects => {
+                    self.c("N_EFX");
+                    return;
+                }
             }
         }
     }
@@ -1466,6 +2094,7 @@ impl Pro {
                 }
                 self.step_on(i);
                 if b1 != 0 {
+                    self.c("M00_LATER");
                     // left to the start of the next tick
                     let m = self.g.w(G_DMA_OFF) | self.v[i].w(V_DMA_OFF);
                     self.g.sw(G_DMA_OFF, m);
@@ -1474,14 +2103,23 @@ impl Pro {
                     return Next::Effects;
                 }
                 let m = self.v[i].w(V_DMA_OFF);
+                self.c("M00_DMA");
+                self.c(["M00_DMA_PRE_0", "M00_DMA_PRE_1", "M00_DMA_PRE_2", "M00_DMA_PRE_3"][i]);
                 self.dmacon(hw, m);
+                self.c(["M00_DMA_POST_0", "M00_DMA_POST_1", "M00_DMA_POST_2", "M00_DMA_POST_3"][i]);
                 self.off_volume(hw, i);
                 Next::Read
             }
             0x01 => {
                 let m = self.v[i].w(V_INT_OFF);
+                self.c("M01_INTENA");
+                self.c(["M01_INTENA_PRE_0", "M01_INTENA_PRE_1", "M01_INTENA_PRE_2", "M01_INTENA_PRE_3"][i]);
                 self.intena(hw, m);
+                self.c(["M01_INTENA_POST_0", "M01_INTENA_POST_1", "M01_INTENA_POST_2", "M01_INTENA_POST_3"][i]);
+                self.c("M01_INTREQ");
+                self.c(["M01_INTREQ_PRE_0", "M01_INTREQ_PRE_1", "M01_INTREQ_PRE_2", "M01_INTREQ_PRE_3"][i]);
                 self.intreq(hw, m);
+                self.c(["M01_INTREQ_POST_0", "M01_INTREQ_POST_1", "M01_INTREQ_POST_2", "M01_INTREQ_POST_3"][i]);
                 self.v[i].sb(V_EFX, b1);
                 self.step_on(i);
                 self.dma_wait(hw, At::WaitOn);
@@ -1504,6 +2142,7 @@ impl Pro {
                 if self.v[i].w(V_SID) == 0 {
                     self.set_begin(hw, i, a);
                 } else {
+                    self.c("M11_SID");
                     self.v[i].sl(V_ADDR, a);
                     self.v[i].sl(V_SID_SRC, a);
                     self.step_on(i);
@@ -1514,6 +2153,7 @@ impl Pro {
                 let d1 = self.v[i].w(V_LEN).wrapping_add(w1);
                 self.v[i].sw(V_LEN, d1);
                 if self.v[i].w(V_SID) != 0 {
+                    self.c("M12_SID");
                     self.v[i].sw(V_SID_MASK, d1);
                 } else {
                     self.len(hw, ch, d1);
@@ -1528,8 +2168,10 @@ impl Pro {
             0x04 => {
                 if b1 & 1 != 0 {
                     if self.v[i].b(V_RND_WAIT) != 0 {
+                        self.c("M04_RND_WAIT");
                         return Next::Effects;
                     }
+                    self.c("M04_RND_GO");
                     self.v[i].sb(V_RND_WAIT, 1);
                     return Next::Step;
                 }
@@ -1538,15 +2180,19 @@ impl Pro {
             }
             0x05 | 0x10 => {
                 if c == 0x10 && self.v[i].b(V_KEY) == 0 {
+                    self.c("M10_UP");
                     return Next::Step;
                 }
                 let l = self.v[i].b(V_LOOP);
                 if l != 0 {
                     self.v[i].sb(V_LOOP, l - 1);
                     if l == 1 {
+                        self.c("LOOP_END");
                         return Next::Step;
                     }
+                    self.c("LOOP_DEC");
                 } else {
+                    self.c("LOOP_SET");
                     self.v[i].sb(V_LOOP, b1);
                 }
                 self.v[i].sw(V_STEP, w1);
@@ -1594,8 +2240,9 @@ impl Pro {
                 v.sb(V_PORTA_TIME, 1);
                 if v.w(V_PORTA_RATE) == 0 {
                     v.sw(V_PORTA_PER, v.w(V_PER));
+                    self.c("M0B_START");
                 }
-                v.sw(V_PORTA_RATE, w1);
+                self.v[i].sw(V_PORTA_RATE, w1);
                 Next::Step
             }
             0x0c => {
@@ -1605,6 +2252,7 @@ impl Pro {
                 v.sb(V_VIB_WIDTH, b3);
                 v.sb(V_VIB_WIDTH + 1, 1);
                 if v.w(V_PORTA_RATE) != 0 {
+                    self.c("M0C_PORTA");
                     return Next::Step;
                 }
                 v.sw(V_PER_OUT, v.w(V_PER));
@@ -1613,6 +2261,7 @@ impl Pro {
             }
             0x0d | 0x0e => {
                 if b2 == 0xfe {
+                    self.c("M0D_NOTE");
                     // a note first, the command's second byte from the note
                     self.g.sw(G_CMD + 2, 0);
                     let n = self.v[i].b(V_NOTE);
@@ -1637,15 +2286,19 @@ impl Pro {
             }
             0x14 => {
                 if self.v[i].b(V_KEY) == 0 {
+                    self.c("M14_UP");
                     return Next::Step;
                 }
                 let l = self.v[i].b(V_LOOP);
                 if l != 0 {
                     self.v[i].sb(V_LOOP, l - 1);
                     if l == 1 {
+                        self.c("LOOP_END");
                         return Next::Step;
                     }
+                    self.c("LOOP_DEC");
                 } else {
+                    self.c("LOOP_SET");
                     self.v[i].sb(V_LOOP, b3);
                 }
                 Next::Effects
@@ -1658,6 +2311,7 @@ impl Pro {
             0x17 => {
                 self.v[i].sw(V_PER, w1);
                 if self.v[i].w(V_PORTA_RATE) == 0 {
+                    self.c("M17_OUT");
                     self.v[i].sw(V_PER_OUT, w1);
                 }
                 Next::Step
@@ -1668,6 +2322,7 @@ impl Pro {
                 self.loc(hw, ch, a);
                 let l = self.v[i].w(V_LEN).wrapping_sub((cmd as u16) >> 1);
                 self.v[i].sw(V_LEN, l);
+                self.c("M18_LEN");
                 self.len(hw, ch, l);
                 Next::Step
             }
@@ -1677,6 +2332,7 @@ impl Pro {
                 self.v[i].sl(V_ADDR, a);
                 self.loc(hw, ch, a);
                 self.v[i].sw(V_LEN, 1);
+                self.c("M19_LEN");
                 self.len(hw, ch, 1);
                 Next::Step
             }
@@ -1684,7 +2340,9 @@ impl Pro {
                 self.set_dma_count(i, w1);
                 self.v[i].sb(V_RUN, 0);
                 let m = self.v[i].w(V_INT_ON);
+                self.c(["M1A_INTENA_PRE_0", "M1A_INTENA_PRE_1", "M1A_INTENA_PRE_2", "M1A_INTENA_PRE_3"][i]);
                 self.intena(hw, m);
+                self.c(["M1A_INTENA_POST_0", "M1A_INTENA_POST_1", "M1A_INTENA_POST_2", "M1A_INTENA_POST_3"][i]);
                 Next::Pause
             }
             0x1b => {
@@ -1698,6 +2356,7 @@ impl Pro {
             0x1c | 0x1d => {
                 let x = self.v[i].b(if c == 0x1c { V_NOTE } else { V_VOL });
                 if b1 >= x {
+                    self.c("M1C_NO");
                     return Next::Step;
                 }
                 self.v[i].sw(V_STEP, w1);
@@ -1775,6 +2434,8 @@ impl Pro {
                 let v = &mut self.v[i];
                 v.sw(V_SID, 0);
                 if b1 != 0 {
+                    self.c("M29_CLEAR");
+                    let v = &mut self.v[i];
                     for o in [0x6c, 0x78] {
                         v.sl(o, 0);
                     }
@@ -1794,6 +2455,7 @@ impl Pro {
             0x2d => {
                 let a = (0x80000u32.wrapping_add(w1 as i16 as u32)) & 0x7ffff;
                 if hw.bus.r8(a) != b1 {
+                    self.c("M2D_NO");
                     return Next::Step;
                 }
                 let s = self.v[i].w(V_STEP).wrapping_add(2);
@@ -1814,6 +2476,7 @@ impl Pro {
             }
             0x30 => {
                 if self.v[i].b(V_F91) == 0 {
+                    self.c("M30_FIRST");
                     self.v[i].sb(V_F91, 0xff);
                     return Next::Step;
                 }
@@ -1853,9 +2516,11 @@ impl Pro {
         self.at(At::Effects);
         let e = self.v[i].b(V_EFX);
         if e & 0x80 != 0 {
+            self.c("EFX_OFF");
             return self.fade_volume(hw, i);
         }
         if e == 0 {
+            self.c("EFX_FIRST");
             self.v[i].sb(V_EFX, 1);
             return self.fade_volume(hw, i);
         }
@@ -1865,13 +2530,17 @@ impl Pro {
             let a = self.v[i].l(V_ADDR).wrapping_add(self.v[i].l(V_AB_DELTA));
             self.v[i].sl(V_ADDR, a);
             if self.v[i].w(V_SID) != 0 {
+                self.c("AB_SID");
                 self.v[i].sl(V_SID_SRC, a);
             } else {
+                self.site = 0x34;
                 self.loc(hw, i, a);
+                self.site = 0xff;
             }
             let t = self.v[i].b(V_AB_TIME).wrapping_sub(1);
             self.v[i].sb(V_AB_TIME, t);
             if t == 0 {
+                self.c("AB_FLIP");
                 let v = &mut self.v[i];
                 v.sb(V_AB_TIME, v.b(V_AB_RESET));
                 v.sl(V_AB_DELTA, v.l(V_AB_DELTA).wrapping_neg());
@@ -1879,12 +2548,21 @@ impl Pro {
         }
         if self.v[i].w(V_SID) != 0 {
             self.sid(hw, i);
+        } else {
+            self.c("NO_SID");
         }
         // vibrato
         if self.v[i].b(V_VIB_RESET) != 0 {
             self.at(At::Vibrato);
-            let v = &mut self.v[i];
+            let v = &self.v[i];
             let o = v.w(V_VIB_OFS).wrapping_add(v.b(V_VIB_WIDTH) as i8 as u16);
+            let (rate, t) = (v.w(V_PORTA_RATE), v.b(V_VIB_TIME).wrapping_sub(1));
+            self.c(if o != 0 { "VIB_MUL" } else { "VIB_ZERO" });
+            self.c(if rate == 0 { "VIB_OUT" } else { "VIB_PORTA" });
+            if t == 0 {
+                self.c("VIB_FLIP");
+            }
+            let v = &mut self.v[i];
             v.sw(V_VIB_OFS, o);
             let mut d0 = v.w(V_PER) as u32;
             if o != 0 {
@@ -1899,6 +2577,8 @@ impl Pro {
                 v.sb(V_VIB_TIME, v.b(V_VIB_RESET));
                 v.sb(V_VIB_WIDTH, (v.b(V_VIB_WIDTH) ^ 0xff).wrapping_add(1));
             }
+        } else {
+            self.c("NO_VIB");
         }
         // portamento
         if self.v[i].w(V_PORTA_RATE) != 0 {
@@ -1907,19 +2587,30 @@ impl Pro {
             v.sb(V_PORTA_TIME, t);
             if t == 0 {
                 self.at(At::Porta);
+                let v = &self.v[i];
+                let (d1, p0, rate) = (v.w(V_PER), v.w(V_PORTA_PER), v.w(V_PORTA_RATE));
+                let mut d0 = p0 as u32;
+                let (kind, reached) = if p0 == d1 {
+                    ("PORTA_EQ", true)
+                } else if p0 < d1 {
+                    d0 = (d0 * rate.wrapping_add(0x100) as u32) >> 8;
+                    ("PORTA_UP", d0 as u16 >= d1)
+                } else {
+                    d0 = (d0 * 0x100u16.wrapping_sub(rate) as u32) >> 8;
+                    ("PORTA_DOWN", d0 as u16 <= d1)
+                };
+                self.c(kind);
+                if reached {
+                    self.c("PORTA_REACHED");
+                    if kind == "PORTA_UP" {
+                        self.c("PORTA_UP_REACHED");
+                    }
+                    if d0 as u16 == d1 {
+                        self.c("PORTA_EXACT");
+                    }
+                }
                 let v = &mut self.v[i];
                 v.sb(V_PORTA_TIME, v.b(V_PORTA_RESET));
-                let d1 = v.w(V_PER);
-                let mut d0 = v.w(V_PORTA_PER) as u32;
-                let reached = if d0 as u16 == d1 {
-                    true
-                } else if (d0 as u16) < d1 {
-                    d0 = (d0 * v.w(V_PORTA_RATE).wrapping_add(0x100) as u32) >> 8;
-                    d0 as u16 >= d1
-                } else {
-                    d0 = (d0 * 0x100u16.wrapping_sub(v.w(V_PORTA_RATE)) as u32) >> 8;
-                    d0 as u16 <= d1
-                };
                 if reached {
                     v.sw(V_PORTA_RATE, 0);
                     d0 = v.w(V_PER) as u32;
@@ -1927,34 +2618,52 @@ impl Pro {
                 let d0 = d0 as u16 & 0x7ff;
                 v.sw(V_PORTA_PER, d0);
                 v.sw(V_PER_OUT, d0);
+            } else {
+                self.c("PORTA_WAIT");
             }
+        } else {
+            self.c("NO_PORTA");
         }
         // envelope
         if self.v[i].b(V_ENV) != 0 {
             self.at(At::Env);
-            let v = &mut self.v[i];
-            let c = v.b(V_ENV + 1);
+            let c = self.v[i].b(V_ENV + 1);
             if c != 0 {
-                v.sb(V_ENV + 1, c - 1);
+                self.c("ENV_WAIT");
+                self.v[i].sb(V_ENV + 1, c - 1);
             } else {
+                let v = &mut self.v[i];
                 v.sb(V_ENV + 1, v.b(V_ENV));
                 let end = v.b(V_ENV + 2) as i8;
                 let rate = v.b(V_ENV + 3);
                 let vol = v.b(V_VOL) as i8;
-                let done = if end > vol {
+                let (kind, done, exact) = if end > vol {
                     let n = (vol as u8).wrapping_add(rate) as i8;
                     v.sb(V_VOL, n as u8);
-                    end <= n
+                    ("ENV_UP", end <= n, end == n)
                 } else {
                     let n = (vol as u8).wrapping_sub(rate) as i8;
                     v.sb(V_VOL, n as u8);
-                    n < 0 || end >= n
+                    (if n < 0 { "ENV_DOWN_NEG" } else { "ENV_DOWN" }, n < 0 || end >= n, end == n)
                 };
+                if exact {
+                    self.c("ENV_EXACT");
+                }
+                let v = &mut self.v[i];
                 if done {
                     v.sb(V_VOL, end as u8);
                     v.sb(V_ENV, 0);
                 }
+                self.c(kind);
+                if done {
+                    self.c("ENV_DONE");
+                    if kind == "ENV_UP" {
+                        self.c("ENV_UP_DONE");
+                    }
+                }
             }
+        } else {
+            self.c("NO_ENV");
         }
         self.random_play(hw, i);
     }
@@ -2059,6 +2768,7 @@ impl Pro {
     fn random_play(&mut self, hw: &mut Hw, i: usize) {
         let r = self.v[i].b(V_RND);
         if r == 0 {
+            self.c("NO_RND");
             return self.fade_volume(hw, i);
         }
         self.at(At::Random);
@@ -2158,13 +2868,16 @@ impl Pro {
         self.at(At::Fade);
         let dir = self.g.b(G_FADE_DIR);
         if dir != 0 {
+            self.c("FADE_DIR");
             let c = self.g.b(G_FADE_CNT).wrapping_sub(1);
             self.g.sb(G_FADE_CNT, c);
             if c == 0 {
+                self.c("FADE_STEP");
                 self.g.sb(G_FADE_CNT, self.g.b(G_FADE_RESET));
                 let m = self.g.b(G_MASTER).wrapping_add(dir);
                 self.g.sb(G_MASTER, m);
                 if self.g.b(G_FADE_END) == m {
+                    self.c("FADE_END");
                     self.g.sb(G_FADE_DIR, 0);
                     self.fade_lock = 0;
                 }
@@ -2176,9 +2889,25 @@ impl Pro {
     /// $114c8 (with the Eagleplayer's song end test before it).
     fn interrupt(&mut self, hw: &mut Hw) {
         self.flush(hw, "t");
+        if !self.tfhd {
+            self.in_tick = true;
+            self.seg = hw.bus.clock;
+            self.cyc = 0;
+        }
         self.at(At::Tick);
-        if !self.tfhd && !self.sfx_module && (0..8).all(|k| self.p.b(P_NUM + 4 * k) == 0xff) {
-            self.songend = true;
+        if !self.tfhd && !self.sfx_module {
+            let mut all = true;
+            for k in 0..8 {
+                self.c("SE_TRACK");
+                if self.p.b(P_NUM + 4 * k) != 0xff {
+                    all = false;
+                    break;
+                }
+            }
+            if all {
+                self.c("SE_ALL");
+                self.songend = true;
+            }
         }
         let saved = self.g.l(G_CMD);
         let off = self.g.w(G_DMA_OFF);
@@ -2189,16 +2918,23 @@ impl Pro {
                 if off & 1 << ch != 0 {
                     self.at(At::OffPer);
                     self.per(hw, ch, 9);
+                } else {
+                    self.c("OFF_SKIP");
                 }
             }
             self.g.sw(G_DMA_OFF, 0);
+        } else {
+            self.c("NO_OFF");
         }
         if self.g.b(G_ON) != 0 {
             for i in 0..4 {
                 self.voice(hw, i);
             }
+            self.ctx = 9;
             if (self.g.b(G_SONG) as i8) >= 0 {
                 self.tracks(hw);
+            } else {
+                self.c("NO_TRACKS");
             }
             for ch in 0..4 {
                 self.at(At::PerOut);
@@ -2207,11 +2943,13 @@ impl Pro {
             }
             self.dma_wait(hw, At::WaitEnd);
             let m = self.g.w(G_DMA_ON);
+            self.c("END_DMA");
             self.dmacon(hw, m);
             self.g.sw(G_DMA_ON, 0);
         }
         self.g.sl(G_CMD, saved);
         self.flush(hw, "e");
+        self.in_tick = false;
     }
 }
 

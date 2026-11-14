@@ -1,7 +1,7 @@
 //! Amiga ProTracker and compatible modules (`loaders/mod_load.c`), with
-//! libxmp's tracker detection. Used only by the UMX container: plain `.mod`
-//! files stay on the native ProTracker path, so this loader is not in
-//! `xmp::LOADERS`.
+//! libxmp's tracker detection. Used by the UMX container, and in `xmp::LOADERS`
+//! for the Software Visions magic (".M.K", the byte-swapped MODs of Apocalypse
+//! Abyss) only: plain `.mod` files stay on the native ProTracker path.
 //!
 //! Ported from libxmp 4.7.4, MIT licence, Copyright (C) 1996-2026 Claudio Matsuoka
 //! and Hipolito Carraro Jr (see LICENSE-libxmp).

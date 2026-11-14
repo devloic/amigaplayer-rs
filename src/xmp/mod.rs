@@ -46,6 +46,10 @@ pub struct Loader {
 /// The loaders, in libxmp's order (`format_loaders` of `format.c`).
 pub static LOADERS: &[Loader] = &[
     Loader { name: "Fast Tracker II", test: loaders::xm::test, load: loaders::xm::load },
+    // libxmp's ProTracker loader, for one of its magics only: the hacked MODs of the game
+    // "Apocalypse Abyss" (Software Visions, `.dmf`; ".M.K", header and first pattern
+    // byte-swapped). The other MODs stay on the built-in ProTracker (see `mod_load`).
+    Loader { name: "Software Visions DMF", test: software_visions_test, load: loaders::mod_load::load },
     Loader { name: "Impulse Tracker", test: loaders::it::test, load: loaders::it::load },
     Loader { name: "Scream Tracker 3", test: loaders::s3m::test, load: loaders::s3m::load },
     Loader { name: "Scream Tracker 2", test: loaders::stm::test, load: loaders::stm::load },
@@ -84,6 +88,11 @@ pub static LOADERS: &[Loader] = &[
     // not a libxmp loader: X-Tracker plays on `crate::dmf` (XmpPlayer hands it there)
     Loader { name: "X-Tracker", test: crate::dmf::test, load: |_, _| Err(()) },
 ];
+
+/// libxmp's `mod_test` for a module whose magic is ".M.K" (Software Visions DMF).
+fn software_visions_test(data: &[u8]) -> bool {
+    data.get(1080..1084) == Some(b".M.K") && loaders::mod_load::test(data)
+}
 
 /// The loader that claims `data`, if any.
 pub fn detect(data: &[u8]) -> Option<&'static Loader> {

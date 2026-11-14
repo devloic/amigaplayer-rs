@@ -33,10 +33,6 @@ const PERIODS: [u16; 36] = [
     0x78, 0x71,
 ];
 
-/// Colour clocks the original lets pass between its DMA-off, DMA-on and data passes
-/// (nine raster lines).
-const DMA_WAIT: u64 = 2000;
-
 // ---------------------------------------------------------------------------------
 // Recognition
 
@@ -134,6 +130,11 @@ struct Pvp {
     m: u8,
     ch: [Chan; 4],
     songend: bool,
+    /// The tick's start (colour clock), the original's 68000 cycles since then and the voice the
+    /// paths are on (4: none), for the writes' times.
+    t0: u64,
+    cy: i64,
+    vk: usize,
 }
 
 impl Pvp {
@@ -153,7 +154,57 @@ impl Pvp {
                 }
             }
         }
-        Some(Pvp { d: d.to_vec(), base, lay, starts, title, speed: 6, c: 0, pos: 0, rc: 0, m: 0, ch: Default::default(), songend: false })
+        Some(Pvp {
+            d: d.to_vec(),
+            base,
+            lay,
+            starts,
+            title,
+            speed: 6,
+            c: 0,
+            pos: 0,
+            rc: 0,
+            m: 0,
+            ch: Default::default(),
+            songend: false,
+            t0: 0,
+            cy: 0,
+            vk: 4,
+        })
+    }
+
+    /// A path of the original's code taken: its cycles, on the current voice.
+    fn k(&mut self, k: usize) {
+        self.cy += COSTS[k][self.vk] as i64;
+    }
+    /// `n` times the path `k`.
+    fn kn(&mut self, k: usize, n: u32) {
+        self.cy += COSTS[k][self.vk] as i64 * n as i64;
+    }
+    /// The colour clock the original is at now.
+    fn now(&self) -> u64 {
+        (self.t0 as i64 + self.cy.div_euclid(2)) as u64
+    }
+    /// A Paula write of kind `k` (the path to it): at the tick's start plus half the cycles so far.
+    fn at(&mut self, k: usize, hw: &mut Hw) {
+        self.k(k);
+        let t = self.now();
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+    /// A wait for the beam: the line is read, then read again every `poll` cycles until it
+    /// is `lines` on (the `w`th wait's parameters).
+    fn wait(&mut self, w: usize) {
+        let base = K_W1PRE + 4 * w;
+        self.k(base);
+        let l0 = self.now() / crate::paula::LINE;
+        self.k(base + 1);
+        let poll = COSTS[base + 2][4].max(1) as i64;
+        let n = COSTS[base + 3][4] as u64;
+        while self.now() / crate::paula::LINE < l0 + n {
+            self.cy += poll;
+        }
     }
 
     fn rb(&self, o: usize) -> u8 {
@@ -171,7 +222,9 @@ impl Pvp {
         if next >= self.s8() {
             next = 8 * self.lay.restart as u32;
             self.songend = true;
+            self.k(K_LSWRAP);
         }
+        self.k(K_LS);
         self.pos = next;
         self.rc = 16;
         for i in 0..4 {
@@ -184,12 +237,19 @@ impl Pvp {
         let bit = 1u8 << i;
         self.ch[i].p22 = p;
         self.ch[i].vp = 0;
+        self.at(K_WTVOL, hw);
         hw.vol(i, 0);
+        self.at(K_WTPER, hw);
         hw.per(i, 1);
+        self.at(K_WTDOFF, hw);
         hw.dmacon(bit as u16);
         self.m |= bit;
-        hw.loc(i, self.ch[i].a12);
-        hw.len(i, self.ch[i].l16);
+        let (a, l) = (self.ch[i].a12, self.ch[i].l16);
+        self.at(K_WTLOC, hw);
+        hw.loc(i, a);
+        self.at(K_WTLEN, hw);
+        hw.len(i, l);
+        self.k(K_TEND);
         self.post_trigger(i, hw);
     }
 
@@ -202,25 +262,33 @@ impl Pvp {
             11 => {
                 self.pos = ((b3 as u32).wrapping_sub(1) << 5) & 0xFFFF;
                 self.rc = 0;
+                self.k(K_P11);
             }
             12 => {
                 c.v18 = (b3 as u16).min(64);
-                hw.vol(i, c.v18 & 0x7F);
+                let v = c.v18;
+                self.k(if b3 > 64 { K_P12CL } else { K_P12 });
+                self.at(K_WP12, hw);
+                hw.vol(i, v & 0x7F);
+                self.k(K_P12END);
             }
             13 => {
                 let mut n = (self.pos & 0xFFE0) + 0x20;
                 if n >= self.s8() {
                     n = 8 * self.lay.restart as u32;
                     self.songend = true;
+                    self.k(K_P13WRAP);
                 }
                 self.pos = n;
                 self.rc = 0;
+                self.k(K_P13);
             }
             15 => {
                 self.speed = b3;
                 self.c = b3 as i8;
+                self.k(K_P15);
             }
-            _ => {}
+            _ => self.k(K_PX),
         }
     }
 
@@ -233,13 +301,19 @@ impl Pvp {
                 c.p6 = 0;
                 c.e = 0;
                 c.b3 = 0;
+                self.k(K_RHOLD);
             } else if c.p6 != 0 {
                 c.v18 = c.v1a;
                 c.p22 = c.p24;
                 if c.e != 3 {
                     let p6 = c.p6;
+                    self.k(K_RREP);
                     self.trigger(i, p6, hw);
+                } else {
+                    self.k(K_RREP3);
                 }
+            } else {
+                self.k(K_RREP0);
             }
             return;
         }
@@ -249,6 +323,7 @@ impl Pvp {
         self.ch[i].tp = o + 4;
         let sample = (b0 >> 3) as usize;
         let period = (((b0 as u16) << 8) | b1 as u16) & 0x3FF;
+        self.k(K_RNEW);
         if sample != 0 {
             let h = 8 * (sample - 1);
             let (len, vol, ls, ll) = (be16(&self.d, h), be16(&self.d, h + 2), be16(&self.d, h + 4), be16(&self.d, h + 6));
@@ -261,9 +336,11 @@ impl Pvp {
                 c.l20 = ll;
                 c.l16 = ls.wrapping_add(ll);
                 c.a1c = a12 + 2 * ls as u32;
+                self.k(K_RSLOOP);
             } else {
                 c.a1c = a12;
                 c.l20 = ll;
+                self.k(K_RSAMP);
             }
         }
         let c = &mut self.ch[i];
@@ -276,92 +353,154 @@ impl Pvp {
         c.p6 = period;
         let e = c.e;
         if period == 0 {
+            self.k(K_RNOPER);
             self.post_trigger(i, hw);
         } else if e != 3 {
+            self.k(K_RNOTE);
             self.trigger(i, period, hw);
         } else {
+            let c = &mut self.ch[i];
             c.target = period;
             c.down = (period as i16) < (c.p22 as i16);
             c.s29 = b3;
             self.m |= bit;
+            self.k(K_RPORTA);
         }
     }
 
     fn effects(&mut self, i: usize, hw: &mut Hw) {
         let (speed, cc) = (self.speed, self.c);
-        let c = &mut self.ch[i];
-        match c.e {
+        let e = self.ch[i].e;
+        match e {
             0 => {
-                if c.b3 != 0 {
+                if self.ch[i].b3 != 0 {
+                    let (p22, x, y) = (self.ch[i].p22, self.ch[i].x, self.ch[i].y);
                     let k = speed.wrapping_sub(cc as u8) as i8;
                     let v = if k == 0 || k == 3 {
-                        c.p22
+                        self.k(K_A03);
+                        p22
                     } else {
-                        let n = if k == 2 || k == 5 { c.y } else { c.x } as usize;
-                        let idx = PERIODS.iter().position(|&t| c.p22 >= t).unwrap_or(36);
-                        PERIODS.get(idx + n).copied().unwrap_or(0)
+                        let n = if k == 2 || k == 5 { y } else { x } as usize;
+                        let idx = PERIODS.iter().position(|&t| p22 >= t).unwrap_or(36);
+                        let v = PERIODS.get(idx + n).copied().unwrap_or(0);
+                        self.k(if k == 2 || k == 5 { K_AY } else { K_AX });
+                        self.kn(K_ASTEP, idx as u32);
+                        v
                     };
+                    self.at(K_WA, hw);
                     hw.per(i, v);
+                    self.k(K_AEND);
+                } else {
+                    self.k(K_E0Z);
                 }
             }
             1 => {
-                c.p22 = (c.p22 as i32 - c.b3 as i32).max(0x71) as u16;
-                hw.per(i, c.p22);
+                let c = &mut self.ch[i];
+                let x = c.p22 as i32 - c.b3 as i32;
+                c.p22 = x.max(0x71) as u16;
+                let p = c.p22;
+                self.k(if x < 0x71 { K_E1CL } else { K_E1 });
+                self.at(K_WE1, hw);
+                hw.per(i, p);
+                self.k(K_E1END);
             }
             2 => {
-                c.p22 = (c.p22 as i32 + c.b3 as i32).min(0x358) as u16;
-                hw.per(i, c.p22);
+                let c = &mut self.ch[i];
+                let x = c.p22 as i32 + c.b3 as i32;
+                c.p22 = x.min(0x358) as u16;
+                let p = c.p22;
+                self.k(if x > 0x358 { K_E2CL } else { K_E2 });
+                self.at(K_WE2, hw);
+                hw.per(i, p);
+                self.k(K_E2END);
             }
             3 => {
-                if c.b3 != 0 {
+                let c = &mut self.ch[i];
+                let set = c.b3 != 0;
+                if set {
                     c.s29 = c.b3;
                 }
                 if c.p22 != c.target {
                     let (p, t, s) = (c.p22 as i16, c.target as i16, c.s29 as i16);
-                    let v = if c.down {
+                    let (v, hit) = if c.down {
                         let n = p.wrapping_sub(s);
                         if t >= n {
-                            t
+                            (t, true)
                         } else {
-                            n
+                            (n, false)
                         }
                     } else {
                         let n = p.wrapping_add(s);
                         if t <= n {
-                            t
+                            (t, true)
                         } else {
-                            n
+                            (n, false)
                         }
                     };
                     c.p22 = v as u16;
-                    hw.per(i, c.p22);
+                    let (down, pv) = (c.down, c.p22);
+                    self.k(if set { K_E3SET } else { K_E3KEEP });
+                    self.k(if down { K_E3DN } else { K_E3UP });
+                    if hit {
+                        self.k(K_E3HIT);
+                    }
+                    self.at(K_WE3, hw);
+                    hw.per(i, pv);
+                    self.k(K_E3END);
+                } else {
+                    self.k(if set { K_E3SET } else { K_E3KEEP });
+                    self.k(K_E3EQ);
                 }
             }
             4 => {
-                if c.b3 != 0 {
+                let c = &mut self.ch[i];
+                let set = c.b3 != 0;
+                if set {
                     c.vib = c.b3;
                 }
                 let idx = ((c.vp & 0x7F) >> 2) as usize;
                 let delta = (SINE[idx] as u16 * (c.vib & 15) as u16) >> 6;
-                hw.per(i, c.p22.wrapping_add(delta));
+                let p = c.p22.wrapping_add(delta);
+                self.k(if set { K_E4SET } else { K_E4 });
+                self.at(K_WE4, hw);
+                hw.per(i, p);
+                let c = &mut self.ch[i];
                 c.vp = c.vp.wrapping_add((c.vib >> 2) & 0x3C);
+                self.k(K_E4END);
             }
             10 => {
-                c.v18 = if c.x != 0 { (c.v18 + c.x as u16).min(64) } else { c.v18.saturating_sub(c.y as u16) };
-                hw.vol(i, c.v18 & 0x7F);
+                let c = &mut self.ch[i];
+                let up = c.x != 0;
+                let clamp = if up { c.v18 + c.x as u16 > 64 } else { c.v18 < c.y as u16 };
+                c.v18 = if up { (c.v18 + c.x as u16).min(64) } else { c.v18.saturating_sub(c.y as u16) };
+                let v = c.v18;
+                self.k(if up { K_EAUP } else { K_EADN });
+                if clamp {
+                    self.k(if up { K_EAUPCL } else { K_EADNCL });
+                }
+                self.at(K_WEA, hw);
+                hw.vol(i, v & 0x7F);
+                self.k(K_EAEND);
             }
-            _ => {}
+            _ => self.k(K_EX),
         }
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t0 = hw.bus.clock;
+        self.cy = 0;
+        self.vk = 4;
+        self.k(K_TICK);
         self.c = self.c.wrapping_sub(1);
         if self.c > 0 {
+            self.k(K_MID);
             for i in 0..4 {
+                self.vk = i;
                 self.effects(i, hw);
             }
             return;
         }
+        self.k(K_ROWT);
         self.c = self.speed as i8;
         self.m = 0;
         self.rc = self.rc.wrapping_sub(1);
@@ -369,22 +508,205 @@ impl Pvp {
             self.load_step();
         }
         for i in 0..4 {
+            self.vk = i;
             self.row(i, hw);
         }
-        hw.wait(DMA_WAIT);
-        hw.dmacon(0x8200 | self.m as u16);
-        hw.wait(DMA_WAIT);
+        self.vk = 4;
+        self.wait(0);
+        let m = self.m;
+        self.at(K_WDON, hw);
+        hw.dmacon(0x8200 | m as u16);
+        self.wait(1);
         for i in 0..4 {
+            self.vk = i;
             if self.m & (1 << i) != 0 {
                 let c = &self.ch[i];
-                hw.loc(i, c.a1c);
-                hw.len(i, c.l20);
-                hw.per(i, c.p22);
-                hw.vol(i, c.v18 & 0x7F);
+                let (a, l, p, v) = (c.a1c, c.l20, c.p22, c.v18);
+                self.at(K_WLLOC, hw);
+                hw.loc(i, a);
+                self.at(K_WLLEN, hw);
+                hw.len(i, l);
+                self.at(K_WLPER, hw);
+                hw.per(i, p);
+                self.at(K_WLVOL, hw);
+                hw.vol(i, v & 0x7F);
+                self.k(K_LEND);
+            } else {
+                self.k(K_LSKIP);
             }
         }
     }
 }
+
+/// The paths of the original's code (the cost tables' rows).
+const K_TICK: usize = 0;
+const K_MID: usize = 1;
+const K_ROWT: usize = 2;
+const K_LS: usize = 3;
+const K_LSWRAP: usize = 4;
+const K_WTVOL: usize = 5;
+const K_WTPER: usize = 6;
+const K_WTDOFF: usize = 7;
+const K_WTLOC: usize = 8;
+const K_WTLEN: usize = 9;
+const K_TEND: usize = 10;
+const K_P11: usize = 11;
+const K_P12: usize = 12;
+const K_P12CL: usize = 13;
+const K_WP12: usize = 14;
+const K_P12END: usize = 15;
+const K_P13: usize = 16;
+const K_P13WRAP: usize = 17;
+const K_P15: usize = 18;
+const K_PX: usize = 19;
+const K_RHOLD: usize = 20;
+const K_RREP: usize = 21;
+const K_RREP3: usize = 22;
+const K_RREP0: usize = 23;
+const K_RNEW: usize = 24;
+const K_RSLOOP: usize = 25;
+const K_RSAMP: usize = 26;
+const K_RNOPER: usize = 27;
+const K_RNOTE: usize = 28;
+const K_RPORTA: usize = 29;
+const K_A03: usize = 30;
+const K_AY: usize = 31;
+const K_AX: usize = 32;
+const K_ASTEP: usize = 33;
+const K_WA: usize = 34;
+const K_AEND: usize = 35;
+const K_E0Z: usize = 36;
+const K_E1: usize = 37;
+const K_E1CL: usize = 38;
+const K_WE1: usize = 39;
+const K_E1END: usize = 40;
+const K_E2: usize = 41;
+const K_E2CL: usize = 42;
+const K_WE2: usize = 43;
+const K_E2END: usize = 44;
+const K_E3SET: usize = 45;
+const K_E3KEEP: usize = 46;
+const K_E3DN: usize = 47;
+const K_E3UP: usize = 48;
+const K_E3HIT: usize = 49;
+const K_WE3: usize = 50;
+const K_E3END: usize = 51;
+const K_E3EQ: usize = 52;
+const K_E4SET: usize = 53;
+const K_E4: usize = 54;
+const K_WE4: usize = 55;
+const K_E4END: usize = 56;
+const K_EAUP: usize = 57;
+const K_EADN: usize = 58;
+const K_WEA: usize = 59;
+const K_EAEND: usize = 60;
+const K_EX: usize = 61;
+const K_W1PRE: usize = 62;
+// 63: first poll, 64: poll period, 65: lines; 66-69 the same for the second wait
+const K_WDON: usize = 70;
+const K_WLLOC: usize = 71;
+const K_WLLEN: usize = 72;
+const K_WLPER: usize = 73;
+const K_WLVOL: usize = 74;
+const K_LEND: usize = 75;
+const K_LSKIP: usize = 76;
+const K_EAUPCL: usize = 77;
+const K_EADNCL: usize = 78;
+const NK: usize = 79;
+/// Each path's 68000 cycles, per voice (the last column: no voice). Integer costs fitted exactly to
+/// the reference's write times. Rows 62-65 and 66-69 are the two waits (cycles before the line is
+/// read, before the first poll, the poll period and the lines waited, in the last column).
+const COSTS: [[i32; 5]; NK] = [
+    [0, 0, 0, 0, 717],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 38],
+    [0, 0, 0, 0, 301],
+    [0, 0, 0, 0, 174],
+    [0, 0, 73, 362, 0],
+    [16, 16, 16, 16, 0],
+    [24, 24, 24, 24, 0],
+    [40, 40, 40, 40, 0],
+    [149, 180, 211, 219, 0],
+    [343, 257, 192, 53, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [125, 265, 384, 521, 0],
+    [262, 176, 90, -26, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [72, 72, 0, 12, 0],
+    [0, 0, -21, 0, 0],
+    [0, 11, 11, 2, 0],
+    [0, 128, 172, 0, 0],
+    [0, 0, 0, 0, 0],
+    [-11, 0, 0, 0, 0],
+    [266, 277, 298, 126, 0],
+    [177, 177, 177, 177, 0],
+    [135, 135, 135, 135, 0],
+    [0, 0, 0, 142, 0],
+    [-140, -23, 0, 0, 0],
+    [36, 36, 15, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [-52, -52, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [-103, 43, 0, 0, 0],
+    [251, 136, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [-90, 56, 0, 0, 0],
+    [251, 0, 0, 0, 0],
+    [0, 110, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [4, 4, 4, 4, 0],
+    [0, 0, 292, 386, 0],
+    [287, 136, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [12, 12, 12, 12, 0],
+    [0, 0, 0, 0, 0],
+    [102, 248, 394, 488, 0],
+    [251, 136, 73, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [73, 242, 411, 495, 0],
+    [267, 152, 89, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 317],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 1],
+    [0, 0, 0, 0, 10],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 1],
+    [0, 0, 0, 0, 10],
+    [0, 0, 0, 0, 92],
+    [142, 185, 228, 271, 0],
+    [20, 20, 20, 20, 0],
+    [20, 20, 20, 20, 0],
+    [325, 379, 433, 431, 0],
+    [28, 16, 4, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [4, 4, 4, 4, 0],
+];
+
+/// From the player's start (the host's call) to its first write: the check and init's colour
+/// clocks, by the pointer table's length and the samples that have a length; then to the song's
+/// start.
+fn start_time(d: &[u8]) -> u64 {
+    let Some(lay) = layout(d) else { return 0 };
+    let ns = (0..31).filter(|&i| be16(d, 8 * i) != 0).count() as u64;
+    2289 + 38 * lay.n as u64 + 8 * ns
+}
+const START_TO_SONG: u64 = 4782;
 
 impl Replayer for Pvp {
     fn format(&self) -> &'static str {
@@ -406,10 +728,12 @@ impl Replayer for Pvp {
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let title = m.bus.read_cstr(m.deli.file_buf);
+    let t0 = m.bus.clock;
     let mut hw = Hw { bus: &mut m.bus };
     let p = Pvp::new(d, base, title, Some(&mut hw))?;
     // the init routine sets the LED bit of CIA-A's port: the filter is off
     m.bus.ciaa.pra |= 2;
+    m.bus.clock = m.bus.clock.max(t0 + start_time(d) + START_TO_SONG);
     Some(Box::new(p))
 }
 

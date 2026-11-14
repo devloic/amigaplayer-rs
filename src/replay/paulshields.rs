@@ -18,6 +18,15 @@
 //! slides, portamento and a release; a note's sample starts with the next tick's
 //! DMA-on and its loop is written right after it.
 //!
+//! Every write is at the reference's colour clock: whole 68000 cycles per code path (`K`, per
+//! voice where the original's differ, one table per engine), a write at the tick's start plus half
+//! the cycles since, rounded down; fitted exactly on all in-tick write gaps of the reference's runs
+//! of the 8 refcmp rows and 3 Jug files (engine A) and the 2 Amnios files (engine B), from a run and a
+//! second one with the cycle count started a cycle late. After the voices the original polls the
+//! beam for 9 line changes before it writes the loops (`Timing::beam_wait`, the polling measured on
+//! the reference's VHPOSR reads). The beam's phase there is the port's own: the reference's depends on
+//! how long its load took, which the port does not model; it moves only the loop writes, by up to a line.
+//!
 //! Decisions where the specification leaves the choice to the port:
 //! * Engine A can index its period table below the start for notes below the table
 //!   (the original then reads its own code). The port extends the table downwards by
@@ -60,15 +69,213 @@ const HOST_HOLD: u32 = 0xFFFF_0002;
 /// The master volume.
 const MASTER: i16 = 64;
 
-/// The waits between the writes of a tick, in colour clocks (the reference's, roughly):
-/// after a voice's step, and before the loop registers (about 8 raster lines).
-const T_VOICE: u64 = 360;
-const T_WRITE: u64 = 40;
 /// From the host's first write (the interrupts off) to the song start, and from a timer call to
 /// the first write of its tick, in the reference's runs.
 const START: u64 = 990;
 const ENTRY: u64 = 163;
-const T_LOOP: u64 = 1900;
+
+macro_rules! costs {
+    ($($name:ident = $a:expr, $b:expr;)*) => {
+        /// The original's code paths, one label per branch, each with the 68000 cycles it takes
+        /// (per voice 0..3, then for no voice): fitted to the gaps between the writes of the
+        /// reference's write logs (exact cycles from a run and a second one with the count
+        /// started a cycle late). The player writes Paula directly: a write comes at the tick's
+        /// start plus half the cycles since, rounded down.
+        #[derive(Clone, Copy)]
+        #[allow(dead_code)]
+        enum K { $($name,)* }
+        const COSTS: &[[[i64; 5]; 2]] = &[$([$a, $b],)*];
+        #[allow(dead_code)]
+        const K_NAMES: &[&str] = &[$(stringify!($name),)*];
+    };
+}
+
+costs! {
+    TickStart = [1, 1, 1, 1, 1], [1, 1, 1, 1, 1];
+    VoiceOff = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    Voice = [0, 0, 0, 22, 0], [0, 0, 0, 0, 0];
+    SlideNo = [0, 0, 0, 0, 0], [371, 371, 371, 371, 371];
+    SlideEq = [33, 33, 33, 33, 33], [0, 0, 0, 0, 0];
+    SlideUp = [78, 78, 78, 78, 78], [0, 0, 0, 0, 0];
+    SlideDown = [88, 88, 88, 88, 88], [0, 0, 0, 0, 0];
+    NoParse = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    Parse = [271, 271, 271, 271, 271], [66, 66, 66, 66, 66];
+    PByte = [62, 62, 62, 62, 62], [81, 81, 81, 81, 81];
+    PNote = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    PNoteAbs = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    PInst = [130, 130, 130, 130, 130], [0, 0, 0, 0, 0];
+    PVolOfs = [0, 0, 0, 0, 0], [27, 27, 27, 27, 27];
+    PTrack = [27, 27, 27, 27, 27], [0, 0, 0, 0, 0];
+    PRest = [231, 231, 231, 231, 231], [0, 0, 0, 0, 0];
+    PPEnv = [20, 20, 20, 20, 20], [0, 0, 0, 0, 0];
+    PVEnv = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    PPorta = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    PFilter = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    PInstrB = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    PSkip = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    DurByte = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    DurWord = [38, 38, 38, 38, 38], [0, 0, 0, 0, 0];
+    Inst = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    InstSilent = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    InstNone = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    SetEnv = [110, 110, 110, 110, 110], [174, 174, 174, 174, 174];
+    Porta = [329, 329, 329, 329, 329], [0, 0, 0, 0, 0];
+    PortaAbs = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    PortaNeg = [28, 28, 28, 28, 28], [379, 379, 379, 379, 379];
+    PortaDur0 = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    NoteStart = [0, 0, 0, 0, 0], [0, 31, 74, 0, 0];
+    NoteVolOfs = [157, 157, 157, 157, 157], [84, 84, 84, 84, 84];
+    NoteDefVol = [169, 169, 169, 169, 169], [84, 84, 84, 84, 84];
+    NoteLoc = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    NoteLen = [20, 20, 20, 20, 20], [20, 20, 20, 20, 20];
+    NoteEnd = [132, 163, 194, 202, 132], [0, 0, 0, 70, 0];
+    TsRep = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    TsWord = [75, 75, 75, 75, 75], [77, 77, 77, 77, 77];
+    TsPat = [45, 45, 45, 45, 45], [45, 45, 45, 45, 45];
+    TsPatRep = [16, 16, 16, 16, 16], [16, 16, 16, 16, 16];
+    TsVolTgt = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    TsDetune = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    TsLoop = [23, 23, 23, 23, 23], [0, 0, 0, 0, 0];
+    TsLoopEnd = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    TsStop = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    TsVolAll = [200, 200, 200, 200, 200], [0, 0, 0, 0, 0];
+    TsTrans = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    RelDec = [429, 429, 429, 429, 429], [22, 22, 22, 22, 22];
+    RelRestDec = [26, 26, 26, 26, 26], [0, 0, 0, 0, 0];
+    RelRestNeg = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    RelNeg = [403, 403, 403, 403, 403], [0, 0, 0, 0, 0];
+    EnvCnt = [407, 407, 407, 407, 407], [0, 0, 0, 0, 0];
+    EnvByte = [68, 68, 68, 68, 68], [41, 41, 41, 41, 41];
+    EnvHold = [380, 380, 380, 380, 380], [0, 0, 0, 0, 0];
+    EnvLoop = [0, 0, 0, 0, 0], [27, 27, 27, 27, 27];
+    EnvVal = [453, 453, 453, 453, 453], [73, 73, 73, 73, 73];
+    PEnvCnt = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    PEnvByte = [41, 41, 41, 41, 41], [0, 0, 0, 0, 0];
+    PEnvHold = [0, 0, 0, 0, 0], [409, 409, 409, 409, 409];
+    PEnvLoop = [27, 27, 27, 27, 27], [0, 0, 0, 0, 0];
+    PEnvVal = [73, 73, 73, 73, 73], [0, 0, 0, 0, 0];
+    VolLo = [0, 17, 24, 51, 0], [0, 0, 0, 0, 0];
+    VolHi = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    VolIn = [3, 20, 27, 54, 3], [247, 264, 271, 298, 247];
+    PerStep = [0, 31, 62, 70, 0], [0, 31, 62, 0, 0];
+    PerAbs = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    Conv = [347, 347, 347, 347, 347], [39, 39, 39, 39, 39];
+    ConvIter = [19, 19, 19, 19, 19], [19, 19, 19, 19, 19];
+    ConvBit = [2, 2, 2, 2, 2], [2, 2, 2, 2, 2];
+    ConvBig = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    ConvBelow = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    ConvNeg = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    VoiceEnd = [0, 0, 0, 0, 0], [0, 138, 138, 115, 0];
+    VoiceStop = [0, 0, 0, 0, 0], [0, 0, 0, 0, 0];
+    WaitPre = [112, 112, 112, 112, 112], [237, 237, 237, 237, 237];
+    WaitExit = [112, 112, 112, 112, 112], [112, 112, 112, 112, 112];
+    LoopSkip = [19, 19, 19, 0, 19], [19, 19, 19, 0, 19];
+    LoopLoc = [55, 55, 55, 36, 55], [55, 55, 55, 36, 55];
+    LoopLen = [20, 20, 20, 20, 20], [20, 20, 20, 20, 20];
+}
+
+/// The beam wait after the voices (measured on the reference's reads of VHPOSR): a first read of
+/// the line, then reads `POLL_FIRST` cycles later and every `POLL` cycles until the line has
+/// changed; a change read, the next round starts `POLL_NEXT` cycles later; `WAIT_LINES` changes.
+const POLL_FIRST: i64 = 16;
+const POLL: i64 = 25;
+const POLL_NEXT: i64 = 35;
+const WAIT_LINES: u32 = 9;
+
+/// The original's time: 68000 cycles since the tick's start.
+struct Timing {
+    acc: i64,
+    t: u64,
+    fit: Option<std::io::BufWriter<std::fs::File>>,
+    counts: Vec<(u16, u32)>,
+    /// The voice the code works on (4: none).
+    v: usize,
+    /// The engine: 0 (A) or 1 (B), whose code and costs differ.
+    e: usize,
+}
+
+impl Timing {
+    fn n(&mut self, k: K, n: u32) {
+        if n == 0 {
+            return;
+        }
+        let k = k as usize;
+        self.acc += COSTS[k][self.e][self.v] * n as i64;
+        if self.fit.is_some() {
+            let key = (k * 5 + self.v) as u16;
+            match self.counts.iter_mut().find(|e| e.0 == key) {
+                Some(e) => e.1 += n,
+                None => self.counts.push((key, n)),
+            }
+        }
+    }
+
+    fn c(&mut self, k: K) {
+        self.n(k, 1);
+    }
+
+    /// The clock `acc` cycles into the tick.
+    fn clock(&self, acc: i64) -> u64 {
+        self.t + (acc.max(0) / 2) as u64
+    }
+
+    /// A trace entry (for the fit) at the current time, `fix` cycles of it known.
+    fn mark(&mut self, kind: &str, fix: i64) {
+        let at = self.clock(self.acc);
+        if let Some(f) = &mut self.fit {
+            use std::io::Write;
+            let b = if self.e == 1 { "b_" } else { "" };
+            let mut names: Vec<String> = self
+                .counts
+                .iter()
+                .map(|&(k, n)| match k % 5 {
+                    4 => format!("{b}{}:{n}", K_NAMES[k as usize / 5]),
+                    v => format!("{b}{}.{v}:{n}", K_NAMES[k as usize / 5]),
+                })
+                .collect();
+            if fix != 0 {
+                names.push(format!("FIX:{fix}"));
+            }
+            let _ = writeln!(f, "{at} {kind} {}", names.join(" "));
+        }
+        self.counts.clear();
+    }
+
+    /// Brings the clock to the original's next write (of kind `kind`).
+    fn w(&mut self, hw: &mut Hw, kind: &str) {
+        self.mark(kind, 0);
+        let at = self.clock(self.acc);
+        if hw.bus.clock < at {
+            hw.wait(at - hw.bus.clock);
+        }
+    }
+
+    /// The beam wait: `WAIT_LINES` line changes seen by the polling reads.
+    fn beam_wait(&mut self) {
+        use crate::paula::LINE;
+        let line = |s: &Self, a: i64| s.clock(a) / LINE;
+        let a0 = self.acc;
+        let mut a = a0;
+        let mut cur = line(self, a);
+        a += POLL_FIRST;
+        let mut n = 0;
+        loop {
+            if line(self, a) != cur {
+                n += 1;
+                if n == WAIT_LINES {
+                    break;
+                }
+                a += POLL_NEXT;
+                cur = line(self, a);
+                a += POLL_FIRST;
+            } else {
+                a += POLL;
+            }
+        }
+        self.acc = a;
+        self.mark("wx", a - a0);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Layout {
@@ -247,6 +454,7 @@ enum Event {
 }
 
 struct PaulShields {
+    t: Timing,
     d: Vec<u8>,
     lay: Layout,
     base: u32,
@@ -345,10 +553,12 @@ impl PaulShields {
     }
 
     /// conv(n) (section 5.5).
-    fn conv(&self, ch: usize, n: u16) -> u16 {
+    fn conv(&mut self, ch: usize, n: u16) -> u16 {
+        self.t.c(K::Conv);
         let v = &self.v[ch];
         let mut x = n.wrapping_add(v.tr).wrapping_add(v.fine) as i16;
         if !self.lay.engine_a() && x < 0 {
+            self.t.c(K::ConvNeg);
             return 0xFFFF;
         }
         let mut o = -1i32;
@@ -359,15 +569,20 @@ impl PaulShields {
                 break;
             }
         }
+        self.t.n(K::ConvIter, o as u32 + 1);
+        let v = &self.v[ch];
         let i = 96 + x as i32;
         let p = if i >= 0 {
             let p = PITCH[i as usize];
             if o >= 16 {
+                self.t.c(K::ConvBig);
                 0
             } else {
+                self.t.n(K::ConvBit, o as u32);
                 p >> o
             }
         } else {
+            self.t.c(K::ConvBelow);
             // below the table: the table extended down by octaves
             let oct = (-i + 95) / 96;
             let p = PITCH[(i + 96 * oct) as usize] as u32;
@@ -385,9 +600,11 @@ impl PaulShields {
         let p = self.v[ch].pat;
         let b = self.b(p);
         if b == 0 {
+            self.t.c(K::DurWord);
             self.v[ch].pat = p.wrapping_add(3);
             self.w(p.wrapping_add(1))
         } else {
+            self.t.c(K::DurByte);
             self.v[ch].pat = p.wrapping_add(1);
             b as u16
         }
@@ -400,9 +617,18 @@ impl PaulShields {
     }
 
     fn instrument(&mut self, ch: usize, i: usize) {
-        let Some(s) = self.smp.get(i).copied() else { return };
+        let Some(s) = self.smp.get(i).copied() else {
+            self.t.c(K::InstNone);
+            return;
+        };
+        self.t.c(K::Inst);
         let lc = self.guest(&s, s.lc);
-        let llc = if s.silent_loop { self.silence } else { self.guest(&s, s.llc) };
+        let llc = if s.silent_loop {
+            self.t.c(K::InstSilent);
+            self.silence
+        } else {
+            self.guest(&s, s.llc)
+        };
         let v = &mut self.v[ch];
         v.lc = lc;
         v.len = s.len;
@@ -414,6 +640,7 @@ impl PaulShields {
 
     /// An envelope at module offset `e`: its reload byte, then the bytes.
     fn set_env(&mut self, ch: usize, vol: bool, e: u32) {
+        self.t.c(K::SetEnv);
         let r = self.b(e);
         let v = &mut self.v[ch];
         if vol {
@@ -430,8 +657,10 @@ impl PaulShields {
     }
 
     fn portamento(&mut self, ch: usize, n1: u8, n2: u8) {
+        self.t.c(K::Porta);
         let (mut a, mut b) = (n1 as u16 * 8, n2 as u16 * 8);
         if self.lay.engine_a() && self.v[ch].abs {
+            self.t.c(K::PortaAbs);
             a = self.conv(ch, a);
             b = self.conv(ch, b);
         }
@@ -442,12 +671,14 @@ impl PaulShields {
         let dur = self.duration(ch);
         self.v[ch].dur = dur;
         let mut s = if dur == 0 {
+            self.t.c(K::PortaDur0);
             0
         } else {
             let dur = dur as u32;
             ((d / dur) << 16) + ((((d % dur) << 16) / dur) & 0xFFFF)
         };
         if neg {
+            self.t.c(K::PortaNeg);
             s = s.wrapping_neg();
         }
         self.v[ch].slide = s;
@@ -456,18 +687,30 @@ impl PaulShields {
     /// The note start (section 5.3).
     fn note_start(&mut self, ch: usize, hw: &mut Hw) {
         let v = &mut self.v[ch];
-        v.env = if v.volofs != 0 { v.volofs as i16 } else { v.defvol as i16 };
         v.vc = v.vr;
         v.venv = v.venvs;
         v.pc = v.pr;
         v.penv = v.penvs;
         v.rel = false;
         let (lc, len) = (v.lc, v.len);
+        self.t.c(K::NoteStart);
+        self.t.w(hw, "off");
         hw.dmacon(1 << ch);
-        hw.wait(T_WRITE);
+        let v = &mut self.v[ch];
+        if v.volofs != 0 {
+            self.t.c(K::NoteVolOfs);
+            v.env = v.volofs as i16;
+        } else {
+            self.t.c(K::NoteDefVol);
+            v.env = v.defvol as i16;
+        }
+        self.t.c(K::NoteLoc);
+        self.t.w(hw, "loc");
         hw.loc(ch, lc);
+        self.t.c(K::NoteLen);
+        self.t.w(hw, "len");
         hw.len(ch, len);
-        hw.wait(T_WRITE);
+        self.t.c(K::NoteEnd);
         self.iacc |= 1 << (7 + ch);
         self.dacc |= 0x8200 | 1 << ch;
     }
@@ -477,18 +720,22 @@ impl PaulShields {
         let a = self.lay.engine_a();
         self.v[ch].rep = self.v[ch].rep.wrapping_sub(1);
         if self.v[ch].rep != 0 {
+            self.t.c(K::TsRep);
             self.v[ch].pat = self.v[ch].patstart;
             return Some(());
         }
         // a list of commands only, with no pattern, would never end
         for _ in 0..0x10000 {
+            self.t.c(K::TsWord);
             let p = self.v[ch].lpos;
             let wd = self.w(p);
             self.v[ch].lpos = p.wrapping_add(2);
             if wd < 0xFFE8 {
+                self.t.c(K::TsPat);
                 self.v[ch].rep = 1;
                 let mut wd = wd;
                 if wd & 0x8000 != 0 {
+                    self.t.c(K::TsPatRep);
                     wd &= 0x7FFF;
                     let r = self.w(self.v[ch].lpos);
                     let v = &mut self.v[ch];
@@ -511,6 +758,7 @@ impl PaulShields {
                 (true, 0xFFF8) | (false, 0xFFF4) => 4,
                 _ => 5,
             };
+            self.t.c([K::TsVolTgt, K::TsDetune, K::TsLoop, K::TsStop, K::TsVolAll, K::TsTrans][cmd]);
             match cmd {
                 0 => {
                     take(2, self);
@@ -527,6 +775,7 @@ impl PaulShields {
                     let v = &mut self.v[ch];
                     v.lpos = v.lst;
                     if ch == if a { 1 } else { 0 } {
+                        self.t.c(K::TsLoopEnd);
                         self.songend = true;
                     }
                 }
@@ -562,12 +811,42 @@ impl PaulShields {
     fn parse(&mut self, ch: usize, hw: &mut Hw) -> Event {
         let a = self.lay.engine_a();
         for _ in 0..0x10000 {
+            self.t.c(K::PByte);
             let c = self.next_byte(ch);
+            if a {
+                self.t.c(match c {
+                    0x00 => K::PNote,
+                    0x04 => K::PInst,
+                    0x08 => K::PVolOfs,
+                    0x0C => K::PTrack,
+                    0x10 => K::PRest,
+                    0x14 | 0x1C => K::PPEnv,
+                    0x18 => K::PVEnv,
+                    0x20 => K::PPorta,
+                    _ => K::PSkip,
+                });
+            } else {
+                self.t.c(match c {
+                    0x00..=0x7F => K::PNote,
+                    0x80 => K::PRest,
+                    0x84 => K::PPorta,
+                    0x88 => K::PVolOfs,
+                    0x8C => K::PInstrB,
+                    0x90 => K::PTrack,
+                    0x94 | 0x98 => K::PFilter,
+                    _ => K::PSkip,
+                });
+            }
             if a {
                 match c {
                     0x00 => {
                         let n = self.next_byte(ch) as u16 * 8;
-                        let n = if self.v[ch].abs { self.conv(ch, n) } else { n };
+                        let n = if self.v[ch].abs {
+                            self.t.c(K::PNoteAbs);
+                            self.conv(ch, n)
+                        } else {
+                            n
+                        };
                         self.v[ch].per = n;
                         self.v[ch].dur = self.duration(ch);
                         self.v[ch].slide = 0;
@@ -672,21 +951,35 @@ impl PaulShields {
         } else {
             (&mut v.pc, &mut v.penv, v.penvs, v.pr)
         };
+        let [k_cnt, k_byte, k_hold, k_loop, k_val] = if vol {
+            [K::EnvCnt, K::EnvByte, K::EnvHold, K::EnvLoop, K::EnvVal]
+        } else {
+            [K::PEnvCnt, K::PEnvByte, K::PEnvHold, K::PEnvLoop, K::PEnvVal]
+        };
         *cnt = cnt.wrapping_sub(1);
         if *cnt != 0 {
+            self.t.c(k_cnt);
             return None;
         }
         let mut p = *cur;
         for _ in 0..0x100 {
+            self.t.c(k_byte);
             let c = match p {
                 HOST_HOLD => 0x80,
                 _ => self.d.get(p as usize).copied().unwrap_or(0),
             };
             p = p.wrapping_add(1);
             match c {
-                0x80 => return None,
-                0x81 => p = start,
+                0x80 => {
+                    self.t.c(k_hold);
+                    return None;
+                }
+                0x81 => {
+                    self.t.c(k_loop);
+                    p = start
+                }
                 _ => {
+                    self.t.c(k_val);
                     let v = &mut self.v[ch];
                     if vol {
                         v.vc = reload;
@@ -702,10 +995,14 @@ impl PaulShields {
         None
     }
 
-    fn release_or_env(&mut self, ch: usize) {
+    /// The release (`rest`: in the tick of the rest command, another path) or the volume envelope.
+    fn release_or_env(&mut self, ch: usize, rest: bool) {
         if self.v[ch].rel {
             if self.v[ch].env >= 0 {
+                self.t.c(if rest { K::RelRestDec } else { K::RelDec });
                 self.v[ch].env = self.v[ch].env.wrapping_sub(2);
+            } else {
+                self.t.c(if rest { K::RelRestNeg } else { K::RelNeg });
             }
         } else if let Some(d) = self.env_step(ch, true) {
             self.v[ch].env = self.v[ch].env.wrapping_add(d);
@@ -714,11 +1011,20 @@ impl PaulShields {
 
     fn write_vol(&mut self, ch: usize, hw: &mut Hw) {
         let v = &self.v[ch];
-        let x = v.vol.wrapping_add(v.env).wrapping_sub(MASTER).clamp(0, 64);
-        hw.vol(ch, x as u16);
+        let x = v.vol.wrapping_add(v.env).wrapping_sub(MASTER);
+        self.t.c(if x < 0 {
+            K::VolLo
+        } else if x > 64 {
+            K::VolHi
+        } else {
+            K::VolIn
+        });
+        self.t.w(hw, "vol");
+        hw.vol(ch, x.clamp(0, 64) as u16);
     }
 
     fn write_per(&mut self, ch: usize, hw: &mut Hw) {
+        self.t.c(K::PerStep);
         let v = &mut self.v[ch];
         let pf = ((v.per as u32) << 16 | v.frac as u32).wrapping_add(v.slide);
         v.per = (pf >> 16) as u16;
@@ -727,30 +1033,51 @@ impl PaulShields {
             self.v[ch].per = self.v[ch].per.wrapping_add(d as u16);
         }
         let v = self.v[ch];
-        let p = if self.lay.engine_a() && v.abs { v.per } else { self.conv(ch, v.per) };
+        let p = if self.lay.engine_a() && v.abs {
+            self.t.c(K::PerAbs);
+            v.per
+        } else {
+            self.conv(ch, v.per)
+        };
+        self.t.w(hw, "per");
         hw.per(ch, p);
     }
 
     /// A voice's step (section 5.1).
     fn voice(&mut self, ch: usize, hw: &mut Hw) {
+        self.t.v = ch;
         if !self.v[ch].active {
+            self.t.c(K::VoiceOff);
             return;
         }
+        self.t.c(K::Voice);
         let v = &mut self.v[ch];
         v.vcnt = v.vcnt.wrapping_sub(1);
-        if v.vcnt == 0 && v.vol != v.vtgt {
+        if v.vcnt != 0 {
+            self.t.c(K::SlideNo);
+        } else if v.vol == v.vtgt {
+            self.t.c(K::SlideEq);
+        } else {
+            self.t.c(if v.vol < v.vtgt { K::SlideUp } else { K::SlideDown });
             v.vol += if v.vol < v.vtgt { 1 } else { -1 };
             v.vcnt = v.vspd;
         }
+        let v = &mut self.v[ch];
         v.dur = v.dur.wrapping_sub(1);
-        let ev = if v.dur == 0 { Some(self.parse(ch, hw)) } else { None };
+        let ev = if v.dur == 0 {
+            self.t.c(K::Parse);
+            Some(self.parse(ch, hw))
+        } else {
+            self.t.c(K::NoParse);
+            None
+        };
         if ev == Some(Event::Stop) {
+            self.t.c(K::VoiceStop);
             return;
         }
         if self.lay.engine_a() {
-            self.release_or_env(ch);
+            self.release_or_env(ch, ev == Some(Event::Rest));
             self.write_vol(ch, hw);
-            hw.wait(T_WRITE);
             self.write_per(ch, hw);
         } else {
             match ev {
@@ -760,13 +1087,12 @@ impl PaulShields {
                     }
                 }
                 Some(Event::Rest) => {}
-                _ => self.release_or_env(ch),
+                _ => self.release_or_env(ch, false),
             }
             self.write_per(ch, hw);
-            hw.wait(T_WRITE);
             self.write_vol(ch, hw);
         }
-        hw.wait(T_VOICE);
+        self.t.c(K::VoiceEnd);
     }
 }
 
@@ -789,23 +1115,40 @@ impl Replayer for PaulShields {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t.t = hw.bus.clock;
+        self.t.acc = 0;
+        self.t.counts.clear();
+        if let Some(f) = &mut self.t.fit {
+            use std::io::Write;
+            let _ = writeln!(f, "{} tick", hw.bus.clock);
+        }
+        self.t.v = 4;
         let itmp = self.iacc;
+        self.t.c(K::TickStart);
+        self.t.w(hw, if self.dacc & 0x8000 != 0 { "on" } else { "off" });
         hw.dmacon(self.dacc);
-        hw.wait(T_WRITE);
         self.dacc = 0;
         self.iacc = 0;
         for ch in (0..4).rev() {
             self.voice(ch, hw);
         }
-        if itmp != 0 {
-            hw.wait(T_LOOP);
-        }
+        self.t.v = 4;
+        self.t.c(K::WaitPre);
+        self.t.mark("wa", 0);
+        self.t.beam_wait();
+        self.t.c(K::WaitExit);
         for ch in (0..4).rev() {
+            self.t.v = ch;
             if itmp & 1 << (7 + ch) != 0 {
                 let v = self.v[ch];
+                self.t.c(K::LoopLoc);
+                self.t.w(hw, "loc");
                 hw.loc(ch, v.llc);
+                self.t.c(K::LoopLen);
+                self.t.w(hw, "len");
                 hw.len(ch, v.llen);
-                hw.wait(T_WRITE);
+            } else {
+                self.t.c(K::LoopSkip);
             }
         }
     }
@@ -839,6 +1182,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         }
     }
     let mut s = PaulShields {
+        t: Timing {
+            acc: 0,
+            t: 0,
+            fit: std::env::var_os("PS_FIT").and_then(|p| std::fs::File::create(p).ok()).map(std::io::BufWriter::new),
+            counts: Vec::new(),
+            v: 4,
+            e: if lay.engine_a() { 0 } else { 1 },
+        },
         d: d.to_vec(),
         lay,
         base,

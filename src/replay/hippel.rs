@@ -3415,36 +3415,218 @@ fn mix_period7(khz: u16) -> u16 {
     ((3_579_545 + k / 2) / k) as u16
 }
 
-/// Colour clocks the original's code takes between its writes (from the
-/// reference's write times, on UADE's 68020).
-mod c7 {
-    /// From the interrupt to channel 0's location, and its length.
-    pub const IRQ: u64 = 10;
-    pub const IRQ_LEN: u64 = 16;
-    /// The tick's start, before the first voice's effects.
-    pub const START: u64 = 72;
-    /// A row (and the next position).
-    pub const ROW: u64 = 80;
-    pub const ROW_POS: u64 = 150;
-    /// A voice's effects: to its first command, from a sample's DMA off to its
-    /// location, length and period, after a sample's writes, and to the
-    /// period and volume.
-    pub const FX: u64 = 100;
-    pub const OFF_LOC: u64 = 116;
-    pub const LOC_LEN: u64 = 6;
-    pub const LEN_PER: u64 = 8;
-    pub const CMD_TAIL: u64 = 128;
-    pub const FX_END: u64 = 438;
-    /// The mixed voices' loops, and what follows the DMA on to the loops.
-    pub const MIX_SETUP: u64 = 550;
-    pub const LOOPS: u64 = 330;
-    pub const LOOP_NEXT: u64 = 6;
-    /// The mixer: its voices' steps, then each byte.
-    pub const STEPS: u64 = 226;
-    pub const BYTE: u64 = 77;
-    /// From the INTENA on to channel 0's volume.
-    pub const VOL0: u64 = 12;
+/// The reference's CPU cycles per colour clock: the original is 68020 code that
+/// does not keep up on a 68000 (`needs_fast_reference_cpu`), so its reference
+/// runs at eight times a 68000's speed (DELI_CPU_SPEED=8): 16 cycles a clock.
+const CYC7: u64 = 16;
+/// Colour clocks from the interrupt's last write (channel 0's volume) to the earliest clock the
+/// next interrupt can come at (its return).
+const RETURN7: u64 = 13;
+
+/// The code paths of the original's interrupt, as fitted to the reference's
+/// write clocks (each write comes at the interrupt's clock plus the cycles
+/// counted since, over `CYC7`, rounded down). The cycles of a path do not
+/// depend on the data (the reference counts each instruction's cycles from the
+/// instruction alone).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+enum K7 {
+    /// The interrupt to its INTENA off, INTREQ, channel 0's location and length.
+    Entry,
+    Req,
+    Loc0,
+    Len0,
+    /// The stopped player's tick.
+    Stopped,
+    /// The tick's start; the speed counter reloaded (rows of voices 3-6) or not.
+    Tick,
+    Reload,
+    NoReload,
+    /// A row: its read, the next position (and its wrap, its command: 0 none,
+    /// D, F, 8, E), a note (with its envelope, with a frequency table), none.
+    Row,
+    RowPos(u8),
+    PosWrap,
+    PosCmd(u8),
+    RowNote,
+    RowEnv,
+    EnvFreq,
+    EnvNoFreq,
+    RowEmpty,
+    RowEnd,
+    RowSize,
+    RowMark,
+    RowI40,
+    RowI20,
+    RowNoEnv,
+    RowFirst,
+    /// A voice's effects (its number), the frequency table's wait, a byte of
+    /// it read, and what it is.
+    Fx(u8),
+    FreqWait,
+    FreqRead,
+    FreqNote,
+    FE0,
+    FE2,
+    FE3,
+    FE4,
+    FE5,
+    FE6,
+    FE7,
+    FE7Same,
+    FE8,
+    FE9,
+    FEA,
+    FStop,
+    /// A sample's start: from the DMA off (or the command) to its location,
+    /// length and period, and after them.
+    POff,
+    PLoc(u8),
+    PLocE7,
+    PLen,
+    PPer,
+    PEnd,
+    E4Loc,
+    E4Len,
+    E4End,
+    E5Per,
+    E5End,
+    E9Loc,
+    E9End,
+    /// The sample slide: off, waiting, its first step, a step, at its end, the
+    /// loop's writes.
+    SlideOff,
+    SlideEnded,
+    SlideWait,
+    SlideFirst,
+    SlideMove,
+    SlideDone,
+    SlideLoc,
+    SlideLen,
+    /// The envelope: sustain, counting, a byte read and what it is.
+    EnvSustain,
+    EnvCount,
+    EnvLoad,
+    EnvE0,
+    EnvE8,
+    EnvStop,
+    EnvVol,
+    /// The period: a negative transpose (fixed note), vibrato delay or step
+    /// (down, at 0, up, at the depth), portamento (none, up, down).
+    PerFixed,
+    PerNote,
+    VibDelay,
+    VibDown,
+    VibDownClamp,
+    VibUp,
+    VibUpClamp,
+    NoPorta,
+    PortaUp,
+    PortaDown,
+    /// The volume: no variation, a new one, the one kept; below 0.
+    NoVar,
+    VarNew,
+    VarOld,
+    VolClamp,
+    /// After a voice's effects: to its period and volume (voices 0-2), to the
+    /// mixer's registers (3-6).
+    FxEnd(u8),
+    /// After the effects to the wait before the DMA on; the wait (in the trace
+    /// only: `poll_lines` counts its cycles).
+    /// The mixer's voices from their registers: off, on (a short loop, a restart).
+    MsOff,
+    MsOn,
+    MsShort,
+    MsRestart,
+    MixSetup,
+    Wait,
+    DmaOn,
+    PollAgain,
+    Loops,
+    LoopLen,
+    LoopNext,
+    LoopEnd,
+    /// The rows of voices 0-2 (when reloaded), the mixer's steps (per voice
+    /// playing), its bytes, the INTENA on and channel 0's volume.
+    Rows0,
+    Steps,
+    Step,
+    MixByte,
+    MixWrap,
+    MixClip(u8),
+    IntOn,
+    Vol0,
 }
+
+impl K7 {
+    fn cycles(self) -> i64 {
+        use K7::*;
+        match self {
+            Entry => 262,
+            Req => 20,
+            Loc0 => 32,
+            Len0 => 24,
+            Row => 196,
+            PosCmd(2) => 5,
+            PosCmd(5) => 33,
+            RowNote => 102,
+            EnvFreq => 346,
+            RowSize => 363,
+            RowMark => 340,
+            RowFirst => 8,
+            Fx(0) => 280,
+            FreqRead => 129,
+            FE7 => 29,
+            FE7Same => 45,
+            FStop => 12,
+            POff => 124,
+            PLoc(0) => 275,
+            PLoc(1) => 306,
+            PLoc(2) => 337,
+            PLocE7 => -12,
+            PLen => 16,
+            PPer => 12,
+            PEnd => 51,
+            E5Per => 25,
+            SlideEnded => 23,
+            SlideLoc => 357,
+            EnvSustain => 1,
+            EnvLoad => 109,
+            EnvE8 => 100,
+            EnvStop => 22,
+            PerNote => 24,
+            VibDown => 184,
+            VibDownClamp => 26,
+            VibUp => 188,
+            VibUpClamp => 18,
+            PortaUp => 137,
+            NoVar => 743,
+            MsOn => 86,
+            MsShort => 48,
+            MsRestart => 480,
+            MixSetup => 1010,
+            DmaOn => 87,
+            PollAgain => 37,
+            Loops => 729,
+            LoopLen => 12,
+            LoopNext => 16,
+            LoopEnd => 2075,
+            Rows0 => -17,
+            EnvNoFreq => 243,
+            MixClip(_) => 241,
+            MixWrap => 38,
+            Vol0 => 40,
+            _ => 0,
+        }
+    }
+}
+
+/// The wait for `n` raster lines: VHPOSR polled until its line byte has
+/// changed `n` times. The first read `POLL_FIRST` cycles in, then one every
+/// `POLL`, `POLL_CHANGE` more after a change.
+const POLL_FIRST: u64 = 0;
+const POLL: u64 = 25;
+const POLL_CHANGE: u64 = 3;
 
 /// The original's voice structure ($56 bytes), the fields it uses.
 #[derive(Default, Clone, Copy)]
@@ -3565,9 +3747,22 @@ struct Mix7 {
 /// A note past the period table reads the mixer's variables (72-83) or the
 /// original's code (84-127); the port reads the variables, and 0 for the code.
 ///
+/// The writes come at the reference's colour clocks: the interrupt's code paths in cycles
+/// (`K7`, 16 a colour clock as the reference runs), each write at the interrupt's clock plus
+/// the cycles since, rounded down; the line waits poll VHPOSR every 25 cycles; an interrupt
+/// due while the last one runs comes at its return; the start-up's writes at the reference's
+/// clocks from the run's start (`start_cycles7`, `boot7`). Fitted to the reference's write
+/// clocks of the 6 TFMX modules and modified copies. The reference's Paula catches up at its
+/// next register write, so the first buffer's fetches during the mix see the whole mix.
+/// Not reproduced: in the first buffer a mixed voice that is off plays the 16 bytes before
+/// its silence, the original's memory there (zeros in the port); it is heard where such a
+/// voice's volume is above 0 (Lethal Xcess, Australian Pioneers: the first 20 ms).
+///
 /// COSO 7V modules (NostalgicPlayer's) play with the same replayer, their
 /// tracks read as NostalgicPlayer reads them; the Eagleplayer does not take
-/// them.
+/// them. Their timing is the TFMX twin's (the reference plays the twin): a COSO row is
+/// counted as the twin's row; the twin's program before the module (1136 cycles more at the
+/// start) is not in the container, so a COSO module starts as one without.
 pub struct Hip7 {
     coso: bool,
     module: u32,
@@ -3612,6 +3807,13 @@ pub struct Hip7 {
     vol_tab: Vec<[u8; 256]>,
     led_done: bool,
     songend: bool,
+    /// The TFMX header; the LED write's clock for the first InitSound.
+    module_hdr: u32,
+    boot: Option<u64>,
+    /// The clock the interrupt came at, and the cycles counted since.
+    t0: u64,
+    cy: u64,
+    busy: u64,
 }
 
 fn new_7v(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -3699,14 +3901,56 @@ fn new_7v(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         vol_tab,
         led_done: false,
         songend: false,
+        module_hdr: base + hdr as u32,
+        boot: None,
+        t0: 0,
+        cy: 0,
+        busy: 0,
     };
     for (i, v) in p.voices.iter_mut().enumerate() {
         v.dma = if i < 3 { 1 << CH7[i] } else { 1 << i };
     }
     let mut hw = Hw { bus: &mut m.bus };
+    p.boot = Some(hw.bus.clock + start_cycles7(&mut hw, &p, !coso && h > 0) / CYC7);
     p.init_sound(1, &mut hw);
     p.start_int(&mut hw);
     Some(Box::new(p))
+}
+
+/// The cycles from the aligned start to InitPlayer's LED write: a pass over the samples (37
+/// cycles a longword of their total length), 1136 more for a module behind a program, 208 when
+/// the first position's second column holds a byte (its text). Measured on modified copies.
+/// A COSO module (its reference is the original on the TFMX twin) counts as one not behind a
+/// program: the container says nothing of the twin's.
+fn start_cycles7(hw: &mut Hw, p: &Hip7, prog: bool) -> u64 {
+    let ns = hw.bus.r16(p.module_hdr + 0x12) as u32;
+    // a COSO module's sample entries are 10 bytes (the length at 4), a TFMX one's 30 (at $16)
+    let (size, at) = if p.coso { (10, 4) } else { (30, 0x16) };
+    let words: u64 = (0..ns).map(|k| hw.bus.r16(p.sample_info + size * k + at) as u64).sum();
+    let text = hw.bus.r8(p.positions + 4) != 0;
+    3787 + 37 * words.div_ceil(2) + if prog { 1136 } else { 0 } + if text { 208 } else { 0 }
+}
+
+/// The start-up writes' clocks after the LED write, for the first InitSound.
+mod boot7 {
+    /// Channel 0's DMA off, the interrupts off.
+    pub const DMA_OFF: u64 = 52;
+    pub const INT_OFF: u64 = 53;
+    /// Per channel voice (the order of `CH7`): location, length, period, volume.
+    pub const VOICE: [[u64; 4]; 3] = [[94, 94, 95, 95], [138, 139, 139, 140], [182, 183, 183, 184]];
+    pub const DMA0_OFF: u64 = 384;
+    pub const PER0: u64 = 412;
+    /// The buffers cleared (and the mix tables set up): cycles from the period write to the
+    /// volume's, plus 34 a word of the buffer; less when the mix does not clip.
+    pub const CLEAR_CLIP: u64 = 4058212;
+    pub const CLEAR_NOCLIP: u64 = 4052828;
+    pub const CLEAR_WORD: u64 = 34;
+    /// Cycles after the volume write (its fraction of a colour clock carried) to the
+    /// location and the length; colour clocks to the interrupt and DMA on.
+    pub const LOC: u64 = 20;
+    pub const LEN: u64 = 40;
+    pub const INT_ON: u64 = 23;
+    pub const DMA_ON: u64 = 24;
 }
 
 impl Replayer for Hip7 {
@@ -3762,6 +4006,15 @@ impl Hip7 {
     /// InitSound for subsong `n` (from 1): InitPlayer's LED off the first time,
     /// the voices, the tempo and the mixer.
     fn init_sound(&mut self, n: u16, hw: &mut Hw) {
+        // the first time at the reference's clocks from the LED write, later with waits
+        let boot = self.boot;
+        let go = |hw: &mut Hw, off: u64, wait: u64| match boot {
+            Some(t) => hw.bus.clock = hw.bus.clock.max(t + off),
+            None => hw.wait(wait),
+        };
+        if let Some(t) = boot {
+            hw.bus.clock = hw.bus.clock.max(t);
+        }
         if !self.led_done {
             self.led_done = true;
             let v = hw.bus.read_byte(0xbfe001);
@@ -3771,9 +4024,11 @@ impl Hip7 {
         let e = self.subsongs_at.wrapping_add((n as u32).wrapping_sub(1) * 8);
         let (start, end) = (hw.bus.r16(e) as u32, hw.bus.r16(e + 2) as u32);
         self.speed = hw.bus.r16(e + 6);
+        go(hw, boot7::DMA_OFF, 0);
         hw.dmacon(0x000f);
+        go(hw, boot7::INT_OFF, 0);
         hw.bus.write_word(0xdff09a, 0x0780);
-        hw.wait(300);
+        hw.wait(if boot.is_some() { 0 } else { 300 });
         for i in 0..7 {
             let first = if self.coso {
                 self.module.wrapping_add(hw.bus.r16(self.tracks) as i16 as i32 as u32)
@@ -3814,14 +4069,18 @@ impl Hip7 {
             v.track_end = first;
             if i < 3 {
                 let ch = CH7[i];
+                let c = boot7::VOICE[i];
+                go(hw, c[0], 0);
                 hw.loc(ch, self.empty);
-                hw.wait(6);
+                go(hw, c[1], 6);
                 hw.len(ch, 1);
-                hw.wait(6);
+                go(hw, c[2], 6);
                 hw.per(ch, 0);
-                hw.wait(4);
+                go(hw, c[3], 4);
                 hw.vol(ch, 0);
-                hw.wait(300);
+                if boot.is_none() {
+                    hw.wait(300);
+                }
             } else {
                 let m = &mut self.mix[i - 3];
                 m.loc = self.empty;
@@ -3835,8 +4094,9 @@ impl Hip7 {
         // the tempo and the mixer's rounding from the first position
         let (tempo, cmd) = (hw.bus.r8(self.positions + 2), hw.bus.r8(self.positions + 3));
         self.clip = cmd != 0;
-        hw.wait(1400);
+        go(hw, boot7::DMA0_OFF, 1400);
         hw.dmacon(0x0001);
+        go(hw, boot7::PER0, 0);
         self.set_tempo(hw, tempo);
         for m in &mut self.mix {
             m.loop_len = 0xd0;
@@ -3853,19 +4113,40 @@ impl Hip7 {
         // Paula starts on the first buffer, the interrupt gives it the second
         self.buf_other = self.bufs;
         self.buf_next = self.bufs + 0x400;
+        // the clear's cycles from the period write; the volume's clock, and the fraction of a
+        // colour clock left, which the next writes carry
+        let clear = if self.clip { boot7::CLEAR_CLIP } else { boot7::CLEAR_NOCLIP }
+            + boot7::CLEAR_WORD * self.mix_words as u64;
+        let (vol_at, frac) = match boot {
+            Some(t) => (t + boot7::PER0 + clear / CYC7, clear % CYC7),
+            None => (hw.bus.clock, 0),
+        };
+        go(hw, vol_at.saturating_sub(boot.unwrap_or(0)), 0);
         hw.vol(0, 0x40);
-        hw.wait(10);
+        go(hw, vol_at.saturating_sub(boot.unwrap_or(0)) + (frac + boot7::LOC) / CYC7, 10);
         hw.loc(0, self.buf_other);
-        hw.wait(10);
+        go(hw, vol_at.saturating_sub(boot.unwrap_or(0)) + (frac + boot7::LEN) / CYC7, 10);
         hw.len(0, 2);
+        if boot.is_some() {
+            self.boot = Some(vol_at);
+        }
     }
 
     /// StartInt: channel 0's interrupt on, its DMA on.
     fn start_int(&mut self, hw: &mut Hw) {
-        hw.wait(300);
+        let Some(v) = self.boot.take() else {
+            hw.wait(300);
+            hw.bus.write_word(0xdff09a, 0x8080);
+            hw.wait(10);
+            hw.dmacon(0x8001);
+            return;
+        };
+        hw.bus.clock = hw.bus.clock.max(v + boot7::INT_ON);
         hw.bus.write_word(0xdff09a, 0x8080);
-        hw.wait(10);
+        hw.bus.clock = hw.bus.clock.max(v + boot7::DMA_ON);
         hw.dmacon(0x8001);
+        // the song starts on the clock after DMA on
+        hw.wait(1);
     }
 
     /// The tempo: the buffer's length at the mixing rate, times (256 + `t`) /
@@ -3874,20 +4155,64 @@ impl Hip7 {
         let bytes = ((self.rate as u32 * 20) * (t as i8 as i32 + 256) as u32) >> 8;
         self.mix_words = (bytes as u16) >> 1;
         self.mix_per = mix_period7(self.rate);
+        self.at(hw);
         hw.per(0, self.mix_per);
     }
 
     /// Channel 0's interrupt (a buffer started): the next buffer to Paula, the
     /// replayer's tick, the mix of voices 3-6 into that buffer.
+    /// The original's code takes path `e`.
+    fn k(&mut self, e: K7) {
+        self.cy = self.cy.wrapping_add_signed(e.cycles());
+    }
+
+    /// The clock of the next write: the interrupt's plus the cycles since, over
+    /// `CYC7`, rounded down.
+    fn at(&mut self, hw: &mut Hw) {
+        let t = self.t0 + self.cy / CYC7;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+
+    /// The wait for `n` raster lines (`POLL`): the cycles of the reads up to
+    /// the one that sees the `n`th change.
+    fn poll_lines(&mut self, n: u64) {
+        use crate::paula::LINE;
+        let line = |cy: u64| (self.t0 + cy / CYC7) / LINE;
+        let mut c = self.cy + POLL_FIRST;
+        for k in 0..n {
+            if k > 0 {
+                c += POLL_CHANGE;
+            }
+            let l = line(c);
+            // the first read on the next line: t0 + c / CYC7 >= (l + 1) * LINE
+            let need = ((l + 1) * LINE - self.t0) * CYC7;
+            if c < need {
+                c += (need - c).div_ceil(POLL) * POLL;
+            }
+        }
+        self.cy = c;
+    }
+
     fn interrupt(&mut self, hw: &mut Hw) {
+        // an interrupt that comes before the last one's return waits for it
+        self.t0 = hw.bus.clock.max(self.busy);
+        self.cy = 0;
+        self.k(K7::Entry);
+        self.at(hw);
         hw.bus.write_word(0xdff09a, 0x0080);
+        self.k(K7::Req);
+        self.at(hw);
         hw.bus.write_word(0xdff09c, 0x0080);
-        hw.wait(c7::IRQ);
+        self.k(K7::Loc0);
+        self.at(hw);
         hw.loc(0, self.buf_next);
-        hw.wait(c7::IRQ_LEN);
+        self.k(K7::Len0);
+        self.at(hw);
         hw.len(0, self.mix_words);
         self.tick7(hw);
-        hw.wait(c7::STEPS);
+        self.k(K7::Steps);
         for k in 0..4 {
             let m = &mut self.mix[k];
             if m.per == 0 {
@@ -3898,16 +4223,23 @@ impl Hip7 {
             let q = d3 / m.per as u32;
             let d1 = if q > 0xffff { d3 } else { q };
             m.step = ((d1 & 0xffff) << 5).rotate_left(16);
+            self.k(K7::Step);
         }
         std::mem::swap(&mut self.buf_next, &mut self.buf_other);
         self.mix(hw, self.buf_other);
+        self.k(K7::IntOn);
+        self.at(hw);
         hw.bus.write_word(0xdff09a, 0x8080);
-        hw.wait(c7::VOL0);
+        self.k(K7::Vol0);
+        self.at(hw);
         hw.vol(0, 0x40);
+        self.busy = hw.bus.clock + RETURN7;
     }
 
     /// The mixing loop: each voice's sample through its volume's table, the
-    /// four summed, clipped to a byte or divided by 4.
+    /// four summed, clipped to a byte or divided by 4. Paula may be playing the buffer (the
+    /// first one): as in the reference, whose Paula catches up at the next register access,
+    /// its fetches since the last one see the whole mix.
     fn mix(&mut self, hw: &mut Hw, out: u32) {
         let n = 2 * self.mix_words as u32;
         for j in 0..n {
@@ -3917,15 +4249,27 @@ impl Hip7 {
                 sum += self.vol_tab[m.tab as usize][b as usize] as u16;
             }
             let o = if !self.clip {
+                self.k(K7::MixClip(0));
                 (0x80 + (sum >> 2)) as u8
             } else {
                 match sum {
-                    0..=0x17f => 0x80,
-                    0x180..=0x27f => (sum - 0x100) as u8,
-                    _ => 0x7f,
+                    0..=0x17f => {
+                        self.k(K7::MixClip(1));
+                        0x80
+                    }
+                    0x180..=0x27f => {
+                        self.k(K7::MixClip(2));
+                        (sum - 0x100) as u8
+                    }
+                    _ => {
+                        self.k(K7::MixClip(3));
+                        0x7f
+                    }
                 }
             };
+            self.k(K7::MixByte);
             hw.bus.w8(out + j, o);
+            let mut wraps = 0;
             for m in &mut self.mix {
                 let (p, x) = m.pos.overflowing_add(m.step);
                 let low = (p as u16).wrapping_add(x as u16);
@@ -3933,44 +4277,56 @@ impl Hip7 {
                 if (low as i16) >= 0 {
                     m.end = m.loop_end;
                     m.pos = (m.pos & 0xffff_0000) | low.wrapping_sub(m.loop_len) as u32;
+                    wraps += 1;
                 }
             }
+            for _ in 0..wraps {
+                self.k(K7::MixWrap);
+            }
         }
-        hw.wait(c7::BYTE * n as u64);
     }
 
     /// The replayer's tick.
     fn tick7(&mut self, hw: &mut Hw) {
         if self.stopped {
+            self.k(K7::Stopped);
+            self.at(hw);
             hw.dmacon(0x000f);
             for ch in 0..4 {
+                self.at(hw);
                 hw.vol(ch, 0);
             }
             self.songend = true;
             return;
         }
-        hw.wait(c7::START);
+        self.k(K7::Tick);
         self.counter = self.counter.wrapping_sub(1);
         if self.counter == 0 {
+            self.k(K7::Reload);
             self.counter = self.speed;
             for i in 3..7 {
                 self.row(i, hw);
             }
+        } else {
+            self.k(K7::NoReload);
         }
         self.dma_acc = 0;
         for i in 0..3 {
             let (per, vol) = self.effects(i, hw);
             let ch = CH7[i];
+            self.k(K7::FxEnd(i as u8));
+            self.at(hw);
             hw.per(ch, per);
             hw.vol(ch, vol & 0x7f);
         }
         for i in 3..7 {
             let (per, vol) = self.effects(i, hw);
+            self.k(K7::FxEnd(i as u8));
             let m = &mut self.mix[i - 3];
             m.per = per;
             m.vol = vol;
         }
-        hw.wait(c7::MIX_SETUP);
+        self.k(K7::MixSetup);
         self.mix_state();
         self.mix_on |= self.mix_restart;
         self.mix_state();
@@ -3979,19 +4335,28 @@ impl Hip7 {
             self.mix[k].loc = v.loop_addr;
             self.mix[k].len = v.loop_len;
         }
-        wait_lines(hw, 9);
+        self.poll_lines(9);
+        self.k(K7::DmaOn);
+        self.at(hw);
         hw.dmacon(0x8000 | self.dma_acc);
-        wait_lines(hw, 9);
+        self.k(K7::PollAgain);
+        self.poll_lines(9);
         self.mix_state();
-        hw.wait(c7::LOOPS);
+        self.k(K7::Loops);
         for i in 0..3 {
             let v = self.voices[i];
+            if i > 0 {
+                self.k(K7::LoopNext);
+            }
+            self.at(hw);
             hw.loc(CH7[i], v.loop_addr);
-            hw.wait(c7::LOOP_NEXT);
+            self.k(K7::LoopLen);
+            self.at(hw);
             hw.len(CH7[i], v.loop_len);
-            hw.wait(c7::LOOP_NEXT);
         }
+        self.k(K7::LoopEnd);
         if self.counter == self.speed {
+            self.k(K7::Rows0);
             for i in 0..3 {
                 self.row(i, hw);
             }
@@ -4006,11 +4371,14 @@ impl Hip7 {
             if self.mix_on & 1 << (k + 3) == 0 {
                 m.step = 0;
                 m.restart = true;
+                self.k(K7::MsOff);
                 continue;
             }
+            let mut ev = [None; 2];
             if m.len & 0x3fff <= 0x10 {
                 m.loc = self.silence;
                 m.len = 0x80;
+                ev[0] = Some(K7::MsShort);
             }
             let l = 2 * (m.len & 0x3fff) as u32;
             m.loop_end = m.loc.wrapping_add(l);
@@ -4019,6 +4387,11 @@ impl Hip7 {
                 m.restart = false;
                 m.end = m.loc.wrapping_add(l);
                 m.pos = l.wrapping_neg();
+                ev[1] = Some(K7::MsRestart);
+            }
+            self.k(K7::MsOn);
+            for e in ev.into_iter().flatten() {
+                self.k(e);
             }
         }
     }
@@ -4045,8 +4418,10 @@ impl Hip7 {
     /// mixer's (and the restart).
     fn voice_off(&mut self, i: usize, hw: &mut Hw) {
         let b = self.voices[i].dma;
+        self.k(K7::POff);
         if i < 3 {
             self.dma_acc |= b;
+            self.at(hw);
             hw.dmacon(b);
         } else {
             self.mix_restart |= b;
@@ -4056,6 +4431,7 @@ impl Hip7 {
 
     fn set_loc(&mut self, i: usize, hw: &mut Hw, a: u32) {
         if i < 3 {
+            self.at(hw);
             hw.loc(CH7[i], a);
         } else {
             self.mix[i - 3].loc = a;
@@ -4064,6 +4440,7 @@ impl Hip7 {
 
     fn set_len(&mut self, i: usize, hw: &mut Hw, l: u16) {
         if i < 3 {
+            self.at(hw);
             hw.len(CH7[i], l);
         } else {
             self.mix[i - 3].len = l;
@@ -4072,6 +4449,7 @@ impl Hip7 {
 
     fn set_per(&mut self, i: usize, hw: &mut Hw, p: u16) {
         if i < 3 {
+            self.at(hw);
             hw.per(CH7[i], p);
         } else {
             self.mix[i - 3].per = p;
@@ -4091,16 +4469,19 @@ impl Hip7 {
     }
 
     /// E2/E7: the sample's start and length, a period of 4, its loop kept.
-    fn play(&mut self, i: usize, hw: &mut Hw, n: u8) {
+    fn play(&mut self, i: usize, hw: &mut Hw, n: u8, e7: bool) {
         let (off, len, ls, ll) = self.sample_info(hw, n);
         let s = off.wrapping_add(self.samples);
-        hw.wait(c7::OFF_LOC);
+        self.k(K7::PLoc(i as u8));
+        if e7 {
+            self.k(K7::PLocE7);
+        }
         self.set_loc(i, hw, s);
-        hw.wait(c7::LOC_LEN);
+        self.k(K7::PLen);
         self.set_len(i, hw, len);
-        hw.wait(c7::LEN_PER);
+        self.k(K7::PPer);
         self.set_per(i, hw, 4);
-        hw.wait(c7::CMD_TAIL);
+        self.k(K7::PEnd);
         let v = &mut self.voices[i];
         v.loop_addr = s.wrapping_add(ls as u32);
         v.loop_len = ll;
@@ -4109,9 +4490,10 @@ impl Hip7 {
     /// A voice's effects: the frequency table, the slide, the envelope; the
     /// period and volume to write.
     fn effects(&mut self, i: usize, hw: &mut Hw) -> (u16, u16) {
-        hw.wait(c7::FX);
+        self.k(K7::Fx(i as u8));
         loop {
             if self.voices[i].freq_wait != 0 {
+                self.k(K7::FreqWait);
                 self.voices[i].freq_wait -= 1;
                 break;
             }
@@ -4123,7 +4505,6 @@ impl Hip7 {
         self.envelope(i, hw);
         let per = self.period(i);
         let vol = self.volume(i);
-        hw.wait(c7::FX_END);
         (per, vol)
     }
 
@@ -4134,20 +4515,26 @@ impl Hip7 {
             let a = v.freq.wrapping_add(v.freq_pos as u32);
             let c = self.r8(hw, a);
             let b = self.r8(hw, a + 1);
+            self.k(K7::FreqRead);
             if c < 0xe0 {
+                self.k(K7::FreqNote);
                 let v = &mut self.voices[i];
                 v.transpose = c;
                 v.freq_pos = v.freq_pos.wrapping_add(1);
                 return false;
             }
             match c {
-                0xe0 => self.voices[i].freq_pos = b as u16,
+                0xe0 => {
+                    self.k(K7::FE0);
+                    self.voices[i].freq_pos = b as u16
+                }
                 0xe2 => {
+                    self.k(K7::FE2);
                     let v = &mut self.voices[i];
                     v.var_depth = 0;
                     v.sample = 0xff;
                     self.voice_off(i, hw);
-                    self.play(i, hw, b);
+                    self.play(i, hw, b, false);
                     let v = &mut self.voices[i];
                     v.env_pos = 0;
                     v.env_counter = 1;
@@ -4155,6 +4542,7 @@ impl Hip7 {
                     v.slide_on = false;
                 }
                 0xe3 => {
+                    self.k(K7::FE3);
                     let d = self.r8(hw, a + 2);
                     let v = &mut self.voices[i];
                     v.freq_pos = v.freq_pos.wrapping_add(3);
@@ -4162,11 +4550,14 @@ impl Hip7 {
                     v.vib_depth = d;
                 }
                 0xe4 => {
+                    self.k(K7::FE4);
                     let (off, len, ls, ll) = self.sample_info(hw, b);
                     let s = off.wrapping_add(self.samples);
+                    self.k(K7::E4Loc);
                     self.set_loc(i, hw, s);
-                    hw.wait(c7::LOC_LEN);
+                    self.k(K7::E4Len);
                     self.set_len(i, hw, len);
+                    self.k(K7::E4End);
                     let v = &mut self.voices[i];
                     v.loop_addr = s.wrapping_add(ls as u32);
                     v.loop_len = ll;
@@ -4174,10 +4565,12 @@ impl Hip7 {
                     v.slide_on = false;
                 }
                 0xe5 => {
+                    self.k(K7::FE5);
                     self.voices[i].var_depth = 0;
                     self.voice_off(i, hw);
-                    hw.wait(c7::OFF_LOC);
+                    self.k(K7::E5Per);
                     self.set_per(i, hw, 4);
+                    self.k(K7::E5End);
                     let (start, len, _, _) = self.sample_info(hw, b);
                     let word = |s: &Self, hw: &Hw, k: u32| (s.r8(hw, a + k) as u16) << 8 | s.r8(hw, a + k + 1) as u16;
                     let mut pos = word(self, hw, 2);
@@ -4201,6 +4594,7 @@ impl Hip7 {
                     v.freq_pos = v.freq_pos.wrapping_add(9);
                 }
                 0xe6 => {
+                    self.k(K7::FE6);
                     let word = |s: &Self, hw: &Hw, k: u32| (s.r8(hw, a + k) as u16) << 8 | s.r8(hw, a + k + 1) as u16;
                     let (sl, sd, ss) = (word(self, hw, 1), word(self, hw, 3), self.r8(hw, a + 5));
                     let v = &mut self.voices[i];
@@ -4214,11 +4608,14 @@ impl Hip7 {
                 }
                 0xe7 => {
                     if b != self.voices[i].sample {
+                        self.k(K7::FE7);
                         let v = &mut self.voices[i];
                         v.var_depth = 0;
                         v.sample = b;
                         self.voice_off(i, hw);
-                        self.play(i, hw, b);
+                        self.play(i, hw, b, true);
+                    } else {
+                        self.k(K7::FE7Same);
                     }
                     let v = &mut self.voices[i];
                     v.env_pos = 0;
@@ -4227,12 +4624,14 @@ impl Hip7 {
                     v.slide_on = false;
                 }
                 0xe8 => {
+                    self.k(K7::FE8);
                     let v = &mut self.voices[i];
                     v.freq_wait = b;
                     v.freq_pos = v.freq_pos.wrapping_add(2);
                     return true;
                 }
                 0xe9 => {
+                    self.k(K7::FE9);
                     let v = &mut self.voices[i];
                     v.var_depth = 0;
                     v.sample = 0xff;
@@ -4245,6 +4644,7 @@ impl Hip7 {
                     v.slide_on = false;
                 }
                 0xea => {
+                    self.k(K7::FEA);
                     let v = &mut self.voices[i];
                     v.var_depth = b;
                     v.variation = 0;
@@ -4252,7 +4652,10 @@ impl Hip7 {
                 }
                 // E1 stops the table (and $EB-$FF jump through the original's
                 // code past its jump table; here they stop it too)
-                _ => return false,
+                _ => {
+                    self.k(K7::FStop);
+                    return false;
+                }
             }
         }
     }
@@ -4274,13 +4677,13 @@ impl Hip7 {
         let end = bus.r32(h + 4) & !1;
         let len = (end.wrapping_sub(start) >> 1) as u16;
         let at = start.wrapping_add(data);
-        hw.wait(c7::OFF_LOC);
+        self.k(K7::E9Loc);
         self.set_loc(i, hw, at);
-        hw.wait(c7::LOC_LEN);
+        self.k(K7::PLen);
         self.set_len(i, hw, len);
-        hw.wait(c7::LEN_PER);
+        self.k(K7::PPer);
         self.set_per(i, hw, 4);
-        hw.wait(c7::CMD_TAIL);
+        self.k(K7::E9End);
         let b = hw.bus.r8(at);
         hw.bus.w8(at.wrapping_add(1), b);
         let v = &mut self.voices[i];
@@ -4291,30 +4694,38 @@ impl Hip7 {
     /// The sample slide (E5): every `speed + 1` ticks the loop moves by its step
     /// within the sample, and is written.
     fn slide(&mut self, i: usize, hw: &mut Hw) {
-        let v = &mut self.voices[i];
+        let v = self.voices[i];
         if !v.slide_on || v.slide_done {
+            self.k(if v.slide_on { K7::SlideEnded } else { K7::SlideOff });
             return;
         }
+        let v = &mut self.voices[i];
         v.slide_counter = v.slide_counter.wrapping_sub(1);
         if (v.slide_counter as i8) >= 0 {
+            self.k(K7::SlideWait);
             return;
         }
+        let v = &mut self.voices[i];
         v.slide_counter = v.slide_speed;
         let mut pos = v.slide_pos as u32;
         let delta = v.slide_delta as i16 as i32 as u32;
         let len = v.slide_len;
+        let mut ev = K7::SlideFirst;
         if !v.slide_moved {
             v.slide_moved = true;
         } else {
+            ev = K7::SlideMove;
             pos = pos.wrapping_add(delta);
             if (pos as i32) < 0 {
                 v.slide_done = true;
                 pos = pos.wrapping_sub(delta);
+                ev = K7::SlideDone;
             } else {
                 let end = v.slide_start.wrapping_add(2 * pos).wrapping_add(2 * len as u32);
                 if end as i32 > v.slide_end as i32 {
                     v.slide_done = true;
                     pos = pos.wrapping_sub(delta);
+                    ev = K7::SlideDone;
                 }
             }
         }
@@ -4322,8 +4733,10 @@ impl Hip7 {
         let a = v.slide_start.wrapping_add(self.samples).wrapping_add(2 * pos);
         v.loop_len = len;
         v.loop_addr = a;
+        self.k(ev);
+        self.k(K7::SlideLoc);
         self.set_loc(i, hw, a);
-        hw.wait(c7::LOC_LEN);
+        self.k(K7::SlideLen);
         self.set_len(i, hw, len);
     }
 
@@ -4333,31 +4746,40 @@ impl Hip7 {
             let v = &mut self.voices[i];
             if v.sustain != 0 {
                 v.sustain -= 1;
+                self.k(K7::EnvSustain);
                 return;
             }
             v.env_counter = v.env_counter.wrapping_sub(1);
             if v.env_counter != 0 {
+                self.k(K7::EnvCount);
                 return;
             }
             v.env_counter = v.env_speed;
+            self.k(K7::EnvLoad);
             loop {
                 let v = self.voices[i];
                 let a = v.env.wrapping_add(v.env_pos as u32);
                 let c = self.r8(hw, a);
                 match c {
                     0xe0 => {
+                        self.k(K7::EnvE0);
                         let p = (self.r8(hw, a + 1) as u16).wrapping_sub(5);
                         self.voices[i].env_pos = p;
                     }
                     0xe8 => {
+                        self.k(K7::EnvE8);
                         let s = self.r8(hw, a + 1);
                         let v = &mut self.voices[i];
                         v.sustain = s;
                         v.env_pos = v.env_pos.wrapping_add(2);
                         break;
                     }
-                    0xe1..=0xff => return,
+                    0xe1..=0xff => {
+                        self.k(K7::EnvStop);
+                        return;
+                    }
                     _ => {
+                        self.k(K7::EnvVol);
                         let v = &mut self.voices[i];
                         v.volume = c;
                         v.env_pos = v.env_pos.wrapping_add(1);
@@ -4374,11 +4796,16 @@ impl Hip7 {
         let mut n = v.transpose;
         if (n as i8) >= 0 {
             n = n.wrapping_add(v.note).wrapping_add(v.track_transpose);
+            self.k(K7::PerNote);
+        } else {
+            self.k(K7::PerFixed);
         }
         let mut per = self.note_period(n & 0x7f);
+        let mut ev = Vec::new();
         let v = &mut self.voices[i];
         if v.vib_delay != 0 {
             v.vib_delay -= 1;
+            ev.push(K7::VibDelay);
         } else {
             let mut d1 = v.vib_delta as i16;
             let depth = v.vib_depth as i16;
@@ -4386,15 +4813,19 @@ impl Hip7 {
             let mut flag = v.vib_flag;
             if flag & 0x20 == 0 {
                 d1 -= speed;
+                ev.push(K7::VibDown);
                 if d1 < 0 {
                     flag |= 0x20;
                     d1 = 0;
+                    ev.push(K7::VibDownClamp);
                 }
             } else {
                 d1 += speed;
+                ev.push(K7::VibUp);
                 if d1 > depth {
                     flag &= !0x20;
                     d1 = depth;
+                    ev.push(K7::VibUpClamp);
                 }
             }
             v.vib_delta = d1 as u8;
@@ -4407,10 +4838,17 @@ impl Hip7 {
             if (b as i8) >= 0 {
                 v.porta = v.porta.wrapping_add(b as u16);
                 per = per.wrapping_sub(((v.porta as u32 * per as u32) >> 10) as u16);
+                ev.push(K7::PortaUp);
             } else {
                 v.porta = v.porta.wrapping_add(b.wrapping_neg() as u16);
                 per = per.wrapping_add(((v.porta as u32 * per as u32) >> 10) as u16);
+                ev.push(K7::PortaDown);
             }
+        } else {
+            ev.push(K7::NoPorta);
+        }
+        for e in ev {
+            self.k(e);
         }
         per
     }
@@ -4418,8 +4856,11 @@ impl Hip7 {
     /// The volume: the envelope's, faded, less a random variation (once).
     fn volume(&mut self, i: usize) -> u16 {
         let mut d1 = self.voices[i].fade as i16;
-        if self.voices[i].var_depth != 0 {
+        if self.voices[i].var_depth == 0 {
+            self.k(K7::NoVar);
+        } else {
             let mut d4 = self.voices[i].variation as u16;
+            self.k(if d4 == 0 { K7::VarNew } else { K7::VarOld });
             if d4 == 0 {
                 let depth = self.voices[i].var_depth as u32;
                 self.voices[i].var_depth = 0;
@@ -4432,6 +4873,7 @@ impl Hip7 {
         }
         if d1 < 0 {
             d1 = 0;
+            self.k(K7::VolClamp);
         }
         (self.voices[i].volume as u32 * d1 as u32 / 100) as u16
     }
@@ -4453,10 +4895,13 @@ impl Hip7 {
     /// The next position of voice `i` (at the end, the first, and the song
     /// end) and its command; the track's number.
     fn next_position(&mut self, i: usize, hw: &mut Hw) -> u8 {
-        hw.wait(c7::ROW_POS);
+        self.k(K7::RowPos(i as u8));
+
         let v = &mut self.voices[i];
         let mut p = v.pos.wrapping_add(v.pos_off as i16 as i32 as u32);
         if p == v.pos_end {
+            self.k(K7::PosWrap);
+            let v = &mut self.voices[i];
             self.songend = true;
             v.pos_off = 0;
             p = v.pos;
@@ -4467,6 +4912,15 @@ impl Hip7 {
         v.track_transpose = tt;
         v.env_transpose = et;
         let arg = cmd & 0x0f;
+        self.k(K7::PosCmd(match cmd >> 4 {
+            0xd => 1,
+            0xf if arg == 0 => 2,
+            0xf => 5,
+            0x8 => 3,
+            0xe => 4,
+            _ => 0,
+        }));
+        let v = &mut self.voices[i];
         match cmd >> 4 {
             // the tempo, from the next column's command byte
             0xd => {
@@ -4505,8 +4959,10 @@ impl Hip7 {
         v.env = e.wrapping_add(5);
         v.sustain = 0;
         if f == 0x80 {
+            self.k(K7::EnvNoFreq);
             return;
         }
+        self.k(K7::EnvFreq);
         let f = if info & 0x40 != 0 { prev } else { f };
         let fr = if self.coso {
             self.module.wrapping_add(hw.bus.r16(self.freqs.wrapping_add(2 * f as u32)) as i16 as i32 as u32)
@@ -4526,11 +4982,12 @@ impl Hip7 {
             self.row_coso(i, hw);
             return;
         }
-        hw.wait(c7::ROW);
+        self.k(K7::Row);
         let size = self.track_size;
         let v = self.voices[i];
         let c = hw.bus.r8(v.track.wrapping_add(v.row as u32)) & 0x7f;
         if c == 1 || v.row == size {
+            self.k(if v.row == size { K7::RowSize } else { K7::RowMark });
             let t = self.next_position(i, hw);
             let v = &mut self.voices[i];
             v.row = 0;
@@ -4540,9 +4997,15 @@ impl Hip7 {
         let a = v.track.wrapping_add(v.row as u32);
         let c = hw.bus.r8(a);
         let n = c & 0x7f;
-        if n != 0 {
+        if n == 0 {
+            self.k(K7::RowEmpty);
+        } else {
+            self.k(K7::RowNote);
             // the info byte of the row before (of the track's last row at its start)
             let before = if v.row == 0 { a + 1 + size as u32 } else { a + 1 } - 2;
+            if v.row == 0 {
+                self.k(K7::RowFirst);
+            }
             let prev = hw.bus.r8(before);
             let info = hw.bus.r8(a + 1);
             let v = &mut self.voices[i];
@@ -4550,10 +5013,21 @@ impl Hip7 {
             v.note = n;
             v.prev_info = prev;
             v.info = info;
+            if info & 0x40 != 0 {
+                self.k(K7::RowI40);
+            }
+            if info & 0x20 != 0 {
+                self.k(K7::RowI20);
+            }
+            if c & 0x80 != 0 {
+                self.k(K7::RowNoEnv);
+            }
             if c & 0x80 == 0 {
+                self.k(K7::RowEnv);
                 self.note_env(i, hw, info, prev);
             }
         }
+        self.k(K7::RowEnd);
         let v = &mut self.voices[i];
         v.row = v.row.wrapping_add(2);
     }
@@ -4562,11 +5036,17 @@ impl Hip7 {
     /// track's end) the next position, $FE and $FD the voice's row speed ($FD
     /// ends the row), else a note, its info and (with info bits 5-7) the info
     /// byte for the portamento and frequency table.
+    /// The reference of a COSO module is the original on its TFMX twin (the original refuses
+    /// the container), so the paths counted are the twin's: each call a row of its track
+    /// (`row` counts them, the bytes of a TFMX track), an empty one while the counter runs, a
+    /// track's end at its size or at an end mark before.
     fn row_coso(&mut self, i: usize, hw: &mut Hw) {
-        hw.wait(c7::ROW);
+        self.k(K7::Row);
+        let size = self.track_size;
         let v = &mut self.voices[i];
         v.counter = v.counter.wrapping_sub(1);
         if (v.counter as i8) >= 0 {
+            self.coso_row_end(i, false);
             return;
         }
         v.counter = v.speed;
@@ -4576,6 +5056,7 @@ impl Hip7 {
             let c = if a == v.track_end { 0xff } else { hw.bus.r8(a) };
             match c {
                 0xff => {
+                    self.k(if v.row >= size { K7::RowSize } else { K7::RowMark });
                     let t = self.next_position(i, hw) as u32;
                     let off = |k: u32| hw.bus.r16(self.tracks.wrapping_add(2 * k)) as i16 as i32 as u32;
                     let start = self.module.wrapping_add(off(t));
@@ -4583,6 +5064,7 @@ impl Hip7 {
                     let v = &mut self.voices[i];
                     v.track = start;
                     v.track_end = end;
+                    v.row = 0;
                 }
                 0xfe | 0xfd => {
                     let s = hw.bus.r8(a + 1);
@@ -4591,6 +5073,7 @@ impl Hip7 {
                     v.counter = s;
                     v.track = a.wrapping_add(2);
                     if c == 0xfd {
+                        self.coso_row_end(i, false);
                         return;
                     }
                 }
@@ -4607,22 +5090,39 @@ impl Hip7 {
                     }
                     v.porta = 0;
                     let prev = v.prev_info;
-                    if c < 0x80 {
-                        self.note_env(i, hw, info, prev);
+                    let first = v.row == 0;
+                    self.k(K7::RowNote);
+                    if first {
+                        self.k(K7::RowFirst);
                     }
+                    if info & 0x40 != 0 {
+                        self.k(K7::RowI40);
+                    }
+                    if info & 0x20 != 0 {
+                        self.k(K7::RowI20);
+                    }
+                    if c < 0x80 {
+                        self.k(K7::RowEnv);
+                        self.note_env(i, hw, info, prev);
+                    } else {
+                        self.k(K7::RowNoEnv);
+                    }
+                    self.coso_row_end(i, true);
                     return;
                 }
             }
         }
     }
-}
 
-/// The original's wait for `n` raster lines: it polls VHPOSR's line byte until
-/// it has changed `n` times, and leaves the loop about 31 colour clocks into
-/// the line (27 to 35 in the reference's DMA-on writes).
-fn wait_lines(hw: &mut Hw, n: u64) {
-    let now = hw.bus.clock;
-    hw.wait((now / LINE + n) * LINE + 31 - now);
+    /// The end of a COSO row as its TFMX twin's (`note`: a note was read, else an empty row).
+    fn coso_row_end(&mut self, i: usize, note: bool) {
+        if !note {
+            self.k(K7::RowEmpty);
+        }
+        self.k(K7::RowEnd);
+        let v = &mut self.voices[i];
+        v.row = v.row.wrapping_add(2);
+    }
 }
 
 #[cfg(test)]

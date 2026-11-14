@@ -26,6 +26,28 @@ const NOISE_LEN: usize = 4096;
 /// Paula periods of the noise voice for its selector.
 const NOISE_PERIOD: [u16; 4] = [0x0200, 0x0400, 0x0800, 0x0800];
 
+// The original's 68000 cycles per code path, measured (black box): every write is a direct Paula
+// write at the tick's start plus half the cycles of the paths taken since (rounded down). Fitted
+// exactly to every write of the reference runs of ten modules (2990 writes; the cycles from a run
+// whose cycle count starts one cycle late give each write's parity). Where one path ends and the
+// next begins is the fit's choice, not the original's: only the sums are measured.
+/// From the tick's start to the first voice.
+const C_TICK: i64 = 203;
+/// A voice that has ended; one still counting down its note.
+const C_IDLE: i64 = 78;
+const C_COUNT: i64 = 133;
+/// A new note up to its sample address (tone voices, the noise voice).
+const C_NOTE: [i64; 2] = [900, 845];
+/// After the address: to the length, the period, the volume and the DMA enable, per voice.
+const C_LEN: i64 = 16;
+const C_PER: [i64; 4] = [262, 324, 386, 416];
+const C_VOL: [i64; 4] = [306, 354, 392, 427];
+const C_DMA: [i64; 4] = [173, 204, 235, 243];
+/// After a note's DMA enable.
+const C_POST: i64 = 18;
+/// A voice reaching its end marker, up to its DMA disable.
+const C_END: i64 = 475;
+
 fn le16(d: &[u8], o: usize) -> Option<u16> {
     d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
@@ -83,6 +105,9 @@ pub struct Agi {
     /// The noise voice has no notes, so the tune loops.
     loops: bool,
     songend: bool,
+    /// The tick's start (colour clock) and the original's 68000 cycles since then.
+    t0: u64,
+    cy: i64,
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -108,6 +133,8 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         noise: block + 12,
         loops: le16(d, start[3]) == Some(END),
         songend: false,
+        t0: 0,
+        cy: 0,
     };
     a.init();
     Some(Box::new(a))
@@ -131,13 +158,25 @@ impl Agi {
         self.active = 4;
     }
 
+    /// `c` more cycles, then up to the clock of the next write: the tick's start plus half the
+    /// cycles so far.
+    fn at(&mut self, c: i64, hw: &mut Hw) {
+        self.cy += c;
+        let t = self.t0 + self.cy.max(0) as u64 / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+
     fn voice(&mut self, ch: usize, hw: &mut Hw) {
         let v = &mut self.v[ch];
         if !v.active {
+            self.cy += C_IDLE;
             return;
         }
         v.wait = v.wait.wrapping_sub(1);
         if v.wait != 0 {
+            self.cy += C_COUNT;
             return;
         }
         // a stream that is cut short counts as ended
@@ -148,6 +187,7 @@ impl Agi {
         let Some((dur, a, b, att)) = note else {
             v.active = false;
             self.active -= 1;
+            self.at(C_END, hw);
             hw.dmacon(1 << ch);
             return;
         };
@@ -159,11 +199,17 @@ impl Agi {
             (self.noise, (NOISE_LEN / 2) as u16, NOISE_PERIOD[b as usize & 3])
         };
         let vol = (15 - (att as u16 & 0x0F)) * 64 / 15;
+        self.at(C_NOTE[ch / 3], hw);
         hw.loc(ch, loc);
+        self.at(C_LEN, hw);
         hw.len(ch, len);
+        self.at(C_PER[ch], hw);
         hw.per(ch, per);
+        self.at(C_VOL[ch], hw);
         hw.vol(ch, vol);
+        self.at(C_DMA[ch], hw);
         hw.dmacon(0x8000 | 1 << ch);
+        self.cy += C_POST;
     }
 }
 
@@ -186,6 +232,8 @@ impl Replayer for Agi {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t0 = hw.bus.clock;
+        self.cy = C_TICK;
         for ch in 0..4 {
             self.voice(ch, hw);
         }

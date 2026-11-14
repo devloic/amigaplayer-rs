@@ -9,9 +9,7 @@ use crate::paulaout::Filter;
 use crate::protracker::ProTracker;
 use anyhow::{anyhow, bail, Result};
 use m68k::CpuType;
-use std::path::Path;
-#[cfg(feature = "host-68k")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const SCOPE_LEN: usize = 512;
 
@@ -155,6 +153,10 @@ pub struct Engine {
     pub settings: Settings,
     pub paused: bool,
     pub last_error: Option<String>,
+    /// The module's path in `m.os.mem_files` when the module was a gzip / xz wrapper: its
+    /// unpacked bytes are kept there for the players that read the module again by its name
+    /// (IFF-SMUS); taken out again when the next module starts.
+    unwrapped_copy: Option<PathBuf>,
     scope_ring: Vec<Vec<f32>>,
     scope_pos: usize,
     a500: OnePole,
@@ -251,6 +253,7 @@ impl Engine {
             settings: Settings::default(),
             paused: false,
             last_error: None,
+            unwrapped_copy: None,
             scope_ring: Vec::new(),
             scope_pos: 0,
             a500: OnePole::new(rate, 4420.0),
@@ -682,8 +685,19 @@ impl Engine {
         self.prowizard_converted = false;
         self.prowizard_format = None;
         // a gzip / xz wrapper first, whatever it holds (a recording as well as a module)
+        if let Some(p) = self.unwrapped_copy.take() {
+            self.m.os.mem_files.remove(&p);
+        }
         #[cfg(feature = "archives")]
-        let data = crate::decrunch::unwrap_wrapper(&data).unwrap_or(data);
+        let data = match crate::decrunch::unwrap_wrapper(&data) {
+            Some(d) => {
+                // (a host's own copy of the module at this path, the wrapper's bytes, is replaced)
+                self.m.os.mem_files.insert(path.to_path_buf(), d.clone());
+                self.unwrapped_copy = Some(path.to_path_buf());
+                d
+            }
+            None => data,
+        };
         // AIFF / AIFF-C recordings are played by our own decoder, from the file itself
         // (not copied into guest memory); an unsupported compression is an error, not a
         // reason to try the other players

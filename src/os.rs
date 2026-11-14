@@ -129,6 +129,11 @@ pub struct OsState {
     pub delays: HashMap<u32, u64>,
 }
 
+/// The largest compressed twin (`NAME.xz`, `NAME.gz`) a lookup reads, and the most it
+/// unpacks to.
+#[cfg(feature = "archives")]
+const TWIN_MAX: usize = 64 << 20;
+
 const NT_LIBRARY: u8 = 9;
 const NT_PROCESS: u8 = 13;
 const MEMF_LARGEST: u32 = 1 << 17;
@@ -1927,10 +1932,44 @@ impl OsState {
         if let Some((_, d)) = self.mem_files.iter().find(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case(&want)) {
             return Ok(d.clone());
         }
-        if self.no_host_files {
-            return Err(std::io::ErrorKind::NotFound.into());
+        let r = if self.no_host_files { Err(std::io::ErrorKind::NotFound.into()) } else { std::fs::read(p) };
+        let r = match r {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.read_twin(p).ok_or(e),
+            r => r,
+        };
+        r
+    }
+
+    /// The file a lookup of `p` finds compressed on disk when `p` itself is not there:
+    /// `p.xz` or `p.gz` (in any case), unpacked. Archive collections keep every file so,
+    /// companions too (`smpl.tune.xz`, `Instruments/Piano.instr.xz`). Only with the
+    /// `archives` feature (which has the decoders) and a host file system.
+    pub fn twin_path(&self, p: &Path) -> Option<PathBuf> {
+        if !cfg!(feature = "archives") || self.no_host_files || p.exists() {
+            return None;
         }
-        std::fs::read(p)
+        let name = p.file_name()?.to_string_lossy().into_owned();
+        ["xz", "gz"].iter().map(|s| any_case_path(p.with_file_name(format!("{name}.{s}")))).find(|q| q.is_file())
+    }
+
+    /// `twin_path`'s file, unpacked (None when it is not a gzip or xz file, or too large).
+    pub fn read_twin(&self, p: &Path) -> Option<Vec<u8>> {
+        #[cfg(feature = "archives")]
+        {
+            let q = self.twin_path(p)?;
+            if std::fs::metadata(&q).ok()?.len() > TWIN_MAX as u64 {
+                return None;
+            }
+            let d = std::fs::read(&q).ok()?;
+            let r = crate::archive::unwrap_single(&d, TWIN_MAX).flatten();
+            log::debug!("{} read from {} ({})", p.display(), q.display(), if r.is_some() { "unpacked" } else { "failed" });
+            r
+        }
+        #[cfg(not(feature = "archives"))]
+        {
+            let _ = p;
+            None
+        }
     }
 
     /// Whether `p` is one of `mem_files`, or a directory above one (names in any case).
@@ -2149,10 +2188,12 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
                 }
             } else {
                 match d2 {
-                    1006 => File::create(&p), // MODE_NEWFILE
-                    _ => File::open(&p),
+                    1006 => File::create(&p).map(Handle::Disk), // MODE_NEWFILE
+                    _ => File::open(&p).map(Handle::Disk).or_else(|e| {
+                        // (only `NAME.xz` / `NAME.gz` there: the file unpacked)
+                        m.os.read_twin(&p).map(|d| Handle::Mem(std::io::Cursor::new(d))).ok_or(e)
+                    }),
                 }
-                .map(Handle::Disk)
             };
             match f {
                 Ok(file) => {
@@ -2173,6 +2214,7 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
             let f = match m.os.locks.get(&d1).cloned() {
                 Some(p) if m.os.no_host_files => m.os.read_file(&p).map(|d| (Handle::Mem(std::io::Cursor::new(d)), p)),
                 Some(p) if p.is_file() => File::open(&p).map(|f| (Handle::Disk(f), p)),
+                Some(p) => m.os.read_twin(&p).map(|d| (Handle::Mem(std::io::Cursor::new(d)), p)).ok_or(std::io::ErrorKind::NotFound.into()),
                 _ => Err(std::io::ErrorKind::NotFound.into()),
             };
             match f {
@@ -2293,7 +2335,7 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
         "Lock" => {
             let n = m.bus.read_cstr(d1);
             let p = m.os.host_path(&n, cur.as_deref());
-            let exists = if m.os.no_host_files { m.os.mem_exists(&p).0 } else { p.exists() };
+            let exists = if m.os.no_host_files { m.os.mem_exists(&p).0 } else { p.exists() || m.os.twin_path(&p).is_some() };
             if exists {
                 let l = bptr_alloc(m, 20);
                 m.os.locks.insert(l, p);
@@ -2374,7 +2416,7 @@ fn dos_call(m: &mut Machine, lvo: i32) -> bool {
         "LoadSeg" => {
             let n = m.bus.read_cstr(d1);
             let p = m.os.host_path(&n, cur.as_deref());
-            let d = if m.os.no_host_files { m.os.read_file(&p).ok() } else { std::fs::read(&p).ok() };
+            let d = if m.os.no_host_files { m.os.read_file(&p).ok() } else { std::fs::read(&p).ok().or_else(|| m.os.read_twin(&p)) };
             let r = d.and_then(|d| crate::deli::load_seg(m, &d).ok());
             log::debug!("LoadSeg {n:?} ({}): {}", p.display(), if r.is_some() { "loaded" } else { "failed" });
             m.set_d0(r.map(|(seg, _)| seg).unwrap_or(0));
@@ -2398,8 +2440,11 @@ fn fill_fib(m: &mut Machine, fib: u32, p: &Path) {
     let (is_dir, size) = if m.os.no_host_files {
         (m.os.mem_exists(p).1, m.os.read_file(p).map_or(0, |d| d.len() as u32))
     } else {
-        let md = std::fs::metadata(p).ok();
-        (md.as_ref().map(|x| x.is_dir()).unwrap_or(false), md.as_ref().map(|x| x.len()).unwrap_or(0) as u32)
+        match std::fs::metadata(p) {
+            Ok(md) => (md.is_dir(), md.len() as u32),
+            // (only `NAME.xz` / `NAME.gz` there: the size unpacked)
+            Err(_) => (false, m.os.read_twin(p).map_or(0, |d| d.len() as u32)),
+        }
     };
     let fname = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     m.bus.w32(fib + 4, if is_dir { 2 } else { -3i32 as u32 });
@@ -2479,6 +2524,30 @@ mod tests {
         // directories too, and a name found in no case stays as named
         assert_eq!(at("sub/SAMPLES"), dir.join("Sub/Samples"));
         assert_eq!(at("smp.none"), dir.join("smp.none"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "archives")]
+    #[test]
+    fn a_compressed_twin_is_read_unpacked() {
+        let dir = std::env::temp_dir().join(format!("amigaplayer-os-test-twin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Instruments")).unwrap();
+        std::fs::write(dir.join("smpl.Tune.gz"), crate::archive::testdata::gzip(b"samples", None)).unwrap();
+        std::fs::write(dir.join("Instruments/Piano.instr.gz"), crate::archive::testdata::gzip(b"piano", None)).unwrap();
+        std::fs::write(dir.join("plain"), b"plain").unwrap();
+        std::fs::write(dir.join("plain.gz"), crate::archive::testdata::gzip(b"other", None)).unwrap();
+        let mut os = OsState { module_dir: dir.clone(), ..OsState::default() };
+        let read = |os: &OsState, n: &str| os.read_file(&os.host_path(n, Some(&dir))).ok();
+        // the name in any case, the twin's suffix too
+        assert_eq!(read(&os, "smpl.tune").as_deref(), Some(&b"samples"[..]));
+        assert_eq!(read(&os, "Instruments:piano.instr").as_deref(), Some(&b"piano"[..]));
+        // a file that is there wins over its twin
+        assert_eq!(read(&os, "plain").as_deref(), Some(&b"plain"[..]));
+        assert_eq!(read(&os, "smpl.none"), None);
+        // nothing of the disk for a guest that sees only its own files
+        os.no_host_files = true;
+        assert_eq!(read(&os, "smpl.tune"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

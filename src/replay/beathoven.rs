@@ -20,7 +20,7 @@
 //! re-written every tick. There is no song end: the lists loop for ever.
 
 use super::beathoven_tables::{Row, ROWS};
-use super::{be16, be32, Hw, Open, Replayer, WriteGaps};
+use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "Beathoven Synthesizer", detect, new };
@@ -137,6 +137,12 @@ pub struct Beathoven {
     started: bool,
     v: [V; 4],
     w: [V100; 4],
+    /// Engine 109: the writes are timed by the original's code paths (`BASE` and the build's `BUILDS` entry); the
+    /// half-colour-clock cursor and the voice the paths are on.
+    timed: bool,
+    cy: i64,
+    vk: usize,
+    costs: [[i32; 4]; NK],
 }
 
 fn sext(v: u16) -> i32 {
@@ -270,20 +276,73 @@ impl Beathoven {
 
     // ---------------------------------------------------- engines 109, NEW, simple
 
+    /// A path of the original's code taken (engine 109): its cycles, on the current voice.
+    fn k(&mut self, k: usize) {
+        if self.timed {
+            self.cy += self.costs[k][self.vk] as i64;
+        }
+    }
+    /// The colour clock the original is at: the clock of the half-colour-clock cursor.
+    fn sync(&mut self, hw: &mut Hw) {
+        if self.timed {
+            let t = self.cy.div_euclid(2) as u64;
+            if hw.bus.clock < t {
+                hw.bus.clock = t;
+            }
+        }
+    }
+    /// A Paula write of the path `k`.
+    fn at(&mut self, k: usize, hw: &mut Hw) {
+        self.k(k);
+        self.sync(hw);
+    }
+    /// The wait for the beam before the DMA is switched on (engine 109): the line is read
+    /// `K_BREAD` cycles in, then the beam is polled every `K_BPOLL` cycles from `K_BFIRST` on,
+    /// until it is `K_BLINES` lines on, `K_BPOS` half colour clocks into that line.
+    fn beam_wait(&mut self, b: [usize; 6], hw: &mut Hw) {
+        if !self.timed {
+            hw.wait_lines(10, 64);
+            return;
+        }
+        let s = self.cy;
+        let [k_read, k_lines, k_pos, k_first, k_poll, k_delay] = b;
+        let c = |k: usize| self.costs[k][0] as i64;
+        if c(k_poll) == 0 {
+            // a build that waits in a delay loop
+            self.cy = s + c(k_delay);
+            return;
+        }
+        let l0 = (s + c(k_read)).div_euclid(2) as u64 / crate::paula::LINE;
+        let target = ((l0 + c(k_lines) as u64) * crate::paula::LINE * 2) as i64 + c(k_pos);
+        let mut p = s + c(k_first);
+        while p < target {
+            p += c(k_poll);
+        }
+        self.cy = p;
+    }
+
     fn voice(&mut self, ch: usize, hw: &mut Hw) {
         let row = self.row();
         let simple = row.eng == 2;
         let bit = 1u16 << ch;
         let m = row.m;
+        self.vk = ch;
+        self.k(K_V);
         let mut v = std::mem::take(&mut self.v[ch]);
         // A. the loop buffer
         let two_part = if simple { v.flags & L != 0 } else { v.flags & (L | R) != 0 };
         if !two_part {
+            self.at(K_ALOC, hw);
             hw.loc(ch, v.base.wrapping_add(sext(v.a24) as u32));
+            self.at(K_ALEN, hw);
             hw.len(ch, ((sext(v.a26) - sext(v.a24)) >> 1) as u16);
+            self.k(K_ALENX);
         } else {
+            self.at(K_A2LOC, hw);
             hw.loc(ch, self.silent());
+            self.at(K_A2LEN, hw);
             hw.len(ch, 1);
+            self.k(K_A2LENX);
         }
         let mut d2 = false;
         v.cnt = v.cnt.wrapping_sub(1);
@@ -291,6 +350,7 @@ impl Beathoven {
             hw.dmacon(bit);
         }
         if v.cnt == 0 {
+            self.k(K_CZ);
             let mut guard = 0;
             loop {
                 v.flags &= !R;
@@ -298,9 +358,12 @@ impl Beathoven {
                 if guard > GUARD {
                     break;
                 }
+                self.k(K_IT);
                 if self.r16(v.seq) == 0 {
+                    self.k(K_SEND);
                     v.list = v.list.wrapping_add(8);
                     if self.r32(v.list) == 0 {
+                        self.k(K_LWRAP);
                         v.list = v.lp;
                     }
                     v.seq = self.r32(v.list);
@@ -310,6 +373,7 @@ impl Beathoven {
                 let c = self.r16(v.seq);
                 if !simple && c != 0x83 {
                     v.flags &= !A;
+                    self.at(K_OFF, hw);
                     hw.dmacon(bit);
                     d2 = true;
                 }
@@ -322,54 +386,77 @@ impl Beathoven {
                         }
                         let rec = self.r32(v.seq + 2);
                         if self.r16(rec + 0xC) != 0 {
+                            self.k(K_IL);
                             v.flags |= L;
                         } else {
+                            self.k(K_INL);
                             v.flags &= !L;
                         }
+                        self.at(K_IVOL, hw);
                         hw.vol(ch, self.r16(rec));
                         let w = if v.flags & L != 0 { self.r16(rec + 2) } else { self.r16(rec + 4) } >> 1;
+                        self.k(if v.flags & L != 0 { K_ILENL } else { K_ILENNL });
+                        self.at(K_ILEN, hw);
                         hw.len(ch, w);
                         v.len1 = w;
                         let sb = if row.eng == 3 { self.h14 } else { 0 };
                         v.base = self.abs(self.r32(rec + 8).wrapping_add(sb));
+                        self.at(K_ILOC, hw);
                         hw.loc(ch, v.base);
                         v.a24 = self.r16(rec + 4);
                         v.a26 = self.r16(rec + 6);
                         v.a28 = self.r16(rec + 2);
                         v.seq += 6;
+                        self.k(K_IEND);
                     }
                     0x81 => {
+                        self.k(K_81);
                         v.step = op;
                         if op != 0 {
                             v.flags |= P;
+                            self.at(K_81ON, hw);
                             hw.dmacon(0x8000 | bit);
                         } else {
+                            self.k(K_81OFF);
                             v.flags &= !P;
                         }
                         v.seq += 4;
+                        self.k(K_81END);
                     }
                     0x82 => {
+                        self.k(K_82);
                         if op != 0 {
                             v.flags |= H;
+                            self.at(K_82ON, hw);
                             hw.dmacon(0x8000 | bit);
                         } else {
+                            self.k(K_82OFF);
                             v.flags &= !H;
                         }
                         v.seq += 4;
+                        self.k(K_82END);
                     }
                     0x83 if !simple => {
+                        self.k(K_83);
                         v.flags |= R;
                         if v.flags & L == 0 {
+                            self.at(K_83OFF, hw);
                             hw.dmacon(bit);
                             d2 = true;
+                            self.at(K_83LOC, hw);
                             hw.loc(ch, v.base.wrapping_add(sext(v.a26) as u32));
+                            self.at(K_83LEN, hw);
                             hw.len(ch, (v.a28.wrapping_sub(v.a26)) >> 1);
+                        } else {
+                            self.k(K_83L);
                         }
                         v.cnt = op.wrapping_mul(m);
                         v.seq += 4;
+                        self.k(K_83END);
                         break;
                     }
                     0x84 if !simple => {
+                        self.k(K_84);
                         let n = self.r16(v.seq + 4);
                         v.flags |= A;
                         v.cnt = op.wrapping_mul(m);
@@ -381,10 +468,12 @@ impl Beathoven {
                         break;
                     }
                     0x85 if row.cmd85 => {
+                        self.k(K_85);
                         v.x32 = op;
                         v.seq += 4;
                     }
                     _ => {
+                        self.k(K_NOTE);
                         let n_off = row.n.wrapping_add(if row.cmd85 { v.x32 } else { 0 });
                         let idx = c.wrapping_sub(1).wrapping_add(v.trans).wrapping_add(if simple { 0 } else { n_off });
                         v.tgt = self.table_word(row.table as i64 + sext(idx << 1) as i64);
@@ -395,79 +484,125 @@ impl Beathoven {
                     }
                 }
             }
+        } else {
+            self.k(K_CNZ);
         }
         // E. the period
         let n_off = row.n.wrapping_add(if row.cmd85 { v.x32 } else { 0 });
         if v.flags & A != 0 {
+            self.k(K_EA);
             let n = self.r16(v.aptr + 2 * v.aidx as u32);
             let idx = n.wrapping_sub(1).wrapping_add(v.trans).wrapping_add(n_off);
             v.tgt = self.table_word(row.table as i64 + sext(idx << 1) as i64);
             v.aidx = v.aidx.wrapping_add(1);
             if v.aidx == v.acnt {
+                self.k(K_EAW);
                 v.aidx = 0;
             }
             v.cur = v.tgt;
         } else if v.flags & P != 0 {
+            self.k(K_EP);
             let lt = |a: u16, b: u16| if row.signed { (a as i16) < (b as i16) } else { a < b };
             if v.cur > v.tgt {
+                self.k(K_EPDN);
                 let d = v.cur.wrapping_sub(v.step);
                 let stop = if simple { d <= v.tgt } else { lt(d, v.tgt) };
+                if stop {
+                    self.k(K_EPDNS);
+                }
                 v.cur = if stop { v.tgt } else { d };
             } else if v.cur < v.tgt {
+                self.k(K_EPUP);
                 let d = v.cur.wrapping_add(v.step);
                 let go = if simple { d <= v.tgt } else { lt(d, v.tgt) };
+                if !go {
+                    self.k(K_EPUPS);
+                }
                 v.cur = if go { d } else { v.tgt };
+            } else {
+                self.k(K_EPEQ);
             }
         } else {
+            self.k(K_EN);
             v.cur = v.tgt;
         }
+        self.at(K_PER, hw);
         hw.per(ch, v.cur);
         // F. DMA on
         let on = if simple { v.cur & 0xFF != 0 || v.flags & (P | H) == 0 } else { d2 || v.flags & (P | H) == 0 };
+        if !simple {
+            self.k(if d2 { K_FD2 } else { K_FFL });
+        }
         if on {
             // the routine's wait before the DMA is switched on (measured: about 1900 colour clocks)
             if simple {
                 hw.wait(1500);
             } else {
-                // the original waits for the beam: ten line changes, then 64 colour clocks in
-                hw.wait_lines(10, 64);
+                self.beam_wait(B1, hw);
             }
+            self.at(K_ON, hw);
             hw.dmacon(0x8000 | bit);
+        } else {
+            self.k(K_NOON);
         }
         self.v[ch] = v;
     }
 
     /// D. After a note or an arpeggio: the sample start unless a portamento or hold is on.
-    fn retrigger(&self, v: &mut V, ch: usize, hw: &mut Hw) {
+    fn retrigger(&mut self, v: &mut V, ch: usize, hw: &mut Hw) {
         if v.flags & (P | H) == 0 {
+            self.at(K_RLOC, hw);
             hw.loc(ch, v.base);
+            self.at(K_RLEN, hw);
             hw.len(ch, v.len1);
+        } else {
+            self.k(K_RNO);
         }
     }
 
     // --------------------------------------------------------------- engine 100
 
-    fn off(&self, ch: usize, hw: &mut Hw) {
+    fn off(&mut self, ch: usize, hw: &mut Hw) {
+        self.at(K0_OFF, hw);
         hw.dmacon(1 << ch);
-        // the original clears the channel's data register in a delay loop (measured: 2300 colour clocks)
-        hw.wait(2300);
+        if self.timed {
+            // the original clears the channel's data register, then waits for the beam
+            self.beam_wait(B0, hw);
+        } else {
+            // the original clears the channel's data register in a delay loop (measured: 2300 colour clocks)
+            hw.wait(2300);
+        }
+        self.k(K0_OFFX);
     }
 
-    fn start100(&self, ch: usize, hw: &mut Hw) {
+    fn start100(&mut self, ch: usize, hw: &mut Hw) {
         let row = self.row();
         let rec = self.w[ch].inst;
+        self.at(K0_SLEN, hw);
         hw.len(ch, (self.r32(rec + 2) >> 1) as u16);
+        self.at(K0_SLOC, hw);
         hw.loc(ch, self.abs(self.r32(rec + 6)));
+        self.at(K0_SON, hw);
         hw.dmacon(0x8000 | 1 << ch);
         if row.post_reset {
-            hw.wait(2100);
+            if self.timed {
+                self.k(K0_PDELAY);
+            } else {
+                hw.wait(2100);
+            }
+            self.at(K0_PLEN, hw);
             hw.len(ch, 1);
+            self.at(K0_PLOC, hw);
             hw.loc(ch, self.silent());
+        } else {
+            self.k(K0_NOPR);
         }
     }
 
-    fn pv(&self, ch: usize, period: u16, hw: &mut Hw) {
+    fn pv(&mut self, ch: usize, period: u16, hw: &mut Hw) {
+        self.at(K0_PVOL, hw);
         hw.vol(ch, self.r16(self.w[ch].inst));
+        self.at(K0_PPER, hw);
         hw.per(ch, period);
     }
 
@@ -480,15 +615,21 @@ impl Beathoven {
     fn voice100(&mut self, ch: usize, hw: &mut Hw) {
         let row = self.row();
         let dur = |d: u16| if row.k5 { (d >> 2).wrapping_mul(5) } else { d };
+        self.vk = ch;
+        self.k(K0_V);
         self.w[ch].cnt = self.w[ch].cnt.wrapping_sub(1);
         if self.w[ch].cnt == 0 {
+            self.k(K0_CZ);
             self.w[ch].arp = 0;
             for _ in 0..GUARD {
+                self.k(K0_IT);
                 let seq = self.w[ch].seq;
                 if self.r16(seq) == 0 {
+                    self.k(K0_SEND);
                     let mut l = self.w[ch].list.wrapping_add(8);
                     let mut g = 0;
                     while self.r32(l) == 0 && g < 2 {
+                        self.k(K0_LWRAP);
                         l = self.w[ch].lp;
                         g += 1;
                     }
@@ -502,10 +643,12 @@ impl Beathoven {
                 let c = self.r16(seq);
                 match c {
                     0x80 => {
+                        self.k(K0_80);
                         self.w[ch].inst = self.r32(seq + 2);
                         self.w[ch].seq += 6;
                     }
                     0x81 => {
+                        self.k(K0_81);
                         let n = self.r16(seq + 4);
                         let d = dur(self.r16(seq + 2));
                         let w = &mut self.w[ch];
@@ -519,24 +662,31 @@ impl Beathoven {
                         break;
                     }
                     0x82 => {
+                        self.k(K0_82);
                         self.w[ch].cnt = dur(self.r16(seq + 2));
                         self.w[ch].seq += 4;
                         self.off(ch, hw);
+                        self.k(K0_82X);
                         break;
                     }
                     _ => {
+                        self.k(K0_NOTE);
                         self.off(ch, hw);
                         self.w[ch].cnt = dur(self.r16(seq + 2));
                         let per = self.period100(ch, c as i64);
                         self.start100(ch, hw);
                         self.pv(ch, per, hw);
                         self.w[ch].seq += 4;
+                        self.k(K0_NOTEX);
                         break;
                     }
                 }
             }
+        } else {
+            self.k(K0_CNZ);
         }
         if self.w[ch].arp != 0 {
+            self.k(K0_ARP);
             let w = &self.w[ch];
             let n = self.r16(w.aptr + 2 * w.aidx as u32);
             let per = self.period100(ch, n as i64);
@@ -545,7 +695,10 @@ impl Beathoven {
             w.aidx = w.aidx.wrapping_add(1);
             if w.aidx == w.acnt {
                 w.aidx = 0;
+                self.k(K0_ARPW);
             }
+        } else {
+            self.k(K0_NOARP);
         }
     }
 }
@@ -568,7 +721,7 @@ impl Replayer for Beathoven {
     }
 
     fn timer_delay(&self) -> u64 {
-        TIMER_DELAY
+        if self.row().eng == 1 { TIMER_DELAY - TICK_LEAD } else { TIMER_DELAY }
     }
 
     fn songend(&self) -> bool {
@@ -586,8 +739,11 @@ impl Replayer for Beathoven {
 
     fn tick(&mut self, hw: &mut Hw) {
         let row = self.row();
-        if row.eng == 1 {
-            hw.gaps(&GAPS);
+        self.timed = row.eng == 1;
+        if self.timed {
+            self.cy = 2 * (hw.bus.clock + TICK_LEAD) as i64;
+            self.vk = 0;
+            self.k(K_TICK);
         }
         if !self.started {
             self.start(hw);
@@ -599,7 +755,10 @@ impl Replayer for Beathoven {
         if row.eng == 0 {
             if row.prologue {
                 for ch in 0..4 {
+                    self.vk = ch;
+                    self.at(K0_PRLEN, hw);
                     hw.len(ch, 1);
+                    self.at(K0_PRLOC, hw);
                     hw.loc(ch, self.silent());
                 }
             }
@@ -641,58 +800,253 @@ fn relocations(d: &[u8], n: usize) -> Vec<u32> {
 /// (measured in the reference runs: its InitSound sets the voices up, the timer runs from its end).
 const INIT_FIRST_WRITE: u64 = 1444;
 const INIT_END: u64 = 8092;
+/// Engine 109: colour clocks into a raster line at which the host starts the player in the
+/// reference runs (the original's beam waits see the line it is on).
+const HOST_PHASE: u64 = 222;
 /// Colour clocks from the song's start to the host's timer start, beyond the first period.
 const TIMER_DELAY: u64 = 195;
+/// Engines 100 and 109: the host's timer runs this many colour clocks ahead of the original's, whose
+/// tick starts `K_TICK` cycles after it (the paths before the first write can take less than that).
+const TICK_LEAD: u64 = 50;
 
-/// Where the writes of a pass over the voices fall (engines 109 and NEW), measured in the reference
-/// runs, by the previous write: the period to the DMA enable is not here, the routine waits for the
-/// beam there (see `voice`).
-static GAPS: WriteGaps = WriteGaps::new(
-    &[
-        (0, 4, 8), // LOC0 -> LEN0 x3962
-        (0, 16, 116), // LOC0 -> DMA_OFF x148
-        (1, 5, 8), // LOC1 -> LEN1 x3789
-        (1, 16, 116), // LOC1 -> DMA_OFF x36
-        (2, 6, 8), // LOC2 -> LEN2 x3980
-        (2, 16, 116), // LOC2 -> DMA_OFF x177
-        (3, 7, 8), // LOC3 -> LEN3 x3233
-        (3, 16, 116), // LOC3 -> DMA_OFF x21
-        (4, 0, 22), // LEN0 -> LOC0 x148
-        (4, 8, 69), // LEN0 -> PER0 x3617
-        (4, 16, 87), // LEN0 -> DMA_OFF x345
-        (5, 1, 22), // LEN1 -> LOC1 x36
-        (5, 9, 69), // LEN1 -> PER1 x3626
-        (5, 16, 86), // LEN1 -> DMA_OFF x163
-        (6, 2, 22), // LEN2 -> LOC2 x177
-        (6, 10, 69), // LEN2 -> PER2 x3626
-        (6, 16, 86), // LEN2 -> DMA_OFF x354
-        (7, 3, 22), // LEN3 -> LOC3 x21
-        (7, 11, 69), // LEN3 -> PER3 x3129
-        (7, 16, 86), // LEN3 -> DMA_OFF x104
-        (8, 1, 79), // PER0 -> LOC1 x178
-        (12, 4, 178), // VOL0 -> LEN0 x148
-        (13, 5, 194), // VOL1 -> LEN1 x36
-        (14, 6, 210), // VOL2 -> LEN2 x177
-        (15, 7, 209), // VOL3 -> LEN3 x21
-        (16, 0, 169), // DMA_OFF -> LOC0 x336
-        (16, 1, 171), // DMA_OFF -> LOC1 x163
-        (16, 2, 169), // DMA_OFF -> LOC2 x354
-        (16, 3, 169), // DMA_OFF -> LOC3 x104
-        (16, 8, 204), // DMA_OFF -> PER0 x9
-        (16, 12, 170), // DMA_OFF -> VOL0 x148
-        (16, 13, 182), // DMA_OFF -> VOL1 x36
-        (16, 14, 193), // DMA_OFF -> VOL2 x177
-        (16, 15, 205), // DMA_OFF -> VOL3 x21
-        (16, 20, 68), // DMA_OFF -> DMA_ON x1
-        (20, 1, 60), // DMA_ON -> LOC1 x3448
-        (20, 2, 60), // DMA_ON -> LOC2 x3626
-        (20, 3, 68), // DMA_ON -> LOC3 x3129
-        (20, 16, 83), // DMA_ON -> DMA_OFF x1
-    ],
-    &[(0, 169), (1, 60), (2, 60), (3, 68), (4, 8), (5, 8), (6, 8), (7, 8), (8, 69), (9, 69), (10, 69), (11, 69), (12, 170), (13, 182), (14, 193), (15, 205), (16, 87)],
-    &[],
-);
+// The original's code paths (engine 109), for the writes' times: cycles per voice.
+const K_TICK: usize = 0;
+const K_V: usize = 1;
+const K_ALOC: usize = 2;
+const K_ALEN: usize = 3;
+const K_A2LOC: usize = 4;
+const K_A2LEN: usize = 5;
+const K_CZ: usize = 6;
+const K_CNZ: usize = 7;
+const K_IT: usize = 8;
+const K_SEND: usize = 9;
+const K_LWRAP: usize = 10;
+const K_OFF: usize = 11;
+const K_IL: usize = 12;
+const K_INL: usize = 13;
+const K_IVOL: usize = 14;
+const K_ILENL: usize = 15;
+const K_ILENNL: usize = 16;
+const K_ILEN: usize = 17;
+const K_ILOC: usize = 18;
+const K_IEND: usize = 19;
+const K_81: usize = 20;
+const K_81ON: usize = 21;
+const K_81OFF: usize = 22;
+const K_81END: usize = 23;
+const K_82: usize = 24;
+const K_82ON: usize = 25;
+const K_82OFF: usize = 26;
+const K_82END: usize = 27;
+const K_83: usize = 28;
+const K_83OFF: usize = 29;
+const K_83LOC: usize = 30;
+const K_83LEN: usize = 31;
+const K_83L: usize = 32;
+const K_83END: usize = 33;
+const K_84: usize = 34;
+const K_85: usize = 35;
+const K_NOTE: usize = 36;
+const K_RLOC: usize = 37;
+const K_RLEN: usize = 38;
+const K_RNO: usize = 39;
+const K_EA: usize = 40;
+const K_EAW: usize = 41;
+const K_EP: usize = 42;
+const K_EPDN: usize = 43;
+const K_EPDNS: usize = 44;
+const K_EPUP: usize = 45;
+const K_EPUPS: usize = 46;
+const K_EPEQ: usize = 47;
+const K_EN: usize = 48;
+const K_PER: usize = 49;
+const K_FD2: usize = 50;
+const K_FFL: usize = 51;
+const K_ON: usize = 52;
+const K_NOON: usize = 53;
+const K_BREAD: usize = 54;
+const K_BLINES: usize = 55;
+const K_BPOS: usize = 56;
+const K_BFIRST: usize = 57;
+const K_BPOLL: usize = 58;
+const K_ALENX: usize = 59;
+const K_A2LENX: usize = 60;
+const K_BDELAY: usize = 61;
+const B1: [usize; 6] = [K_BREAD, K_BLINES, K_BPOS, K_BFIRST, K_BPOLL, K_BDELAY];
+// engine 100
+const K0_V: usize = 70;
+const K0_CZ: usize = 71;
+const K0_CNZ: usize = 72;
+const K0_IT: usize = 73;
+const K0_SEND: usize = 74;
+const K0_LWRAP: usize = 75;
+const K0_80: usize = 76;
+const K0_81: usize = 77;
+const K0_82: usize = 78;
+const K0_82X: usize = 79;
+const K0_NOTE: usize = 80;
+const K0_NOTEX: usize = 81;
+const K0_OFF: usize = 82;
+const K0_OFFX: usize = 83;
+const K0_SLEN: usize = 84;
+const K0_SLOC: usize = 85;
+const K0_SON: usize = 86;
+const K0_PDELAY: usize = 87;
+const K0_PLEN: usize = 88;
+const K0_PLOC: usize = 89;
+const K0_NOPR: usize = 90;
+const K0_PVOL: usize = 91;
+const K0_PPER: usize = 92;
+const K0_ARP: usize = 93;
+const K0_ARPW: usize = 94;
+const K0_NOARP: usize = 95;
+const K0_PRLEN: usize = 96;
+const K0_PRLOC: usize = 97;
+const K0_BREAD: usize = 98;
+const K0_BLINES: usize = 99;
+const K0_BPOS: usize = 100;
+const K0_BFIRST: usize = 101;
+const K0_BPOLL: usize = 102;
+const K0_BDELAY: usize = 103;
+const B0: [usize; 6] = [K0_BREAD, K0_BLINES, K0_BPOS, K0_BFIRST, K0_BPOLL, K0_BDELAY];
+const NK: usize = 104;
 
+/// The cycles of the original's code paths (engine 109), by path and voice: the build Ringside and
+/// funny_funk share; the other builds differ in `BUILDS`. Engine 100 is not timed by paths (its
+/// rows are 0).
+static BASE: [[i16; 4]; NK] = {
+    let mut c = [[0; 4]; NK];
+    c[K_TICK] = [44, 44, 44, 44];
+    c[K_V] = [44, 88, 88, 88];
+    c[K_ALOC] = [35, 57, 57, 57];
+    c[K_ALEN] = [64, 64, 64, 64];
+    c[K_A2LOC] = [9, 31, 31, 31];
+    c[K_A2LEN] = [16, 16, 16, 16];
+    c[K_CZ] = [-3, -3, -3, -3];
+    c[K_CNZ] = [23, 23, 23, 23];
+    c[K_IT] = [116, 116, 116, 116];
+    c[K_SEND] = [60, 60, 60, 60];
+    c[K_LWRAP] = [248, 281, 310, 329];
+    c[K_OFF] = [56, 56, 56, 56];
+    c[K_IL] = [170, 181, 122, 130];
+    c[K_INL] = [127, 134, 142, 150];
+    c[K_IVOL] = [170, 182, 264, 279];
+    c[K_ILENL] = [178, 194, 136, 136];
+    c[K_ILENNL] = [125, 136, 146, 146];
+    c[K_ILEN] = [179, 194, 283, 281];
+    c[K_ILOC] = [44, 44, 44, 44];
+    c[K_IEND] = [60, 60, 60, 60];
+    c[K_82] = [75, 75, 75, 75];
+    c[K_82ON] = [61, 61, 61, 61];
+    c[K_82OFF] = [15, 15, 15, 15];
+    c[K_82END] = [-3, -3, -3, -3];
+    c[K_84] = [150, 150, 150, 150];
+    c[K_85] = [78, 78, 78, 78];
+    c[K_NOTE] = [94, 94, 94, 94];
+    c[K_RLOC] = [244, 244, 244, 244];
+    c[K_RLEN] = [20, 20, 20, 20];
+    c[K_RNO] = [151, 151, 151, 151];
+    c[K_EA] = [141, 141, 141, 141];
+    c[K_EAW] = [4, 4, 4, 4];
+    c[K_EN] = [-15, -15, -15, -15];
+    c[K_PER] = [125, 125, 125, 125];
+    c[K_FD2] = [-29, -29, -29, -29];
+    c[K_NOON] = [42, 42, 42, 42];
+    c[K_BREAD] = [132, 132, 132, 132];
+    c[K_BLINES] = [9, 9, 9, 9];
+    c[K_BPOS] = [115, 115, 115, 115];
+    c[K_BFIRST] = [21, 21, 21, 21];
+    c[K_BPOLL] = [25, 25, 25, 25];
+    c[K_ALENX] = [14, 14, 14, 14];
+    c[K_A2LENX] = [4, 4, 4, 4];
+    c
+};
+
+/// The builds of engine 109 measured in the reference runs: the code's hash (`code_build`), the
+/// colour clocks from the host's start of the player to the song's start (the build's start-up
+/// path: the same whatever samples, sequences, header fields, subsong count, hunk length or
+/// relocation count the file has), and the paths that take other cycles than the base table's
+/// (path, voice, cycles).
+static BUILDS: &[Build] = &[
+    // Cosmic_Bouncer
+    Build { code: 0x2288edd6, start: 12094, over: &[(K_CZ as u8, 0, -15), (K_CZ as u8, 1, -15), (K_CZ as u8, 2, -15), (K_CZ as u8, 3, -15), (K_CNZ as u8, 0, 27), (K_CNZ as u8, 1, 27), (K_CNZ as u8, 2, 27), (K_CNZ as u8, 3, 27), (K_IT as u8, 0, 111), (K_IT as u8, 1, 111), (K_IT as u8, 2, 111), (K_IT as u8, 3, 111), (K_SEND as u8, 0, 57), (K_SEND as u8, 1, 57), (K_SEND as u8, 2, 57), (K_SEND as u8, 3, 57), (K_OFF as u8, 0, 53), (K_OFF as u8, 1, 53), (K_OFF as u8, 2, 53), (K_OFF as u8, 3, 53), (K_IL as u8, 0, 149), (K_INL as u8, 0, 169), (K_IVOL as u8, 0, 191), (K_ILENL as u8, 0, 157), (K_ILENNL as u8, 0, 167), (K_ILEN as u8, 0, 200), (K_IEND as u8, 0, 68), (K_IEND as u8, 1, 68), (K_IEND as u8, 2, 68), (K_IEND as u8, 3, 68), (K_NOTE as u8, 0, 100), (K_NOTE as u8, 1, 100), (K_NOTE as u8, 2, 100), (K_NOTE as u8, 3, 100), (K_RLOC as u8, 0, 250), (K_RLOC as u8, 1, 250), (K_RLOC as u8, 2, 250), (K_RLOC as u8, 3, 250), (K_ALENX as u8, 0, 10), (K_ALENX as u8, 1, 10), (K_ALENX as u8, 2, 10), (K_ALENX as u8, 3, 10), (K_A2LENX as u8, 0, 0), (K_A2LENX as u8, 1, 0), (K_A2LENX as u8, 2, 0), (K_A2LENX as u8, 3, 0)] },
+    // Ganymed
+    Build { code: 0x46475265, start: 9178, over: &[(K_INL as u8, 1, 167), (K_IVOL as u8, 1, 216), (K_ILENNL as u8, 1, 170), (K_ILEN as u8, 1, 228)] },
+    // Great_Giana_Sisters ingame
+    Build { code: 0x5be88c5d, start: 8751, over: &[(K_TICK as u8, 0, 5), (K_V as u8, 0, 4), (K_V as u8, 1, 89), (K_V as u8, 2, 89), (K_V as u8, 3, 107), (K_ALOC as u8, 0, 13), (K_ALOC as u8, 1, 56), (K_ALOC as u8, 2, 56), (K_ALOC as u8, 3, 65), (K_A2LOC as u8, 0, -9), (K_A2LOC as u8, 1, 34), (K_A2LOC as u8, 2, 34), (K_A2LOC as u8, 3, 43), (K_CZ as u8, 0, -6), (K_CZ as u8, 1, -6), (K_CZ as u8, 2, -6), (K_CZ as u8, 3, -6), (K_CNZ as u8, 0, 24), (K_CNZ as u8, 1, 24), (K_CNZ as u8, 2, 24), (K_CNZ as u8, 3, 24), (K_IT as u8, 0, 120), (K_IT as u8, 1, 120), (K_IT as u8, 2, 120), (K_IT as u8, 3, 120), (K_SEND as u8, 0, 56), (K_SEND as u8, 1, 56), (K_SEND as u8, 2, 56), (K_SEND as u8, 3, 56), (K_OFF as u8, 0, 65), (K_OFF as u8, 1, 65), (K_OFF as u8, 2, 65), (K_OFF as u8, 3, 65), (K_IEND as u8, 0, 47), (K_IEND as u8, 1, 47), (K_IEND as u8, 2, 47), (K_IEND as u8, 3, 47), (K_85 as u8, 0, 101), (K_85 as u8, 1, 101), (K_85 as u8, 2, 101), (K_85 as u8, 3, 101), (K_NOTE as u8, 0, 108), (K_NOTE as u8, 1, 108), (K_NOTE as u8, 2, 108), (K_NOTE as u8, 3, 108), (K_RLOC as u8, 0, 259), (K_RLOC as u8, 1, 259), (K_RLOC as u8, 2, 259), (K_RLOC as u8, 3, 259), (K_ALENX as u8, 0, 13), (K_ALENX as u8, 1, 13), (K_ALENX as u8, 2, 13), (K_ALENX as u8, 3, 13), (K_A2LENX as u8, 0, 3), (K_A2LENX as u8, 1, 3), (K_A2LENX as u8, 2, 3), (K_A2LENX as u8, 3, 3)] },
+    // Katakis
+    Build { code: 0xbe94162e, start: 9550, over: &[(K_TICK as u8, 0, -7), (K_V as u8, 0, -7), (K_V as u8, 3, 83), (K_ALOC as u8, 0, 9), (K_ALOC as u8, 3, 54), (K_A2LOC as u8, 0, -17), (K_A2LOC as u8, 3, 28), (K_IL as u8, 0, 149), (K_IL as u8, 1, 159), (K_INL as u8, 0, 169), (K_INL as u8, 1, 179), (K_IVOL as u8, 0, 191), (K_IVOL as u8, 1, 204), (K_ILENL as u8, 0, 157), (K_ILENL as u8, 1, 171), (K_ILENNL as u8, 0, 167), (K_ILENNL as u8, 1, 181), (K_ILEN as u8, 0, 200), (K_ILEN as u8, 1, 217)] },
+    // Ringside
+    Build { code: 0x8e8080ce, start: 6923, over: &[] },
+    // Rock_Challenge
+    Build { code: 0x8b9abb0d, start: 17159, over: &[(K_TICK as u8, 0, 41), (K_V as u8, 0, 41), (K_V as u8, 1, 83), (K_V as u8, 2, 83), (K_V as u8, 3, 83), (K_ALOC as u8, 0, 33), (K_ALOC as u8, 1, 54), (K_ALOC as u8, 2, 54), (K_ALOC as u8, 3, 54), (K_A2LOC as u8, 0, 7), (K_A2LOC as u8, 1, 28), (K_A2LOC as u8, 2, 28), (K_A2LOC as u8, 3, 28), (K_CZ as u8, 0, -15), (K_CZ as u8, 1, -15), (K_CZ as u8, 2, -15), (K_CZ as u8, 3, -15), (K_CNZ as u8, 0, 27), (K_CNZ as u8, 1, 27), (K_CNZ as u8, 2, 27), (K_CNZ as u8, 3, 27), (K_IT as u8, 0, 111), (K_IT as u8, 1, 111), (K_IT as u8, 2, 111), (K_IT as u8, 3, 111), (K_SEND as u8, 0, 57), (K_SEND as u8, 1, 57), (K_SEND as u8, 2, 57), (K_SEND as u8, 3, 57), (K_OFF as u8, 0, 53), (K_OFF as u8, 1, 53), (K_OFF as u8, 2, 53), (K_OFF as u8, 3, 53), (K_IL as u8, 0, 168), (K_IL as u8, 1, 179), (K_IL as u8, 2, 120), (K_IL as u8, 3, 128), (K_IVOL as u8, 0, 168), (K_IVOL as u8, 1, 180), (K_IVOL as u8, 2, 262), (K_IVOL as u8, 3, 277), (K_ILOC as u8, 0, 40), (K_ILOC as u8, 1, 40), (K_ILOC as u8, 2, 40), (K_ILOC as u8, 3, 40), (K_IEND as u8, 0, 68), (K_IEND as u8, 1, 68), (K_IEND as u8, 2, 68), (K_IEND as u8, 3, 68), (K_NOTE as u8, 0, 96), (K_NOTE as u8, 1, 96), (K_NOTE as u8, 2, 96), (K_NOTE as u8, 3, 96), (K_RLOC as u8, 0, 246), (K_RLOC as u8, 1, 246), (K_RLOC as u8, 2, 246), (K_RLOC as u8, 3, 246), (K_EN as u8, 0, -17), (K_EN as u8, 1, -17), (K_EN as u8, 2, -17), (K_EN as u8, 3, -17), (K_PER as u8, 0, 123), (K_PER as u8, 1, 123), (K_PER as u8, 2, 123), (K_PER as u8, 3, 123), (K_BPOLL as u8, 0, 0), (K_BPOLL as u8, 1, 0), (K_BPOLL as u8, 2, 0), (K_BPOLL as u8, 3, 0), (K_ALENX as u8, 0, 10), (K_ALENX as u8, 1, 10), (K_ALENX as u8, 2, 10), (K_ALENX as u8, 3, 10), (K_A2LENX as u8, 0, 0), (K_A2LENX as u8, 1, 0), (K_A2LENX as u8, 2, 0), (K_A2LENX as u8, 3, 0), (K_BDELAY as u8, 0, 2016), (K_BDELAY as u8, 1, 2016), (K_BDELAY as u8, 2, 2016), (K_BDELAY as u8, 3, 2016)] },
+    // Zoom
+    Build { code: 0x74bab24f, start: 9326, over: &[(K_TICK as u8, 0, 51), (K_V as u8, 0, 51), (K_V as u8, 1, 85), (K_V as u8, 2, 85), (K_V as u8, 3, 85), (K_ALOC as u8, 0, 42), (K_ALOC as u8, 1, 56), (K_ALOC as u8, 2, 56), (K_ALOC as u8, 3, 56), (K_A2LOC as u8, 1, 30), (K_A2LOC as u8, 2, 30), (K_A2LOC as u8, 3, 30), (K_CZ as u8, 0, -4), (K_CZ as u8, 1, -4), (K_CZ as u8, 2, -4), (K_CZ as u8, 3, -4), (K_IT as u8, 0, 112), (K_IT as u8, 1, 112), (K_IT as u8, 2, 112), (K_IT as u8, 3, 112), (K_SEND as u8, 0, 56), (K_SEND as u8, 1, 56), (K_SEND as u8, 2, 56), (K_SEND as u8, 3, 56), (K_OFF as u8, 0, 57), (K_OFF as u8, 1, 57), (K_OFF as u8, 2, 57), (K_OFF as u8, 3, 57), (K_IL as u8, 1, 159), (K_INL as u8, 0, 158), (K_INL as u8, 1, 179), (K_IVOL as u8, 0, 202), (K_IVOL as u8, 1, 204), (K_ILENL as u8, 1, 171), (K_ILENNL as u8, 0, 156), (K_ILENNL as u8, 1, 181), (K_ILEN as u8, 0, 211), (K_ILEN as u8, 1, 217), (K_IEND as u8, 0, 63), (K_IEND as u8, 1, 63), (K_IEND as u8, 2, 63), (K_IEND as u8, 3, 63), (K_84 as u8, 0, 161), (K_84 as u8, 1, 161), (K_84 as u8, 2, 161), (K_84 as u8, 3, 161), (K_NOTE as u8, 0, 109), (K_NOTE as u8, 1, 109), (K_NOTE as u8, 2, 109), (K_NOTE as u8, 3, 109), (K_RLOC as u8, 0, 233), (K_RLOC as u8, 1, 233), (K_RLOC as u8, 2, 233), (K_RLOC as u8, 3, 233), (K_RNO as u8, 0, 189), (K_RNO as u8, 1, 189), (K_RNO as u8, 2, 189), (K_RNO as u8, 3, 189)] },
+    // funny_funk
+    Build { code: 0x3763398c, start: 9876, over: &[] },
+    // smash_intro
+    Build { code: 0xf7e3367c, start: 11854, over: &[(K_INL as u8, 1, 167), (K_IVOL as u8, 1, 216), (K_ILENNL as u8, 1, 170), (K_ILEN as u8, 1, 228), (K_84 as u8, 0, 149), (K_84 as u8, 1, 149), (K_84 as u8, 2, 149), (K_84 as u8, 3, 149), (K_NOTE as u8, 0, 93), (K_NOTE as u8, 1, 93), (K_NOTE as u8, 2, 93), (K_NOTE as u8, 3, 93), (K_RLOC as u8, 0, 241), (K_RLOC as u8, 1, 241), (K_RLOC as u8, 2, 241), (K_RLOC as u8, 3, 241)] },
+];
+
+struct Build {
+    code: u32,
+    start: u32,
+    over: &'static [(u8, u8, i16)],
+}
+
+/// The build of the replay code in the hunk `img`: a hash (FNV-1a) of the 0x400 bytes from the
+/// header's entry at 0x14 on (the replay routines, shared by files of other games), with the
+/// relocated longs zeroed, so it does not depend on where the data lies.
+fn code_build(img: &[u8], relocs: &[u32]) -> u32 {
+    let s = be32(img, 0x14) as usize;
+    let e = (s + 0x400).min(img.len());
+    let mut h: u32 = 0x811C_9DC5;
+    for (i, &b) in img.get(s..e).unwrap_or(&[]).iter().enumerate() {
+        let o = (s + i) as u32;
+        let rel = (0..4).any(|k| o >= k && relocs.binary_search(&(o - k)).is_ok());
+        h = (h ^ if rel { 0 } else { b as u32 }).wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// The cycles of the code paths of the build (the base table with the build's own cycles where
+/// the reference runs showed others) and its song start, if the build was measured.
+fn build_costs(build: Option<&Build>) -> [[i32; 4]; NK] {
+    let mut c = [[0i32; 4]; NK];
+    for (k, row) in BASE.iter().enumerate() {
+        for v in 0..4 {
+            c[k][v] = row[v] as i32;
+        }
+    }
+    if let Some(b) = build {
+        for &(k, v, n) in b.over {
+            c[k as usize][v as usize] = n as i32;
+        }
+    }
+    c
+}
+
+/// The IFF 8SVX headers in the hunk: from each FORM to the start of its BODY chunk's data.
+fn iff_headers(img: &[u8]) -> Vec<(usize, usize)> {
+    let mut v = Vec::new();
+    let mut s = 0;
+    while s + 12 <= img.len() {
+        if &img[s..s + 4] != b"FORM" || &img[s + 8..s + 12] != b"8SVX" {
+            s += 2;
+            continue;
+        }
+        let mut p = s + 12;
+        while p + 8 <= img.len() {
+            if &img[p..p + 4] == b"BODY" {
+                v.push((s, p + 8));
+                break;
+            }
+            p += 8 + ((be32(img, p + 4) as usize + 1) & !1);
+        }
+        s += 12;
+    }
+    v
+}
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect(d) {
@@ -715,15 +1069,34 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         started: false,
         v: Default::default(),
         w: Default::default(),
+        timed: false,
+        cy: 0,
+        vk: 0,
+        costs: [[0; 4]; NK],
     };
+    let build = BUILDS.iter().find(|x| x.code == code_build(&b.pristine, &b.relocs));
+    b.costs = build_costs(build);
     if b.row().eng != 0 {
         // the start-up routine runs in the original's InitSound, before its timer: the first
         // tick is already the first pass over the voices
-        let t0 = m.bus.clock;
+        let mut t0 = m.bus.clock;
+        let mut end = INIT_END;
+        if b.row().eng == 1 {
+            // a sample kept as an IFF 8SVX file plays its header as silence: the chunks before
+            // the BODY's data read as zero (Katakis; measured with copies whose header bytes and
+            // first sample bytes were cleared one length at a time)
+            for (s, e) in iff_headers(&b.pristine) {
+                m.bus.write_bytes(b.mem + s as u32, &vec![0; e - s]);
+            }
+            // the original polls the beam: its start lies on the reference's line phase
+            t0 += (HOST_PHASE + crate::paula::LINE - t0 % crate::paula::LINE) % crate::paula::LINE;
+            m.bus.clock = t0;
+            end = build.map_or(INIT_END, |x| x.start as u64);
+        }
         let mut hw = Hw { bus: &mut m.bus };
         hw.wait(INIT_FIRST_WRITE);
         b.start(&mut hw);
-        m.bus.clock = m.bus.clock.max(t0 + INIT_END);
+        m.bus.clock = m.bus.clock.max(t0 + end);
     }
     Some(Box::new(b))
 }
@@ -923,7 +1296,7 @@ mod tests {
             d.extend_from_slice(&v.to_be_bytes());
         }
         assert_eq!(relocations(&d, n), vec![0x700]);
-        let b = Beathoven { pristine: Vec::new(), img: d[32..end].to_vec(), mem: 0x2_0000 + 32, relocs: vec![0x700], rows: rows_of(&d), title: String::new(), h14: 0, sub: 0, started: true, v: Default::default(), w: Default::default() };
+        let b = Beathoven { pristine: Vec::new(), img: d[32..end].to_vec(), mem: 0x2_0000 + 32, relocs: vec![0x700], rows: rows_of(&d), title: String::new(), h14: 0, sub: 0, started: true, v: Default::default(), w: Default::default(), timed: false, cy: 0, vk: 0, costs: [[0; 4]; NK] };
         assert_eq!(b.table_word(0x700), 2);
         assert_eq!(b.table_word(-4), 0);
         assert_eq!(b.table_word(0x5fe), 500);

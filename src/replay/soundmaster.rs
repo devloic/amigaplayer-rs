@@ -226,16 +226,477 @@ struct Sm {
     /// The subsong playing and the number of them.
     sub: u16,
     nsub: u16,
+    /// Builds B and C: the tick's start, the original's cycles since then, the voice of the paths
+    /// (4: none) and the last write's path (`usize::MAX`: none), for the writes' times.
+    t0: u64,
+    cy: i64,
+    vk: usize,
+    lastw: usize,
 }
 
-// Colour clocks between the original's writes, so the DMA off and on writes of a
-// note start are as far apart as in the reference.
+// Builds B and C: every Paula write at the original's colour clock, the tick's start plus half the
+// 68000 cycles of the code paths taken before it (fitted to the reference's write times). The
+// paths: W.. a write (the tables' after-write rows: from the write to the next path), L.. the loop
+// registers, R.. a row read, N.. a note start, Q.. its period, A.. the song's advance, LS.. a step
+// load, ARP the arpeggio, V.. the vibrato, PST the portamento, SW the sample sweep, E.. the envelope,
+// MAST the master volume.
+const K_WPEND: usize = 0;
+const K_ROW: usize = 1;
+const K_FETCH: usize = 2;
+const K_WDMAOFF: usize = 3;
+const K_VOICE: usize = 4;
+const K_NOTE_ON: usize = 5;
+const K_WDMAON: usize = 6;
+const K_LSIL: usize = 7;
+const K_LSIL2: usize = 8;
+const K_LLOOP: usize = 9;
+const K_LLOOP2: usize = 10;
+const K_LSILEND: usize = 11;
+const K_LLOOPEND: usize = 12;
+const K_RNOTE: usize = 13;
+const K_RCMD: usize = 14;
+const K_NOTE0: usize = 15;
+const K_NVOLC: usize = 16;
+const K_NINS: usize = 17;
+const K_NINSKEEP: usize = 18;
+const K_NARPS: usize = 19;
+const K_WNLEN: usize = 20;
+const K_WNLOC: usize = 21;
+const K_WNLLEN: usize = 22;
+const K_WNLLOC: usize = 23;
+const K_NNOLOOP: usize = 24;
+const K_NPEAKP: usize = 25;
+const K_NVCNT: usize = 26;
+const K_NPEAK: usize = 27;
+const K_NPORT: usize = 28;
+const K_WNPER: usize = 29;
+const K_NCEN: usize = 30;
+const K_NCENODD: usize = 31;
+const K_NEND: usize = 32;
+const K_QRAW: usize = 33;
+const K_QTRANS: usize = 34;
+const K_ARP: usize = 35;
+const K_ARPLOOP: usize = 36;
+const K_ARPS80: usize = 37;
+const K_ARPNEW: usize = 38;
+const K_ARPPER: usize = 39;
+const K_WAPER: usize = 40;
+const K_VIB: usize = 41;
+const K_VDLY: usize = 42;
+const K_VDLY0: usize = 43;
+const K_VVOL: usize = 44;
+const K_VDOWN: usize = 45;
+const K_VINC: usize = 46;
+const K_VLEV0: usize = 47;
+const K_VFLIP: usize = 48;
+const K_VFLIPD: usize = 49;
+const K_WFPER: usize = 50;
+const K_PST: usize = 51;
+const K_WPST: usize = 52;
+const K_WPSTEND: usize = 53;
+const K_SW0: usize = 54;
+const K_SW1: usize = 55;
+const K_SW: usize = 56;
+const K_SWSTEP: usize = 57;
+const K_SWFLIP: usize = 58;
+const K_ERELDN: usize = 59;
+const K_ERELFL: usize = 60;
+const K_EATT0: usize = 61;
+const K_EATT: usize = 62;
+const K_EATTPK: usize = 63;
+const K_EHOLD: usize = 64;
+const K_MAST: usize = 65;
+const K_WVOL: usize = 66;
+const K_AROW: usize = 67;
+const K_APAT: usize = 68;
+const K_ASTEP: usize = 69;
+const K_LSFADE: usize = 70;
+const K_LSF40: usize = 71;
+const K_LSF20: usize = 72;
+const K_ERELNEG: usize = 73;
+const K_NPDN: usize = 74;
+const K_NINSKN: usize = 75;
+const K_PSTENDUP: usize = 76;
+const NK: usize = 77;
+/// Build B: the 68000 cycles of each path, per voice (the fifth: outside the voices).
+const COST_B: [[i16; 5]; NK] = [
+    [0, 0, 0, 0, 0], // WPEND
+    [186, 186, 186, 186, 186], // ROW
+    [226, 226, 226, 226, 226], // FETCH
+    [56, 56, 56, 56, 56], // WDMAOFF
+    [183, 0, 0, 0, 0], // VOICE
+    [108, 108, 108, 108, 108], // NOTE_ON
+    [101, 101, 101, 101, 101], // WDMAON
+    [77, 77, 77, 77, 77], // LSIL
+    [16, 16, 16, 16, 16], // LSIL2
+    [73, 73, 73, 73, 73], // LLOOP
+    [28, 28, 28, 28, 28], // LLOOP2
+    [25, 25, 25, 25, 25], // LSILEND
+    [15, 15, 15, 15, 15], // LLOOPEND
+    [37, 37, 37, 37, 37], // RNOTE
+    [9, 9, 9, 9, 9], // RCMD
+    [34, 34, 34, 34, 34], // NOTE0
+    [50, 50, 50, 50, 50], // NVOLC
+    [222, 222, 222, 222, 222], // NINS
+    [8, 8, 8, 8, 8], // NINSKEEP
+    [32, 32, 32, 32, 32], // NARPS
+    [0, 0, 0, 0, 0], // WNLEN
+    [0, 31, 62, 70, 0], // WNLOC
+    [172, 0, 290, 0, 0], // WNLLEN
+    [0, 0, 0, 0, 0], // WNLLOC
+    [0, 0, 0, 0, 0], // NNOLOOP
+    [6, 6, 6, 6, 6], // NPEAKP
+    [16, 16, 16, 16, 16], // NVCNT
+    [742, 742, 742, 742, 742], // NPEAK
+    [137, 137, 137, 137, 137], // NPORT
+    [0, 31, 62, 70, 0], // WNPER
+    [59, 59, 59, 59, 59], // NCEN
+    [40, 40, 40, 40, 40], // NCENODD
+    [206, 206, 206, 206, 206], // NEND
+    [78, 78, 78, 78, 78], // QRAW
+    [106, 106, 106, 106, 106], // QTRANS
+    [327, 327, 327, 327, 327], // ARP
+    [12, 12, 12, 12, 12], // ARPLOOP
+    [51, 51, 51, 51, 51], // ARPS80
+    [0, 0, 0, 0, 0], // ARPNEW
+    [84, 84, 84, 84, 84], // ARPPER
+    [0, 0, 0, 0, 0], // WAPER
+    [46, 46, 46, 46, 46], // VIB
+    [0, 0, 0, 0, 0], // VDLY
+    [69, 69, 69, 69, 69], // VDLY0
+    [118, 118, 118, 118, 118], // VVOL
+    [45, 45, 45, 45, 45], // VDOWN
+    [28, 28, 28, 28, 28], // VINC
+    [106, 106, 106, 106, 106], // VLEV0
+    [36, 36, 36, 36, 36], // VFLIP
+    [10, 10, 10, 10, 10], // VFLIPD
+    [0, 0, 0, 0, 0], // WFPER
+    [100, 100, 100, 100, 100], // PST
+    [0, 0, 0, 0, 0], // WPST
+    [76, 76, 76, 76, 76], // WPSTEND
+    [21, 21, 21, 21, 21], // SW0
+    [42, 42, 42, 42, 42], // SW1
+    [129, 129, 129, 129, 129], // SW
+    [44, 44, 44, 44, 44], // SWSTEP
+    [36, 36, 36, 36, 36], // SWFLIP
+    [56, 56, 56, 56, 56], // ERELDN
+    [4, 4, 4, 4, 4], // ERELFL
+    [24, 24, 24, 24, 24], // EATT0
+    [38, 38, 38, 38, 38], // EATT
+    [20, 20, 20, 20, 20], // EATTPK
+    [1, 1, 1, 1, 1], // EHOLD
+    [93, 93, 93, 93, 93], // MAST
+    [462, 516, 570, 568, 0], // WVOL
+    [29, 29, 29, 29, 29], // AROW
+    [39, 39, 39, 39, 39], // APAT
+    [459, 459, 459, 459, 459], // ASTEP
+    [80, 80, 80, 80, 80], // LSFADE
+    [-18, -18, -18, -18, -18], // LSF40
+    [8, 8, 8, 8, 8], // LSF20
+    [-13, -13, -13, -13, -13], // ERELNEG
+    [8, 8, 8, 8, 8], // NPDN
+    [-31, -31, -31, -31, -31], // NINSKN
+    [10, 10, 10, 10, 10], // PSTENDUP
+];
+/// Build B: the cycles after each write, to the next path.
+const COST_B_AFTER: [[i16; 5]; NK] = [
+    [0, 0, 0, 0, 0], // WPEND
+    [0, 0, 0, 0, 0], // ROW
+    [0, 0, 0, 0, 0], // FETCH
+    [0, 0, 0, 0, 0], // WDMAOFF
+    [0, 0, 0, 0, 0], // VOICE
+    [0, 0, 0, 0, 0], // NOTE_ON
+    [0, 0, 0, 0, 0], // WDMAON
+    [0, 0, 0, 0, 0], // LSIL
+    [0, 0, 0, 0, 0], // LSIL2
+    [0, 0, 0, 0, 0], // LLOOP
+    [0, 0, 0, 0, 0], // LLOOP2
+    [0, 0, 0, 0, 0], // LSILEND
+    [0, 0, 0, 0, 0], // LLOOPEND
+    [0, 0, 0, 0, 0], // RNOTE
+    [0, 0, 0, 0, 0], // RCMD
+    [0, 0, 0, 0, 0], // NOTE0
+    [0, 0, 0, 0, 0], // NVOLC
+    [0, 0, 0, 0, 0], // NINS
+    [0, 0, 0, 0, 0], // NINSKEEP
+    [0, 0, 0, 0, 0], // NARPS
+    [367, 367, 367, 367, 367], // WNLEN
+    [0, 0, 0, 0, 0], // WNLOC
+    [16, 16, 16, 16, 16], // WNLLEN
+    [0, 0, -118, 0, 0], // WNLLOC
+    [0, 0, 0, 0, 0], // NNOLOOP
+    [0, 0, 0, 0, 0], // NPEAKP
+    [0, 0, 0, 0, 0], // NVCNT
+    [0, 0, 0, 0, 0], // NPEAK
+    [0, 0, 0, 0, 0], // NPORT
+    [0, 0, 0, 0, 0], // WNPER
+    [0, 0, 0, 0, 0], // NCEN
+    [0, 0, 0, 0, 0], // NCENODD
+    [0, 0, 0, 0, 0], // NEND
+    [0, 0, 0, 0, 0], // QRAW
+    [0, 0, 0, 0, 0], // QTRANS
+    [0, 0, 0, 0, 0], // ARP
+    [0, 0, 0, 0, 0], // ARPLOOP
+    [0, 0, 0, 0, 0], // ARPS80
+    [0, 0, 0, 0, 0], // ARPNEW
+    [0, 0, 0, 0, 0], // ARPPER
+    [10, 10, 10, 10, 10], // WAPER
+    [0, 0, 0, 0, 0], // VIB
+    [0, 0, 0, 0, 0], // VDLY
+    [0, 0, 0, 0, 0], // VDLY0
+    [0, 0, 0, 0, 0], // VVOL
+    [0, 0, 0, 0, 0], // VDOWN
+    [0, 0, 0, 0, 0], // VINC
+    [0, 0, 0, 0, 0], // VLEV0
+    [0, 0, 0, 0, 0], // VFLIP
+    [0, 0, 0, 0, 0], // VFLIPD
+    [21, 21, 21, 21, 0], // WFPER
+    [0, 0, 0, 0, 0], // PST
+    [0, 0, 0, 0, 0], // WPST
+    [69, 69, 69, 69, 69], // WPSTEND
+    [0, 0, 0, 0, 0], // SW0
+    [0, 0, 0, 0, 0], // SW1
+    [0, 0, 0, 0, 0], // SW
+    [0, 0, 0, 0, 0], // SWSTEP
+    [0, 0, 0, 0, 0], // SWFLIP
+    [0, 0, 0, 0, 0], // ERELDN
+    [0, 0, 0, 0, 0], // ERELFL
+    [0, 0, 0, 0, 0], // EATT0
+    [0, 0, 0, 0, 0], // EATT
+    [0, 0, 0, 0, 0], // EATTPK
+    [0, 0, 0, 0, 0], // EHOLD
+    [0, 0, 0, 0, 0], // MAST
+    [161, 161, 161, 161, 161], // WVOL
+    [0, 0, 0, 0, 0], // AROW
+    [0, 0, 0, 0, 0], // APAT
+    [0, 0, 0, 0, 0], // ASTEP
+    [0, 0, 0, 0, 0], // LSFADE
+    [0, 0, 0, 0, 0], // LSF40
+    [0, 0, 0, 0, 0], // LSF20
+    [0, 0, 0, 0, 0], // ERELNEG
+    [0, 0, 0, 0, 0], // NPDN
+    [0, 0, 0, 0, 0], // NINSKN
+    [0, 0, 0, 0, 0], // PSTENDUP
+];
+/// Build C, as `COST_B`.
+const COST_C: [[i16; 5]; NK] = [
+    [0, 0, 0, 0, 0], // WPEND
+    [186, 186, 186, 186, 186], // ROW
+    [226, 226, 226, 226, 226], // FETCH
+    [56, 56, 56, 56, 56], // WDMAOFF
+    [183, 0, 0, 0, 0], // VOICE
+    [108, 108, 108, 108, 108], // NOTE_ON
+    [101, 101, 101, 101, 101], // WDMAON
+    [77, 77, 77, 77, 77], // LSIL
+    [16, 16, 16, 16, 16], // LSIL2
+    [73, 73, 73, 73, 73], // LLOOP
+    [28, 28, 28, 28, 28], // LLOOP2
+    [25, 25, 25, 25, 25], // LSILEND
+    [15, 15, 15, 15, 15], // LLOOPEND
+    [37, 37, 37, 37, 37], // RNOTE
+    [9, 9, 9, 9, 9], // RCMD
+    [34, 34, 34, 34, 34], // NOTE0
+    [50, 50, 50, 50, 50], // NVOLC
+    [226, 226, 226, 226, 226], // NINS
+    [8, 8, 8, 8, 8], // NINSKEEP
+    [32, 32, 32, 32, 32], // NARPS
+    [0, 0, 0, 0, 0], // WNLEN
+    [0, 31, 62, 70, 0], // WNLOC
+    [172, 0, 290, 0, 0], // WNLLEN
+    [0, 0, 0, 0, 0], // WNLLOC
+    [152, 152, 152, 152, 152], // NNOLOOP
+    [6, 6, 6, 6, 6], // NPEAKP
+    [16, 16, 16, 16, 16], // NVCNT
+    [742, 742, 742, 742, 742], // NPEAK
+    [137, 137, 137, 137, 137], // NPORT
+    [-68, 31, 50, 70, 0], // WNPER
+    [59, 59, 59, 59, 59], // NCEN
+    [40, 40, 40, 40, 40], // NCENODD
+    [206, 206, 206, 206, 206], // NEND
+    [78, 78, 78, 78, 78], // QRAW
+    [102, 102, 102, 102, 102], // QTRANS
+    [327, 327, 327, 327, 327], // ARP
+    [12, 12, 12, 12, 12], // ARPLOOP
+    [51, 51, 51, 51, 51], // ARPS80
+    [204, 204, 204, 204, 204], // ARPNEW
+    [-35, -35, -35, -35, -35], // ARPPER
+    [0, 0, 0, 0, 0], // WAPER
+    [164, 164, 164, 164, 164], // VIB
+    [-118, -118, -118, -118, -118], // VDLY
+    [69, 69, 69, 69, 69], // VDLY0
+    [118, 118, 118, 118, 118], // VVOL
+    [45, 45, 45, 45, 45], // VDOWN
+    [53, 53, 53, 53, 53], // VINC
+    [106, 106, 106, 106, 106], // VLEV0
+    [36, 36, 36, 36, 36], // VFLIP
+    [10, 10, 10, 10, 10], // VFLIPD
+    [0, 0, 0, 0, 0], // WFPER
+    [100, 100, 100, 100, 100], // PST
+    [0, 0, 0, 0, 0], // WPST
+    [76, 76, 76, 76, 76], // WPSTEND
+    [21, 21, 21, 21, 21], // SW0
+    [42, 42, 42, 42, 42], // SW1
+    [129, 129, 129, 129, 129], // SW
+    [44, 44, 44, 44, 44], // SWSTEP
+    [36, 36, 36, 36, 36], // SWFLIP
+    [56, 56, 56, 56, 56], // ERELDN
+    [4, 4, 4, 4, 4], // ERELFL
+    [24, 24, 24, 24, 24], // EATT0
+    [38, 38, 38, 38, 38], // EATT
+    [20, 20, 20, 20, 20], // EATTPK
+    [1, 1, 1, 1, 1], // EHOLD
+    [93, 93, 93, 93, 93], // MAST
+    [462, 516, 570, 568, 0], // WVOL
+    [29, 29, 29, 29, 29], // AROW
+    [39, 39, 39, 39, 39], // APAT
+    [459, 459, 459, 459, 459], // ASTEP
+    [80, 80, 80, 80, 80], // LSFADE
+    [-18, -18, -18, -18, -18], // LSF40
+    [8, 8, 8, 8, 8], // LSF20
+    [-13, -13, -13, -13, -13], // ERELNEG
+    [8, 8, 8, 8, 8], // NPDN
+    [-31, -31, -31, -31, -31], // NINSKN
+    [10, 10, 10, 10, 10], // PSTENDUP
+];
+/// Build C, as `COST_B_AFTER`.
+const COST_C_AFTER: [[i16; 5]; NK] = [
+    [0, 0, 0, 0, 0], // WPEND
+    [0, 0, 0, 0, 0], // ROW
+    [0, 0, 0, 0, 0], // FETCH
+    [0, 0, 0, 0, 0], // WDMAOFF
+    [0, 0, 0, 0, 0], // VOICE
+    [0, 0, 0, 0, 0], // NOTE_ON
+    [0, 0, 0, 0, 0], // WDMAON
+    [0, 0, 0, 0, 0], // LSIL
+    [0, 0, 0, 0, 0], // LSIL2
+    [0, 0, 0, 0, 0], // LLOOP
+    [0, 0, 0, 0, 0], // LLOOP2
+    [0, 0, 0, 0, 0], // LSILEND
+    [0, 0, 0, 0, 0], // LLOOPEND
+    [0, 0, 0, 0, 0], // RNOTE
+    [0, 0, 0, 0, 0], // RCMD
+    [0, 0, 0, 0, 0], // NOTE0
+    [0, 0, 0, 0, 0], // NVOLC
+    [0, 0, 0, 0, 0], // NINS
+    [0, 0, 0, 0, 0], // NINSKEEP
+    [0, 0, 0, 0, 0], // NARPS
+    [367, 367, 367, 367, 367], // WNLEN
+    [68, 0, 12, 0, 0], // WNLOC
+    [16, 16, 16, 16, 16], // WNLLEN
+    [0, 0, -118, 0, 0], // WNLLOC
+    [0, 0, 0, 0, 0], // NNOLOOP
+    [0, 0, 0, 0, 0], // NPEAKP
+    [0, 0, 0, 0, 0], // NVCNT
+    [0, 0, 0, 0, 0], // NPEAK
+    [0, 0, 0, 0, 0], // NPORT
+    [0, 0, 0, 0, 0], // WNPER
+    [0, 0, 0, 0, 0], // NCEN
+    [0, 0, 0, 0, 0], // NCENODD
+    [0, 0, 0, 0, 0], // NEND
+    [0, 0, 0, 0, 0], // QRAW
+    [0, 0, 0, 0, 0], // QTRANS
+    [0, 0, 0, 0, 0], // ARP
+    [0, 0, 0, 0, 0], // ARPLOOP
+    [0, 0, 0, 0, 0], // ARPS80
+    [0, 0, 0, 0, 0], // ARPNEW
+    [0, 0, 0, 0, 0], // ARPPER
+    [10, 10, 10, 10, 10], // WAPER
+    [0, 0, 0, 0, 0], // VIB
+    [0, 0, 0, 0, 0], // VDLY
+    [0, 0, 0, 0, 0], // VDLY0
+    [0, 0, 0, 0, 0], // VVOL
+    [0, 0, 0, 0, 0], // VDOWN
+    [0, 0, 0, 0, 0], // VINC
+    [0, 0, 0, 0, 0], // VLEV0
+    [0, 0, 0, 0, 0], // VFLIP
+    [0, 0, 0, 0, 0], // VFLIPD
+    [21, 21, 21, 21, 0], // WFPER
+    [0, 0, 0, 0, 0], // PST
+    [0, 0, 0, 0, 0], // WPST
+    [69, 69, 69, 69, 69], // WPSTEND
+    [0, 0, 0, 0, 0], // SW0
+    [0, 0, 0, 0, 0], // SW1
+    [0, 0, 0, 0, 0], // SW
+    [0, 0, 0, 0, 0], // SWSTEP
+    [0, 0, 0, 0, 0], // SWFLIP
+    [0, 0, 0, 0, 0], // ERELDN
+    [0, 0, 0, 0, 0], // ERELFL
+    [0, 0, 0, 0, 0], // EATT0
+    [0, 0, 0, 0, 0], // EATT
+    [0, 0, 0, 0, 0], // EATTPK
+    [0, 0, 0, 0, 0], // EHOLD
+    [0, 0, 0, 0, 0], // MAST
+    [161, 161, 161, 161, 161], // WVOL
+    [0, 0, 0, 0, 0], // AROW
+    [0, 0, 0, 0, 0], // APAT
+    [0, 0, 0, 0, 0], // ASTEP
+    [0, 0, 0, 0, 0], // LSFADE
+    [0, 0, 0, 0, 0], // LSF40
+    [0, 0, 0, 0, 0], // LSF20
+    [0, 0, 0, 0, 0], // ERELNEG
+    [0, 0, 0, 0, 0], // NPDN
+    [0, 0, 0, 0, 0], // NINSKN
+    [0, 0, 0, 0, 0], // PSTENDUP
+];
+/// The paths that end in a Paula write.
+const WRITES: [usize; 13] = [
+    K_WPEND, K_WDMAOFF, K_WDMAON, K_WNLEN, K_WNLOC, K_WNLLEN, K_WNLLOC,
+    K_WNPER, K_WAPER, K_WFPER, K_WPST, K_WPSTEND, K_WVOL,
+];
+// Build D: colour clocks between the original's writes, so the DMA off and on writes of a
+// note start are as far apart as in the reference (builds B and C: the path costs).
 const WAIT_LOOP: u64 = 60;
 const WAIT_ROW: u64 = 160;
 const WAIT_NOTE: u64 = 900;
 const WAIT_FX: u64 = 280;
 
 impl Sm {
+    /// A path of the original's code taken: its cycles, on the current voice (`vk`).
+    fn c(&mut self, k: usize) {
+        let t = match self.build {
+            Build::B => &COST_B,
+            Build::C => &COST_C,
+            _ => return,
+        };
+        self.cy += t[k][self.vk] as i64;
+        if WRITES.contains(&k) {
+            self.lastw = k;
+        }
+    }
+    /// A Paula write: at the tick's start plus half the cycles so far (the colour clock), the
+    /// cycles after the write counted on.
+    fn at(&mut self, hw: &mut Hw) {
+        let t = self.t0 + self.cy.max(0) as u64 / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+        if self.lastw != usize::MAX {
+            let t = if self.build == Build::C { &COST_C_AFTER } else { &COST_B_AFTER };
+            self.cy += t[self.lastw][self.vk] as i64;
+            self.lastw = usize::MAX;
+        }
+    }
+    /// Builds B and C: the init's cycles for the first step's fade flags (as `load_step`'s).
+    fn start_cost(&self) -> u64 {
+        let t = match self.build {
+            Build::B => &COST_B,
+            Build::C => &COST_C,
+            _ => return 0,
+        };
+        let f = self.r8(self.g + 0xE8 + self.c + 0xC0);
+        let mut cy = 0;
+        if f & 0x80 != 0 {
+            cy += t[K_LSFADE][4] as i64;
+            if f & 0x40 != 0 {
+                cy += t[K_LSF40][4] as i64;
+            }
+            if f & 0x20 != 0 {
+                cy += t[K_LSF20][4] as i64;
+            }
+        }
+        cy.max(0) as u64
+    }
+
     fn r8(&self, o: usize) -> u8 {
         rb(&self.img, o)
     }
@@ -385,6 +846,15 @@ impl Sm {
             for i in 0..4 {
                 self.v[i].iofs = self.r8(col(4 + i));
             }
+            if self.flock == 0 && f & 0x80 != 0 {
+                self.c(K_LSFADE);
+                if f & 0x40 != 0 {
+                    self.c(K_LSF40);
+                }
+                if f & 0x20 != 0 {
+                    self.c(K_LSF20);
+                }
+            }
             if self.flock == 0 {
                 if f & 0x80 == 0 {
                     self.fctl = 0;
@@ -450,7 +920,10 @@ impl Sm {
             note = 0;
         }
         if (1..=0x7F).contains(&note) {
+            self.c(K_RNOTE);
             self.dmaon |= self.v[i].bit;
+        } else if note != 0 {
+            self.c(K_RCMD);
         }
         self.v[i].note = note;
         self.v[i].par = par;
@@ -464,16 +937,19 @@ impl Sm {
         if self.tick != self.speed {
             return;
         }
+        self.c(K_AROW);
         self.tick = 0;
         self.row = self.row.wrapping_add(2);
         if self.row != self.patlen {
             return;
         }
+        self.c(K_APAT);
         self.row = 0;
         if self.pos != self.pos_n {
             self.pos = self.pos.wrapping_add(1);
             return;
         }
+        self.c(K_ASTEP);
         self.step = self.step.wrapping_add(1);
         if self.build == Build::A && self.mode & 2 == 0 {
             self.step = 0;
@@ -504,6 +980,11 @@ impl Sm {
     /// The note's period (the full form: with the transpositions), setting `cnote`.
     fn period_full(&mut self, i: usize, n: u8) -> u16 {
         let v = self.v[i];
+        if v.par & 0x80 != 0 {
+            self.c(K_QRAW);
+        } else {
+            self.c(K_QTRANS);
+        }
         let m = if v.par & 0x80 != 0 { n } else { n.wrapping_add(v.ptrans).wrapping_add(self.strans) };
         self.v[i].cnote = m;
         if self.build == Build::B {
@@ -551,6 +1032,12 @@ impl Sm {
     fn note_start(&mut self, i: usize, hw: &mut Hw) {
         let n = self.v[i].note;
         if n == 0 || n == 0xFF {
+            if n == 0 {
+                self.c(K_NOTE0);
+            }
+            if n & 0x40 == 0 && self.v[i].par & 0x40 != 0 {
+                self.c(K_NVOLC);
+            }
             Self::volume_command(&mut self.v[i], n);
             return;
         }
@@ -569,9 +1056,23 @@ impl Sm {
             let iofs = if self.build == Build::A && self.v[i].sfxpar != 0 { 0 } else { self.v[i].iofs };
             let r = self.instrument(ins.wrapping_add(iofs));
             let rec: [u8; 16] = std::array::from_fn(|k| self.r8(r + k));
+            self.c(K_NINS);
+            if n & 0x40 != 0 || par & 0x40 != 0 {
+                self.c(K_NINSKEEP);
+                if n & 0x40 != 0 {
+                    self.c(K_NINSKN);
+                }
+            }
+            if rec[10] != 0 {
+                self.c(K_NARPS);
+            }
             let s = if rec[10] != 0 { self.arpsample(rec[9]) } else { rec[0] };
             let (start, len, ls, ll) = self.sample(s);
+            self.c(K_WNLEN);
+            self.at(hw);
             hw.len(i, len);
+            self.c(K_WNLOC);
+            self.at(hw);
             hw.loc(i, self.base.wrapping_add(start));
             let rptr = start.wrapping_add(ls as u32);
             self.v[i].rlen = ll;
@@ -582,8 +1083,23 @@ impl Sm {
                 Build::C | Build::D => s & 0x80 != 0,
             };
             if in_loop {
+                self.c(K_WNLLEN);
+                self.at(hw);
                 hw.len(i, ll);
+                self.c(K_WNLLOC);
+                self.at(hw);
                 hw.loc(i, self.base.wrapping_add(rptr));
+            } else {
+                self.c(K_NNOLOOP);
+            }
+            if n & 0x40 == 0 && par & 0x40 != 0 {
+                self.c(K_NPEAKP);
+            }
+            if rec[7] & 15 >= 2 {
+                self.c(K_NVCNT);
+            }
+            if rec[2] != 0 {
+                self.c(K_NPEAK);
             }
             let v = &mut self.v[i];
             let peak = if n & 0x40 == 0 && par & 0x40 != 0 { par & 0x3F } else { rec[2] };
@@ -620,15 +1136,29 @@ impl Sm {
         }
         // the pitch
         let per = self.period_full(i, n);
-        let v = &mut self.v[i];
         if n & 0x40 != 0 {
+            self.c(K_NPORT);
+            if (per << 2).wrapping_sub(self.v[i].cur) & 0x8000 != 0 {
+                self.c(K_NPDN);
+            }
+            let v = &mut self.v[i];
             v.tgt = per << 2;
             let sp = (v.par & 0x7F) as u16;
             v.pst = if v.tgt.wrapping_sub(v.cur) & 0x8000 == 0 { sp } else { sp.wrapping_neg() };
         } else {
+            self.c(K_WNPER);
+            self.at(hw);
             hw.per(i, per);
-            v.cur = per << 2;
+            self.v[i].cur = per << 2;
         }
+        if self.v[i].vdelay == 0 {
+            self.c(K_NCEN);
+            if self.v[i].vlen & 1 != 0 {
+                self.c(K_NCENODD);
+            }
+        }
+        self.c(K_NEND);
+        let v = &mut self.v[i];
         if v.vdelay == 0 {
             Self::centre(v);
         }
@@ -643,15 +1173,18 @@ impl Sm {
     fn effects(&mut self, i: usize, hw: &mut Hw) {
         let mut skip = false;
         if self.v[i].aend != 0 {
+            self.c(K_ARP);
             let t = self.arpnote(self.v[i].apos);
             let mut apos = self.v[i].apos.wrapping_add(1);
             if apos == self.v[i].aend {
+                self.c(K_ARPLOOP);
                 apos = self.v[i].aloop;
             }
             self.v[i].apos = apos;
             let s = self.arpsample(apos);
             let (start, len, ls, ll) = self.sample(s);
             if s & 0x80 != 0 {
+                self.c(K_ARPS80);
                 self.pendn |= self.v[i].bit;
                 self.v[i].rlen = len;
                 self.v[i].rptr = start;
@@ -663,12 +1196,14 @@ impl Sm {
                     Build::A => same || s & 0x20 != 0,
                 };
                 if !keep {
+                    self.c(K_ARPNEW);
                     self.v[i].rlen = ll;
                     self.v[i].rptr = start.wrapping_add(ls as u32);
                 }
             }
             self.lastarp = t;
             if t != 0x80 && !(matches!(self.build, Build::C | Build::D) && t == 0x82) {
+                self.c(K_ARPPER);
                 let m = if t == 0x81 {
                     self.v[i].afix
                 } else {
@@ -676,23 +1211,34 @@ impl Sm {
                     self.v[i].cnote
                 };
                 let per = self.period_arp(i, m);
+                self.c(K_WAPER);
+                self.at(hw);
                 hw.per(i, per);
                 skip = true;
             }
         }
         let build = self.build;
-        let v = &mut self.v[i];
         if !skip {
+            let mut paths: Vec<usize> = Vec::new();
+            let v = &mut self.v[i];
             if v.vdir != 0 {
+                paths.push(K_VIB);
                 if v.vdelay != 0 {
+                    paths.push(K_VDLY);
                     v.vdelay -= 1;
                     if v.vdelay == 0 {
+                        paths.push(K_VDLY0);
                         Self::centre(v);
                     }
                 } else {
                     let d = if matches!(build, Build::B | Build::D) && v.lev != 0 { v.vvol as u16 } else { 0 };
+                    if matches!(build, Build::B | Build::D) && v.lev != 0 {
+                        paths.push(K_VVOL);
+                    }
                     if v.vdir & 0x80 == 0 {
+                        paths.push(K_VDOWN);
                         if v.vlen >> 1 == v.vcnt && (build == Build::B || v.vdepth <= 0x40) {
+                            paths.push(K_VINC);
                             v.vdepth = v.vdepth.wrapping_add(v.vinc);
                         }
                         v.cur = v.cur.wrapping_sub(v.vdepth as u16);
@@ -701,21 +1247,43 @@ impl Sm {
                         v.cur = v.cur.wrapping_add(v.vdepth as u16);
                         v.lev = v.lev.wrapping_add(d);
                     }
+                    if v.lev == 0 {
+                        paths.push(K_VLEV0);
+                    }
                     v.vcnt = v.vcnt.wrapping_sub(1);
                     if v.vcnt == 0 {
+                        paths.push(K_VFLIP);
+                        if v.vdir & 0x80 == 0 {
+                            paths.push(K_VFLIPD);
+                        }
                         v.vdir = v.vdir.wrapping_neg();
                         v.vcnt = v.vlen;
                     }
                 }
             }
+            for k in paths {
+                self.c(k);
+            }
+            self.c(K_WFPER);
+            self.at(hw);
+            let v = self.v[i];
             hw.per(i, v.cur >> 2);
             if v.pst != 0 {
+                self.c(K_PST);
                 let x = v.cur.wrapping_add(v.pst);
                 let below = x.wrapping_sub(v.tgt) & 0x8000 != 0;
                 if (v.pst & 0x8000 == 0) == below {
-                    v.cur = x;
+                    self.c(K_WPST);
+                    self.at(hw);
+                    self.v[i].cur = x;
                     hw.per(i, x >> 2);
                 } else {
+                    self.c(K_WPSTEND);
+                    if v.pst & 0x8000 == 0 {
+                        self.c(K_PSTENDUP);
+                    }
+                    self.at(hw);
+                    let v = &mut self.v[i];
                     v.pst = 0;
                     v.vcnt = v.vlen >> 1;
                     v.vdir = 1;
@@ -725,12 +1293,24 @@ impl Sm {
                 }
             }
         }
+        let v = &mut self.v[i];
+        let mut paths: Vec<usize> = Vec::new();
+        if matches!(build, Build::C | Build::D) {
+            if v.rlen == 0 {
+                paths.push(K_SW0);
+            } else if v.swlen == 0 {
+                paths.push(K_SW1);
+            }
+        }
         if matches!(build, Build::C | Build::D) && v.rlen != 0 && v.swlen != 0 && self.lastarp != 0x82 {
+            paths.push(K_SW);
             if v.swcnt & v.swmask == 0 {
+                paths.push(K_SWSTEP);
                 v.rptr = v.rptr.wrapping_add(v.swstep as i16 as i32 as u32);
             }
             v.swcnt = v.swcnt.wrapping_sub(1);
             if v.swcnt == 0 {
+                paths.push(K_SWFLIP);
                 v.swstep = v.swstep.wrapping_neg();
                 v.swcnt = v.swlen;
             }
@@ -740,20 +1320,30 @@ impl Sm {
         if v.note == 0 {
             v.att = 0xFFFF;
             if v.lev > v.floor {
+                paths.push(K_ERELDN);
                 v.lev = v.lev.wrapping_sub(v.rel as u16);
+                if v.lev & 0x8000 != 0 {
+                    paths.push(K_ERELNEG);
+                }
                 if v.lev & 0x8000 != 0 || v.lev <= v.floor {
+                    paths.push(K_ERELFL);
                     v.lev = v.floor;
                 }
             }
         } else if v.att == 0 {
+            paths.push(K_EATT0);
             v.lev = v.peak;
             v.att = 0xFFFF;
         } else if v.att & 0x8000 == 0 {
+            paths.push(K_EATT);
             v.lev = v.lev.wrapping_add(v.att);
             if v.lev >= v.peak {
+                paths.push(K_EATTPK);
                 v.lev = v.peak;
                 v.att = 0xFFFF;
             }
+        } else {
+            paths.push(K_EHOLD);
         }
         let mut vol = (v.lev >> 4) as u32;
         if build == Build::A {
@@ -770,22 +1360,41 @@ impl Sm {
                 vol = (vol * v.master as u32) >> 6;
             }
         } else if self.master != 0x40 && v.iofs & 0x80 == 0 {
+            paths.push(K_MAST);
             vol = (vol * self.master as u32) >> 6;
         }
+        for k in paths {
+            self.c(k);
+        }
+        self.c(K_WVOL);
+        self.at(hw);
         hw.vol(i, vol as u16);
     }
 
-    fn loop_regs(&self, i: usize, hw: &mut Hw) {
-        let v = &self.v[i];
+    fn loop_regs(&mut self, i: usize, hw: &mut Hw) {
+        let v = self.v[i];
         if v.rlen == 0 {
+            self.c(K_LSIL);
+            self.at(hw);
             hw.loc(i, self.base.wrapping_add(self.silent() as u32));
+            self.c(K_LSIL2);
+            self.at(hw);
             hw.len(i, 1);
         } else if self.build == Build::A {
             hw.loc(i, self.base.wrapping_add(v.rptr));
             hw.len(i, v.rlen);
         } else {
+            self.c(K_LLOOP);
+            self.at(hw);
             hw.len(i, v.rlen);
+            self.c(K_LLOOP2);
+            self.at(hw);
             hw.loc(i, self.base.wrapping_add(v.rptr));
+        }
+        if v.rlen == 0 {
+            self.c(K_LSILEND);
+        } else {
+            self.c(K_LLOOPEND);
         }
     }
 
@@ -903,33 +1512,55 @@ impl Sm {
                 self.master -= 1;
             }
         }
+        self.c(K_WPEND);
+        self.at(hw);
         hw.dmacon(self.pend);
         self.dmaon = 0;
         self.brk = false;
         for i in 0..4 {
+            self.vk = i;
             self.loop_regs(i, hw);
             if self.tick == 0 {
+                self.c(K_ROW);
                 if self.row == 0 {
+                    self.c(K_FETCH);
                     self.fetch_pattern(i);
                 }
                 self.read_row(i);
-                hw.wait(WAIT_ROW);
+                if self.build == Build::D {
+                    hw.wait(WAIT_ROW);
+                }
             }
-            hw.wait(WAIT_LOOP);
+            if self.build == Build::D {
+                hw.wait(WAIT_LOOP);
+            }
         }
+        self.vk = 4;
+        self.c(K_WDMAOFF);
+        self.at(hw);
         hw.dmacon(self.dmaon);
         self.dmaon = 0x8200;
         self.pendn = 0;
         let row = self.tick == 0;
         for i in 0..4 {
+            self.vk = i;
+            self.c(K_VOICE);
             if row {
+                self.c(K_NOTE_ON);
                 self.note_start(i, hw);
-                hw.wait(WAIT_NOTE);
+                if self.build == Build::D {
+                    hw.wait(WAIT_NOTE);
+                }
             }
             self.effects(i, hw);
-            hw.wait(WAIT_FX);
+            if self.build == Build::D {
+                hw.wait(WAIT_FX);
+            }
         }
+        self.vk = 4;
         self.advance();
+        self.c(K_WDMAON);
+        self.at(hw);
         hw.dmacon(self.dmaon | self.pend);
         self.pend = self.pendn;
         if self.build == Build::D {
@@ -1045,9 +1676,13 @@ impl Replayer for Sm {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t0 = hw.bus.clock;
+        self.cy = 0;
+        self.vk = 4;
         if !self.started {
             self.started = true;
             self.init(hw);
+            self.cy = 0;
         }
         match self.build {
             Build::A => self.tick_a(hw),
@@ -1057,8 +1692,11 @@ impl Replayer for Sm {
 }
 
 /// From the host's first write to the song start, and from a timer call to the first write of its
-/// tick, in the reference's runs.
+/// tick, in the reference's runs (build C: `START_C`), plus half the cycles of the init's first step
+/// (`Sm::start_cost`), less `START_LED` with the LED flag set.
 const START: u64 = 2006;
+const START_C: u64 = 2146;
+const START_LED: u64 = 12;
 /// Build A: from the host's second write to its init's first write.
 const INIT_WAIT: u64 = 785;
 const ENTRY: u64 = 156;
@@ -1118,6 +1756,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         lastarp: 0,
         sub: 0,
         nsub: 1,
+        t0: 0,
+        cy: 0,
+        vk: 4,
+        lastw: usize::MAX,
     };
     sm.nsub = sm.subsong_count();
     if lay.build == Build::A {
@@ -1126,7 +1768,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         sm.started = true;
         sm.init(&mut hw);
     }
-    m.bus.clock = m.bus.clock.max(t0 + START);
+    // builds B and C: an init with the LED flag set is shorter
+    let start = match lay.build {
+        Build::C => START_C,
+        _ => START,
+    } - if keep && matches!(lay.build, Build::B | Build::C) { START_LED } else { 0 };
+    m.bus.clock = m.bus.clock.max(t0 + start + sm.start_cost() / 2);
     Some(Box::new(sm))
 }
 

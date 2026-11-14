@@ -103,10 +103,6 @@ const SINE: [u8; 32] = [
     180, 161, 141, 120, 97, 74, 49, 24,
 ];
 
-/// Colour clocks the original lets pass between its DMA-off, DMA-on and loop passes
-/// (nine raster lines).
-const DMA_WAIT: u64 = 2000;
-
 // ---------------------------------------------------------------------------------
 // Recognition
 
@@ -151,6 +147,9 @@ struct Rec {
     tp: usize,
     k: u8,
     kf: u8,
+    /// Effect 7's position and parameter (it writes nothing).
+    t7p: u8,
+    t7q: u8,
     la: u32,
     ll: u16,
 }
@@ -175,6 +174,11 @@ struct Alp {
     rec: [Rec; 4],
     ft: [usize; 4],
     songend: bool,
+    /// The tick's start (colour clock), the original's 68000 cycles since then and the record
+    /// the paths are on (4: none), for the writes' times.
+    t0: u64,
+    cy: i64,
+    vk: usize,
 }
 
 fn sx8(b: u8) -> i32 {
@@ -182,6 +186,51 @@ fn sx8(b: u8) -> i32 {
 }
 
 impl Alp {
+    /// A path of the original's code taken: its cycles, on the current record.
+    fn k(&mut self, k: usize) {
+        self.cy += COSTS[k][self.vk] as i64;
+    }
+    /// `n` times the path `k`.
+    fn kn(&mut self, k: usize, n: u32) {
+        self.cy += COSTS[k][self.vk] as i64 * n as i64;
+    }
+    /// The colour clock the original is at now.
+    fn now(&self) -> u64 {
+        (self.t0 as i64 + self.cy.div_euclid(2)) as u64
+    }
+    /// A Paula write of kind `k` (the path to it): at the tick's start plus half the cycles so far.
+    fn at(&mut self, k: usize, hw: &mut Hw) {
+        self.k(k);
+        let t = self.now();
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+    /// A wait for the beam: the line is read, then read again every `poll` cycles until it
+    /// is `lines` on (the `w`th wait's parameters).
+    fn wait(&mut self, w: usize) {
+        let base = K_W1PRE + 4 * w;
+        self.k(base);
+        let l0 = self.now() / crate::paula::LINE;
+        self.k(base + 1);
+        let poll = COSTS[base + 2][4].max(1) as i64;
+        let n = COSTS[base + 3][4] as u64;
+        while self.now() / crate::paula::LINE < l0 + n {
+            self.cy += poll;
+        }
+    }
+    /// `vol_add` with its clamps' paths.
+    fn vadd(&mut self, r: usize, d: i32) {
+        let v = self.rec[r].v;
+        let b = ((v as i32 + d) & 0xFF) as u16;
+        if b >= 0x80 {
+            self.k(K_VCLZ);
+        } else if b >= 0x40 {
+            self.k(K_VCLH);
+        }
+        self.rec[r].v = Self::vol_add(v, d);
+    }
+
     fn rb(&self, o: usize) -> u8 {
         self.d.get(o).copied().unwrap_or(0)
     }
@@ -196,7 +245,9 @@ impl Alp {
         if self.p == self.end {
             self.p = self.restart;
             self.songend = true;
+            self.k(K_LPEND);
         }
+        self.k(K_LP);
         let x = self.w(self.poslist + self.p as usize) as i16 as isize;
         let pat = self.pattab.wrapping_add_signed(x);
         for r in 0..4 {
@@ -226,8 +277,10 @@ impl Alp {
         let mut skip = false;
         if self.rec[r].k != 0 {
             self.rec[r].k -= 1;
+            self.k(K_RKDEC);
             if self.rec[r].kf != 0 {
                 skip = true;
+                self.k(K_RKSKIP);
             }
         }
         while !skip {
@@ -242,22 +295,31 @@ impl Alp {
                 rec.e = 0;
                 if rec.kf != 0 {
                     skip = true;
+                    self.k(K_RCMDK);
+                } else {
+                    self.k(K_RCMD);
                 }
                 continue;
             }
             // an event
+            self.k(K_REV);
             let b2 = self.rb(a1);
             a1 += 1;
             let sp = (b2 >> 4) as usize + if b & 1 != 0 { 16 } else { 0 };
+            if b & 1 != 0 {
+                self.k(K_RSPHI);
+            }
             if sp != 0 {
                 self.rec[r].sm = sp as u8;
                 self.rec[r].v = self.rb(16 * sp + 7) as u16;
+                self.k(K_RSP);
             }
             let entry = 16 * self.rec[r].sm as usize;
             self.rec[r].e = b2 & 15;
             if self.rec[r].e != 0 {
                 self.rec[r].q = self.rb(a1);
                 a1 += 1;
+                self.k(K_REFF);
             }
             let note = b & 0xFE;
             let e = self.rec[r].e;
@@ -268,7 +330,12 @@ impl Alp {
                 if e == 3 || e == 5 {
                     let rec = &mut self.rec[r];
                     rec.tg = if per == rec.per { 0 } else { per };
-                    rec.pd = per < rec.per;
+                    let (eq, dn) = (per == rec.per, per < rec.per);
+                    rec.pd = dn;
+                    self.k(K_RNPORTA);
+                    if eq {
+                        self.k(K_RNPEQ);
+                    }
                 } else {
                     let start = self.entry_start(self.rec[r].sm as usize);
                     let (len, la_off, ll) = (self.w(entry + 4), self.w(entry + 14) as u32, self.w(entry + 12));
@@ -277,22 +344,33 @@ impl Alp {
                     rec.per = per;
                     rec.vp = 0;
                     *d5 |= 1 << ch;
+                    self.at(K_WRLOC, hw);
                     hw.loc(ch, start);
+                    self.at(K_WRLEN, hw);
                     hw.len(ch, len);
+                    let rec = &mut self.rec[r];
                     rec.la = start.wrapping_add(2 * la_off);
                     rec.ll = ll;
+                    self.k(K_RNEND);
                 }
+            } else {
+                self.k(K_RNONOTE);
             }
             if e >= 9 {
+                self.k(K_RT0);
                 self.tick0_effect(r, entry, hw);
             }
             break;
         }
         if self.rec[r].k == 0 {
             self.rec[r].tp = a1;
+            self.k(if skip { K_RTPS } else { K_RTP });
         }
-        hw.per(ch, self.rec[r].per as u16);
-        hw.vol(ch, self.rec[r].v);
+        let (per, v) = (self.rec[r].per as u16, self.rec[r].v);
+        self.at(K_WRPER, hw);
+        hw.per(ch, per);
+        self.at(K_WRVOL, hw);
+        hw.vol(ch, v);
     }
 
     /// Effects 9..F on the first tick of a row.
@@ -303,6 +381,7 @@ impl Alp {
             0xA => {
                 if q != 0 {
                     self.rec[r].so = q;
+                    self.k(K_EAQ);
                 }
                 let start = self.entry_start(self.rec[r].sm as usize);
                 let len = self.w(entry + 4) as i16;
@@ -311,67 +390,106 @@ impl Alp {
                 let mut s = start;
                 if l <= 0 {
                     l = 1;
+                    self.k(K_EACL);
                 }
                 s = s.wrapping_add(off.wrapping_mul(2) as i16 as i32 as u32);
+                self.at(K_WEALEN, hw);
                 hw.len(ch, l as u16);
+                self.at(K_WEALOC, hw);
                 hw.loc(ch, s);
+                self.k(K_EAEND);
             }
             0xB => {
                 self.p = q as i8 as i16 as u16;
                 self.r |= 0x80;
+                self.k(K_EB);
             }
-            0xC => self.rec[r].v = q as u16,
-            0xD => self.r |= 0x80,
+            0xC => {
+                self.rec[r].v = q as u16;
+                self.k(K_EC);
+            }
+            0xD => {
+                self.r |= 0x80;
+                self.k(K_ED);
+            }
             0xE => {
                 let (hi, x) = (q >> 4, (q & 15) as i32);
-                let rec = &mut self.rec[r];
                 match hi {
-                    1 => {
-                        rec.per = (rec.per + x).clamp(113, 856);
-                        hw.per(ch, rec.per as u16);
+                    1 | 2 => {
+                        let rec = &mut self.rec[r];
+                        let p = if hi == 1 { rec.per + x } else { rec.per - x };
+                        rec.per = p.clamp(113, 856);
+                        let per = rec.per as u16;
+                        self.k(if hi == 1 { K_EE1 } else { K_EE2 });
+                        if p != per as i32 {
+                            self.k(K_EECL);
+                        }
+                        self.at(K_WEEPER, hw);
+                        hw.per(ch, per);
+                        self.k(K_EEEND);
                     }
-                    2 => {
-                        rec.per = (rec.per - x).clamp(113, 856);
-                        hw.per(ch, rec.per as u16);
+                    3 => {
+                        self.k(K_EE3);
+                        self.vadd(r, -x);
                     }
-                    3 => rec.v = Self::vol_add(rec.v, -x),
-                    4 => rec.v = Self::vol_add(rec.v, x),
-                    _ => {}
+                    4 => {
+                        self.k(K_EE4);
+                        self.vadd(r, x);
+                    }
+                    _ => self.k(K_EEX),
                 }
             }
-            0xF => self.speed = q,
-            _ => {}
+            0xF => {
+                self.speed = q;
+                self.k(K_EF);
+            }
+            _ => self.k(K_E9),
         }
     }
 
-    fn vibrato(rec: &mut Rec, ch: usize, hw: &mut Hw) {
+    /// The vibrato's period (and its step).
+    fn vibrato(&mut self, r: usize) -> u16 {
+        let rec = &mut self.rec[r];
         let idx = ((rec.vp >> 2) & 31) as usize;
         let mut dl = (SINE[idx] as i32 * (rec.vb & 15) as i32) >> 7;
-        if rec.vp & 0x80 != 0 {
+        let neg = rec.vp & 0x80 != 0;
+        if neg {
             dl = -dl;
         }
-        hw.per(ch, (rec.per + dl) as u16);
+        let p = (rec.per + dl) as u16;
         rec.vp = rec.vp.wrapping_add((rec.vb >> 2) & 0x3C);
+        if neg {
+            self.k(K_VNEG);
+        }
+        p
     }
 
-    fn porta(rec: &mut Rec, ch: usize, hw: &mut Hw) {
+    /// The tone portamento's step: the period to write, if any.
+    fn porta(&mut self, r: usize) -> Option<u16> {
+        let rec = &mut self.rec[r];
         if rec.tg == 0 {
-            return;
+            self.k(K_PNONE);
+            return None;
         }
-        if !rec.pd {
+        let hit;
+        let up = !rec.pd;
+        if up {
             rec.per += rec.ps as i32;
-            if rec.tg <= rec.per {
-                rec.per = rec.tg;
-                rec.tg = 0;
-            }
+            hit = rec.tg <= rec.per;
         } else {
             rec.per -= rec.ps as i32;
-            if rec.tg >= rec.per {
-                rec.per = rec.tg;
-                rec.tg = 0;
-            }
+            hit = rec.tg >= rec.per;
         }
-        hw.per(ch, rec.per as u16);
+        if hit {
+            rec.per = rec.tg;
+            rec.tg = 0;
+        }
+        let p = rec.per as u16;
+        self.k(if up { K_PUP } else { K_PDN });
+        if hit {
+            self.k(if up { K_PHIT } else { K_PHITD });
+        }
+        Some(p)
     }
 
     /// The per-tick effect of record `r` on a tick that starts no row.
@@ -379,54 +497,109 @@ impl Alp {
         let ch = 3 - r;
         let (cc, speed) = (self.c, self.speed);
         let ft = self.ft[ch];
-        let rec = &mut self.rec[r];
-        let q = rec.q;
-        match rec.e {
+        let q = self.rec[r].q;
+        match self.rec[r].e {
             1 => {
                 let mut dd = cc.wrapping_sub(speed) as i8;
+                let mut n = 0;
                 while dd < 0 {
                     dd += 3;
+                    n += 1;
                 }
-                match dd {
-                    0 => hw.per(ch, rec.per as u16),
-                    d => {
-                        let nib = if d == 1 { q & 15 } else { q >> 4 } as usize;
-                        let i = (rec.n as usize + 2 * nib).min(72);
-                        hw.per(ch, period(ft / 72, i / 2) as u16);
+                self.kn(K_ARPLOOP, n);
+                let p = match dd {
+                    0 => {
+                        self.k(K_ARP0);
+                        self.rec[r].per as u16
                     }
-                }
+                    d => {
+                        self.k(if d == 1 { K_ARP1 } else { K_ARP2 });
+                        let nib = if d == 1 { q & 15 } else { q >> 4 } as usize;
+                        let i = (self.rec[r].n as usize + 2 * nib).min(72);
+                        period(ft / 72, i / 2) as u16
+                    }
+                };
+                self.at(K_WARP, hw);
+                hw.per(ch, p);
+                self.k(K_ARPEND);
             }
             2 => {
-                rec.per = (rec.per - sx8(q)).clamp(113, 856);
-                hw.per(ch, rec.per as u16);
+                let rec = &mut self.rec[r];
+                let x = rec.per - sx8(q);
+                rec.per = x.clamp(113, 856);
+                let p = rec.per as u16;
+                self.k(K_SLIDE);
+                if x != p as i32 {
+                    self.k(K_SLCL);
+                }
+                self.at(K_WSLIDE, hw);
+                hw.per(ch, p);
+                self.k(K_SLEND);
             }
             3 | 5 => {
-                if q != 0 && rec.e == 3 {
-                    rec.ps = q;
+                let e = self.rec[r].e;
+                self.k(if e == 3 { K_E3 } else { K_E5 });
+                if q != 0 && e == 3 {
+                    self.rec[r].ps = q;
+                    self.k(K_E3Q);
                 }
-                Self::porta(rec, ch, hw);
-                if rec.e == 5 {
-                    rec.v = Self::vol_add(rec.v, sx8(q));
+                if let Some(p) = self.porta(r) {
+                    self.at(K_WPORTA, hw);
+                    hw.per(ch, p);
+                    self.k(K_PEND);
+                }
+                if e == 5 {
+                    self.k(K_VS5);
+                    self.vadd(r, sx8(q));
                 }
             }
             4 | 6 => {
-                if q != 0 && rec.e == 4 {
-                    rec.vb = q;
+                let e = self.rec[r].e;
+                self.k(if e == 4 { K_E4 } else { K_E6 });
+                if q != 0 && e == 4 {
+                    self.rec[r].vb = q;
+                    self.k(K_E4Q);
                 }
-                Self::vibrato(rec, ch, hw);
-                if rec.e == 6 {
-                    rec.v = Self::vol_add(rec.v, sx8(q));
+                let p = self.vibrato(r);
+                self.at(K_WVIB, hw);
+                hw.per(ch, p);
+                self.k(K_VIBEND);
+                if e == 6 {
+                    self.k(K_VS);
+                    self.vadd(r, sx8(q));
                 }
             }
-            8 => rec.v = Self::vol_add(rec.v, sx8(q)),
-            _ => {}
+            8 => {
+                self.k(K_E8);
+                self.vadd(r, sx8(q));
+            }
+            _ => {
+                self.k(K_E7);
+                let rec = &mut self.rec[r];
+                if q != 0 {
+                    rec.t7q = q;
+                }
+                let neg = rec.t7p & 0x80 != 0;
+                rec.t7p = rec.t7p.wrapping_add((rec.t7q >> 2) & 0x3C);
+                if q != 0 {
+                    self.k(K_E7Q);
+                }
+                if neg {
+                    self.k(K_E7NEG);
+                }
+            }
         }
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t0 = hw.bus.clock;
+        self.cy = 0;
+        self.vk = 4;
+        self.k(K_TICK);
         if self.f != 0 {
             self.f = 0;
             self.r = self.r.wrapping_sub(1);
+            self.k(K_FSET);
             if (self.r as i8) <= 0 {
                 self.p = self.p.wrapping_add(2);
                 self.load_position();
@@ -434,33 +607,257 @@ impl Alp {
         }
         self.c = self.c.wrapping_sub(1);
         if (self.c as i8) > 0 {
+            self.k(K_MID);
             for r in 0..4 {
+                self.vk = r;
                 if (1..=8).contains(&self.rec[r].e) {
+                    self.k(K_MEFF);
                     self.effect(r, hw);
+                } else if self.rec[r].e == 0 {
+                    self.k(K_MNOEFF);
+                } else {
+                    self.k(K_MHI);
                 }
-                hw.vol(3 - r, self.rec[r].v);
+                let v = self.rec[r].v;
+                self.at(K_MVOL, hw);
+                hw.vol(3 - r, v);
             }
+            self.vk = 4;
         } else {
+            self.k(K_ROWT);
             self.f = 0xFF;
             let mut d5 = 0u8;
             for r in 0..4 {
+                self.vk = r;
                 self.row(r, &mut d5, hw);
             }
+            self.vk = 4;
             self.c = self.speed;
             self.dmask = d5;
             if d5 != 0 {
+                self.at(K_WDOFF, hw);
                 hw.dmacon(d5 as u16);
+                self.k(K_DOFFEND);
+            } else {
+                self.k(K_NODOFF);
             }
         }
-        hw.wait(DMA_WAIT);
+        self.wait(0);
+        self.at(K_WDON, hw);
         hw.dmacon(0x8200 | self.dmask as u16);
-        hw.wait(DMA_WAIT);
+        self.wait(1);
         for r in 0..4 {
-            hw.loc(3 - r, self.rec[r].la);
-            hw.len(3 - r, self.rec[r].ll);
+            self.vk = r;
+            let (la, ll) = (self.rec[r].la, self.rec[r].ll);
+            self.at(K_WLLOC, hw);
+            hw.loc(3 - r, la);
+            self.at(K_WLLEN, hw);
+            hw.len(3 - r, ll);
         }
+        self.vk = 4;
     }
 }
+
+/// The paths of the original's code (the cost tables' rows).
+const K_TICK: usize = 0;
+const K_FSET: usize = 1;
+const K_LP: usize = 2;
+const K_LPEND: usize = 3;
+const K_MID: usize = 4;
+const K_MEFF: usize = 5;
+const K_MNOEFF: usize = 6;
+const K_MVOL: usize = 7;
+const K_ROWT: usize = 8;
+const K_WDOFF: usize = 9;
+const K_NODOFF: usize = 10;
+const K_RKDEC: usize = 11;
+const K_RKSKIP: usize = 12;
+const K_RCMD: usize = 13;
+const K_RCMDK: usize = 14;
+const K_REV: usize = 15;
+const K_RSP: usize = 16;
+const K_REFF: usize = 17;
+const K_RNPORTA: usize = 18;
+const K_WRLOC: usize = 19;
+const K_WRLEN: usize = 20;
+const K_RNEND: usize = 21;
+const K_RNONOTE: usize = 22;
+const K_RT0: usize = 23;
+const K_RTP: usize = 24;
+const K_WRPER: usize = 25;
+const K_WRVOL: usize = 26;
+const K_EAQ: usize = 27;
+const K_EACL: usize = 28;
+const K_WEALEN: usize = 29;
+const K_WEALOC: usize = 30;
+const K_EAEND: usize = 31;
+const K_EB: usize = 32;
+const K_EC: usize = 33;
+const K_ED: usize = 34;
+const K_EE1: usize = 35;
+const K_EE2: usize = 36;
+const K_EECL: usize = 37;
+const K_WEEPER: usize = 38;
+const K_EEEND: usize = 39;
+const K_EE3: usize = 40;
+const K_EE4: usize = 41;
+const K_EEX: usize = 42;
+const K_EF: usize = 43;
+const K_E9: usize = 44;
+const K_VNEG: usize = 45;
+const K_PNONE: usize = 46;
+const K_PUP: usize = 47;
+const K_PDN: usize = 48;
+const K_PHIT: usize = 49;
+const K_ARPLOOP: usize = 50;
+const K_ARP0: usize = 51;
+const K_ARP1: usize = 52;
+const K_ARP2: usize = 53;
+const K_WARP: usize = 54;
+const K_ARPEND: usize = 55;
+const K_SLIDE: usize = 56;
+const K_SLCL: usize = 57;
+const K_WSLIDE: usize = 58;
+const K_SLEND: usize = 59;
+const K_E3: usize = 60;
+const K_E5: usize = 61;
+const K_E3Q: usize = 62;
+const K_WPORTA: usize = 63;
+const K_PEND: usize = 64;
+const K_VS: usize = 65;
+const K_E4: usize = 66;
+const K_E6: usize = 67;
+const K_E4Q: usize = 68;
+const K_WVIB: usize = 69;
+const K_VIBEND: usize = 70;
+const K_E8: usize = 71;
+const K_E7: usize = 72;
+const K_VCLZ: usize = 73;
+const K_VCLH: usize = 74;
+const K_W1PRE: usize = 75;
+// 76: first poll, 77: poll period, 78: lines; 79-82 the same for the second wait
+const K_WDON: usize = 83;
+const K_WLLOC: usize = 84;
+const K_WLLEN: usize = 85;
+const K_MHI: usize = 86;
+const K_RTPS: usize = 87;
+const K_RSPHI: usize = 88;
+const K_PHITD: usize = 89;
+const K_VS5: usize = 90;
+const K_RNPEQ: usize = 91;
+const K_DOFFEND: usize = 92;
+const K_E7Q: usize = 93;
+const K_E7NEG: usize = 94;
+const NK: usize = 95;
+/// Each path's 68000 cycles, per record (the last column: no record). Integer costs fitted
+/// exactly to the reference's write times. Rows 75-78 and 79-82 are the two waits (cycles before
+/// the line is read, before the first poll, the poll period and the lines waited, in the last
+/// column).
+const COSTS: [[i32; 5]; NK] = [
+    [0, 0, 0, 0, 195],
+    [0, 0, 0, 0, 41],
+    [0, 0, 0, 0, 433],
+    [0, 0, 0, 0, 170],
+    [0, 0, 0, 0, 0],
+    [347, 403, 215, 364, 0],
+    [-17, 47, 70, 70, 0],
+    [467, 469, 415, 361, 0],
+    [0, 0, 0, 0, 370],
+    [0, 0, 0, 0, 204],
+    [0, 0, 0, 0, 37],
+    [39, 39, 39, 39, 0],
+    [-124, 0, 162, 131, 0],
+    [124, 124, 124, 124, 0],
+    [0, 124, 286, 255, 0],
+    [285, 226, 586, 357, 0],
+    [32, 32, 17, 215, 0],
+    [20, 20, 20, 20, 0],
+    [0, 183, 0, 0, 0],
+    [373, 822, 407, 345, 0],
+    [16, 16, 16, 16, 0],
+    [112, -170, 0, 0, 0],
+    [-183, 0, -198, 0, 0],
+    [70, 70, 70, 78, 0],
+    [16, 16, 16, 16, 0],
+    [0, 282, 112, 112, 0],
+    [256, 266, 243, 220, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [49, 0, 161, 0, 0],
+    [24, 0, 24, 0, 0],
+    [427, 0, 237, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, -8, 0],
+    [0, 8, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 96, 0],
+    [0, 0, 0, 88, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, -8, 0],
+    [8, 8, 8, 0, 0],
+    [4, 4, 0, 4, 0],
+    [-243, -238, -27, -173, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [16, 16, 16, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 180, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 3, 3, 0, 0],
+    [0, 0, 0, 0, 0],
+    [12, 12, 12, 12, 0],
+    [26, 23, 203, 0, 0],
+    [12, 12, 12, 12, 0],
+    [76, 76, 0, 0, 0],
+    [21, 21, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [12, 12, 0, 12, 0],
+    [181, 181, 394, 202, 0],
+    [0, 0, 0, 0, 0],
+    [0, -211, 0, -149, 0],
+    [19, 0, 0, 0, 0],
+    [0, -13, -13, 0, 0],
+    [0, 0, 0, 14, 0],
+    [0, 0, 0, 0, -1129],
+    [0, 0, 0, 0, 3],
+    [0, 0, 0, 0, 25],
+    [0, 0, 0, 0, 10],
+    [0, 0, 0, 0, -1450],
+    [0, 0, 0, 0, 3],
+    [0, 0, 0, 0, 25],
+    [0, 0, 0, 0, 10],
+    [0, 0, 0, 0, 1013],
+    [1015, 24, 24, 24, 0],
+    [16, 16, 16, 16, 0],
+    [0, 64, 87, 87, 0],
+    [0, 0, 0, 0, 0],
+    [0, 4, 4, 0, 0],
+    [26, 26, 26, 52, 0],
+    [0, 82, 82, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, -155],
+    [12, 0, 0, 0, 0],
+    [4, 0, 0, 0, 0],
+];
+
+/// From the player's start to the song's start: the check and init's colour clocks (the
+/// companion's load when the samples are in one), and 55 for every sample record.
+fn start_time(d: &[u8], companion: bool) -> u64 {
+    let Some(w) = parts(d) else { return 0 };
+    (if companion { 1878 } else { 564 }) + START_TO_SONG + 55 * (w[0] >> 4) as u64
+}
+const START_TO_SONG: u64 = 2041;
 
 impl Replayer for Alp {
     fn format(&self) -> &'static str {
@@ -508,6 +905,9 @@ fn start(d: &[u8], smp: u32, title: String) -> Option<Alp> {
         rec: Default::default(),
         ft: [0; 4],
         songend: false,
+        t0: 0,
+        cy: 0,
+        vk: 4,
     };
     p.load_position();
     // the position the song starts at is not the end of it
@@ -528,7 +928,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let total = be32(d, 4) as usize;
     let file = m.bus.read_cstr(m.deli.file_buf);
     let name = file.rsplit('/').next().unwrap_or(&file).to_string();
-    let smp = if total > d.len() {
+    let t0 = m.bus.clock;
+    let companion = total > d.len();
+    let smp = if companion {
         let data = crate::deli::read_companion(m, &companion_name(&name)?).1.ok()?;
         let a = m.alloc((data.len() as u32).max(4));
         if a == 0 {
@@ -539,7 +941,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     } else {
         base + (8 + w[0] + w[1] + w[2] + w[3]) as u32
     };
-    Some(Box::new(start(d, smp, name)?))
+    let p = start(d, smp, name)?;
+    m.bus.clock = m.bus.clock.max(t0 + start_time(d, companion));
+    Some(Box::new(p))
 }
 
 #[cfg(test)]

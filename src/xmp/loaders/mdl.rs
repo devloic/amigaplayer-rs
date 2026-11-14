@@ -768,8 +768,12 @@ fn get_chunk_sa(_id: &[u8], size: u32, m: &mut ModuleData, f: &mut Hio, data: &m
                     if x16 {
                         return Err(());
                     }
-                    if clen <= 0 || clen > 0x80000 {
-                        // Max compressed sample size
+                    // Max compressed sample size. libxmp 4.7.4 allows 0x80000 bytes here, which
+                    // refuses Digitrakker's own files with an 8-bit sample of more than about
+                    // 650 KB (Soorya Namaskara: 831 576 packed bytes, 1 136 952 unpacked);
+                    // the port allows what it allows a 16-bit one. The size is still bounded
+                    // by the chunk (`size_bound` above) and the unpacker by the sample length.
+                    if clen <= 0 || clen > MAX_SAMPLE_SIZE {
                         return Err(());
                     }
                 } else {

@@ -982,6 +982,11 @@ BLACKBOX_REF = {'iff8svx': 'sox', 'aiff': 'sox', 'riffwave': 'sox', 'riffwaveadp
 # output stage the port does not have (refcmp's STAGE-MISMATCH on all 4 rows), so openmpt123 is the
 # reference, at the port's stage (48 kHz, linear interpolation, full stereo, no dither).
 BLACKBOX_PREFIX = ('delusiondigitalmusicformat',)
+# libxmp-port formats where the port loads modules libxmp 4.7.4 refuses (README): for those modules
+# alone (the oracle prints "-\t0\tload") openmpt123 is the reference, at the port's stage. Digitrakker:
+# the port lifts libxmp's 512 KB cap on a packed 8-bit sample. The port plays them on libxmp's mixer,
+# openmpt123 on its own: at best SIMILAR.
+XMP_REFUSED_BLACKBOX = ('digitrakker',)
 
 
 def blackbox_key(fmt):
@@ -1344,6 +1349,12 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
                 return dict(none, note=f'no libxmp harness build that renders at {ctx.rate} Hz', norate=True)
             return dict(none, note='no libxmp oracle')
         raw, info = render_oracle(ctx, mod)
+        if not raw and info.startswith('-\t0\tload') and _norm(po.get('format', '')).startswith(XMP_REFUSED_BLACKBOX):
+            ref = render_blackbox(ctx, mod, po, pplay, 'openmpt123')
+            if isinstance(ref, dict):
+                ref['player'] = 'libxmp 4.7.4 refuses it; ' + ref['player']
+                return ref
+            return dict(none, note='oracle: libxmp 4.7.4 refuses it; ' + ref[:80], noref=False)
         if not raw or '\t' not in info:
             return dict(none, note='oracle: ' + info[:100], noref=False)
         return dict(kind='libxmp', wav=raw, data=read_raw(raw, ctx.rate), out='libxmp 4.7.4 ' + info.replace('\t', ' '),

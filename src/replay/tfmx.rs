@@ -871,6 +871,38 @@ fn new_pro(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     make_pro(d, base, smpl, m, None)
 }
 
+/// The engines for a module whose song part `d` (in guest memory at `base`) and samples come
+/// from elsewhere than `mdat.NAME` and `smpl.NAME`, the samples in guest memory at `smpl`
+/// (TFMX-MOD files: `tfmxmod.rs`): the replayer the plain pair would play, with the subsong
+/// whose song-table entry is `song` (or the first after it) to start, and the format's name.
+pub(super) fn new_with_samples(d: &[u8], base: u32, smpl: u32, song: u8, m: &mut Machine) -> Option<Box<dyn Replayer>> {
+    let (mut r, sub) = if detect_pro(d) {
+        let r = make_pro(d, base, smpl, m, None)?;
+        let sub = subsong_list(&m.bus, base).iter().position(|&s| s >= song).unwrap_or(0);
+        (r, sub as u16)
+    } else if detect_15(d) {
+        let r = make_15(d, base, smpl, false)?;
+        let sub = (song as u16).min(r.subsongs().1);
+        (r, sub)
+    } else if detect_7v(d) {
+        let r = make_7v(d, base, smpl, m)?;
+        let sub = (song as u16).min(r.subsongs().1);
+        (r, sub)
+    } else {
+        return None;
+    };
+    if sub != r.subsongs().2 {
+        let mut hw = Hw { bus: &mut m.bus };
+        r.set_subsong(sub, &mut hw);
+    }
+    Some(r)
+}
+
+/// Whether one of the engines takes the song part `d` (see `new_with_samples`).
+pub(super) fn detect_any(d: &[u8]) -> bool {
+    detect_pro(d) || detect_15(d) || detect_7v(d)
+}
+
 /// The TFMX-Pro-TFHD player's engine: the song part `d` is in guest memory at `base`, its
 /// samples are at `smpl` (in the same file, no copy). `songs` is the number of subsongs the
 /// player lists (its compacted song table, see `tfhd.rs`).

@@ -176,6 +176,7 @@ pub mod synthpack;
 pub mod specialfxst;
 pub mod tfhd;
 pub mod tfmx;
+pub mod tfmxmod;
 pub mod tfmxst;
 pub mod timfollin;
 pub mod tcbtracker;
@@ -293,6 +294,9 @@ pub const REPLAYERS: &[Open] = &[
     deltamusic1::OPEN,
     sonicarranger::OPEN,
     sidmon1::OPEN,
+    // strict (the TFMX-MOD container and a TFMX song in it): before TFMX 1.5, which takes any
+    // "TFMX" but "TFMX-SONG" (these files too)
+    tfmxmod::OPEN,
     // before TFMX 1.5, which takes any "TFMX" but "TFMX-SONG", and Hippel COSO
     hippel::OPEN_7V,
     tfmx::OPEN_PRO,

@@ -38,6 +38,7 @@ use super::m68kdec::{decode, Ea, Insn, K};
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
 use m68k::AddressBus;
+use std::collections::HashMap;
 
 pub const OPEN: Open = Open { name: "Sean Conran", detect, new };
 
@@ -45,9 +46,50 @@ pub const OPEN: Open = Open { name: "Sean Conran", detect, new };
 const VIRT: u32 = 0xF000;
 const HWBASE: u32 = 0xDFF096;
 
-/// The waits between writes, in colour clocks (rough: the times are not compared).
+/// The wait after an interrupt write, in colour clocks (rough).
 const T_WRITE: u64 = 24;
-const T_VOICE: u64 = 300;
+
+// The original's 68000 cycles per code path, measured: every write of a tick is a direct Paula
+// write at the tick's start plus half the cycles its code took to reach it (rounded down). A label
+// names a path of the play routine (`v` a voice's counter, `v.parse` a parse, `eff` the effects,
+// `vol` the final volume block, ...), most with the voice's block as a suffix (the original's code
+// is one block per voice); `nf` is the counter form that tests zero, `.b` the builds whose stop test
+// is a `bmi`. Fitted exactly to every gap of the reference runs of ten modules (the cycles between
+// two writes from a run whose cycle count starts one cycle late, so each write's parity is known);
+// a label the runs did not separate takes its voice family's value. Some builds take other cycles
+// on a few paths (`costs`, by their layout), measured the same way.
+const COSTS: &[(&str, i16)] = &[
+    ("act.h2.0", 12), ("act.h2.1", 12), ("act.h2.2", 12), ("act.h2.3", 12), ("act.i1.0", 12), ("act.i1.1", 12),
+    ("act.i1.2", 12), ("act.i1.3", 12), ("call.0", 120), ("call.1", 120), ("call.2", 120), ("call.3", 120),
+    ("cut.post.0", -36), ("cut.post.1", -36), ("cut.post.2", -36), ("cut.post.3", -36), ("eff.off.0", -16),
+    ("eff.off.1", -16), ("eff.off.2", -16), ("eff.off.3", -6), ("eff.per.0", 315), ("eff.per.1", 315),
+    ("eff.per.2", 315), ("eff.per.3", 315), ("eff.vneg.0", 4), ("eff.vneg.1", 4), ("eff.vneg.2", 4),
+    ("eff.vneg.3", 4), ("ev3.0", 4), ("ev3.1", 4), ("ev3.2", 4), ("ev3.3", 4), ("evn0.post.1", 4), ("evn5.0", -6),
+    ("evn5.1", -6), ("evn5.2", -6), ("evn5.3", -6), ("fade.off", 13), ("fin", 90), ("la.cut.0", -18),
+    ("la.cut.1", -18), ("la.cut.2", -18), ("la.cut.3", -18), ("la.end.0", 5), ("la.end.1", 5), ("la.end.2", 5),
+    ("la.end.3", 5), ("la.skip.0", 56), ("la.skip.1", 56), ("la.skip.2", 56), ("la.skip.3", 56),
+    ("la.skip.b.0", 4), ("la.skip.b.1", 4), ("la.skip.b.2", 4), ("la.skip.b.3", 4), ("lan.end.0", 17),
+    ("lan.end.1", 17), ("lan.end.2", 17), ("lan.end.3", 17), ("lan.skip.0", 52), ("lan.skip.1", 52),
+    ("lan.skip.2", 52), ("lan.skip.3", 52), ("lan.skip.b.0", 4), ("lan.skip.b.1", 4), ("lan.skip.b.2", 4),
+    ("lan.skip.b.3", 4), ("led", 24), ("mrel.ok.0", 98), ("mrel.ok.1", 98), ("mrel.ok.2", 98), ("mrel.ok.3", 98),
+    ("penv.loop.0", 30), ("penv.loop.1", 30), ("penv.loop.2", 30), ("penv.loop.3", 30), ("pos.0", 215),
+    ("pos.1", 149), ("pos.2", 149), ("pos.3", 149), ("ret.0", 47), ("ret.1", 47), ("ret.2", 47), ("ret.3", 47),
+    ("ret.back.0", 34), ("ret.back.1", 34), ("ret.back.2", 34), ("ret.back.3", 34), ("setb.0", 58), ("setb.1", 58),
+    ("setb.2", 58), ("setb.3", 58), ("setptr.0", 108), ("setptr.1", 108), ("setptr.2", 108), ("setptr.3", 108),
+    ("shbit", 2), ("smp.0", 114), ("smp.1", 114), ("smp.2", 114), ("smp.3", 114), ("smp.post.0", 142),
+    ("smp.post.1", 142), ("smp.post.2", 142), ("smp.post.3", 132), ("stub1", 16), ("stub2", 12), ("stub3", 12),
+    ("stub4", 12), ("tick", 193), ("v.0", 80), ("v.1", 80), ("v.2", 80), ("v.3", 80), ("v.cut.0", 91),
+    ("v.cut.1", 91), ("v.cut.2", 91), ("v.cut.3", 87), ("v.next.0", -74), ("v.next.1", -74), ("v.next.2", -74),
+    ("v.next.3", -64), ("v.nf.0", 12), ("v.nf.1", 16), ("v.nf.2", 16), ("v.nf.3", 16), ("v.parse.0", 105),
+    ("v.parse.1", 105), ("v.parse.2", 105), ("v.parse.3", 105), ("v.run.0", -15), ("v.run.1", -15),
+    ("v.run.2", -15), ("v.run.3", -15), ("v.stop.0", 128), ("v.stop.1", 128), ("v.stop.2", 128), ("v.stop.3", 128),
+    ("venv.loop.0", 24), ("venv.loop.1", 24), ("venv.loop.2", 24), ("venv.loop.3", 24), ("venv.plain.0", -6),
+    ("venv.plain.1", -6), ("venv.plain.2", -6), ("venv.plain.3", -6), ("venv.rs.b.0", 4), ("venv.rs.b.1", 4),
+    ("venv.rs.b.2", 4), ("venv.rs.b.3", 4), ("vol.0", 335), ("vol.1", 345), ("vol.2", 335), ("vol.3", 335),
+    ("vol.after.0", 2), ("vol.after.1", 2), ("vol.after.2", 2), ("vol.after.3", 2), ("vol.neg.0", 305),
+    ("vol.neg.1", 315), ("vol.neg.2", 305), ("vol.neg.3", 305),
+];
+
 /// The audio interrupt's latency after the DMA-on that raises it (the reference's
 /// shortest, 160 colour clocks).
 const T_IRQ: u64 = 160;
@@ -1002,6 +1044,11 @@ struct SeanConran {
     started: bool,
     songend: bool,
     armed: [bool; 4],
+    /// The cycles of each code path for this build.
+    costs: HashMap<String, i64>,
+    /// The tick's start (colour clock) and the original's 68000 cycles since then.
+    t0: u64,
+    cy: i64,
 }
 
 /// How a voice's parse ended.
@@ -1039,11 +1086,30 @@ impl SeanConran {
         self.set_w(o + 2, v as u16);
     }
 
+    /// The cycles of a code path (of voice `v`'s block when `v` < 4).
+    fn k(&mut self, l: &str, v: usize) {
+        let n = if v < 4 { format!("{l}.{v}") } else { l.to_string() };
+        self.cy += self.costs.get(&n).copied().unwrap_or(0);
+    }
+
+    /// The clock of the next write: the tick's start plus half the cycles.
+    fn at(&mut self, hw: &mut Hw) {
+        let t = self.t0 + self.cy.max(0) as u64 / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+
     fn guest(&self, a: u32) -> u32 {
         self.base.wrapping_add(a.wrapping_sub(VIRT))
     }
 
-    fn act(&mut self, a: &Act, hw: &mut Hw) {
+    fn act(&mut self, a: &Act, _l: &str, v: usize, hw: &mut Hw) {
+        let l = format!("act.{}{}", if matches!(a.t, Tgt::Hw(_)) { "h" } else { "i" }, a.size);
+        self.k(&l, v);
+        if matches!(a.t, Tgt::Hw(_)) {
+            self.at(hw);
+        }
         match a.t {
             Tgt::Img(o) => match a.size {
                 1 => self.set_b(o, a.val as u8),
@@ -1060,7 +1126,6 @@ impl SeanConran {
                 if h == HWBASE {
                     self.dma_on(a.val as u16, hw);
                 }
-                hw.wait(T_WRITE);
             }
         }
     }
@@ -1110,10 +1175,9 @@ impl SeanConran {
         let ev = self.lay.initev.clone();
         for e in ev {
             match e {
-                InitEv::Store(o, size, val) => self.act(&Act { t: Tgt::Img(o), size, val }, hw),
+                InitEv::Store(o, size, val) => self.act(&Act { t: Tgt::Img(o), size, val }, "init", 9, hw),
                 InitEv::Hw(h, v) => {
                     hw.bus.write_word(h, v);
-                    hw.wait(T_WRITE);
                 }
                 InitEv::SubWord(o) => self.set_w(o, 0x0F00 + s),
                 InitEv::MasterCopy(src, dst) => {
@@ -1139,11 +1203,13 @@ impl SeanConran {
     /// A position read (5.4); false when the song stops.
     fn position(&mut self, v: usize, test: bool) -> bool {
         let np = self.lay.voices[v].np.clone();
+        self.k("pos", v);
         let mut pos = self.il(np.pos);
         let mut c = self.b(pos);
         pos = pos.wrapping_add(1);
         let mut guard = 0;
         while test && (c as i8) < 0 && np.neg != NegKind::None {
+            self.k("pos.neg", v);
             if v == 0 {
                 self.songend = true;
             }
@@ -1154,6 +1220,7 @@ impl SeanConran {
             let op = self.b(pos);
             match np.neg {
                 NegKind::Loop => {
+                    self.k("pos.loop", v);
                     pos = pos.wrapping_sub(op as u32);
                     c = self.b(pos);
                     pos = pos.wrapping_add(1);
@@ -1162,6 +1229,7 @@ impl SeanConran {
                 NegKind::StopFf if op == 0xFF => return false,
                 NegKind::StopNeg if (op as i8) < 0 => return false,
                 NegKind::StopFf | NegKind::StopNeg => {
+                    self.k("pos.back", v);
                     pos = pos.wrapping_sub(op as u32);
                     c = self.b(pos);
                     pos = pos.wrapping_add(1);
@@ -1178,19 +1246,26 @@ impl SeanConran {
     }
 
     /// The lookahead after a note or duration (4.3).
-    fn lookahead(&mut self, v: usize, mut q: u32) {
+    fn lookahead(&mut self, v: usize, mut q: u32, n: bool) {
+        let la = if n { "lan" } else { "la" };
         for _ in 0..64 {
             let c = self.b(q) as i8;
             if c < self.lay.d3 {
+                self.k(&format!("{la}.cut"), v);
                 self.set_b(self.lay.voices[v].cut, 0xFF);
                 return;
             }
             if c == self.lay.d2 {
+                self.k(&format!("{la}.skip"), v);
+                if self.lay.stub.bmi {
+                    self.k(&format!("{la}.skip.b"), v);
+                }
                 q = q.wrapping_add(2);
                 continue;
             }
             break;
         }
+        self.k(&format!("{la}.end"), v);
         self.set_b(self.lay.voices[v].cut, 0);
     }
 
@@ -1201,15 +1276,20 @@ impl SeanConran {
             let c = self.b(a0) as usize;
             a0 = a0.wrapping_add(1);
             let cmd = if c % 4 == 0 { self.lay.voices[v].cmds.get(c / 4).cloned() } else { None };
-            let Some(cmd) = cmd else { return Ended::Next };
+            let Some(cmd) = cmd else {
+                self.k("cmd.bad", v);
+                return Ended::Next;
+            };
             let op2 = |s: &Self, a: u32| (s.b(a), s.b(a.wrapping_add(1)));
             match cmd {
                 Cmd::SetB(x) => {
+                    self.k("setb", v);
                     let b = self.b(a0);
                     self.set_b(x, b);
                     a0 = a0.wrapping_add(1);
                 }
                 Cmd::SetPtr { cell, scratch } => {
+                    self.k("setptr", v);
                     let (h, l) = op2(self, a0);
                     a0 = a0.wrapping_add(2);
                     self.set_b(scratch, h);
@@ -1218,6 +1298,7 @@ impl SeanConran {
                     self.set_l(cell, x);
                 }
                 Cmd::Call { ret, scratch } => {
+                    self.k("call", v);
                     let (h, l) = op2(self, a0);
                     a0 = a0.wrapping_add(2);
                     self.set_b(scratch, h);
@@ -1229,12 +1310,15 @@ impl SeanConran {
                     }
                 }
                 Cmd::Ret { flag, ret } => {
+                    self.k("ret", v);
                     if self.ib(flag) != 0 {
+                        self.k("ret.back", v);
                         self.set_b(flag, 0);
                         a0 = self.il(ret);
                     }
                 }
                 Cmd::Sample { scratch, extra } => {
+                    self.k("smp", v);
                     a0 = a0.wrapping_add(1);
                     for k in 0..3 {
                         let b = self.b(a0);
@@ -1242,44 +1326,61 @@ impl SeanConran {
                         self.set_b(scratch + k, b);
                     }
                     let off = self.il(scratch - 1);
+                    self.at(hw);
                     hw.loc(v, self.base.wrapping_add(off));
-                    hw.wait(T_WRITE);
-                    for a in &extra {
-                        self.act(a, hw);
+                    for (i, a) in extra.iter().enumerate() {
+                        let _ = i;
+                        self.act(a, "", v, hw);
                     }
+                    self.k("smp.post", v);
                 }
                 Cmd::SampleRec { scratch } => {
+                    self.k("srec", v);
                     let (h, l) = op2(self, a0);
                     a0 = a0.wrapping_add(2);
                     self.set_b(scratch, h);
                     self.set_b(scratch + 1, l);
                     let r = ((h as u16) << 8 | l as u16) as i16 as isize as usize;
                     let (lc, len, lc2, len2) = (self.il(r), self.iw(r + 4), self.il(r + 6), self.iw(r + 10));
+                    self.at(hw);
                     hw.loc(v, self.base.wrapping_add(lc));
+                    self.k("srec.len", v);
+                    self.at(hw);
                     hw.len(v, len);
                     if let Some(irq) = self.lay.irq {
                         self.set_l(irq[v].0, VIRT.wrapping_add(lc2));
                         self.set_w(irq[v].1, len2);
                     }
+                    self.k("srec.irq", v);
+                    self.at(hw);
                     hw.bus.write_word(0xDFF09C, 0x80 << v);
+                    self.k("srec.ena", v);
+                    self.at(hw);
                     hw.bus.write_word(0xDFF09A, 0xC000 | 0x80 << v);
                     self.armed[v] = true;
+                    self.k("srec.per", v);
+                    self.at(hw);
                     hw.per(v, 0xFFFF);
-                    hw.wait(T_WRITE);
+                    self.k("srec.dma", v);
+                    self.at(hw);
                     hw.dmacon(0x8200 | 1 << v);
                     self.dma_on(0x8200 | 1 << v, hw);
-                    hw.wait(T_WRITE);
                 }
                 Cmd::MasterRel { mv } => {
+                    self.k("mrel", v);
                     let x = self.b(a0).wrapping_add(self.ib(mv));
                     a0 = a0.wrapping_add(1);
+                    self.k(if (x as i8) < 0 { "mrel.neg" } else if x > 15 { "mrel.max" } else { "mrel.ok" }, v);
                     let x = if (x as i8) < 0 { 0 } else { x.min(15) };
                     self.set_b(mv, x);
                 }
                 Cmd::Event { pre, note, cnt, pat, rest, .. } => {
-                    for a in &pre {
-                        self.act(a, hw);
+                    let shape = format!("ev{}{}{}", if note.is_some() { "n" } else { "" }, if rest { "r" } else { "" }, pre.len());
+                    self.k(&shape, v);
+                    for a in pre.iter() {
+                        self.act(a, "", v, hw);
                     }
+                    self.k(&format!("{shape}.post"), v);
                     if let Some(n) = note {
                         let b = self.b(a0);
                         self.set_b(n, b);
@@ -1292,17 +1393,21 @@ impl SeanConran {
                     if rest {
                         return Ended::Next;
                     }
-                    self.lookahead(v, a0);
+                    self.lookahead(v, a0, note.is_some());
                     return Ended::Effects;
                 }
                 Cmd::NextPat => {
+                    self.k("np", v);
                     let test = self.lay.voices[v].np.neg != NegKind::None;
                     if !self.position(v, test) {
                         return Ended::Stop;
                     }
                     a0 = self.il(self.lay.voices[v].pat);
                 }
-                Cmd::Bogus => return Ended::Next,
+                Cmd::Bogus => {
+                    self.k("bogus", v);
+                    return Ended::Next;
+                }
             }
         }
         Ended::Next
@@ -1310,15 +1415,21 @@ impl SeanConran {
 
     /// One envelope step: the next byte of the envelope whose restart flag, start and
     /// pointer cells are given; the 0x80 marker loops back.
-    fn envelope(&mut self, rs: usize, start: usize, ptr: usize) -> u8 {
+    fn envelope(&mut self, rs: usize, start: usize, ptr: usize, l: &str, v: usize) -> u8 {
         let mut a = if (self.ib(rs) as i8) < 0 {
+            self.k(&format!("{l}.rs"), v);
+            if l == "venv" && self.lay.stub.bmi {
+                self.k("venv.rs.b", v);
+            }
             self.set_b(rs, 0);
             self.il(start)
         } else {
             let a = self.il(ptr);
             if self.b(a) == 0x80 {
+                self.k(&format!("{l}.loop"), v);
                 a.wrapping_sub(self.b(a.wrapping_add(1)) as u32)
             } else {
+                self.k(&format!("{l}.plain"), v);
                 a
             }
         };
@@ -1332,18 +1443,22 @@ impl SeanConran {
     fn effects(&mut self, v: usize, hw: &mut Hw) {
         let f = self.lay.voices[v].eff.clone();
         if self.ib(f.eff) == 0 {
+            self.k("eff.off", v);
             return;
         }
-        let e = self.envelope(f.vrs, f.venvs, f.venvp);
+        self.k("eff", v);
+        let e = self.envelope(f.vrs, f.venvs, f.venvp, "venv", v);
         let mut x = self.ib(f.volb).wrapping_add(e);
         if (x as i8) < 0 {
+            self.k("eff.vneg", v);
             x = 0;
         }
         if let Some(m) = f.mask {
             x &= m;
         }
         self.set_b(f.volidx, x);
-        let e = self.envelope(f.prs, f.penvs, f.penvp);
+        self.k("eff.p", v);
+        let e = self.envelope(f.prs, f.penvs, f.penvp, "penv", v);
         let nw = self.iw(f.note);
         let mut dd = nw & 0xFF00 | (nw as u8).wrapping_add(e) as u16;
         if f.double {
@@ -1356,8 +1471,12 @@ impl SeanConran {
             n => n,
         };
         p = if sh & 0x100 != 0 { p << n } else { p >> n };
+        self.k("eff.per", v);
+        for _ in 0..n {
+            self.k("shbit", 9);
+        }
+        self.at(hw);
         hw.per(v, p);
-        hw.wait(T_WRITE);
     }
 
     /// The stop stub (5.8).
@@ -1366,77 +1485,103 @@ impl SeanConran {
         if !direct {
             let sf = self.ib(s.flag);
             if if s.bmi { (sf as i8) < 0 } else { sf == 0 } {
+                self.k("stub.skip", 9);
                 return;
             }
         }
-        for &(h, v) in &s.writes {
+        for (i, &(h, v)) in s.writes.iter().enumerate() {
+            self.k(&format!("stub{i}"), 9);
+            self.at(hw);
             hw.bus.write_word(h, v);
-            hw.wait(T_WRITE);
         }
         self.set_b(s.flag, s.set);
     }
 
     fn play(&mut self, hw: &mut Hw) {
+        self.k("tick", 9);
         if self.ib(self.lay.run) == 0 {
+            self.k("norun", 9);
             self.stub(false, hw);
             return;
         }
         if let Some(set) = self.lay.led {
+            self.k("led", 9);
             self.led(hw, set);
         }
         for v in 0..4 {
+            self.k("v", v);
+            if !self.lay.voices[v].neg_form {
+                self.k("v.nf", v);
+            }
             let vc = &self.lay.voices[v];
             let (cnt, neg_form, cut) = (vc.cnt, vc.neg_form, vc.cut);
             let c = self.ib(cnt).wrapping_sub(1);
             self.set_b(cnt, c);
             let parse = if neg_form { (c as i8) < 0 } else { c == 0 };
             let ended = if parse {
+                self.k("v.parse", v);
                 self.parse(v, hw)
-            } else if c != if neg_form { 0 } else { 1 } || (self.ib(cut) as i8) < 0 {
+            } else if c != if neg_form { 0 } else { 1 } {
+                self.k("v.run", v);
+                Ended::Effects
+            } else if (self.ib(cut) as i8) < 0 {
+                self.k("v.nocut", v);
                 Ended::Effects
             } else {
+                self.k("v.cut", v);
                 let acts = self.lay.voices[v].cutacts.clone();
-                for a in &acts {
-                    self.act(a, hw);
+                for (i, a) in acts.iter().enumerate() {
+                    let _ = i;
+                    self.act(a, "", v, hw);
                 }
+                self.k("cut.post", v);
                 Ended::Next
             };
             match ended {
                 Ended::Effects => self.effects(v, hw),
-                Ended::Next => {}
+                Ended::Next => self.k("v.next", v),
                 Ended::Stop => {
+                    self.k("v.stop", v);
                     self.set_b(self.lay.run, 0);
                     let direct = self.lay.voices[v].np.direct;
                     self.stub(direct, hw);
                     return;
                 }
             }
-            hw.wait(T_VOICE);
         }
+        self.k("fin", 9);
         let f = self.lay.fin.clone();
         if let Some(fd) = &f.fade {
             if self.ib(fd.fade) != 0 {
+                self.k("fade", 9);
                 let fc = self.iw(fd.fc).wrapping_sub(1);
                 self.set_w(fd.fc, fc);
                 if fc == 0 {
+                    self.k("fade.step", 9);
                     let r = self.iw(fd.reload);
                     self.set_w(fd.fc, r);
                     let mv = self.ib(f.mv).wrapping_sub(1);
                     self.set_b(f.mv, mv);
                     if mv == 0 {
+                        self.k("fade.end", 9);
                         self.set_b(self.lay.run, 0);
                     }
                 }
+            } else {
+                self.k("fade.off", 9);
             }
         }
         let d0 = self.ib(f.mv).wrapping_sub(f.mvsub);
         for v in 0..4 {
             let x = self.ib(f.vols[v]).wrapping_add(d0);
+            self.k(if (x as i8) < 0 { "vol.neg" } else { "vol" }, v);
             let vol = if (x as i8) < 0 { 0 } else { self.iw(f.vt + 2 * x as usize) };
+            self.at(hw);
             hw.vol(v, vol);
-            hw.wait(T_WRITE);
+            self.k(if (x as i8) < 0 { "vol.neg.after" } else { "vol.after" }, v);
         }
         if f.led {
+            self.k("led.fin", 9);
             self.led(hw, true);
         }
     }
@@ -1472,12 +1617,44 @@ impl Replayer for SeanConran {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t0 = hw.bus.clock;
+        self.cy = 0;
         if !self.started {
             self.started = true;
             self.start(self.sub, hw);
+            self.cy = 0;
         }
         self.play(hw);
     }
+}
+
+/// The cycles of each code path of the build `lay` describes: `COSTS`, with the paths some builds
+/// take other cycles on, told apart by their layout (measured on the refcmp rows):
+/// - the builds whose init has no master-volume copy and whose final block has no LED write: a
+///   position step 6 more on every voice (Infestation, title; not jingles or Videokid's title, the
+///   other two without the copy);
+/// - a voice whose volume block sits 11 bytes after its volume envelope's position cell (9 in the
+///   other builds; Infestation): the plain envelope step 8 more;
+/// - a voice whose position list ends by stopping at once (jingles' voice 0): the stop 25 more.
+///
+/// Three files' rows need deltas no layout difference was found for and stay SIMILAR: Defenders
+/// of the Earth (`lan.cut.1` -4, `vol.0` +4), Infestation (`v.nf.0` -4), Ruff and Reddy
+/// (`v.nf.0` +4).
+fn costs(lay: &Layout) -> HashMap<String, i64> {
+    let mut c: HashMap<String, i64> = COSTS.iter().map(|&(l, v)| (l.to_string(), v as i64)).collect();
+    let mut add = |l: String, v: i64| *c.entry(l).or_insert(0) += v;
+    if !lay.initev.iter().any(|e| matches!(e, InitEv::MasterCopy(..))) && !lay.fin.led {
+        (0..4).for_each(|v| add(format!("pos.{v}"), 6));
+    }
+    for (v, vo) in lay.voices.iter().enumerate() {
+        if vo.eff.volb.wrapping_sub(vo.eff.venvp) == 11 {
+            add(format!("venv.plain.{v}"), 8);
+        }
+        if vo.np.neg == NegKind::StopNow {
+            add(format!("v.stop.{v}"), 25);
+        }
+    }
+    c
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -1492,6 +1669,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if lay.initev.iter().any(|e| matches!(e, InitEv::Led)) || lay.led == Some(true) {
         m.bus.ciaa.pra |= 2;
     }
+    let costs = costs(&lay);
     Some(Box::new(SeanConran {
         lay,
         pristine: d.to_vec(),
@@ -1501,6 +1679,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         started: false,
         songend: false,
         armed: [false; 4],
+        costs,
+        t0: 0,
+        cy: 0,
     }))
 }
 

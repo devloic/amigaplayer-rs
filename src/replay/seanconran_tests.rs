@@ -227,7 +227,20 @@ fn synth(pat: &[u8], list: &[u8], neg0: NegKind) -> (Vec<u8>, Layout) {
 fn run(d: Vec<u8>, lay: Layout, ticks: usize) -> (Vec<Vec<(u32, u16)>>, bool) {
     let mut e = crate::engine::Engine::new(48000.0);
     e.m.bus.write_log = Some(Vec::new());
-    let mut s = SeanConran { lay, pristine: d.clone(), img: d, base: 0x2_0000, sub: 0, started: false, songend: false, armed: [false; 4] };
+    let costs = costs(&lay);
+    let mut s = SeanConran {
+        lay,
+        costs,
+        pristine: d.clone(),
+        img: d,
+        base: 0x2_0000,
+        sub: 0,
+        started: false,
+        songend: false,
+        armed: [false; 4],
+        t0: 0,
+        cy: 0,
+    };
     let mut out = Vec::new();
     for _ in 0..ticks {
         let mut hw = Hw { bus: &mut e.m.bus };

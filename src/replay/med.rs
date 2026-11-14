@@ -213,8 +213,13 @@ mod cost {
     /// The row's commands: base and per track.
     pub const CMDS0: [f64; 2] = [159.0, 31.0];
     pub const CMDS1: [f64; 2] = [163.5, 31.0];
-    /// A track that does not play a note in the trigger loop.
+    /// A track that does not play a note in the trigger loop (after the last note); before a
+    /// note the first skipped track costs 40 and each further one 39 (`skipc`).
     pub const SKIP: f64 = 39.5;
+    pub const SKIP_FIRST: f64 = 40.0;
+    pub const SKIP_NEXT: f64 = 39.0;
+    /// The line advance moving on to the next block (the end of one, or a block command).
+    pub const NEW_BLOCK: f64 = 140.0;
     /// From the loop's start to the first note's DMA off (without skipped tracks).
     pub const FIRST: f64 = 245.5;
     /// From a note's length to the next note's DMA off (without skipped tracks), and after the last
@@ -967,9 +972,9 @@ impl Med {
             tr.hold_cnt = if tr.hold == 0 { -1 } else { tr.hold as i8 };
             let note = tr.curr_note;
             let gap = if last.is_none() {
-                cost::FIRST + cost::SKIP * skipped
+                cost::FIRST + skipc(skipped)
             } else {
-                cost::NEXT + cost::SKIP * skipped + if self.note_loops { cost::LOOPED } else { 0.0 }
+                cost::NEXT + skipc(skipped) + if self.note_loops { cost::LOOPED } else { 0.0 }
             };
             self.spend(gap);
             last = Some(t);
@@ -1266,6 +1271,7 @@ impl Med {
             if !self.keep_line {
                 line = 0;
             }
+            hold_cost += cost::NEW_BLOCK;
             let blk = self.next_pos(b, self.new_block != 0xff);
             self.pblock = if (blk as i16) < self.numblocks as i16 {
                 blk
@@ -2196,6 +2202,11 @@ impl Med {
         self.anchor = hw.bus.clock;
         self.acc2 = 0;
     }
+}
+
+/// The tracks skipped before a note in the trigger loop: the first costs 40, each further one 39.
+fn skipc(n: f64) -> f64 {
+    if n > 0.0 { cost::SKIP_FIRST + cost::SKIP_NEXT * (n - 1.0) } else { 0.0 }
 }
 
 /// The 16 period tables (finetunes 0..7, -8..-1), `TABLE` words each.

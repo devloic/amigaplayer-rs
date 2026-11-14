@@ -53,11 +53,11 @@
 //!   it on entering the last position, which cuts that position off and ends a
 //!   one-position song after its first row; the tempo gives the timer value
 //!   tempo * 14187 / 50, as the original's InitSound computes it;
-//! * the writes are spaced as the original's: each part of its code costs the
-//!   time fitted to the gaps of its write logs (see `t`), so that a note's DMA
-//!   off stops the voice for as long before the tick's DMA on. The noise
-//!   generators read the beam where the port's timing puts it, which is not
-//!   the original's to the colour clock, so their noise differs.
+//! * every write lands at the original's colour clock: each part of its code
+//!   costs the 68000 cycles fitted to the gaps of its write logs (see `COSTS`),
+//!   InitPlayer's and InitSound's time passes before the song starts (see
+//!   `new`), and the noise generators read the beam at the original's clock.
+//!   Synth effects 9, 13, 14 and 15 are timed by best-effort costs only.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -131,70 +131,193 @@ const I_ARPEGGIOS: u32 = 0x4a;
 /// The original's InitPlayer keeps the default timer to scale it by the tempo.
 const TIMER: u32 = crate::deli::DEFAULT_TIMER as u32;
 
-/// Colour clocks the original takes between its writes: what each part of its
-/// code costs, fitted (least squares) to the gaps between the writes of its
-/// write logs on 80 modules. The code adds the parts it runs to `pend`; a
-/// write waits them, plus its own kind's.
-mod t {
-    /// To each kind of write, from the code before it.
-    pub const PER: i64 = 401;
-    pub const VOL: i64 = 227;
-    pub const LEN: i64 = 105;
-    pub const LOC: i64 = 99;
-    pub const OFF: i64 = 183;
-    pub const ON: i64 = 168;
-    /// From the tick to the first voice (not measured: the logs have no tick).
-    pub const TICK: i64 = 200;
-    /// A row, a new position (not measured either).
-    pub const ROW: i64 = 200;
-    pub const POSITION: i64 = 100;
-    /// A voice's row: without a note (and with an instrument), quiet, a note,
-    /// its instrument (or none), a sample, a synth sound and its copy for each
-    /// 16 bytes.
-    pub const EMPTY: i64 = 131;
-    pub const EMPTY_INSTRUMENT: i64 = 279;
-    pub const QUIET: i64 = 114;
-    pub const NOTE: i64 = 183;
-    pub const INSTRUMENT: i64 = 352;
-    pub const NO_INSTRUMENT: i64 = 235;
-    pub const SAMPLE: i64 = -27;
-    pub const SYNTH_SOUND: i64 = 5;
-    pub const COPY16: i64 = 45;
-    /// The row's effect, by effect (the ones the logs do not have at about
-    /// their neighbours').
-    pub const ROW_EFFECT: [i64; 16] = [84, 89, 100, 100, 145, 100, 97, 97, 100, 108, 90, 100, 110, 98, 151, 110];
-    /// A sample's loop, on the next tick.
-    pub const LOOP: i64 = 97;
-    /// A voice's tick: silent; arpeggio (the instrument's, the effect's);
-    /// portamento; vibrato (its delay, it, its level); AMF and its step; slide.
-    pub const MUTED: i64 = 30;
-    pub const ARPEGGIO: i64 = 31;
-    pub const EFFECT_ARPEGGIO: i64 = 95;
-    pub const PORTAMENTO: i64 = 141;
-    pub const VIBRATO_DELAY: i64 = 27;
-    pub const VIBRATO: i64 = 80;
-    pub const VIBRATO_LEVEL: i64 = 80;
-    pub const AMF: i64 = 62;
-    pub const AMF_STEP: i64 = 22;
-    pub const SLIDE: i64 = 15;
-    /// The envelope (or none), its sustain, its delay and its step.
-    pub const ADSR: i64 = 84;
-    pub const NO_ADSR: i64 = -1;
-    pub const SUSTAIN: i64 = 53;
-    pub const ADSR_ADVANCE: i64 = 36;
-    pub const ADSR_STEP: i64 = 37;
-    /// The synth effect's delay; each effect (0 for none) and for each byte it
-    /// changes. Effects 5, 8, 9, 15 and 17 are not in the logs.
-    pub const SYNTH: i64 = 47;
-    pub const EFFECT: [i64; 18] = [22, 104, 75, 140, 117, 140, 158, 203, 243, 140, 134, 199, 110, 5, 3, 140, 19, 120];
-    pub const EFFECT_BYTE: [i64; 18] = [0, 0, 0, 20, 15, 20, 0, 19, 19, 25, 0, 40, 0, 74, 81, 25, 19, 0];
-    /// The free negator: its copy and its negation, for each longword, and
-    /// an odd byte.
-    pub const NEGATOR: i64 = 192;
-    pub const NEGATOR_COPY: i64 = 24;
-    pub const NEGATOR_NEGATE: i64 = 74;
-    pub const NEGATOR_ODD: i64 = 25;
-}
+/// 68000 cycles of the original's code, by the part of it the port runs (the names `c` takes),
+/// for voices 0-3 and for the code outside the voices (4). The original writes Paula only through
+/// the host's calls (ENPP_PokeAdr, ...), and each lands at the clock its code's cycles since the
+/// last call reach (half the cycles, rounded down: the engine's static cycle table, so a path's
+/// time depends only on its branches). The costs are integers fitted to every gap between two
+/// host calls of the reference write logs of rows 907-912 and of 217 modified copies of 909, 910
+/// and 912 (787 121 gaps, all within the rounding), plus the clocks of the noise generators'
+/// beam reads, which split the synth sound's cost around its effect (`SYNTH`, `SYNTH_TAIL`).
+/// The write-site and loop costs differ by voice (their code is reached by different branches);
+/// a name not listed costs 0. Rows marked unsure (synth effects 9, 13, 14 and 15) are best-effort
+/// fits that do not match the reference's gaps: their cost is not linear in the counts the port
+/// has, so their modified copies are not exact.
+const COSTS: &[(&str, [i64; 5])] = &[
+    ("ADSR_ADVANCE", [69, 69, 69, 69, 69]),
+    ("ADSR_STEP", [57, 57, 57, 57, 57]),
+    ("AMF", [125, 125, 125, 125, 125]),
+    ("AMF_STEP", [57, 57, 57, 57, 57]),
+    ("ARPEGGIO", [106, 106, 106, 106, 106]),
+    ("B_ADSR_WRAP", [83, 83, 83, 83, 83]),
+    ("B_AMF_WRAP", [45, 45, 45, 45, 45]),
+    ("B_AMF_WRAP0", [4, 4, 4, 4, 4]),
+    ("B_ARP_WRAP", [34, 34, 34, 34, 34]),
+    ("B_E10_RUN", [48, 48, 48, 48, 48]),
+    ("B_E17_RESET", [46, 46, 46, 46, 46]),
+    ("B_E9_NZ", [17, 17, 17, 17, 17]),
+    ("B_E9_SET", [16, 16, 16, 16, 16]),
+    ("B_EA1", [33, 33, 33, 33, 33]),
+    ("B_EA2", [47, 47, 47, 47, 47]),
+    ("B_EC_MAX", [8, 8, 8, 8, 8]),
+    ("B_EF_SET", [35, 35, 35, 35, 35]),
+    ("B_EMPTY0", [269, 269, 269, 269, 269]),
+    ("B_FX0", [13, 13, 13, 13, 13]),
+    ("B_FXPOS_WRAP1", [20, 20, 20, 20, 20]),
+    ("B_FXPOS_WRAP10", [20, 20, 20, 20, 20]),
+    ("B_FXPOS_WRAP11", [20, 20, 20, 20, 20]),
+    ("B_FXPOS_WRAP12", [20, 20, 20, 20, 20]),
+    ("B_FXPOS_WRAP13", [17, 17, 17, 17, 17]), // unsure
+    ("B_FXPOS_WRAP14", [15, 15, 15, 15, 15]), // unsure
+    ("B_FXPOS_WRAP17", [20, 20, 20, 20, 20]),
+    ("B_FXPOS_WRAP3", [20, 20, 20, 20, 20]),
+    ("B_FXPOS_WRAP4", [20, 20, 20, 20, 20]),
+    ("B_FXPOS_WRAP6", [36, 36, 36, 36, 36]),
+    ("B_FXPOS_WRAP7", [20, 20, 20, 20, 20]),
+    ("B_FXPOS_WRAP8", [36, 36, 36, 36, 36]),
+    ("B_INSTR_NZ", [7, 7, 7, 7, 7]),
+    ("B_INSTR_TR", [54, 54, 54, 54, 54]),
+    ("B_KIND_SYNTH", [53, 53, 53, 53, 53]),
+    ("B_LAST", [0, 0, 0, 0, 105]),
+    ("B_LOOPS", [0, 0, 0, 0, 37]),
+    ("B_LOOP_NONE", [0, -238, 0, 0, 0]),
+    ("B_LOOP_SKIP", [0, 21, 21, 21, 0]),
+    ("B_MM_DONE", [-295, -295, -295, -295, -295]), // unsure
+    ("B_MM_STOP", [-4, -4, -4, -4, -4]), // unsure
+    ("B_MUTED_FLAGS_CLEAR", [734, 734, 734, 734, 734]),
+    ("B_MUTED_SCOPE", [16, 16, 16, 16, 16]),
+    ("B_NEG_D1", [48, 48, 48, 48, 48]),
+    ("B_NEG_WRAP", [41, 41, 41, 41, 41]),
+    ("B_NOTE_NZ", [273, 273, 273, 273, 273]),
+    ("B_PER_HI4", [8, 8, 8, 8, 8]),
+    ("B_PER_MIN", [8, 8, 8, 8, 8]),
+    ("B_PORTA_CNT", [13, 13, 13, 13, 13]),
+    ("B_PORTA_LEN", [21, 21, 21, 21, 21]),
+    ("B_PREV0", [12, 12, 12, 12, 12]),
+    ("B_SAMPLE_NONE", [127, 127, 127, 127, 127]),
+    ("B_SAMPLE_REP1", [-11, -11, -11, -11, -11]),
+    ("B_SCOPE", [16, 16, 16, 16, 16]),
+    ("B_SUS_CNT", [47, 47, 47, 47, 47]),
+    ("B_SUS_HOLD", [33, 33, 33, 33, 33]),
+    ("B_SUS_SET", [-3, -3, -3, -3, -3]),
+    ("B_VIB_ON", [47, 47, 47, 47, 47]),
+    ("B_VOL_MAX", [8, 8, 8, 8, 8]),
+    ("B_VOL_NEG", [-3, -3, -3, -3, -3]),
+    ("COPY16", [90, 90, 90, 90, 90]),
+    ("E12_TAIL", [119, 119, 119, 119, 119]),
+    ("E16_TAIL", [4, 4, 4, 4, 4]),
+    ("EFFECT0", [51, 51, 51, 51, 51]),
+    ("EFFECT1", [217, 217, 217, 217, 217]),
+    ("EFFECT10", [212, 212, 212, 212, 212]),
+    ("EFFECT11", [470, 470, 470, 470, 470]),
+    ("EFFECT12", [110, 110, 110, 110, 110]),
+    ("EFFECT15", [-1, -1, -1, -1, -1]), // unsure
+    ("EFFECT16", [170, 170, 170, 170, 170]),
+    ("EFFECT17", [290, 290, 290, 290, 290]),
+    ("EFFECT3", [2, 2, 2, 2, 2]),
+    ("EFFECT4", [243, 243, 243, 243, 243]),
+    ("EFFECT5", [5, 5, 5, 5, 5]),
+    ("EFFECT6", [330, 330, 330, 330, 330]),
+    ("EFFECT7", [14, 14, 14, 14, 14]),
+    ("EFFECT8", [-3, -3, -3, -3, -3]),
+    ("EFFECT9", [93, 93, 93, 93, 93]), // unsure
+    ("EFFECT_ARPEGGIO", [175, 175, 175, 175, 175]),
+    ("EFFECT_BYTE16", [75, 75, 75, 75, 75]),
+    ("EFFECT_BYTE4", [29, 29, 29, 29, 29]),
+    ("EFFECT_HIGH", [70, 70, 70, 70, 70]),
+    ("EMPTY_INSTRUMENT", [556, 556, 556, 556, 556]),
+    ("H_CMD_RET", [-53, -53, -53, -53, -53]),
+    ("INSTRUMENT", [849, 849, 849, 849, 849]),
+    ("LOOP", [111, 378, 140, 140, 0]),
+    ("LP13_BYTE", [112, 112, 112, 112, 112]), // unsure
+    ("LP13_LAST", [-1, -1, -1, -1, -1]), // unsure
+    ("LP13_NEG", [7, 7, 7, 7, 7]), // unsure
+    ("LP13_UP", [5, 5, 5, 5, 5]), // unsure
+    ("LP13_WRITE", [30, 30, 30, 30, 30]), // unsure
+    ("LP14_BYTE", [137, 137, 137, 137, 137]), // unsure
+    ("LP14_LAST", [-2, -2, -2, -2, -2]), // unsure
+    ("LP14_NEG", [-1, -1, -1, -1, -1]), // unsure
+    ("LP14_UP", [1, 1, 1, 1, 1]), // unsure
+    ("LP14_WRITE", [30, 30, 30, 30, 30]), // unsure
+    ("MM15_CHG", [25, 25, 25, 25, 25]), // unsure
+    ("MM15_UP", [28, 28, 28, 28, 28]), // unsure
+    ("MM9_CHG", [26, 26, 26, 26, 26]), // unsure
+    ("MM9_UP", [22, 22, 22, 22, 22]), // unsure
+    ("MUTED", [458, 458, 458, 458, 458]),
+    ("NEGATOR", [528, 528, 528, 528, 528]),
+    ("NEGATOR_NEGATE", [147, 147, 147, 147, 147]),
+    ("NEGATOR_ODD", [42, 42, 42, 42, 42]),
+    ("NOTE", [404, 404, 404, 404, 404]),
+    ("NO_ADSR", [451, 451, 451, 451, 451]),
+    ("NO_INSTRUMENT", [315, 315, 315, 315, 315]),
+    ("PORTAMENTO", [246, 246, 246, 246, 246]),
+    ("POSITION", [0, 0, 0, 0, 271]),
+    ("QT_NOINST", [31, 31, 31, 31, 31]),
+    ("QT_NOTE7F", [36, 36, 36, 36, 36]),
+    ("QT_SNONE", [64, 64, 64, 64, 64]),
+    ("QUIET", [352, 352, 352, 352, 352]),
+    ("RBYTE7", [161, 161, 161, 161, 161]),
+    ("RLONG15", [296, 296, 296, 296, 296]), // unsure
+    ("RLONG3", [194, 194, 194, 194, 194]),
+    ("RLONG5", [303, 303, 303, 303, 303]),
+    ("RLONG7", [208, 208, 208, 208, 208]),
+    ("RLONG8", [224, 224, 224, 224, 224]),
+    ("RLONG9", [338, 338, 338, 338, 338]), // unsure
+    ("RODD3", [97, 97, 97, 97, 97]),
+    ("RODD5", [253, 253, 253, 253, 253]),
+    ("RODD7", [243, 243, 243, 243, 243]),
+    ("RODD9", [335, 335, 335, 335, 335]), // unsure
+    ("ROW", [0, 0, 0, 0, 540]),
+    ("ROW_EFFECT0", [163, 163, 163, 163, 163]),
+    ("ROW_EFFECT1", [175, 175, 175, 175, 175]),
+    ("ROW_EFFECT10", [175, 175, 175, 175, 175]),
+    ("ROW_EFFECT12", [214, 214, 214, 214, 214]),
+    ("ROW_EFFECT13", [187, 187, 187, 187, 187]),
+    ("ROW_EFFECT14", [354, 354, 354, 354, 354]),
+    ("ROW_EFFECT15", [178, 178, 178, 178, 178]),
+    ("ROW_EFFECT2", [175, 175, 175, 175, 175]),
+    ("ROW_EFFECT3", [163, 163, 163, 163, 163]),
+    ("ROW_EFFECT4", [285, 285, 285, 285, 285]),
+    ("ROW_EFFECT5", [163, 163, 163, 163, 163]),
+    ("ROW_EFFECT6", [187, 187, 187, 187, 187]),
+    ("ROW_EFFECT7", [187, 187, 187, 187, 187]),
+    ("ROW_EFFECT8", [195, 195, 195, 195, 195]),
+    ("ROW_EFFECT9", [176, 176, 176, 176, 176]),
+    ("SLIDE", [28, 28, 28, 28, 28]),
+    ("SUSTAIN", [65, 65, 65, 65, 65]),
+    ("SYNTH", [200, 200, 200, 200, 200]),
+    ("SYNTH_SOUND", [6, 6, 6, 6, 6]),
+    ("SYNTH_TAIL", [503, 503, 503, 503, 503]),
+    ("TICK", [0, 0, 0, 0, 145]),
+    ("VIBRATO", [103, 103, 103, 103, 103]),
+    ("VIBRATO_LEVEL", [162, 162, 162, 162, 162]),
+    ("VOICE_TAIL", [68, 68, 68, 68, 68]),
+    ("WA_LONG", [368, 368, 368, 368, 368]),
+    ("WA_ODD", [6, 6, 6, 6, 6]),
+    ("WA_SUB", [-10, -10, -10, -10, -10]),
+    ("W_LEN_LOOP", [198, 198, 198, 198, 0]),
+    ("W_LEN_LOOP_EMPTY", [198, 198, 198, 198, 0]),
+    ("W_LEN_NOTE", [190, 190, 190, 190, 0]),
+    ("W_LEN_SAMPLE", [274, 274, 274, 274, 0]),
+    ("W_LEN_SYNTH", [206, 206, 206, 206, 0]),
+    ("W_LOC_LOOP", [297, 60, 298, 298, 0]),
+    ("W_LOC_LOOP_EMPTY", [239, 0, 239, 239, 0]),
+    ("W_ON", [0, 0, 0, 0, 274]),
+    ("W_PER", [70, 0, 0, -18, 0]),
+    ("W_VOL_ADSR", [-23, 0, 23, 13, 0]),
+    ("W_VOL_MUTED", [47, 0, 22, -5, 0]),
+    ("W_VOL_NO_ADSR", [-24, 0, 21, 11, 0]),
+    ("W_VOL_QUIET", [0, 23, 46, 36, 0]),
+];
+
+const FXPOS_WRAP: [&str; 18] = ["B_FXPOS_WRAP0", "B_FXPOS_WRAP1", "B_FXPOS_WRAP2", "B_FXPOS_WRAP3", "B_FXPOS_WRAP4", "B_FXPOS_WRAP5", "B_FXPOS_WRAP6", "B_FXPOS_WRAP7", "B_FXPOS_WRAP8", "B_FXPOS_WRAP9", "B_FXPOS_WRAP10", "B_FXPOS_WRAP11", "B_FXPOS_WRAP12", "B_FXPOS_WRAP13", "B_FXPOS_WRAP14", "B_FXPOS_WRAP15", "B_FXPOS_WRAP16", "B_FXPOS_WRAP17"];
+const RODD: [&str; 18] = ["RODD0", "RODD1", "RODD2", "RODD3", "RODD4", "RODD5", "RODD6", "RODD7", "RODD8", "RODD9", "RODD10", "RODD11", "RODD12", "RODD13", "RODD14", "RODD15", "RODD16", "RODD17"];
+const RLONG: [&str; 18] = ["RLONG0", "RLONG1", "RLONG2", "RLONG3", "RLONG4", "RLONG5", "RLONG6", "RLONG7", "RLONG8", "RLONG9", "RLONG10", "RLONG11", "RLONG12", "RLONG13", "RLONG14", "RLONG15", "RLONG16", "RLONG17"];
+const RBYTE: [&str; 18] = ["RBYTE0", "RBYTE1", "RBYTE2", "RBYTE3", "RBYTE4", "RBYTE5", "RBYTE6", "RBYTE7", "RBYTE8", "RBYTE9", "RBYTE10", "RBYTE11", "RBYTE12", "RBYTE13", "RBYTE14", "RBYTE15", "RBYTE16", "RBYTE17"];
+const ROW_EFFECT: [&str; 16] = ["ROW_EFFECT0", "ROW_EFFECT1", "ROW_EFFECT2", "ROW_EFFECT3", "ROW_EFFECT4", "ROW_EFFECT5", "ROW_EFFECT6", "ROW_EFFECT7", "ROW_EFFECT8", "ROW_EFFECT9", "ROW_EFFECT10", "ROW_EFFECT11", "ROW_EFFECT12", "ROW_EFFECT13", "ROW_EFFECT14", "ROW_EFFECT15"];
+const EFFECT: [&str; 18] = ["EFFECT0", "EFFECT1", "EFFECT2", "EFFECT3", "EFFECT4", "EFFECT5", "EFFECT6", "EFFECT7", "EFFECT8", "EFFECT9", "EFFECT10", "EFFECT11", "EFFECT12", "EFFECT13", "EFFECT14", "EFFECT15", "EFFECT16", "EFFECT17"];
+const EFFECT_BYTE: [&str; 18] = ["EFFECT_BYTE0", "EFFECT_BYTE1", "EFFECT_BYTE2", "EFFECT_BYTE3", "EFFECT_BYTE4", "EFFECT_BYTE5", "EFFECT_BYTE6", "EFFECT_BYTE7", "EFFECT_BYTE8", "EFFECT_BYTE9", "EFFECT_BYTE10", "EFFECT_BYTE11", "EFFECT_BYTE12", "EFFECT_BYTE13", "EFFECT_BYTE14", "EFFECT_BYTE15", "EFFECT_BYTE16", "EFFECT_BYTE17"];
+
 
 pub struct SonicArranger {
     subsong_table: u32,
@@ -233,8 +356,11 @@ pub struct SonicArranger {
     position: [u32; 4],
     row_data: [u32; 4],
     songend: bool,
-    /// Colour clocks the original's code has taken since its last write.
-    pend: i64,
+    /// The clock of the last host call, and the 68000 cycles spent since.
+    seg: u64,
+    cyc: i64,
+    /// The voice whose code runs (4: the code outside the voices), for `COSTS`.
+    cv: usize,
 }
 
 /// The eight offsets at the module's start. `strict` is the original's check
@@ -325,9 +451,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         position: [0; 4],
         row_data: [0; 4],
         songend: false,
-        pend: 0,
+        seg: 0,
+        cyc: 0,
+        cv: 4,
     };
     // as the original's InitPlayer: the parts' addresses, and the samples'
+    let (n_samples, n_instruments);
     if kind == 0 {
         // the chunks one after the other, each with its count after the mark
         let mut a = a0 + 8;
@@ -340,9 +469,11 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         p.tracks = a + 8;
         a = p.tracks.wrapping_add(bus.r32(a + 4).wrapping_mul(4));
         p.instruments = a + 8;
+        n_instruments = bus.r32(a + 4);
         a = p.instruments.wrapping_add(bus.r32(a + 4).wrapping_mul(152));
         // SD8B: the count, its one-shot and repeat lengths, names, sample lengths
         let n = bus.r32(a + 4);
+        n_samples = n as u16 as u32;
         a += 8;
         if n as u16 != 0 {
             a = a.wrapping_add(n * 8 + n * 30);
@@ -374,8 +505,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         p.waveforms = o(4);
         p.adsr = o(5);
         p.amf = o(6);
+        n_instruments = o(4).wrapping_sub(o(3)) / 152;
         let mut a = o(7);
         let n = bus.r32(a);
+        n_samples = n;
         a += 4;
         if n != 0 {
             let lengths = a;
@@ -390,9 +523,26 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     // the original's InitPlayer ends in its InitSound, which DeliTracker then
     // calls again
+    let synths = (0..n_instruments.min(256)).filter(|&i| m.bus.r16(p.instruments.wrapping_add(152 * i)) != 0).count() as u64;
+    let n_instruments = n_instruments as u64;
+    let n = n_samples as u64;
+    let nz = (n != 0) as u64;
+    // the original's InitPlayer: cycles from its first host call to its DMA off
+    let cyc = match kind {
+        0 => 9596 + 243 * nz + 81 * n,
+        _ => 9430 + if kind == 2 { 80 } else { 0 } + 41 * nz + 43 * n,
+    } + 55 * (n_instruments - synths) + 59 * synths;
+    let check = [63, 392, 178][kind as usize];
+    let dma1 = m.bus.clock + check + 66 + cyc / 2;
+    let start = dma1 + 61 + 4550 + 3688;
     let mut hw = Hw { bus: &mut m.bus };
+    hw.bus.clock = dma1;
+    p.rebase(&hw);
     p.init_sound(0, &mut hw);
+    hw.bus.clock = hw.bus.clock.max(start - 48);
+    p.rebase(&hw);
     p.init_sound(0, &mut hw);
+    hw.bus.clock = hw.bus.clock.max(start);
     // the later player's InitPlayer ends with bset.b #1,$bfe001: the LED filter off
     // (the older player never writes it, except for an E effect)
     if p.newer {
@@ -433,11 +583,17 @@ impl Replayer for SonicArranger {
     /// The original's interrupt: the loops of last tick's samples, the row when
     /// its speed counter is up, the voices' effects, and the DMA of the notes.
     fn tick(&mut self, hw: &mut Hw) {
-        self.pend = t::TICK;
+        self.rebase(hw);
+        self.cv = 4;
+        self.c("TICK");
         if self.loop_pending.iter().any(|&f| f) {
+            self.c("B_LOOPS");
             for v in 0..4 {
+                self.cv = v;
                 if self.loop_pending[v] {
                     self.set_loop(v, hw);
+                } else {
+                    self.c("B_LOOP_SKIP");
                 }
             }
             self.loop_pending = [false; 4];
@@ -454,12 +610,14 @@ impl Replayer for SonicArranger {
         }
         // the later player writes DMACON for every row, even with no note
         if self.dma_mask & 0xff != 0 || (self.newer && self.dma_mask != 0) {
-            self.write_wait(hw, t::ON);
+            self.cv = 4;
+            self.host(hw, "W_ON");
             hw.dmacon(0x8000 | (self.dma_mask & 0xf));
             // the host's ENPP_DMAMask waits for the DMA, as dtg_WaitAudioDMA does:
             // to 10 lines past the current one
             let now = hw.bus.clock;
             hw.wait((now / LINE + 10) * LINE - now);
+            self.rebase(hw);
             self.dma_mask = 0;
         }
     }
@@ -489,16 +647,52 @@ impl SonicArranger {
         self.bss + VOICE_SIZE * v as u32
     }
 
-    /// Lets the time of the code run since the last write pass.
-    fn spend(&mut self, hw: &mut Hw) {
-        wait(hw, self.pend.max(0) as u64);
-        self.pend = 0;
+    /// The original's code for `i` runs once.
+    fn c(&mut self, i: &'static str) {
+        self.cn(i, 1);
     }
 
-    /// Before a write: that time, and the write's own.
-    fn write_wait(&mut self, hw: &mut Hw, own: i64) {
-        self.pend += own;
-        self.spend(hw);
+    /// The original's code for `i` runs `n` times.
+    fn cn(&mut self, i: &'static str, n: i64) {
+        if let Ok(k) = COSTS.binary_search_by(|e| e.0.cmp(i)) {
+            self.cyc += COSTS[k].1[self.cv] * n;
+        }
+    }
+
+    /// The original's byte loop of `n` bytes from `start` (`for_range`): an odd first byte,
+    /// longwords, then bytes.
+    fn range_cost(&mut self, e: usize, start: u16, n: i32) {
+        let n = n.max(0) as i64;
+        let odd = (n > 0 && start & 1 != 0) as i64;
+        self.cn(RODD[e], odd);
+        self.cn(RLONG[e], (n - odd) / 4);
+        self.cn(RBYTE[e], (n - odd) % 4);
+    }
+
+    fn cost(&mut self, (i, n): (&'static str, i64)) {
+        self.cn(i, n);
+    }
+
+    /// The clock the code has reached (no host call): Paula plays up to it.
+    fn now(&mut self, hw: &mut Hw) {
+        let t = self.seg + (self.cyc.max(0) / 2) as u64;
+        if t > hw.bus.clock {
+            wait(hw, t - hw.bus.clock);
+        } else {
+            wait(hw, 0);
+        }
+    }
+
+    /// A host call (a write, `own` its kind): at the clock the cycles since the last reach.
+    fn host(&mut self, hw: &mut Hw, own: &'static str) {
+        self.c(own);
+        self.now(hw);
+        self.rebase(hw);
+    }
+
+    fn rebase(&mut self, hw: &Hw) {
+        self.seg = hw.bus.clock;
+        self.cyc = 0;
     }
 
     fn signal_songend(&mut self) {
@@ -510,10 +704,10 @@ impl SonicArranger {
         self.loop_pending = [false; 4];
         self.silence_all(hw);
         for v in 0..4 {
-            self.write_wait(hw, t::VOL);
+            self.host(hw, "W_VOL_END");
             hw.vol(v, 0);
         }
-        self.write_wait(hw, t::OFF);
+        self.host(hw, "W_OFF_END");
         hw.dmacon(0x000f);
     }
 
@@ -523,7 +717,7 @@ impl SonicArranger {
             let a = self.va(v) + FLAGS;
             hw.bus.w8(a, hw.bus.r8(a) | 1);
         }
-        self.write_wait(hw, t::OFF);
+        self.host(hw, "W_OFF_SILENCE");
         hw.dmacon(0x000f);
     }
 
@@ -564,37 +758,40 @@ impl SonicArranger {
 
     /// The loop of the sample a note started on the last tick.
     fn set_loop(&mut self, v: usize, hw: &mut Hw) {
+        self.cv = v;
         let va = self.va(v);
         let b = &*hw.bus;
         let inst = b.r32(va + INSTR);
         let repeat = b.r16(inst + I_REPEAT);
-        self.pend += t::LOOP;
+        self.c("LOOP");
         if repeat == 0 {
+            self.c("B_LOOP_NONE");
             return;
         }
         let sample = b.r32(va + SAMPLE);
-        if repeat == 1 || sample == 0 {
-            self.write_wait(hw, t::LOC);
+        if repeat == 1 || { self.c("B_LOOP_NOT1"); sample == 0 } {
+            self.host(hw, "W_LOC_LOOP_EMPTY");
             hw.loc(v, self.bss + EMPTY);
-            self.write_wait(hw, t::LEN);
+            self.host(hw, "W_LEN_LOOP_EMPTY");
             hw.len(v, 1);
         } else {
             // movem.w: the one-shot length sign-extended
             let one_shot = hw.bus.r16(inst + I_LEN) as i16 as i32 as u32;
-            self.write_wait(hw, t::LOC);
+            self.host(hw, "W_LOC_LOOP");
             hw.loc(v, sample.wrapping_add(one_shot << 1));
-            self.write_wait(hw, t::LEN);
+            self.host(hw, "W_LEN_LOOP");
             hw.len(v, repeat);
         }
     }
 
     fn next_row(&mut self, hw: &mut Hw) {
-        self.pend += t::ROW;
+        self.cv = 4;
+        self.c("ROW");
         self.row = self.row.wrapping_add(1);
         if !(self.rows as i16 > self.row as i16) {
             self.row = 0;
             self.pos = self.pos.wrapping_add(1);
-            self.pend += t::POSITION;
+            self.c("POSITION");
             // the original signals the end on entering the last position, as the
             // Eagleplayer 2.06's songs end there in its write logs; the position
             // after the last one wraps to the restart. A one-position song would
@@ -602,9 +799,11 @@ impl SonicArranger {
             // position is over (the later SonicArranger Eagleplayer's).
             let one = self.first as i16 == self.last as i16;
             if self.last as i16 == self.pos as i16 && !one {
+                self.c("B_LAST");
                 self.signal_songend();
             }
             if !(self.last as i16 >= self.pos as i16) {
+                self.c("B_RESTART");
                 self.pos = self.restart;
                 if one {
                     self.signal_songend();
@@ -629,60 +828,65 @@ impl SonicArranger {
     /// One voice's row `d7` (note, instrument, flags/arpeggio/effect, argument)
     /// with the position's transposes in `d6`.
     fn play_voice(&mut self, v: usize, d7: u32, d6: u32, dma: &mut u16, hw: &mut Hw) {
+        self.cv = v;
         let va = self.va(v);
         let note = (d7 >> 24) as u16;
         let mut instr = (d7 >> 16) & 0xff;
-        if note == 0 || note == 0x80 {
-            self.pend += t::EMPTY;
-            if note == 0 && instr != 0 {
-                self.pend += t::EMPTY_INSTRUMENT;
+        if note == 0 || { self.c("B_NOTE_NZ"); note == 0x80 } {
+            self.c("EMPTY");
+            if note == 0 && { self.c("B_EMPTY0"); true } && instr != 0 {
+                self.c("EMPTY_INSTRUMENT");
                 self.set_instrument(v, instr, hw);
             }
         } else if note == 0x7f {
-            self.pend += t::QUIET;
-            self.quiet(v, hw);
+            self.c("QUIET");
+            self.quiet(v, "QT_NOTE7F", hw);
         } else {
             let flags = (d7 >> 12) & 0xc;
-            self.pend += t::NOTE;
+            self.c("NOTE");
             let mut n = note;
             if flags & 4 == 0 {
+                self.c("B_NOTE_TR");
                 n = n.wrapping_add(d6 as u8 as i8 as u16);
             }
-            if instr != 0 && flags & 8 == 0 {
+            if (instr != 0 || { self.c("B_INSTR_Z"); false }) && { self.c("B_INSTR_NZ"); true } && flags & 8 == 0 {
+                self.c("B_INSTR_TR");
                 instr = (instr as u16).wrapping_add((d6 >> 8) as u8 as i8 as u16) as u32 & 0xff;
             }
             let b = &mut *hw.bus;
             b.w16(va + PREV_NOTE, b.r16(va + NOTE));
             b.w16(va + NOTE, n);
             if b.r16(va + PREV_NOTE) == 0 {
+                self.c("B_PREV0");
                 b.w16(va + PREV_NOTE, n);
             }
             if self.newer {
                 // the later player: period 1, the interrupt cleared, DMA off
-                self.write_wait(hw, t::LEN);
+                self.host(hw, "W_PER_NEWER");
                 hw.per(v, 1);
                 m68k::AddressBus::write_word(hw.bus, 0xDFF09C, 0x80 << v);
-                self.write_wait(hw, t::OFF);
+                self.host(hw, "W_OFF_NEWER");
                 hw.dmacon(1 << v);
             } else {
-                self.write_wait(hw, t::OFF);
+                self.host(hw, "W_OFF_NOTE");
                 hw.dmacon(1 << v);
-                self.write_wait(hw, t::LEN);
+                self.host(hw, "W_LEN_NOTE");
                 hw.len(v, 0);
             }
             let inst = if instr == 0 {
-                self.pend += t::NO_INSTRUMENT;
+                self.c("NO_INSTRUMENT");
                 let inst = hw.bus.r32(va + INSTR);
                 if inst == 0 {
                     // straight to the original's quiet routine, which returns from
                     // the row: no effect
-                    self.quiet(v, hw);
+                    self.c("B_NO_INST_QUIET");
+                    self.quiet(v, "QT_NOINST", hw);
                     return;
                 }
                 self.set_synth(v, inst, hw);
                 inst
             } else {
-                self.pend += t::INSTRUMENT;
+                self.c("INSTRUMENT");
                 self.set_instrument(v, instr, hw)
             };
             let kind = hw.bus.r16(inst);
@@ -690,6 +894,7 @@ impl SonicArranger {
             if kind == 0 {
                 self.play_sample(v, inst, dma, hw);
             } else {
+                self.c("B_KIND_SYNTH");
                 self.play_synth(v, inst, dma, hw);
             }
         }
@@ -701,18 +906,22 @@ impl SonicArranger {
         let n = hw.bus.r16(inst + I_WAVE);
         // lsl.w #2: a signed word index into the original's table of 64
         let addr = self.samples.get(((n << 2) as i16 / 4) as usize).copied().unwrap_or(0);
-        self.pend += t::SAMPLE;
+        self.c("SAMPLE");
         if addr == 0 {
+            self.c("B_SAMPLE_NONE");
             hw.bus.w8(va + FLAGS, hw.bus.r8(va + FLAGS) | 1);
-            self.quiet(v, hw);
+            self.quiet(v, "QT_SNONE", hw);
             return;
         }
-        self.write_wait(hw, t::LOC);
+        self.host(hw, "W_LOC_SAMPLE");
         hw.loc(v, addr);
         hw.bus.w32(va + SAMPLE, addr);
         let repeat = hw.bus.r16(inst + I_REPEAT);
+        if repeat == 1 {
+            self.c("B_SAMPLE_REP1");
+        }
         let len = hw.bus.r16(inst + I_LEN).wrapping_add(if repeat == 1 { 0 } else { repeat });
-        self.write_wait(hw, t::LEN);
+        self.host(hw, "W_LEN_SAMPLE");
         hw.len(v, len);
         hw.bus.w16(va + LEN, len);
         *dma |= 1 << v;
@@ -726,15 +935,16 @@ impl SonicArranger {
         let src = self.waveforms.wrapping_add((hw.bus.r16(inst + I_WAVE) as u32) << 7);
         hw.bus.w32(va + SAMPLE, src);
         hw.bus.w32(va + 0xbe, 0);
-        self.write_wait(hw, t::LOC);
+        self.host(hw, "W_LOC_SYNTH");
         hw.loc(v, va);
         let len = hw.bus.r16(inst + I_LEN);
-        self.write_wait(hw, t::LEN);
+        self.host(hw, "W_LEN_SYNTH");
         hw.len(v, len);
         hw.bus.w16(va + LEN, len);
         // dbra over (len - 1) >> 3 + 1 blocks of 16 bytes
         let blocks = (((len.wrapping_sub(1) as i16) >> 3) as u16 as u32) + 1;
-        self.pend += t::SYNTH_SOUND + t::COPY16 * blocks as i64;
+        self.c("SYNTH_SOUND");
+        self.cn("COPY16", blocks as i64);
         for i in 0..blocks * 16 {
             let x = hw.bus.r8(src.wrapping_add(i));
             hw.bus.w8(va.wrapping_add(i), x);
@@ -781,10 +991,11 @@ impl SonicArranger {
 
     /// The original's quiet routine: volume 0, and only the high word of the
     /// instrument pointer cleared.
-    fn quiet(&mut self, v: usize, hw: &mut Hw) {
+    fn quiet(&mut self, v: usize, tail: &'static str, hw: &mut Hw) {
         let va = self.va(v);
-        self.write_wait(hw, t::VOL);
+        self.host(hw, "W_VOL_QUIET");
         hw.vol(v, 0);
+        self.c(tail);
         let b = &mut *hw.bus;
         b.w16(va + VOL, 0);
         b.w16(va + SCOPE_VOL, 0);
@@ -799,7 +1010,10 @@ impl SonicArranger {
         let b = &mut *hw.bus;
         b.w16(va + SLIDE_SPEED, 0);
         b.w16(va + VOL_SLIDE, 0);
-        self.pend += t::ROW_EFFECT[(d7 >> 8) as usize & 0xf];
+        self.c(ROW_EFFECT[(d7 >> 8) as usize & 0xf]);
+        if d7 & 0xff != 0 {
+            self.c("B_RE_ARG");
+        }
         let arg = (d7 & 0xff) as u16;
         let sarg = d7 as u8 as i8 as u16;
         match (d7 >> 8) & 0xf {
@@ -819,16 +1033,23 @@ impl SonicArranger {
                 b.w16(va + PORTA_CNT, 0);
                 b.w16(va + PORTA_LEN, 0);
             }
-            9 if arg > 0 && arg <= 0x40 => self.rows = arg,
+            9 if arg > 0 && { self.c("B_E9_NZ"); arg <= 0x40 } => {
+                self.c("B_E9_SET");
+                self.rows = arg
+            }
             0xa => b.w16(va + VOL_SLIDE, sarg),
             0xb => {
                 if arg <= self.pos {
+                    self.c("B_EB_BACK");
                     self.signal_songend();
                 }
                 self.pos = arg.wrapping_sub(1);
                 self.row = self.rows;
             }
             0xc => {
+                if arg > 0x40 {
+                    self.c("B_EC_MAX");
+                }
                 let vol = arg.min(0x40);
                 b.w16(va + VOL, vol);
                 b.w16(va + SCOPE_VOL, vol << 2);
@@ -836,9 +1057,28 @@ impl SonicArranger {
             0xd => self.row = self.rows,
             // the older player's ENPP_PokeCommand 1 (the filter): 0 turns it off; the later
             // player's bclr / bset on $BFE001 does the opposite: 0 turns it on
-            0xe if (arg as u8 == 0) != self.newer => b.ciaa.pra |= 2,
-            0xe => b.ciaa.pra &= !2,
-            0xf if (arg as i8) > 0 && (arg as i8) <= 16 => self.speed = arg,
+            0xe if self.newer => {
+                if arg as u8 == 0 {
+                    b.ciaa.pra &= !2
+                } else {
+                    b.ciaa.pra |= 2
+                }
+            }
+            0xe => {
+                // a host call: it lands at the clock the code has reached
+                self.host(hw, "H_CMD");
+                self.c("H_CMD_RET");
+                if arg as u8 == 0 {
+                    self.c("B_EE_OFF");
+                    hw.bus.ciaa.pra |= 2
+                } else {
+                    hw.bus.ciaa.pra &= !2
+                }
+            }
+            0xf if (arg as i8) > 0 && (arg as i8) <= 16 => {
+                self.c("B_EF_SET");
+                self.speed = arg
+            }
             _ => {}
         }
     }
@@ -846,16 +1086,18 @@ impl SonicArranger {
     /// A voice's tick: arpeggio, portamento, vibrato, AMF and slide give the
     /// period; then the synth effect, and the envelope gives the volume.
     fn update_voice(&mut self, v: usize, hw: &mut Hw) {
+        self.cv = v;
         let va = self.va(v);
         let d7 = self.row_data[v];
         let inst = hw.bus.r32(va + INSTR);
-        if hw.bus.r8(va + FLAGS) & 1 != 0 || inst == 0 {
-            self.pend += t::MUTED;
-            self.write_wait(hw, t::VOL);
+        if hw.bus.r8(va + FLAGS) & 1 != 0 || { self.c("B_MUTED_FLAGS_CLEAR"); inst == 0 } {
+            self.c("MUTED");
+            self.host(hw, "W_VOL_MUTED");
             hw.vol(v, 0);
             let b = &mut *hw.bus;
             let s = b.r16(va + SCOPE_VOL);
             if s != 0 {
+                self.c("B_MUTED_SCOPE");
                 b.w16(va + SCOPE_VOL, s.wrapping_sub(4));
             }
             return;
@@ -868,7 +1110,7 @@ impl SonicArranger {
 
         let arp = (d7 as u16 >> 12) & 3;
         if arp != 0 {
-            self.pend += t::ARPEGGIO;
+            self.c("ARPEGGIO");
             let a = inst.wrapping_add(I_ARPEGGIOS + 16 * (arp as u32 - 1));
             let pos = r(b, ARP_POS);
             let x = b.r8(a.wrapping_add(2).wrapping_add(pos as i16 as i32 as u32));
@@ -878,14 +1120,15 @@ impl SonicArranger {
             b.w16(va + ARP_POS, pos);
             let end = b.r8(a).wrapping_add(b.r8(a + 1)) as u16;
             if !(end as i16 > pos as i16) {
+                self.c("B_ARP_WRAP");
                 b.w16(va + ARP_POS, b.r8(a) as u16);
             }
-        } else if d7 & 0xf00 == 0 && d7 & 0xff != 0 {
-            self.pend += t::EFFECT_ARPEGGIO;
+        } else if d7 & 0xf00 == 0 && { self.c("B_FX0"); true } && d7 & 0xff != 0 {
+            self.c("EFFECT_ARPEGGIO");
             let x = match (self.counter as i16) % 3 {
-                0 => 0,
-                1 => d7 as u16 & 0xf,
-                _ => (d7 as u16 & 0xff) >> 4,
+                0 => { self.c("B_EA0"); 0 }
+                1 => { self.c("B_EA1"); d7 as u16 & 0xf }
+                _ => { self.c("B_EA2"); (d7 as u16 & 0xff) >> 4 }
             };
             d3 = d3.wrapping_add(x);
             d4 = d4.wrapping_add(x);
@@ -894,12 +1137,18 @@ impl SonicArranger {
             let i = n << 1;
             if i >= 0xda { PERIODS[0] } else { PERIODS[i as usize / 2] }
         };
+        if d3 << 1 >= 0xda {
+            self.c("B_PER_HI3");
+        }
+        if d4 << 1 >= 0xda {
+            self.c("B_PER_HI4");
+        }
         let mut d3 = period(d3);
         let d4 = period(d4);
 
         let (cnt, len) = (r(b, PORTA_CNT), r(b, PORTA_LEN));
-        if len != 0 && cnt != 0 && d3 != d4 {
-            self.pend += t::PORTAMENTO;
+        if len != 0 && { self.c("B_PORTA_LEN"); true } && cnt != 0 && { self.c("B_PORTA_CNT"); true } && d3 != d4 {
+            self.c("PORTAMENTO");
             let cnt = cnt.wrapping_sub(1);
             b.w16(va + PORTA_CNT, cnt);
             let diff = d4.wrapping_sub(d3) as i16 as i32 * cnt as i16 as i32;
@@ -908,14 +1157,18 @@ impl SonicArranger {
 
         let delay = r(b, VIB_DELAY);
         if delay != 0xff {
+            self.c("B_VIB_ON");
             if delay != 0 {
-                self.pend += t::VIBRATO_DELAY;
+                self.c("VIBRATO_DELAY");
                 b.w16(va + VIB_DELAY, delay - 1);
             } else {
                 let pos = r(b, VIB_POS);
                 let x = VIBRATO[pos as usize & 0xff] as i32;
                 let level = ri(b, I_VIB_LEVEL);
-                self.pend += t::VIBRATO + if level != 0 { t::VIBRATO_LEVEL } else { 0 };
+                self.c("VIBRATO");
+                if level != 0 {
+                    self.c("VIBRATO_LEVEL");
+                }
                 if level != 0 {
                     d3 = d3.wrapping_add(divs(x * 4, level as i16));
                 }
@@ -925,7 +1178,7 @@ impl SonicArranger {
 
         let amf_len = ri(b, I_AMF_LEN).wrapping_add(ri(b, I_AMF_REPEAT));
         if amf_len != 0 {
-            self.pend += t::AMF;
+            self.c("AMF");
             let table = self.amf.wrapping_add((ri(b, I_AMF_NUM) as u32) << 7);
             let pos = r(b, AMF_POS);
             let x = b.r8(table.wrapping_add(pos as i16 as i32 as u32)) as i8 as u16;
@@ -934,12 +1187,14 @@ impl SonicArranger {
             b.w16(va + AMF_DELAY, delay);
             if delay == 0 {
                 b.w16(va + AMF_DELAY, ri(b, I_AMF_DELAY));
-                self.pend += t::AMF_STEP;
+                self.c("AMF_STEP");
                 let pos = pos.wrapping_add(1);
                 b.w16(va + AMF_POS, pos);
                 if !(amf_len as i16 > pos as i16) {
+                    self.c("B_AMF_WRAP");
                     let mut p = ri(b, I_AMF_LEN);
                     if ri(b, I_AMF_REPEAT) == 0 {
+                        self.c("B_AMF_WRAP0");
                         p = p.wrapping_sub(1);
                     }
                     b.w16(va + AMF_POS, p);
@@ -949,29 +1204,33 @@ impl SonicArranger {
 
         d3 = d3.wrapping_sub(r(b, SLIDE));
         if (d3 as i16) < 0x71 {
+            self.c("B_PER_MIN");
             d3 = 0x71;
         }
         if self.counter != 0 {
-            self.pend += t::SLIDE;
+            self.c("SLIDE");
             b.w16(va + SLIDE, r(b, SLIDE).wrapping_add(r(b, SLIDE_SPEED)));
         }
-        self.write_wait(hw, t::PER);
+        self.host(hw, "W_PER");
         hw.per(v, d3);
 
         if hw.bus.r16(inst) != 0 {
+            self.c("B_SYNTH");
             self.synth_effect(v, inst, hw);
+            self.c("SYNTH_TAIL");
         }
 
         let b = &mut *hw.bus;
         let adsr_len = ri(b, I_ADSR_LEN).wrapping_add(ri(b, I_ADSR_REPEAT));
-        self.pend += if adsr_len == 0 { t::NO_ADSR } else { t::ADSR };
+        self.c(if adsr_len == 0 { "NO_ADSR" } else { "ADSR" });
         if adsr_len == 0 {
             let vol = ((r(b, VOL) as u32 * self.master as u32) >> 6) as u16;
-            self.write_wait(hw, t::VOL);
+            self.host(hw, "W_VOL_NO_ADSR");
             hw.vol(v, vol & 0x7f);
             let b = &mut *hw.bus;
             let s = r(b, SCOPE_VOL);
             if s != 0 {
+                self.c("B_SCOPE");
                 b.w16(va + SCOPE_VOL, s.wrapping_sub(4));
             }
         } else {
@@ -979,41 +1238,47 @@ impl SonicArranger {
             let pos = r(b, ADSR_POS);
             let d1 = (b.r8(table.wrapping_add(pos as i16 as i32 as u32)) as u32 * self.master as u32) >> 6;
             let vol = ((r(b, VOL) as u32 * (d1 & 0xffff)) >> 6) as u16;
-            self.write_wait(hw, t::VOL);
+            self.host(hw, "W_VOL_ADSR");
             hw.vol(v, vol & 0x7f);
             let b = &mut *hw.bus;
             b.w16(va + SCOPE_VOL, vol << 2);
             let mut advance = true;
-            if d7 >> 24 == 0x80 && !((pos as i16) < ri(b, I_SUSTAIN_POINT) as i16) {
+            if d7 >> 24 == 0x80 && { self.c("B_SUS_HOLD"); true } && !((pos as i16) < ri(b, I_SUSTAIN_POINT) as i16) {
                 let sustain = ri(b, I_SUSTAIN_DELAY);
-                self.pend += t::SUSTAIN;
+                self.c("SUSTAIN");
                 let cnt = r(b, SUSTAIN_CNT);
                 if sustain == 0 {
+                    self.c("B_SUS0");
                     advance = false;
                 } else if cnt != 0 {
+                    self.c("B_SUS_CNT");
                     b.w16(va + SUSTAIN_CNT, cnt - 1);
                     advance = false;
                 } else {
+                    self.c("B_SUS_SET");
                     b.w16(va + SUSTAIN_CNT, sustain);
                 }
             }
             if advance {
                 let delay = r(b, ADSR_DELAY).wrapping_sub(1);
-                self.pend += t::ADSR_ADVANCE;
+                self.c("ADSR_ADVANCE");
                 b.w16(va + ADSR_DELAY, delay);
                 if delay == 0 {
                     b.w16(va + ADSR_DELAY, ri(b, I_ADSR_DELAY));
-                    self.pend += t::ADSR_STEP;
+                    self.c("ADSR_STEP");
                     let pos = r(b, ADSR_POS).wrapping_add(1);
                     b.w16(va + ADSR_POS, pos);
                     if !(adsr_len as i16 > pos as i16) {
+                        self.c("B_ADSR_WRAP");
                         let repeat = ri(b, I_ADSR_REPEAT);
                         let mut p = ri(b, I_ADSR_LEN);
                         if repeat == 0 {
+                            self.c("B_ADSR_WRAP0");
                             p = p.wrapping_sub(1);
                         }
                         b.w16(va + ADSR_POS, p);
                         if repeat == 0 && d1 as u8 == 0 {
+                            self.c("B_ADSR_END");
                             b.w8(va + FLAGS, b.r8(va + FLAGS) | 1);
                         }
                     }
@@ -1022,7 +1287,13 @@ impl SonicArranger {
         }
 
         let b = &mut *hw.bus;
+        self.c("VOICE_TAIL");
         let vol = r(b, VOL).wrapping_add(r(b, VOL_SLIDE));
+        if (vol as i16) < 0 {
+            self.c("B_VOL_NEG");
+        } else if vol > 0x40 {
+            self.c("B_VOL_MAX");
+        }
         let vol = if (vol as i16) < 0 { 0 } else { vol.min(0x40) };
         b.w16(va + VOL, vol);
     }
@@ -1033,14 +1304,14 @@ impl SonicArranger {
         let va = self.va(v);
         let b = &mut *hw.bus;
         let delay = b.r16(va + FX_DELAY).wrapping_sub(1);
-        self.pend += t::SYNTH;
+        self.c("SYNTH");
         b.w16(va + FX_DELAY, delay);
         if delay != 0 {
             return;
         }
         b.w16(va + FX_DELAY, b.r16(inst + I_FX_DELAY));
         let effect = b.r16(inst + I_EFFECT) as i16;
-        self.pend += t::EFFECT[effect.clamp(0, 0x11) as usize];
+        self.c(if effect > 0x11 { "EFFECT_HIGH" } else { EFFECT[effect.max(0) as usize] });
         if effect <= 0 || effect > 0x11 {
             return;
         }
@@ -1052,7 +1323,7 @@ impl SonicArranger {
         let flags = b.r8(va + FLAGS);
         let fx_pos = b.r16(va + FX_POS);
         let wave_pos = b.r16(va + FX_WAVE_POS);
-        let cost = |n: i32| n.max(0) as i64 * t::EFFECT_BYTE[effect as usize];
+        let cost = |n: i32| (EFFECT_BYTE[effect as usize], n.max(0) as i64);
         let mut inc = true;
         match effect {
             // wave negator
@@ -1065,6 +1336,8 @@ impl SonicArranger {
                 inc = false;
                 if flags & 4 == 0 {
                     self.free_negator(v, inst, hw);
+                } else {
+                    self.c("B_NEG_SKIP");
                 }
             }
             // rotate vertical
@@ -1073,7 +1346,7 @@ impl SonicArranger {
                     let a = at(i);
                     b.w8(a, b.r8(a).wrapping_add(arg1 as u8));
                 });
-                self.pend += cost(n);
+                self.range_cost(effect as usize, arg2, n);
             }
             // rotate horizontal
             4 => {
@@ -1089,7 +1362,7 @@ impl SonicArranger {
                     }
                 }
                 b.w8(a, first);
-                self.pend += cost(arg3.wrapping_sub(arg2) as i16 as i32 + 1);
+                self.cost(cost(arg3.wrapping_sub(arg2) as i16 as i32 + 1));
             }
             // alien voice
             5 => {
@@ -1099,11 +1372,14 @@ impl SonicArranger {
                     let x = b.r8(other.wrapping_add(i as i16 as i32 as u32));
                     b.w8(a, b.r8(a).wrapping_add(x));
                 });
-                self.pend += cost(n);
+                self.range_cost(effect as usize, arg2, n);
             }
             // poly negator
             6 => {
                 b.w8(at(fx_pos), b.r8(own.wrapping_add(fx_pos as i16 as i32 as u32)));
+                if fx_pos as i16 >= arg3 as i16 {
+                    self.c("B_E6_WRAP");
+                }
                 let p = if fx_pos as i16 >= arg3 as i16 { arg2.wrapping_sub(1) } else { fx_pos };
                 let a = at(p.wrapping_add(1));
                 b.w8(a, b.r8(a).wrapping_neg());
@@ -1111,12 +1387,15 @@ impl SonicArranger {
             // shack wave 1 and 2
             7 | 8 => {
                 let n = self.shack_wave(v, arg1, arg2, arg3, fx_pos, hw);
-                self.pend += cost(n);
+                self.range_cost(effect as usize, arg2, n);
                 if effect == 8 {
                     let b = &mut *hw.bus;
                     let a = at(arg2).wrapping_add(wave_pos as i16 as i32 as u32);
                     b.w8(a, b.r8(a).wrapping_neg());
                     let p = wave_pos.wrapping_add(1);
+                    if (arg3.wrapping_sub(arg2).wrapping_sub(p) as i16) < 0 {
+                        self.c("B_E8_WRAP");
+                    }
                     let p = if (arg3.wrapping_sub(arg2).wrapping_sub(p) as i16) < 0 { 0 } else { p };
                     b.w16(va + FX_WAVE_POS, p);
                 }
@@ -1128,75 +1407,104 @@ impl SonicArranger {
                 let mut src = other;
                 if effect == 15 {
                     if flags & 2 != 0 {
+                        self.c("B_OSC_FLIP");
                         flags = (flags ^ 8) & !2;
                         b.w8(va + FLAGS, flags);
                     }
                     if flags & 8 != 0 {
+                        self.c("B_OSC_OWN");
                         src = own;
                     }
                 } else if flags & 2 != 0 {
+                    self.c("B_MM_STOP");
                     return;
                 }
                 let mut changed = false;
+                let (mut chg, mut up) = (0, 0);
                 let n = for_range(b, arg2, arg3, |b, i| {
                     let a = at(i);
                     let (x, y) = (b.r8(a) as i8, b.r8(src.wrapping_add(i as i16 as i32 as u32)) as i8);
                     if x != y {
                         changed = true;
+                        chg += 1;
+                        if x < y {
+                            up += 1;
+                        }
                         b.w8(a, if x < y { x.wrapping_add(1) } else { x.wrapping_sub(1) } as u8);
                     }
                 });
                 if !changed {
+                    self.c("B_MM_DONE");
                     b.w8(va + FLAGS, b.r8(va + FLAGS) | 2);
                 }
-                self.pend += cost(n);
+                self.cn(if effect == 9 { "MM9_CHG" } else { "MM15_CHG" }, chg);
+                self.cn(if effect == 9 { "MM9_UP" } else { "MM15_UP" }, up);
+                self.range_cost(effect as usize, arg2, n);
             }
             // laser
             10 => {
                 if arg3 > wave_pos {
+                    self.c("B_E10_RUN");
                     b.w16(va + SLIDE, b.r16(va + SLIDE).wrapping_add(arg2 as u8 as i8 as u16));
                     b.w16(va + FX_WAVE_POS, wave_pos.wrapping_add(1));
                 }
             }
             // wave alias
             11 => {
-                let n = wave_alias(b, va, arg1, arg2, arg3);
-                self.pend += cost(n);
+                let mut k = [0; 5];
+                wave_alias(b, va, arg1, arg2, arg3, &mut k);
+                for (name, n) in ["WA_ODD", "WA_ODDEND", "WA_LONG", "WA_BYTE", "WA_SUB"].into_iter().zip(k) {
+                    self.cn(name, n);
+                }
             }
             // noise generator 1
             12 => {
                 let a = at(fx_pos);
+                self.now(hw);
+                let b = &mut *hw.bus;
                 let h = b.beam().1 as u8;
                 b.w8(a, b.r8(a) ^ h);
+                self.c("E12_TAIL");
             }
             // low-pass filters 1 and 2
             13 | 14 => {
                 let thresholds = (effect == 14).then(|| self.waveforms.wrapping_add((arg1 as u32) << 7));
-                let n = low_pass(b, va, arg1, arg2, arg3, thresholds);
-                self.pend += cost(n);
+                let mut k = [0; 5];
+                low_pass(b, va, arg1, arg2, arg3, thresholds, &mut k);
+                let names = if effect == 13 {
+                    ["LP13_BYTE", "LP13_LAST", "LP13_UP", "LP13_NEG", "LP13_WRITE"]
+                } else {
+                    ["LP14_BYTE", "LP14_LAST", "LP14_UP", "LP14_NEG", "LP14_WRITE"]
+                };
+                for (name, n) in names.into_iter().zip(k) {
+                    self.cn(name, n);
+                }
             }
             // noise generator 2: the beam moves on while it runs
             16 => {
                 inc = false;
                 let base = at(arg2);
                 let mut d1 = arg3.wrapping_sub(arg2);
+                self.now(hw);
                 loop {
                     let b = &mut *hw.bus;
                     let a = base.wrapping_add(d1 as i16 as i32 as u32);
                     let x = (b.r8(a) ^ 5).rotate_left(2).wrapping_add(b.beam().1 as u8);
                     b.w8(a, x);
-                    self.pend += t::EFFECT_BYTE[16];
-                    self.spend(hw);
+                    self.c(EFFECT_BYTE[16]);
+                    self.now(hw);
                     d1 = d1.wrapping_sub(1);
                     if (d1 as i16) < 0 {
                         break;
                     }
                 }
+                self.c("E16_TAIL");
             }
             // frequency drum
             17 => {
                 let mut p = wave_pos;
                 if !(arg3 > p) {
+                    self.c("B_E17_RESET");
                     b.w16(va + SLIDE, ri(b, I_FINE));
                     p = 0;
                 }
@@ -1209,6 +1517,9 @@ impl SonicArranger {
         if inc {
             let b = &mut *hw.bus;
             let p = b.r16(va + FX_POS).wrapping_add(1);
+            if p > arg3 {
+                self.c(FXPOS_WRAP[effect as usize]);
+            }
             b.w16(va + FX_POS, if p > arg3 { arg2 } else { p });
         }
     }
@@ -1231,7 +1542,7 @@ impl SonicArranger {
         let mut d0 = level;
         let mut steps = 0;
         let mut negated = 0;
-        while (d1 as i16) > 0 && !(d0 as i16 > d1 as i16) {
+        while (d1 as i16) > 0 && { self.c("B_NEG_D1"); !(d0 as i16 > d1 as i16) } {
             for _ in 0..4 {
                 a1 = a1.wrapping_sub(1);
                 a0 = a0.wrapping_sub(1);
@@ -1245,12 +1556,13 @@ impl SonicArranger {
         a1 = a1.wrapping_add(d0 as i16 as i32 as u32);
         a0 = a0.wrapping_add(d0 as i16 as i32 as u32);
         if (d1 as i16) > 0 {
+            self.c("B_NEG_TAIL");
             let mut longs = true;
             if d0 & 1 != 0 {
                 a1 = a1.wrapping_sub(1);
                 a0 = a0.wrapping_sub(1);
                 b.w8(a0, b.r8(a1).wrapping_neg());
-                self.pend += t::NEGATOR_ODD;
+                self.c("NEGATOR_ODD");
                 d1 = d1.wrapping_sub(1);
                 longs = (d1 as i16) > 0;
             }
@@ -1269,12 +1581,16 @@ impl SonicArranger {
         let p = wave_pos.wrapping_add(1);
         b.w16(va + FX_WAVE_POS, p);
         if p > arg2.wrapping_add(arg3) {
+            self.c("B_NEG_WRAP");
             b.w16(va + FX_WAVE_POS, arg2);
             if arg3 == 0 && level == 0 {
+                self.c("B_NEG_END");
                 b.w8(va + FLAGS, b.r8(va + FLAGS) | 4);
             }
         }
-        self.pend += t::NEGATOR + t::NEGATOR_COPY * (steps - negated) + t::NEGATOR_NEGATE * negated;
+        self.c("NEGATOR");
+        self.cn("NEGATOR_COPY", (steps - negated) as i64);
+        self.cn("NEGATOR_NEGATE", negated as i64);
     }
 
     /// Shack wave: the effect's waveform byte at start + position added to the
@@ -1307,23 +1623,27 @@ fn for_range(b: &mut crate::bus::Bus, start: u16, stop: u16, mut f: impl FnMut(&
 /// next one. The original does it a longword at a time with word additions,
 /// so a carry runs into the neighbouring byte, and its fourth byte is compared
 /// as changed by the first's carry.
-fn wave_alias(b: &mut crate::bus::Bus, va: u32, delta: u16, start: u16, stop: u16) -> i32 {
+fn wave_alias(b: &mut crate::bus::Bus, va: u32, delta: u16, start: u16, stop: u16, k: &mut [i64; 5]) {
     let mut a = va.wrapping_add(start as i16 as i32 as u32);
     let mut d1 = stop.wrapping_sub(start);
-    let step = |d0: u32, next: u8| -> u32 {
+    let mut subs = 0;
+    let mut step = |d0: u32, next: u8| -> u32 {
         let w = d0 as u16;
-        let w = if (d0 as u8 as i8) > next as i8 { w.wrapping_sub(delta) } else { w.wrapping_add(delta) };
+        let sub = (d0 as u8 as i8) > next as i8;
+        subs += sub as i64;
+        let w = if sub { w.wrapping_sub(delta) } else { w.wrapping_add(delta) };
         (d0 & 0xffff_0000) | w as u32
     };
-    let mut n = 0;
     if start & 1 != 0 {
         let d0 = step(b.r8(a) as u32, b.r8(a.wrapping_add(1)));
         b.w8(a, d0 as u8);
         a = a.wrapping_add(1);
-        n += 1;
+        k[0] += 1;
         d1 = d1.wrapping_sub(1);
         if d1 == 0xffff {
-            return n;
+            k[1] += 1;
+            k[4] = subs;
+            return;
         }
     }
     while (d1.wrapping_sub(3) as i16) >= 0 {
@@ -1337,35 +1657,38 @@ fn wave_alias(b: &mut crate::bus::Bus, va: u32, delta: u16, start: u16, stop: u1
         b.w32(a, d0);
         a = a.wrapping_add(4);
         d1 = d1.wrapping_sub(4);
-        n += 4;
+        k[2] += 1;
     }
     while (d1 as i16) >= 0 {
         let d0 = step(b.r8(a) as u32, b.r8(a.wrapping_add(1)));
         b.w8(a, d0 as u8);
         a = a.wrapping_add(1);
         d1 = d1.wrapping_sub(1);
-        n += 1;
+        k[3] += 1;
     }
-    n
+    k[4] = subs;
 }
 
 /// Low-pass filters: a byte further than the threshold (`delta`, or for the
 /// second filter the bytes of a waveform from its stop position on) from the
 /// next one (from the first for the last) moves 2 towards it.
-fn low_pass(b: &mut crate::bus::Bus, va: u32, delta: u16, start: u16, stop: u16, thresholds: Option<u32>) -> i32 {
+fn low_pass(b: &mut crate::bus::Bus, va: u32, delta: u16, start: u16, stop: u16, thresholds: Option<u32>, k: &mut [i64; 5]) {
     let first = va.wrapping_add(start as i16 as i32 as u32);
     let last = va.wrapping_add(stop as i16 as i32 as u32);
     let mut th = thresholds.map(|t| t.wrapping_add(stop as i16 as i32 as u32));
     // d0's high byte is the start position's
     let hi = start & 0xff00;
     let mut a = first;
-    let mut n = 0;
     loop {
         let x = b.r8(a);
         let y = if a == last { b.r8(first) } else { b.r8(a.wrapping_add(1)) };
+        k[0] += 1;
+        k[1] += (a == last) as i64;
         let up = x as i8 <= y as i8;
+        k[2] += up as i64;
         let mut dif = x.wrapping_sub(y);
         if dif & 0x80 != 0 {
+            k[3] += 1;
             dif = dif.wrapping_neg();
         }
         let limit = match &mut th {
@@ -1377,15 +1700,14 @@ fn low_pass(b: &mut crate::bus::Bus, va: u32, delta: u16, start: u16, stop: u16,
             None => delta,
         };
         if (hi | dif as u16) as i16 > limit as i16 {
+            k[4] += 1;
             b.w8(a, if up { x.wrapping_add(2) } else { x.wrapping_sub(2) });
         }
         a = a.wrapping_add(1);
-        n += 1;
         if (last as i32) < (a as i32) {
             break;
         }
     }
-    n
 }
 
 include!("sonicarranger_tables.rs");

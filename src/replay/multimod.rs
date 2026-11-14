@@ -486,7 +486,7 @@ impl MultiMod {
     }
 
     fn next_position(&mut self) {
-        self.song_pos += 1;
+        self.song_pos = self.song_pos.wrapping_add(1);
         if self.song_pos >= self.song_len {
             self.song_pos = self.restart;
             self.last_break_arg = -1;

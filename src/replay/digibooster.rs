@@ -318,7 +318,7 @@ fn load(d: &[u8]) -> Option<Song> {
         if ls > s.length || ll == 0 {
             ls = 0;
             ll = 0;
-        } else if ls + ll >= s.length {
+        } else if ls.wrapping_add(ll) >= s.length {
             ll = s.length - ls;
         }
         (s.loop_start, s.loop_len) = (ls, ll);

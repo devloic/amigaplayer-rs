@@ -1570,7 +1570,7 @@ mod tests {
         pk(&mut d, 0xA8, &[0x43, 0xF9]);
         pl(&mut d, 0xAA, at(0x3A0));
         for n in 0..128usize {
-            d[0x300 + 2 * n..0x302 + 2 * n].copy_from_slice(&(1000 - 10 * n as u16).to_be_bytes());
+            d[0x300 + 2 * n..0x302 + 2 * n].copy_from_slice(&1000u16.wrapping_sub(10 * n as u16).to_be_bytes());
         }
         // voice block: channel offsets, arpeggio bases, DMA bits
         for v in 0..4 {

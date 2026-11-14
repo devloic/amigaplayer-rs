@@ -92,6 +92,7 @@ pub mod epg {
     pub const PLAYER_TAG_LIST: u32 = 0x16C;
     pub const MODULE_SIZE: u32 = 0x1BC;
     pub const AMPLIFIER_TAG_LIST: u32 = 0x1D8;
+    pub const EAGLEPLAYER_DIR_ARRAY_PTR: u32 = 0x1F0;
     pub const SONG_NAME: u32 = 0xF8;
     pub const SIZE: u32 = 0x1F4;
 }
@@ -189,8 +190,17 @@ pub fn init_globals(m: &mut Machine) -> u32 {
     for v in 0..4 {
         m.bus.w16(g + epg::VOICE1_VOL + 2 * v, 64);
     }
+    // the directory the Eagleplayers were loaded from, as the volume `EAGLE_DIR_VOLUME` (the
+    // block's spare bytes after the globals hold it): PlayAY locks it and makes it the current
+    // directory to LoadSeg its sub-player "AYPlayers/ZXAY<type>" when it is not found in the
+    // current one (EP206 has AYPlayers/ in its Eagleplayers directory)
+    m.bus.write_cstr(g + epg::SIZE, EAGLE_DIR_VOLUME);
+    m.bus.w32(g + epg::EAGLEPLAYER_DIR_ARRAY_PTR, g + epg::SIZE);
     g
 }
+
+/// The name EPG_EagleplayerDirArrayPtr gives the Eagleplayers' directory (`OsState::eagle_dir`).
+pub const EAGLE_DIR_VOLUME: &str = "Eagleplayers:";
 
 /// Per-module EPG_ fields, set before the player is initialised.
 pub fn prepare(m: &mut Machine, tag_list: u32, size: u32) {
@@ -491,6 +501,8 @@ mod tests {
         assert_eq!(offset("PlayerTagList"), epg::PLAYER_TAG_LIST);
         assert_eq!(offset("Modulesize"), epg::MODULE_SIZE);
         assert_eq!(offset("AmplifierTagList"), epg::AMPLIFIER_TAG_LIST);
+        assert_eq!(offset("EagleplayerDirArrayPtr"), epg::EAGLEPLAYER_DIR_ARRAY_PTR);
+        assert!(EAGLE_DIR_VOLUME.len() < 0x10);
         assert_eq!(offset("SizeOf"), epg::SIZE);
     }
 

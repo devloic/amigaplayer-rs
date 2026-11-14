@@ -227,7 +227,7 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 | OctaMED | OctaMED 0.1 | OctaMED | open `OctaMED` | 7 S (ref 7) | A | V |
 | Oktalyzer | Oktalyzer 1.45 | Oktalyzer | open `Oktalyzer` | 50 S (ref 50) | A | V |
 | PierreAdane | Pierre Adane Packer 0.1 | Pierre Adane Packer | open `Pierre Adane Packer` | 10 S | R | V |
-| PlayAY | PlayAY 2.1 (+ AYPlayers) | ZX Spectrum / CPC AY: ZXAYEMUL, ZXAYAMAD, ST11, STRC | built-in Z80 + AY (`src/replay/ay.rs`): EMUL and AMAD; ST11 and STRC not played | EMUL: 10 L, 1 D against libgme (ffmpeg; another emulation, 2-3 dB louder, its own level curve); 13 files in `dl-modules/PlayAY/`, 11 in refcmp. PlayAY itself does not run: its AYPlayer loads (with `AYPlayers/` in the working directory), then it writes through a null pointer in InitSound (README) | P | V (EMUL vs GME only; AMAD U; ST11/STRC X) |
+| PlayAY | PlayAY 2.1 (+ AYPlayers) | ZX Spectrum / CPC AY: ZXAYEMUL, ZXAYAMAD, ST11, STRC | built-in Z80 + AY (`src/replay/ay.rs`): EMUL and AMAD; ST11 and STRC not played | EMUL: 6 L, 5 F against PlayAY itself on the engine (another emulation: the port 4.1-7.4 dB quieter; libgme the fallback, where the port was 10 L, 1 D); 13 files in `dl-modules/PlayAY/`, 11 in refcmp. PlayAY runs since the engine sends a process player's checks to its process, names the Eagleplayers' directory in `EPG_EagleplayerDirArrayPtr` (where it finds `AYPlayers/`) and gives exec a MemList and AllocAbs (README); 11 of the 13 EMUL files play (not the two "AY Megademo" digital ones), AMAD and STRC files too | P | V (EMUL vs PlayAY; AMAD U; ST11/STRC X) |
 | PlaySid | PlaySID 0.1 | C64 PSID | `src/sid` (C64 + SID emulation) with `--features sid` (used by the AzuraCast renderer build); left out of the default build only for its licence (GPL-2.0-only) | not in refcmp (no `sid` in the gate's build); `tools/psid-playsid.py` against this player: 1 L, 1 F on the 2 PSID files on disk | E | U |
 | Polytracker | PolyTracker 0.90 (a DeliPlayer) | PolyTracker | open `PolyTracker` | 20 S (ref 20) | A | V |
 | Profiteam-Soundfactory | Profiteam-Soundfactory 0.1 | Sound Factory | open `Sound Factory` | 8 I, 1 D, 1 F (ref 8) | A | V |
@@ -288,8 +288,8 @@ L = LENGTH, Q = SILENT, NE = NEAR. "open `Name`" is the replayer of that name in
 The 4 U are the two Datatype players (partial: only 8SVX, AIFF and WAV, which are verified), BFB Master
 (its one disk holds AHX modules, which play and are verified; its BMOD and GMOD replayers have no file)
 and PlaySid (`--features sid` only: C64 PSID, GPL-2.0-only, so not in the default build). PlayAY is
-counted under V for ZXAYEMUL (against GME only, see below); its AMAD type has no refcmp row, ST11 and
-STRC are not played.
+counted under V for ZXAYEMUL (against PlayAY itself, see below); its AMAD type has no refcmp row, ST11 and
+STRC are not played by the port.
 
 Verification of 2026-11-13 (`claude-scratch/deliplayerrust/fixround/unverified/`: `newrows.json` holds
 the 148 refcmp rows 1735-1882 that the list `listen/files.json` lacks, their files copied under
@@ -305,7 +305,7 @@ Where the engine runs no original, `tools/refcmp.py` (`BLACKBOX_REF`) now takes 
 | RIFF WAVE PCM / MS ADPCM | 6 / 4 | sox, as above | | 2 I, 4 NE / 4 NE |
 | MPEG audio layers 2, 3 | 8 | ffmpeg 6 at the file's rate, then the port's rate conversion | | 5 NE, 2 S, 1 PITCH: `fl10.mp2`, where ffmpeg drops the first frame and libmad (mpg321) agrees with the port |
 | Symphonie / Symphonie Pro | 4 | openmpt123 0.7.3, 48 kHz, linear, no dither | the X-Tracker port (same libopenmpt) is 4 S against it, level 0.00 dB | 4 S, level within 0.03 dB |
-| ZX Spectrum AY (EMUL) | 11 | libgme through ffmpeg | none possible: GME is another emulation | 10 L, 1 D: the port 0.8-3.3 dB quieter, every band 3.3-5.9 dB below GME |
+| ZX Spectrum AY (EMUL) | 11 | PlayAY V2.1 (EP206) with its ZXAYEMUL AYPlayer on the engine, `--filter none` on both sides (since 2026-11-13; before, libgme through ffmpeg, now the fallback) | none possible: PlayAY is another emulation (a Z80 interpreter in 68000 code, the AY mixed on the amplifier) | 6 L, 5 F: the port 4.1-7.4 dB quieter, the bands 0.4-7.7 dB below (against GME: 10 L, 1 D, 0.8-3.3 dB quieter) |
 | NSF | 4 | the original DeliPlayer `NSF` (PlayerStore) in the engine, both sides `--filter none`; libgme the fallback | libgme and the port agree on the pitch (0 cents) | 4 F: the original 139 cents flat, 2.3-4.3 dB louder, 4.8-6.0 dB more at 10-20 kHz (against libgme before: 4 F, 3.3-5.2 dB less at 10-20 kHz) |
 | ProRunner 2, Promizer 0.1 / 1.x / 4.0 | 8, 5, 5, 2 | UADE's PTK-Prowiz in the engine (the existing ProWizard reference) | the Chiptracker rows: 10 S against it | 20 S |
 | PumaTracker, InStereo! 2.0, TME | 8, 6, 8 | EP206's Pumatracker 1.0, In Stereo 2.0, TME (the generic search) | | 8 S; 5 I, 1 S; 8 S |

@@ -56,6 +56,26 @@ impl Heap {
         Some(a)
     }
 
+    /// exec AllocAbs: the block of `size` bytes at `addr` (rounded down to 8, the size grown
+    /// by as much and rounded up to 8), when all of it is free; its start.
+    pub fn alloc_abs(&mut self, addr: u32, size: u32) -> Option<u32> {
+        let a = addr & !7;
+        let size = (size.max(1) + (addr - a) + 7) & !7;
+        let (&start, &len) = self.free.range(..=a).next_back()?;
+        if a.checked_add(size)? > start + len {
+            return None;
+        }
+        self.free.remove(&start);
+        if a > start {
+            self.free.insert(start, a - start);
+        }
+        if a + size < start + len {
+            self.free.insert(a + size, start + len - (a + size));
+        }
+        self.used.insert(a, size);
+        Some(a)
+    }
+
     /// Frees a block previously returned by `alloc`. Returns its size.
     pub fn free(&mut self, start: u32) -> Option<u32> {
         let size = self.used.remove(&start)?;
@@ -143,6 +163,25 @@ mod tests {
         assert_eq!(h.largest(), 0x1000 - 0x100);
         assert_eq!(h.alloc_top(0xF00), Some(0x1100));
         assert_eq!(h.alloc_top(8), None);
+    }
+
+    #[test]
+    fn alloc_abs_takes_a_free_block_where_asked() {
+        let mut h = Heap::new(0x1000, 0x3000);
+        let a = h.alloc(0x100).unwrap();
+        // inside the used block, or past the end: refused
+        assert_eq!(h.alloc_abs(0x1080, 0x10), None);
+        assert_eq!(h.alloc_abs(0x2FF8, 0x10), None);
+        // rounded down to 8, the size grown to cover what was asked
+        assert_eq!(h.alloc_abs(0x1FFC, 0x10), Some(0x1FF8));
+        assert_eq!(h.alloc_abs(0x2000, 0x10), None);
+        // the free memory on both sides stays free
+        assert_eq!(h.alloc(0x100), Some(0x1100));
+        assert_eq!(h.alloc_top(0x8), Some(0x2FF8));
+        h.free(0x1FF8);
+        h.free(0x1100);
+        h.free(a);
+        assert_eq!(h.alloc_abs(0x1000, 0xF00), Some(0x1000));
     }
 
     #[test]

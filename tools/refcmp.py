@@ -33,7 +33,7 @@ settings, WAV for WAV:
              ZX AY, NSF, Symphonie; and X-Tracker, whose original's output stage the port
              does not have) are checked against sox, ffmpeg, libgme or
              openmpt123 instead; where an original does run (ORIGINAL_BEFORE_BLACKBOX: NSF's
-             DeliPlayer) it comes first and the tool is the fallback, and Fibonacci 8SVX is
+             DeliPlayer, ZX AY's Eagleplayer PlayAY) it comes first and the tool is the fallback, and Fibonacci 8SVX is
              checked on the data the original Eagleplayer's Paula fetches (render_8svx_dma). uade123's
              PTK-Prowiz clears every sample's first long before it plays (ProTracker
              2.3D, the port's original, only a one-shot sample's first word): where
@@ -910,9 +910,8 @@ def render_sndh_oracle(ctx, mod, po, pplay):
 #     against the original Eagleplayer's data instead (render_8svx_dma below).
 #   ffmpeg: MPEG audio layers 1-3, decoded by ffmpeg 6 at the file's rate (float), then as for sox
 #     (the port decodes with symphonia-bundle-mp3 onto the same recorded-audio stage).
-#   gme: ZX Spectrum AY (ZXAYEMUL) and NSF through ffmpeg's libgme, 48 kHz, the port's subsong (NSF:
-#     only where its original, ORIGINAL_BEFORE_BLACKBOX, gives no render; PlayAY, the original of ZX AY,
-#     does not run in the engine: README). GME is
+#   gme: ZX Spectrum AY (ZXAYEMUL) and NSF through ffmpeg's libgme, 48 kHz, the port's subsong (only
+#     where their original, ORIGINAL_BEFORE_BLACKBOX, gives no render). GME is
 #     another emulation (its own AY level curve and output filters): no file plays alike, the class
 #     says how far the port is from it, not whether it is exact.
 #   openmpt123: Symphonie / Symphonie Pro (the port follows libopenmpt 0.8.7; openmpt123 0.7.3, 48 kHz,
@@ -952,7 +951,16 @@ def blackbox_key(fmt):
 #     64-step volume for the NES's mixer. Rendered with --filter none: the port models the NES's own
 #     output filters, the A500's is no part of the sound (the port's recorded-audio stage ignores the
 #     flag: same samples with and without it), and both sides get it so the stages compare equal.
-ORIGINAL_BEFORE_BLACKBOX = {'nsf': (DELI_STORE, 'NSF', ('--filter', 'none'))}
+#   ZX AY (ZXAYEMUL): EP206's Eagleplayer "PlayAY" (V2.1, Raxoft; "AY-3-8912 Emulator interface"),
+#     which LoadSegs its AYPlayer "AYPlayers/ZXAYEMUL" (Z80 Emul Player 1.1, a Z80 interpreter run as a
+#     process of its own, the AY's voices mixed on the amplifier's 4 AudioStructs) from the directory
+#     EPG_EagleplayerDirArrayPtr names (the engine: the Eagleplayers directory, where EP206 keeps
+#     AYPlayers/). Another emulation, not the hardware. Rendered with --filter none for the reason given
+#     for NSF (the Spectrum's sound has no A500 filter). The two "AY Megademo" files (digital samples, no
+#     refcmp row) do not play: their Z80 code never lets the emulator's process wait.
+# Values: (directory, --player name, output-stage flags given to BOTH sides, the directory holds Eagleplayers).
+ORIGINAL_BEFORE_BLACKBOX = {'nsf': (DELI_STORE, 'NSF', ('--filter', 'none'), False),
+                            'zxayemul': (EP206, 'PlayAY', ('--filter', 'none'), True)}
 
 
 # IFF 8SVX Fibonacci: no black-box decoder reads it right, and the original's audio is not comparable
@@ -1060,17 +1068,17 @@ def render_8svx_dma(ctx, mod):
 def original_before_blackbox(ctx, mod, want):
     """The original's render for a format of ORIGINAL_BEFORE_BLACKBOX (dict), or a note (str) on why
     there is none (then the black-box tool is the reference)."""
-    pdir, name, flags = ORIGINAL_BEFORE_BLACKBOX[want]
+    pdir, name, flags, eagle = ORIGINAL_BEFORE_BLACKBOX[want]
     if not os.path.exists(os.path.join(pdir, name)):
         return f'no original {name} in {pdir}'
-    rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, ('deli', pdir), ('--player', name, *flags))
+    rw, rplay, rout, rled, rlines = render_engine(ctx, mod, False, pdir if eagle else ('deli', pdir), ('--player', name, *flags))
     o = parse_output(rout)
     if not (rw and rplay and o.get('backend') == '68k'):
         return f'original {name}: ' + (rlines[-1] if rlines else 'no output')[:80]
     data = read_wav(rw)
     if not data[1].any():
         return f'original {name} renders it silent'
-    return dict(kind='engine', wav=rw, data=data, out=rout, led=rled or '', player=f'deli+original: {rplay}', o=o, note='')
+    return dict(kind='engine', wav=rw, data=data, out=rout, led=rled or '', player=f"{'ep206' if eagle else 'deli'}+original: {rplay}", o=o, note='')
 
 
 def port_rate_conversion(x, src, dst=48000):
@@ -1498,7 +1506,7 @@ def process(ctx, f):
             return row
         row['player'] = pplay
         po = parse_output(pout)
-        stage = ORIGINAL_BEFORE_BLACKBOX.get(_norm(po.get('format', '')), (None, None, ()))[2]
+        stage = ORIGINAL_BEFORE_BLACKBOX.get(_norm(po.get('format', '')), (None, None, (), False))[2]
         if stage:
             # the original is rendered at this output stage: the port too, so that the stages compare
             sw, splay, sout, sled, slines = render_engine(ctx, mod, True, None, stage)

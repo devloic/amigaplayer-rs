@@ -107,6 +107,8 @@ pub struct OsState {
     /// keeps the players' settings (`ENV/EaglePlayer/EP-Hippel_7V.cfg`, the mixing rate of
     /// Hippel 7V: 24 kHz, not its own 16).
     pub env_dir: PathBuf,
+    /// The Eagleplayers' directory: the volume `eagle::EAGLE_DIR_VOLUME` names it.
+    pub eagle_dir: PathBuf,
     /// The current module's directory, where the `Instruments:` volume is.
     pub module_dir: PathBuf,
     /// Files held in memory, by host path, read before the disk: a host with no
@@ -709,7 +711,12 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
             let p = m.alloc(d0);
             m.set_d0(p);
         }
-        "AllocAbs" => m.set_d0(0),
+        "AllocAbs" => {
+            // d0 bytes at a1 (ZXAYEMUL takes its Z80's 64 KB at a 64 KB boundary it finds by
+            // walking the MemList's MemHeaders); 0 where any of it is in use or not memory
+            let p = m.heap.alloc_abs(a1, d0).unwrap_or(0);
+            m.set_d0(p);
+        }
         "FreeMem" | "FreeVec" | "Deallocate" => {
             if a1 != 0 && m.heap.free_containing(a1).is_none() {
                 log::debug!("{name} of unknown block ${a1:06x}");
@@ -1978,6 +1985,9 @@ impl OsState {
                     d = any_case(&d, part);
                 }
                 return d;
+            }
+            if !self.eagle_dir.as_os_str().is_empty() && crate::eagle::EAGLE_DIR_VOLUME.strip_suffix(':').is_some_and(|v| v.eq_ignore_ascii_case(vol)) {
+                return self.eagle_dir.join(rest);
             }
             // unknown Amiga volume: try the remainder relative to PROGDIR
             log::debug!("mapping volume {vol}: of {name} to PROGDIR");

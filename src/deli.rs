@@ -163,8 +163,12 @@ pub struct DeliHost {
 /// A `DTP_Process` player. DeliTracker starts its process code as a task, stores the
 /// task's message port where `DTP_MsgPort` points, and sends it a DeliMessage for each
 /// player function (DTMN_Function at 20, DTMN_Result at 24); the process calls the
-/// function, stores the result and replies. The checks run directly, before there is a
-/// process.
+/// function, stores the result and replies. An Eagleplayer's checks go to the process too
+/// (started for the first one): PlayAY's EP_Check5 keeps what it finds (its AYPlayer, loaded
+/// there with dos LoadSeg) through the A4 its process code sets, and writes it through a null
+/// A4 when called directly. A DeliTracker player's checks run directly, before there is a
+/// process (MusiclineEditor's DTP_Check2 needs none; through the process its run would start
+/// 270 colour clocks later, which moves its verified renders).
 pub struct PlayerProc {
     entry: u32,
     /// DTP_Priority: which of several ready processes runs first.
@@ -185,10 +189,11 @@ impl PlayerProc {
     pub fn new(tags: &HashMap<u32, u32>) -> Option<Self> {
         let entry = *tags.get(&tag::PROCESS)?;
         let checks = [tag::CHECK1, tag::CHECK2, eagle::tag::CHECK3, eagle::tag::CHECK5];
+        let direct_checks = !eagle::has_ep_tags(tags);
         let fns = tags
             .iter()
             // NoteSignal is called directly, from the player's interrupt
-            .filter(|(t, _)| !checks.contains(t) && ![tag::PROCESS, tag::CONFIG, tag::NOTE_SIGNAL].contains(t))
+            .filter(|(t, _)| !(direct_checks && checks.contains(t)) && ![tag::PROCESS, tag::CONFIG, tag::NOTE_SIGNAL].contains(t))
             .map(|(_, &v)| v)
             .collect();
         Some(PlayerProc {

@@ -25,7 +25,10 @@ use players_native::{DynBus, Info};
 pub const SENTINEL_ADDR: u32 = 0x400;
 const EXCEPTION_ADDR: u32 = 0x404;
 const STUB_AREA: u32 = 0x408;
-const STUB_AREA_END: u32 = 0x2000;
+const STUB_AREA_END: u32 = MEM_HEADER;
+/// exec's one MemHeader (MemList at ExecBase + $142), right below the memory it describes, as
+/// on the Amiga: the heap, public chip memory (as TypeOfMem answers).
+pub const MEM_HEADER: u32 = 0x1FE0;
 pub const HEAP_START: u32 = 0x2000;
 const STACK_SIZE: u32 = 0x20000;
 pub const STACK_TOP: u32 = LOW_RAM_END - 0x10;
@@ -182,7 +185,26 @@ impl Machine {
         m.cpu.pc = SENTINEL_ADDR;
         m.cpu.invalidate_prefetch();
         crate::os::init(&mut m);
+        m.mem_header(heap_end);
         m
+    }
+
+    /// The MemList of exec with its one MemHeader, `HEAP_START..end`: ln_Type NT_MEMORY,
+    /// mh_Attributes MEMF_PUBLIC | MEMF_CHIP, mh_Lower, mh_Upper, mh_Free. Its MemChunks are
+    /// not kept (mh_First 0): the heap answers the allocations.
+    fn mem_header(&mut self, end: u32) {
+        let (h, list) = (MEM_HEADER, self.os.exec_base + 0x142);
+        self.bus.w32(list, h); // lh_Head
+        self.bus.w32(list + 4, 0); // lh_Tail
+        self.bus.w32(list + 8, h); // lh_TailPred
+        self.bus.w8(list + 12, 10); // lh_Type NT_MEMORY
+        self.bus.w32(h, list + 4);
+        self.bus.w32(h + 4, list);
+        self.bus.w8(h + 8, 10);
+        self.bus.w16(h + 14, 3);
+        self.bus.w32(h + 20, HEAP_START);
+        self.bus.w32(h + 24, end);
+        self.bus.w32(h + 28, self.heap.available());
     }
 
     fn add_trap_at(&mut self, addr: u32, t: Trap) -> u16 {
@@ -232,6 +254,7 @@ impl Machine {
         self.native_layout = false;
         self.native_enabled = false;
         self.heap.add_region(from, LOW_RAM_END);
+        self.bus.w32(MEM_HEADER + 24, LOW_RAM_END); // mh_Upper
         self.stack_top = RAM_SIZE as u32 - 0x10;
         true
     }

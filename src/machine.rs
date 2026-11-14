@@ -82,6 +82,24 @@ pub struct NativeStats {
     pub patched_calls: u64,
 }
 
+/// Slots of the memo of instruction cycle counts (`Machine::ins_cycles`), a power of two.
+const CYCLE_MEMO_SLOTS: usize = 4096;
+/// The most words an instruction the memo keeps may have been decoded from.
+const CYCLE_MEMO_WORDS: usize = 12;
+
+/// The cycle count `m68k_rc::cycles` gave for the instruction at `pc`, and the words its
+/// decode read (from `pc` on): it holds for as long as those words are unchanged.
+#[derive(Clone, Copy)]
+struct CycleMemo {
+    pc: u32,
+    /// Words in `words`; 0: empty slot.
+    n: u8,
+    cycles: u32,
+    words: [u16; CYCLE_MEMO_WORDS],
+}
+
+const EMPTY_MEMO: CycleMemo = CycleMemo { pc: 0, n: 0, cycles: 0, words: [0; CYCLE_MEMO_WORDS] };
+
 enum TrapFlow {
     Continue,
     Returned,
@@ -141,6 +159,8 @@ pub struct Machine {
     pub call_budget: u64,
     /// Instructions interpreted since the outermost call began.
     spent: u64,
+    /// Cycle counts of the instructions interpreted, by PC (see `ins_cycles`).
+    cycle_memo: Box<[CycleMemo]>,
 }
 
 impl Machine {
@@ -173,6 +193,7 @@ impl Machine {
             yielded: false,
             call_budget: CALL_BUDGET,
             spent: 0,
+            cycle_memo: vec![EMPTY_MEMO; CYCLE_MEMO_SLOTS].into_boxed_slice(),
         };
         m.add_trap_at(SENTINEL_ADDR, Trap::Sentinel);
         m.add_trap_at(EXCEPTION_ADDR, Trap::Exception);
@@ -408,6 +429,49 @@ impl Machine {
         res.map(|_| out)
     }
 
+    /// The 68000 cycles of the instruction at `pc` (whose first word is `w0`), from the
+    /// table the generated code counts with. The decode behind it is memoised by PC with
+    /// the words it read; a memo is used only while all of them are unchanged, so code
+    /// that rewrites itself gets the count of what it runs now.
+    #[inline]
+    fn ins_cycles(&mut self, pc: u32, w0: u16) -> u32 {
+        let slot = (pc >> 1) as usize & (CYCLE_MEMO_SLOTS - 1);
+        let m = &self.cycle_memo[slot];
+        if m.pc == pc && m.n != 0 && m.words[0] == w0 {
+            let mut same = true;
+            for k in 1..m.n as usize {
+                if self.bus.r16(pc.wrapping_add(2 * k as u32)) != m.words[k] {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return m.cycles;
+            }
+        }
+        let (mut words, mut n, mut sequential) = ([0u16; CYCLE_MEMO_WORDS], 0usize, true);
+        let bus = &self.bus;
+        let ins = m68k_rc::decode::decode_model(
+            pc,
+            &mut |a| {
+                let w = bus.r16(a);
+                if n < CYCLE_MEMO_WORDS && a == pc.wrapping_add(2 * n as u32) {
+                    words[n] = w;
+                    n += 1;
+                } else {
+                    sequential = false;
+                }
+                w
+            },
+            m68k_rc::Model::M68020,
+        );
+        let c = m68k_rc::cycles::cycles(&ins);
+        if sequential && n != 0 {
+            self.cycle_memo[slot] = CycleMemo { pc, n: n as u8, cycles: c, words };
+        }
+        c
+    }
+
     fn run_until_return(&mut self, ret_sp: u32) -> Result<(), String> {
         let mut cycles: u64 = 0;
         self.bus.rebase(cycles);
@@ -416,9 +480,9 @@ impl Machine {
             // counts with, charged before it runs as there, so that interpreted and native
             // runs see the same clock (A-line stubs are host calls and take none)
             let pc = self.cpu.pc;
-            if self.bus.r16(pc) & 0xF000 != 0xA000 {
-                let ins = m68k_rc::decode::decode_model(pc, &mut |a| self.bus.r16(a), m68k_rc::Model::M68020);
-                let c = m68k_rc::cycles::cycles(&ins) as u64;
+            let w0 = self.bus.r16(pc);
+            if w0 & 0xF000 != 0xA000 {
+                let c = self.ins_cycles(pc, w0) as u64;
                 cycles += c;
                 if let Some(t) = &mut self.bus.trace {
                     t.ins(pc, c, self.bus.clock);

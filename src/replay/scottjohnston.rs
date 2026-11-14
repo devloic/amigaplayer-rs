@@ -47,6 +47,9 @@ const H_FILTER: (u64, u64) = (74, 68);
 const INIT_DMA_AT: u64 = 4_800;
 /// Colour clock, from the run's origin, at which the song start call ends.
 const START_END_AT: u64 = 38_800;
+/// Colour clock in its raster line at which the reference's song start call ends (184 in four of
+/// the five reference runs, 160 in the fifth); the DMA waits count lines from there.
+const START_LINE_PHASE: u64 = 184;
 
 fn byte(d: &[u8], o: usize) -> u8 {
     d.get(o).copied().unwrap_or(0)
@@ -140,10 +143,12 @@ impl Voice {
     };
 }
 
-/// The cycle clock: `b` is the base colour clock, `t` the cycles since it.
+/// The cycle clock: `b` is the base colour clock, `t` the cycles since it; `g` puts the raster line
+/// grid of the reference host on it (a line starts where `(clock + g) % LINE` is 0).
 struct Clk {
     b: u64,
     t: u64,
+    g: u64,
 }
 
 impl Clk {
@@ -161,7 +166,7 @@ impl Clk {
         self.b = s;
         self.t = 0;
         if wait {
-            self.b = (s / LINE + 10) * LINE;
+            self.b = ((s + self.g) / LINE + 10) * LINE - self.g;
         }
         self.t += cost.1;
     }
@@ -175,6 +180,8 @@ pub struct ScottJohnston {
     mask: u8,
     counter: u8,
     v: [Voice; 4],
+    /// The `g` of the clocks (see `Clk`).
+    grid: u64,
 }
 
 impl ScottJohnston {
@@ -192,6 +199,7 @@ impl ScottJohnston {
             mask: byte(d, 0x2E),
             counter: 0,
             v: [Voice::IDLE; 4],
+            grid: 0,
         })
     }
 
@@ -211,12 +219,14 @@ impl ScottJohnston {
 
     /// Player initialisation (spec 4.1): the DMA-off writes, one tick's loop refresh and DMA on.
     fn init(&mut self, hw: &mut Hw, origin: u64) {
+        let start = origin + START_END_AT;
+        self.grid = (START_LINE_PHASE + LINE - start % LINE) % LINE;
         let first = origin + INIT_DMA_AT;
         for i in 0..4u64 {
             hw.bus.clock = first + 129 * i;
             hw.dmacon(1 << i);
         }
-        let mut c = Clk { b: first + 3 * 129 + 999 - 221, t: 0 };
+        let mut c = Clk { b: first + 3 * 129 + 999 - 221, t: 0, g: self.grid };
         c.t += 246;
         for v in 0..4 {
             self.refresh(hw, &mut c, v);
@@ -507,7 +517,7 @@ impl Replayer for ScottJohnston {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        let mut c = Clk { b: hw.bus.clock, t: 246 };
+        let mut c = Clk { b: hw.bus.clock, t: 246, g: self.grid };
         for v in 0..4 {
             self.refresh(hw, &mut c, v);
         }

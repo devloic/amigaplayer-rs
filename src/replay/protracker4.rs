@@ -20,9 +20,13 @@
 //! - an arpeggio that reads past the period table reads the player's own variables;
 //! - eight voices (`8CHN`) play through the Eagleplayer amplifier's virtual voices.
 //!
-//! Timing: the interrupt period is 5 * (1773447 / tempo + 1) colour clocks. The writes within a
-//! tick are spaced as the original's code, in 68000 cycles measured between writes (the host
-//! calls themselves take no time), and the host waits ten raster lines after every DMA on.
+//! Timing: the interrupt period is 5 * (1773447 / tempo + 1) colour clocks; the first interrupt
+//! comes one period after the song start (measured against the engine's song-start clock). The
+//! writes within a tick are spaced as the original's code, in 68000 cycles measured between
+//! writes, and the host waits ten raster lines after every DMA on. Every write is a host call
+//! (as is an Fxx tempo's SetTimer), which takes no time, but the machine counts the code's time
+//! from its colour clock again after one: the odd cycle of a path is lost there, so each path
+//! rounds down to colour clocks on its own.
 //! The costs are written as the path a voice takes and are exact for the paths the specification
 //! measured; paths it did not (the unusual waveforms, E3x, E4x, E7x, EAx, ECx) use the cost of
 //! the nearest measured one.
@@ -49,7 +53,7 @@ const FX_ENTRY_VOL: u64 = 132;
 /// A voice's period write for the previous empty cell, after the previous voice's volume.
 const ROW_PREV_PER: u64 = 368;
 /// What a previous empty cell adds to the rest of the voice's path (on a trigger, on others).
-const ROW_PREV_EXTRA_TRIG: u64 = 194;
+const ROW_PREV_EXTRA_TRIG: u64 = 195;
 const ROW_PREV_EXTRA: u64 = 196;
 /// A funk speed set adds this to every effect-tick voice.
 const FX_FUNK: u64 = 206;
@@ -190,6 +194,8 @@ struct Pt4 {
     extra: i64,
     vol_seg: Option<u64>,
     vol_go: u64,
+    /// The cycles from the host's SetTimer call (an Fxx tempo) to the voice's volume write.
+    after_timer: Option<u64>,
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -246,6 +252,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         extra: 0,
         vol_seg: None,
         vol_go: 0,
+        after_timer: None,
     };
     let mut hw = Hw { bus: &mut m.bus };
     // all DMA off: one write with four voices, one poke each with eight
@@ -281,6 +288,7 @@ impl Pt4 {
         } else {
             hw.voice_loc(v, a);
         }
+        self.host(hw);
     }
 
     /// A length of 0 or 1 is written as 0.
@@ -291,6 +299,7 @@ impl Pt4 {
         } else {
             hw.voice_len(v, w);
         }
+        self.host(hw);
     }
 
     fn per(&mut self, hw: &mut Hw, v: usize, p: u16) {
@@ -305,6 +314,7 @@ impl Pt4 {
         } else {
             hw.voice_per(v, p);
         }
+        self.host(hw);
     }
 
     fn vol(&mut self, hw: &mut Hw, v: usize, x: u16) {
@@ -314,6 +324,7 @@ impl Pt4 {
         } else {
             hw.voice_vol(v, x);
         }
+        self.host(hw);
     }
 
     fn dma_off(&mut self, hw: &mut Hw, mask: u8) {
@@ -322,6 +333,13 @@ impl Pt4 {
         } else {
             hw.voice_dma(mask as u32, false);
         }
+        self.host(hw);
+    }
+
+    /// A host call: the machine counts the time from its clock again, so an odd cycle of the
+    /// code before it is lost.
+    fn host(&mut self, hw: &mut Hw) {
+        self.cyc = hw.bus.clock * 2;
     }
 
     /// DMA on, then the host waits until ten raster lines on.
@@ -413,6 +431,8 @@ impl Pt4 {
     // ---- a row ---------------------------------------------------------------------------
 
     fn row_tick(&mut self, hw: &mut Hw) {
+        // (a row tick's code starts on an even cycle: an odd first path rounds down)
+        self.cyc = hw.bus.clock * 2;
         self.dma = 0;
         self.fx_entry = false;
         self.go(hw, ROW_ENTRY);
@@ -424,6 +444,11 @@ impl Pt4 {
             }
             let g = std::mem::take(&mut self.vol_go);
             self.go(hw, g);
+            if let Some(t) = self.after_timer.take() {
+                // the tempo's SetTimer is a host call
+                self.host(hw);
+                self.go(hw, t);
+            }
             self.vol(hw, v, x);
             self.skip = 0;
             self.extra = 0;
@@ -507,6 +532,11 @@ impl Pt4 {
             let fit = self.sample_offset(v);
             pre = if fit { 237 } else { 225 };
         }
+        if ins == 22 {
+            // (measured: instrument 22, and no other number, takes four cycles more before the
+            // trigger, whatever the sample's header and the voice)
+            pre += 4;
+        }
         let fine = self.ch[v].fine as usize & 0xF;
         let i = Self::lookup0(note);
         self.ch[v].period = PERIODS[fine * 37 + i];
@@ -578,9 +608,11 @@ impl Pt4 {
             c.tp_down = true;
         }
         self.vol_seg = None;
-        let dir = if c.tp_target == 0 { -16 } else if c.tp_down { 16 } else { 0 };
+        // (a period already at the note costs four cycles more than one below it; without an
+        // instrument in the cell the setup takes 382 cycles more than the port's sum)
+        let dir = if c.tp_target == 0 { 4 } else if c.tp_down { 16 } else { 0 };
         // (the cost joins the path of the period write that follows)
-        self.extra += (cost + if ins { 700 } else { 0 } + if ins && rs { 62 } else { 0 }) as i64 + dir;
+        self.extra += (cost + if ins { 700 } else { 382 } + if ins && rs { 62 } else { 0 }) as i64 + dir;
     }
 
     /// "More effects" on a row tick. `trig`: a trigger's writes came before.
@@ -625,7 +657,8 @@ impl Pt4 {
                 if trig {
                     self.vol_go = 704;
                 } else {
-                    self.vol_seg = Some(944);
+                    // (as the tick's first write, two cycles more: measured on voice 0)
+                    self.vol_seg = Some(944 + 2 * self.first as u64);
                 }
             }
             0xE => self.e_cmd_row(hw, v, trig),
@@ -639,11 +672,20 @@ impl Pt4 {
                     self.speed = par;
                     self.counter = 0;
                 }
-                // (F00 is the cheapest; a tempo needs the timer division)
+                // (F00 is the cheapest; a tempo needs the timer division, then the host's SetTimer,
+                // 496 cycles before the volume; a speed costs 16 cycles less without the CIA flag)
+                let vbl = !self.cia as u64;
+                if tempo {
+                    self.after_timer = Some(496);
+                }
                 if trig {
-                    self.vol_go = if tempo { 1188 } else if par == 0 { 608 } else { 692 };
+                    self.vol_go = if tempo { 692 } else if par == 0 { 608 } else { 692 - 16 * vbl };
                 } else {
-                    self.vol_seg = Some(if tempo { 1430 } else if par == 0 { 850 } else { 934 });
+                    // (after a previous empty cell's period write, two cycles less)
+                    if self.skip != 0 && self.cia {
+                        self.extra -= 2;
+                    }
+                    self.vol_seg = Some(if tempo { 934 } else if par == 0 { 850 } else { 934 - 18 * vbl });
                 }
             }
             _ => {
@@ -666,6 +708,7 @@ impl Pt4 {
         let tick0 = true;
         let mut seg = 1000u64;
         let mut after = 676u64;
+        let mut loop6 = 0i64;
         match x {
             1 | 2 => {
                 self.mask = 0x0F;
@@ -689,8 +732,11 @@ impl Pt4 {
                         c.loop_cnt = y;
                     } else {
                         c.loop_cnt -= 1;
+                        // (a count stepped down takes ten cycles more, the loop's end 34 less)
+                        loop6 = 10;
                         if c.loop_cnt == 0 {
                             jump = false;
+                            loop6 = -34;
                         }
                     }
                     if jump {
@@ -702,8 +748,8 @@ impl Pt4 {
             7 => self.ch[v].wavectl = (y << 4) | (self.ch[v].wavectl & 0xF),
             8 => {
                 let n = self.karplus(hw, v);
-                seg += 22_866 + n;
-                after += 22_866 + n;
+                seg += n;
+                after += n;
             }
             9 => {
                 // tick 0 with a note: nothing (already triggered)
@@ -724,9 +770,9 @@ impl Pt4 {
             0xF => {
                 self.ch[v].glissfunk = (y << 4) | (self.ch[v].glissfunk & 0xF);
                 if y != 0 {
-                    self.funk(hw, v);
-                    seg += 206;
-                    after += 206;
+                    let f = 206 + self.funk(hw, v);
+                    seg += f;
+                    after += f;
                 }
             }
             _ => {}
@@ -734,7 +780,7 @@ impl Pt4 {
         let (s, a) = match x {
             0 => (916, 676),
             5 => (982, 676),
-            6 => (1114, 942),
+            6 => ((1114 + loop6) as u64, (942 + loop6) as u64),
             0xB => (1184, 1012),
             0xC => (1174, 676),
             0xE => (1126, 954),
@@ -761,20 +807,24 @@ impl Pt4 {
         }
     }
 
-    fn funk(&mut self, hw: &mut Hw, v: usize) {
+    /// The funk inversion; returns the cycles it takes on top of the path's (16 when the
+    /// inverted byte wraps back to the repeat start: measured, the only part that varies).
+    fn funk(&mut self, hw: &mut Hw, v: usize) -> u64 {
         let c = &mut self.ch[v];
         let sp = (c.glissfunk >> 4) as usize;
         if sp == 0 {
-            return;
+            return 0;
         }
         c.funk_acc = c.funk_acc.wrapping_add(FUNK[sp]);
         if c.funk_acc & 0x80 == 0 {
-            return;
+            return 0;
         }
         c.funk_acc = 0;
         c.wave = c.wave.wrapping_add(1);
+        let mut extra = 0;
         if c.wave >= c.rstart.wrapping_add(c.rlen as u32 * 2) {
             c.wave = c.rstart;
+            extra = 16;
         }
         let a = c.wave;
         if a != 0 {
@@ -782,14 +832,18 @@ impl Pt4 {
                 self.put(hw, a, !b);
             }
         }
+        extra
     }
 
-    /// E8x: a Karplus-Strong pass over the repeat part in sample memory. Returns the byte count.
+    /// E8x: a Karplus-Strong pass over the repeat part in sample memory. Returns its cycles:
+    /// 67 per byte and 118 (measured on the reference with the repeat length of one sample
+    /// changed: 60, 120, 200 and 334 bytes fit exactly; a pass with nothing to filter is taken
+    /// as the 118 alone).
     fn karplus(&mut self, hw: &mut Hw, v: usize) -> u64 {
         let c = self.ch[v];
         let n = c.rlen as u32 * 2;
         if n == 0 || c.rstart == 0 {
-            return 0;
+            return 118;
         }
         let at = |i: u32| c.rstart.wrapping_add(i);
         for i in 0..n - 1 {
@@ -801,13 +855,13 @@ impl Pt4 {
         if let (Some(a), Some(b)) = (self.byte(hw, at(n - 1)), self.byte(hw, at(0))) {
             self.put(hw, at(n - 1), ((a as i8 as i16 + b as i8 as i16) >> 1) as u8);
         }
-        n as u64
+        118 + 67 * n as u64
     }
 
     fn fx_voice(&mut self, hw: &mut Hw, v: usize) {
         if self.ch[v].glissfunk >> 4 != 0 {
-            self.go(hw, FX_FUNK);
-            self.funk(hw, v);
+            let f = FX_FUNK + self.funk(hw, v);
+            self.go(hw, f);
         }
         let c = self.ch[v];
         if c.cell & 0xFFF == 0 {
@@ -829,7 +883,8 @@ impl Pt4 {
                     let t = (c.fine as usize & 0xF) * 37;
                     if let Some(i) = (0..37).find(|&i| c.period >= PERIODS[t + i]) {
                         let p = self.arp_word(t + i + n);
-                        self.go(hw, 883 + 49 * i as u64);
+                        // (the second arpeggio step takes a cycle more than the first)
+                        self.go(hw, 883 + 49 * i as u64 + (k == 2) as u64);
                         self.per(hw, v, p);
                         vol_gap = 284;
                     } else {
@@ -933,11 +988,14 @@ impl Pt4 {
         self.mask = 0xFF;
         let c = &mut self.ch[v];
         c.period = c.period.wrapping_add((c.par() & m) as u16);
+        // (measured on an effect tick: stopping at the limit takes 40 cycles more)
+        let mut stop = 0;
         if c.period & 0xFFF > 856 {
             c.period = (c.period & 0xF000) | 856;
+            stop = 40;
         }
         let p = c.period & 0xFFF;
-        self.porta_write(hw, v, p, row, trig, 666, 826);
+        self.porta_write(hw, v, p, row, trig, 666 + stop, 826);
     }
 
     fn porta_write(&mut self, hw: &mut Hw, v: usize, p: u16, row: bool, trig: bool, fx_cost: u64, row_cost: u64) {
@@ -950,7 +1008,9 @@ impl Pt4 {
             self.per(hw, v, p);
             self.vol_go = 392;
         } else {
-            self.go(hw, fx_cost);
+            // (as the tick's first write, two cycles more: measured on voice 0)
+            let first = 2 * (self.first && self.fx_entry) as u64;
+            self.go(hw, fx_cost + first);
             self.per(hw, v, p);
             self.vol_go = 284;
         }
@@ -990,6 +1050,8 @@ impl Pt4 {
             p = PERIODS[t + i];
             cost += 49 * i as u64;
         }
+        // (as the tick's first write, two cycles more: measured on voice 0)
+        cost += 2 * (self.first && self.fx_entry) as u64;
         self.go(hw, cost);
         self.per(hw, v, p);
         self.vol_go = 308;
@@ -1075,6 +1137,7 @@ impl Pt4 {
             0xD => 1146,
             0xE => 1024 + 52 * (tick0 && self.delay_cnt == 0) as u64,
             0xF => 1140,
+            8 => 970,
             _ => 950,
         };
         match x {
@@ -1112,7 +1175,7 @@ impl Pt4 {
             7 => self.ch[v].wavectl = (y << 4) | (self.ch[v].wavectl & 0xF),
             8 => {
                 let n = self.karplus(hw, v);
-                base += 22_866 + n;
+                base += n;
             }
             9 if y != 0 && !(tick0 && has_note) && self.counter % y == 0 => return self.retrigger(hw, v, false),
             0xA if tick0 => self.ch[v].vol = self.ch[v].vol.saturating_add(y).min(64),
@@ -1123,10 +1186,14 @@ impl Pt4 {
             0xF if tick0 => {
                 self.ch[v].glissfunk = (y << 4) | (self.ch[v].glissfunk & 0xF);
                 if y != 0 {
-                    self.funk(hw, v);
+                    base += self.funk(hw, v);
                 }
             }
             _ => {}
+        }
+        if self.first && matches!(x, 1 | 0xF) {
+            // (as the tick's first write, two cycles less: measured on voice 0)
+            base -= 2;
         }
         self.go(hw, base);
         let x = self.ch[v].vol as u16;
@@ -1179,11 +1246,6 @@ impl Replayer for Pt4 {
 
     fn tick_clocks(&self) -> u64 {
         5 * (1_773_447 / self.tempo.max(1) as u64 + 1)
-    }
-
-    /// The first interrupt follows the start by about 72 000 colour clocks in the host.
-    fn timer_delay(&self) -> u64 {
-        655
     }
 
     fn songend(&self) -> bool {

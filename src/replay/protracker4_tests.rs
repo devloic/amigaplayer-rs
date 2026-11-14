@@ -225,12 +225,12 @@ fn run_one_more(m: &mut Machine, r: &mut Box<dyn Replayer>, _k: usize) {
 }
 
 #[test]
-fn the_first_tick_follows_the_start_by_a_period_and_the_host_delay() {
+fn the_first_tick_follows_the_start_by_a_period() {
     let f = container(&simple(&[]), 125, 0x81);
     let (mut m, mut r) = start(&f);
     let t0 = m.bus.clock;
     let e = run(&mut m, &mut r, 1);
-    assert_eq!(e[0], t0 + 70940 + 655);
+    assert_eq!(e[0], t0 + 70940);
     // the first write of an effect tick is a volume 366 colour clocks into the interrupt
     assert_eq!(log(&m)[1].2, e[0] + 366);
     // and the next voice's volume 300 later

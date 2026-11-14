@@ -97,6 +97,77 @@ const ARP: [&[u8]; 8] = [
     &[0, 0, 0, 2, 2, 2, 1, 1, 1, 2, 2, 2],
 ];
 
+// The original's 68000 cycles per code path, measured (black box): every write is a direct Paula
+// write at the interrupt's start plus half the cycles of the paths taken since (rounded down).
+// Fitted exactly to every write of the reference runs (UADE's Synth Pack player) of the nine songs
+// and of 14 copies with one kind of change to the instruments (attack speeds, zero decay and
+// release speeds, modulator key flags, a deep tremolo, portamento up and down): 268,338 writes,
+// the cycles from a run whose cycle count starts one cycle late giving each write's parity. Where
+// one path ends and the next begins is the fit's choice, not the original's: only the sums are
+// measured. Per-voice tables are indexed by the voice (slot 0..3), not by its Paula channel.
+/// From the interrupt to the first write's path; every sixth interrupt from the song's start takes
+/// `C_SIXTH` more.
+const C_TICK: i64 = 504;
+const C_SIXTH: i64 = 26;
+/// To the DMA on of the notes the previous tick started.
+const C_DMA_ON: i64 = 24;
+/// Entering a voice.
+const C_VOICE: [i64; 4] = [11, 39, 0, 8];
+/// The envelope: a phase counting down (or the sustain held); per phase (attack, decay, release)
+/// a level step, the phase's end with a speed of 0, the phase's end at its level; the sustain's end.
+const C_ENV_WAIT: i64 = 73;
+const C_ENV: [[i64; 3]; 3] = [[167, 186, 219], [167, 162, 195], [155, 142, 163]];
+const C_SUSTAIN_END: i64 = 121;
+/// A modulator: its key flag set, still delayed, stepping its phase.
+const C_MOD_FLAG: i64 = 21;
+const C_MOD_DELAY: i64 = 51;
+const C_MOD_STEP: i64 = 74;
+/// The tremolo's output, taken from a level above 0, clamped at 0.
+const C_TREMOLO_OUT: i64 = 144;
+const C_TREMOLO_SUB: i64 = 5;
+const C_TREMOLO_NEG: i64 = 4;
+/// The vibrato, its output.
+const C_VIBRATO: i64 = 278;
+const C_VIBRATO_OUT: i64 = 109;
+/// The pulse width (a waveform of 0x80 bytes or less), its output, an odd offset, to its address.
+const C_PULSE: i64 = 213;
+const C_PULSE_OUT: i64 = 114;
+const C_PULSE_ODD: i64 = 8;
+const C_PULSE_LOC: [i64; 4] = [0, 31, 70, 62];
+/// Portamento: a held note sliding down to 0 or up to it; a released one at its target, above it
+/// or below it.
+const C_SLIDE_DOWN: i64 = 57;
+const C_SLIDE_UP: i64 = 53;
+const C_RELEASED: [i64; 3] = [40, 69, 65];
+/// To the volume, then to the period.
+const C_VOL: [i64; 4] = [562, 610, 683, 648];
+const C_PER: [i64; 4] = [145, 176, 215, 207];
+/// A note's loop queued (a tick after its start): to the length (an unlooped sample's length 1 at
+/// once), then a loop's address, and after it; no loop to queue.
+const C_LOOP: [i64; 4] = [221, 252, 291, 283];
+const C_LOOP_LEN: i64 = 28;
+const C_LOOP_LOC: [i64; 4] = [137, 168, 207, 199];
+const C_LOOP_POST: [i64; 4] = [101, 132, 171, 163];
+const C_NO_LOOP: [i64; 4] = [164, 195, 234, 226];
+/// A note's start: to its address, to its length (`C_UNLOOPED` more for an unlooped sample), after it.
+const C_START_LOC: i64 = 135;
+const C_START_LEN: [i64; 4] = [158, 189, 228, 220];
+const C_UNLOOPED: i64 = 10;
+const C_START_POST: [i64; 4] = [38, 69, 108, 100];
+/// After the last voice, to the DMA off of the notes this tick starts.
+const C_END: i64 = 99;
+/// The start-up writes, in colour clocks from the filter's write (see `SynthPack::start`), measured,
+/// the same in every song. The song starts `START_END` cycles after the filter's write, plus the
+/// search for the subsong's start position: per position passed, one without a subsong mark and one
+/// with; a search that finds none (measured on one copy) instead.
+const START_LEN: u64 = 212;
+const START_STEP: u64 = 68;
+const START_VOL: u64 = 8;
+const START_DMA: u64 = 443;
+const START_END: u64 = 1674;
+const START_SCAN: [u64; 2] = [43, 60];
+const START_NONE: u64 = 2714;
+
 /// Slot k plays Paula channel CHANNEL[k].
 const CHANNEL: [usize; 4] = [0, 1, 3, 2];
 
@@ -155,10 +226,22 @@ fn count_subsongs(d: &[u8]) -> u16 {
 /// The start position of subsong `n`: the n-th position whose mask has any of bits
 /// 4-7, else position 0.
 fn subsong_start(d: &[u8], n: u16) -> u8 {
-    (0..64usize)
-        .filter(|&i| d.get(0x0C + 4 * i + 3).is_some_and(|m| m & 0xF0 != 0))
-        .nth(n as usize)
-        .unwrap_or(0) as u8
+    subsong_search(d, n).0
+}
+
+/// The start position of subsong `n` (as `subsong_start`) and the original's cycles for the search.
+fn subsong_search(d: &[u8], n: u16) -> (u8, u64) {
+    let mut cy = 0;
+    let mut k = 0;
+    for i in 0..64usize {
+        let marked = d.get(0x0C + 4 * i + 3).is_some_and(|m| m & 0xF0 != 0);
+        if marked && k == n {
+            return (i as u8, cy);
+        }
+        k += marked as u16;
+        cy += START_SCAN[marked as usize];
+    }
+    (0, START_NONE)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -233,6 +316,11 @@ pub struct SynthPack {
     nextdma: u16,
     v: [Voice; 4],
     songend: bool,
+    /// Interrupts since the song's start, modulo 6.
+    sixth: u8,
+    /// The interrupt's start (colour clock) and the original's 68000 cycles since then.
+    t0: u64,
+    cy: i64,
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -266,16 +354,23 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         nextdma: 0,
         v: Default::default(),
         songend: false,
+        sixth: 0,
+        t0: 0,
+        cy: 0,
     };
-    let mut hw = Hw { bus: &mut m.bus };
-    // the audio filter off
-    let x = hw.bus.read_byte(0xBFE001);
-    hw.bus.write_byte(0xBFE001, x | 2);
-    r.start(0, &mut hw);
+    r.start(0, &mut Hw { bus: &mut m.bus });
     Some(Box::new(r))
 }
 
 impl SynthPack {
+    /// Up to the clock of the next write: the interrupt's start plus half the cycles so far.
+    fn at(&mut self, hw: &mut Hw) {
+        let t = self.t0 + self.cy.max(0) as u64 / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+
     fn rb(&self, o: usize) -> u8 {
         self.d.get(o).copied().unwrap_or(0)
     }
@@ -298,7 +393,9 @@ impl SynthPack {
         PERIODS.get(note as usize).copied().unwrap_or(0).wrapping_sub(ft)
     }
 
-    /// The song from the start position of subsong `n`, with the start-up writes.
+    /// The song from the start position of subsong `n`, with the start-up writes at the original's
+    /// times (colour clocks from the filter's write: `START_LEN`, `START_STEP` per voice, the volume
+    /// `START_VOL` after its length, `START_DMA`), the song starting after the search for its position.
     fn start(&mut self, n: u16, hw: &mut Hw) {
         self.sub = n;
         self.pos = subsong_start(&self.d, n);
@@ -311,180 +408,264 @@ impl SynthPack {
         self.nextdma = 0;
         self.v = Default::default();
         self.songend = false;
-        for ch in CHANNEL {
+        self.sixth = 0;
+        let t = hw.bus.clock;
+        // the audio filter off
+        let x = hw.bus.read_byte(0xBFE001);
+        hw.bus.write_byte(0xBFE001, x | 2);
+        for (k, ch) in CHANNEL.into_iter().enumerate() {
+            hw.bus.clock = hw.bus.clock.max(t + START_LEN + START_STEP * k as u64);
             hw.len(ch, 1);
+            hw.bus.clock = hw.bus.clock.max(t + START_LEN + START_STEP * k as u64 + START_VOL);
             hw.vol(ch, 0);
         }
+        hw.bus.clock = hw.bus.clock.max(t + START_DMA);
         hw.dmacon(0x800F);
+        hw.bus.clock = hw.bus.clock.max(t + (START_END + subsong_search(&self.d, n).1) / 2);
     }
 
     /// A modulator's wave byte (unsigned), or None for no output.
     fn modulate(&mut self, k: usize, j: usize, a: usize) -> Option<u8> {
         let o = a + [0x15, 0x1A, 0x1F][j];
         let (shift, flag) = (self.sb(o + 2), self.sb(o + 4));
-        let v = &mut self.v[k];
-        let m = &mut v.m[j];
-        if flag != 0 && v.key == 0 {
-            return None;
+        if flag != 0 {
+            self.cy += C_MOD_FLAG;
+            if self.v[k].key == 0 {
+                return None;
+            }
         }
+        let m = &mut self.v[k].m[j];
         if m.dly >> 8 != 0 {
             m.dly = m.dly.wrapping_sub(0x40);
+            self.cy += C_MOD_DELAY;
             return None;
         }
         m.pha = m.pha.wrapping_add(m.spd);
+        let (pha, wave) = (m.pha, m.wave);
+        self.cy += C_MOD_STEP;
         if shift == 8 {
             return None;
         }
-        let i = (m.pha >> 8 & 0x7F) as usize;
-        Some(m.wave.and_then(|w| WAVES.get(w as usize)).map_or(0, |w| w[i] as u8))
+        let i = (pha >> 8 & 0x7F) as usize;
+        Some(wave.and_then(|w| WAVES.get(w as usize)).map_or(0, |w| w[i] as u8))
     }
 
     fn adsr(&mut self, k: usize, a: usize) {
         let e: [u8; 5] = std::array::from_fn(|i| self.sb(a + 0x10 + i));
         let (al, asp, dsp, sl, rsp) = (e[0], e[1], e[2], e[3], e[4]);
-        let v = &mut self.v[k];
         let low = |l: u16| l as u8 as i8;
-        match v.ph {
+        let v = &mut self.v[k];
+        // the path's cycles: counting down, a step, the phase's end (speed 0 / at its level)
+        let end = |c: &[i64; 3], speed: u8| if speed == 0 { c[1] } else { c[2] };
+        let c = match v.ph {
             0 => {
                 v.cnt16 = v.cnt16.wrapping_sub(2);
                 if (v.cnt16 as i16) >= 0 {
-                    return;
-                }
-                v.cnt16 = asp as u16;
-                if asp != 0 && low(v.lvl) < al as i8 {
-                    v.lvl = v.lvl.wrapping_add(8);
+                    C_ENV_WAIT
                 } else {
-                    v.ph = 1;
-                    v.cnt16 = dsp as u16;
-                    v.lvl = al as u16;
+                    v.cnt16 = asp as u16;
+                    if asp != 0 && low(v.lvl) < al as i8 {
+                        v.lvl = v.lvl.wrapping_add(8);
+                        C_ENV[0][0]
+                    } else {
+                        v.ph = 1;
+                        v.cnt16 = dsp as u16;
+                        v.lvl = al as u16;
+                        end(&C_ENV[0], asp)
+                    }
                 }
             }
             1 => {
                 v.cnt16 = v.cnt16.wrapping_sub(2);
                 if (v.cnt16 as i16) >= 0 {
-                    return;
-                }
-                v.cnt16 = dsp as u16;
-                if dsp != 0 && low(v.lvl) > sl as i8 {
-                    v.lvl = v.lvl.wrapping_sub(8);
+                    C_ENV_WAIT
                 } else {
-                    v.ph = 2;
-                    v.lvl = sl as u16;
+                    v.cnt16 = dsp as u16;
+                    if dsp != 0 && low(v.lvl) > sl as i8 {
+                        v.lvl = v.lvl.wrapping_sub(8);
+                        C_ENV[1][0]
+                    } else {
+                        v.ph = 2;
+                        v.lvl = sl as u16;
+                        end(&C_ENV[1], dsp)
+                    }
                 }
             }
             2 => {
                 if v.key == 0xFF {
                     v.ph = 3;
                     v.cnt16 = rsp as u16;
+                    C_SUSTAIN_END
+                } else {
+                    C_ENV_WAIT
                 }
             }
             3 => {
                 v.cnt16 = v.cnt16.wrapping_sub(2);
                 if (v.cnt16 as i16) >= 0 {
-                    return;
-                }
-                v.cnt16 = rsp as u16;
-                if rsp != 0 && (v.lvl as i16) > 0 {
-                    v.lvl = v.lvl.wrapping_sub(8);
+                    C_ENV_WAIT
                 } else {
-                    v.ph = 4;
-                    v.lvl = 0;
+                    v.cnt16 = rsp as u16;
+                    if rsp != 0 && (v.lvl as i16) > 0 {
+                        v.lvl = v.lvl.wrapping_sub(8);
+                        C_ENV[2][0]
+                    } else {
+                        v.ph = 4;
+                        v.lvl = 0;
+                        end(&C_ENV[2], rsp)
+                    }
                 }
             }
-            _ => {}
-        }
+            _ => 0,
+        };
+        self.cy += c;
     }
 
-    /// 6.1: the envelopes and modulators, then the registers of every voice.
+    /// 6.1: the envelopes and modulators, then the registers of every voice; each write at the
+    /// original's time (see `C_TICK`).
     fn update(&mut self, hw: &mut Hw) {
-        // the original's time to these writes (Paula must fetch a started sample's
-        // start before the loop part is queued)
-        hw.wait(180);
+        self.t0 = hw.bus.clock;
+        self.cy = C_TICK;
+        self.sixth += 1;
+        if self.sixth == 6 {
+            self.sixth = 0;
+            self.cy += C_SIXTH;
+        }
         if self.nextdma != 0 {
+            self.cy += C_DMA_ON;
+            self.at(hw);
             hw.dmacon(self.nextdma | 0x8000);
         }
-        hw.wait(450);
         let mut acc = 0u16;
         for k in 0..4 {
-            if k != 0 {
-                hw.wait(520);
-            }
+            self.cy += C_VOICE[k];
             let ch = CHANNEL[k];
             let a = self.ins(self.v[k].inst);
             self.adsr(k, a);
             // tremolo
             let w = self.modulate(k, 0, a);
             let shift = (self.sb(a + 0x17) & 63) as u32;
-            let v = &mut self.v[k];
-            v.out = match w {
-                None => v.lvl,
+            let lvl = self.v[k].lvl;
+            let out = match w {
+                None => lvl,
                 Some(w) => {
+                    self.cy += C_TREMOLO_OUT;
                     let d = shr(((w ^ 0x80) >> 1) as u32, shift) as u16;
-                    if v.lvl == 0 {
+                    if lvl == 0 {
                         0
                     } else {
-                        let o = v.lvl.wrapping_sub(d);
-                        if (o as i16) < 0 { 0 } else { o }
+                        self.cy += C_TREMOLO_SUB;
+                        let o = lvl.wrapping_sub(d);
+                        if (o as i16) < 0 {
+                            self.cy += C_TREMOLO_NEG;
+                            0
+                        } else {
+                            o
+                        }
                     }
                 }
             };
+            self.v[k].out = out;
             // vibrato
+            self.cy += C_VIBRATO;
             let w = self.modulate(k, 1, a);
             let shift = (self.sb(a + 0x1C) & 63) as u32;
-            let d = w.map_or(0, |w| ((w as i8 as i32) >> shift.min(31)) as u16);
+            let d = match w {
+                None => 0,
+                Some(w) => {
+                    self.cy += C_VIBRATO_OUT;
+                    ((w as i8 as i32) >> shift.min(31)) as u16
+                }
+            };
             let v = &mut self.v[k];
             v.outper = v.per.wrapping_add(d);
             // pulse width
             if (self.sw(a + 2) as i16) <= 0x80 {
+                self.cy += C_PULSE;
                 let w = self.modulate(k, 2, a);
                 let shift = (self.sb(a + 0x21) & 63) as u32;
-                let mut d = w.map_or(0, |w| shr(((!(w ^ 0x80)) as u32 & 0xFF) >> 1, shift));
+                let mut d = match w {
+                    None => 0,
+                    Some(w) => {
+                        self.cy += C_PULSE_OUT;
+                        shr(((!(w ^ 0x80)) as u32 & 0xFF) >> 1, shift)
+                    }
+                };
                 let mut b = a + 0x30;
                 if d & 1 != 0 {
+                    self.cy += C_PULSE_ODD;
                     d -= 1;
                     b = a + 0x130;
                 }
+                self.cy += C_PULSE_LOC[k];
+                self.at(hw);
                 hw.loc(ch, self.base.wrapping_add(b as u32).wrapping_add(d));
             }
             // portamento
             let (hstep, target, rstep) = (self.sw(a + 0x0A), self.sw(a + 0x0C), self.sw(a + 0x0E));
             let v = &mut self.v[k];
-            if v.key == 0 {
-                if v.port != 0 {
-                    v.port = if (v.port as i16) > 0 { v.port.wrapping_sub(hstep) } else { v.port.wrapping_add(hstep) };
-                }
-            } else if v.port != target {
-                v.port = if (v.port.wrapping_sub(target) as i16) > 0 {
-                    v.port.wrapping_sub(rstep)
+            let c = if v.key == 0 {
+                if v.port == 0 {
+                    0
+                } else if (v.port as i16) > 0 {
+                    v.port = v.port.wrapping_sub(hstep);
+                    C_SLIDE_DOWN
                 } else {
-                    v.port.wrapping_add(rstep)
-                };
-            }
+                    v.port = v.port.wrapping_add(hstep);
+                    C_SLIDE_UP
+                }
+            } else if v.port == target {
+                C_RELEASED[0]
+            } else if (v.port.wrapping_sub(target) as i16) > 0 {
+                v.port = v.port.wrapping_sub(rstep);
+                C_RELEASED[1]
+            } else {
+                v.port = v.port.wrapping_add(rstep);
+                C_RELEASED[2]
+            };
             v.outper = v.outper.wrapping_sub(v.port);
             let vol = (v.out.wrapping_mul(v.vel) >> 6) & 0x7F;
             let per = v.outper;
+            self.cy += c + C_VOL[k];
+            self.at(hw);
             hw.vol(ch, vol);
+            self.cy += C_PER[k];
+            self.at(hw);
             hw.per(ch, per);
             let looped = be32(&self.smp, a + 4) != 0;
             let (ls, le) = (self.sw(a + 4), self.sw(a + 6));
-            let v = &mut self.v[k];
-            if v.st == 0xFE {
-                v.st = 0xFD;
+            if self.v[k].st == 0xFE {
+                self.v[k].st = 0xFD;
+                self.cy += C_LOOP[k];
                 if !looped {
+                    self.at(hw);
                     hw.len(ch, 1);
                 } else {
+                    self.cy += C_LOOP_LEN;
+                    self.at(hw);
                     hw.len(ch, le.wrapping_sub(ls) >> 1);
+                    self.cy += C_LOOP_LOC[k];
+                    self.at(hw);
                     hw.loc(ch, self.base.wrapping_add(a as u32).wrapping_add(0x30u16.wrapping_add(ls) as u32));
+                    self.cy += C_LOOP_POST[k];
                 }
+            } else {
+                self.cy += C_NO_LOOP[k];
             }
-            let v = &mut self.v[k];
-            if v.st == 0xFF {
-                v.st = 0xFE;
+            if self.v[k].st == 0xFF {
+                self.v[k].st = 0xFE;
                 acc |= 1 << ch;
+                self.cy += C_START_LOC;
+                self.at(hw);
                 hw.loc(ch, self.base.wrapping_add(a as u32 + 0x30));
+                self.cy += C_START_LEN[k] + if looped { 0 } else { C_UNLOOPED };
+                self.at(hw);
                 hw.len(ch, if looped { le } else { self.sw(a + 2) } >> 1);
+                self.cy += C_START_POST[k];
             }
         }
+        self.cy += C_END;
+        self.at(hw);
         hw.dmacon(acc);
         self.nextdma = acc;
     }

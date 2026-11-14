@@ -197,6 +197,9 @@ pub mod dmf;
 pub mod mptmath;
 #[doc(hidden)]
 #[allow(missing_docs)]
+pub mod mo3;
+#[doc(hidden)]
+#[allow(missing_docs)]
 pub mod symmod;
 #[doc(hidden)]
 #[allow(missing_docs)]

@@ -50,6 +50,9 @@ pub static LOADERS: &[Loader] = &[
     // "Apocalypse Abyss" (Software Visions, `.dmf`; ".M.K", header and first pattern
     // byte-swapped). The other MODs stay on the built-in ProTracker (see `mod_load`).
     Loader { name: "Software Visions DMF", test: software_visions_test, load: loaders::mod_load::load },
+    // Un4seen MO3 (`.mo3`): IT, XM, S3M, MOD and MTM modules with packed music data and
+    // compressed samples, put back into their format for that format's loader (see `mo3`).
+    Loader { name: "Un4seen MO3", test: crate::mo3::test, load: crate::mo3::load },
     Loader { name: "Impulse Tracker", test: loaders::it::test, load: loaders::it::load },
     Loader { name: "Scream Tracker 3", test: loaders::s3m::test, load: loaders::s3m::load },
     Loader { name: "Scream Tracker 2", test: loaders::stm::test, load: loaders::stm::load },

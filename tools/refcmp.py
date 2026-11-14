@@ -984,9 +984,11 @@ BLACKBOX_REF = {'iff8svx': 'sox', 'aiff': 'sox', 'riffwave': 'sox', 'riffwaveadp
 BLACKBOX_PREFIX = ('delusiondigitalmusicformat',)
 # libxmp-port formats where the port loads modules libxmp 4.7.4 refuses (README): for those modules
 # alone (the oracle prints "-\t0\tload") openmpt123 is the reference, at the port's stage. Digitrakker:
-# the port lifts libxmp's 512 KB cap on a packed 8-bit sample. The port plays them on libxmp's mixer,
-# openmpt123 on its own: at best SIMILAR.
-XMP_REFUSED_BLACKBOX = ('digitrakker',)
+# the port lifts libxmp's 512 KB cap on a packed 8-bit sample. Un4seen MO3: libxmp has no loader (the
+# port reads the file as libopenmpt 0.8.7 does and plays the module put back into its format on the
+# libxmp port's loader of that format). The port plays them on libxmp's mixer, openmpt123 on its own:
+# at best SIMILAR.
+XMP_REFUSED_BLACKBOX = ('digitrakker', 'un4seenmo3')
 
 
 def blackbox_key(fmt):

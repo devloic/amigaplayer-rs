@@ -46,6 +46,9 @@ lzma-rs = { version = "0.3", optional = true }
 # layer 1 frame. Builds for wasm32-unknown-unknown.
 symphonia-bundle-mp3 = { version = "0.6.1", default-features = false, features = ["mp1", "mp2", "mp3"] }
 symphonia-core = "0.6.1"
+# The Ogg Vorbis samples of MO3 modules (`src/mo3/codec.rs`): Symphonia's pure-Rust Vorbis
+# decoder, MPL-2.0, as above. Builds for wasm32-unknown-unknown.
+symphonia-codec-vorbis = "0.6.1"
 
 [features]
 # What `cargo build --release` produces: the player window, the open replayers (Rust ports),

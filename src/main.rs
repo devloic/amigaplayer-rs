@@ -30,6 +30,8 @@ struct Args {
     #[cfg(feature = "host-68k")]
     open_replayers: bool,
     wav: Option<PathBuf>,
+    /// the --wav render's sample rate
+    rate: u32,
     seconds: f64,
     subsong: i32,
     led: bool,
@@ -58,7 +60,7 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
-const USAGE_HEAD: &str = "usage: amigaplayer-rs [--wav OUT.wav [--seconds N] [--subsong N] [--volume V]]\n\
+const USAGE_HEAD: &str = "usage: amigaplayer-rs [--wav OUT.wav [--rate HZ] [--seconds N] [--subsong N] [--volume V]]\n\
          \x20                 [--filter a500|a1200|none|auto] [--led auto|on|off|force]\n\
          \x20                 [--separation 0..1] [--mono] [--interp nearest|linear|spline]\n\
          \x20                 [--xmp-filter on|off] [--archive-entry NAME]\n\
@@ -97,7 +99,8 @@ const USAGE_TAIL: &str = "--led off renders with the LED filter\n\
          A500, none for PC formats; the A1200 has no fixed filter). --separation\n\
          (default 0.7; 1 = hard Amiga panning) and --mono shape the Paula mix.\n\
          --interp and --xmp-filter are libxmp's mixer's (linear, on). --volume V\n\
-         sets the output volume (default 0.8; UADE's level is 1). With --wav the\n\
+         sets the output volume (default 0.8; UADE's level is 1). --rate HZ is the\n\
+         --wav render's sample rate (8000 to 192000, default 48000). With --wav the\n\
          stages in effect are printed on stderr (`output: ...`, `led-switched: ...`).\n\
          An archive (LhA, zip, tar, .tar.gz, .tar.xz) is extracted into a cache\n\
          directory ($AMIGAPLAYER_ARCHIVE_CACHE, else ~/.cache/amigaplayer-rs/archives)\n\
@@ -122,7 +125,7 @@ fn parse_args() -> Args {
         only_player: None,
         #[cfg(feature = "host-68k")]
         open_replayers: true,
-        wav: None, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
+        wav: None, rate: SAMPLE_RATE, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
     // (a file name need not be UTF-8: options are read as text, file names as given)
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
@@ -154,6 +157,9 @@ fn parse_args() -> Args {
             #[cfg(feature = "host-68k")]
             "--genie" | "--noteplayer" => a.use_genies.push(it.next().unwrap_or_else(|| usage())),
             "--wav" => a.wav = it.next().map(PathBuf::from),
+            "--rate" => {
+                a.rate = it.next().and_then(|v| v.parse().ok()).filter(|r| (8000..=192000).contains(r)).unwrap_or_else(|| usage())
+            }
             "--seconds" => a.seconds = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
             "--subsong" => a.subsong = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
             "--led" => {
@@ -243,7 +249,8 @@ fn apply_settings(args: &Args, s: &mut Settings) {
 fn render_wav(args: &Args) -> Result<()> {
     let wav = args.wav.as_ref().unwrap();
     let Some(file) = args.files.first() else { bail!("--wav needs a module file") };
-    let mut e = engine::Engine::new(SAMPLE_RATE as f64);
+    let rate = args.rate;
+    let mut e = engine::Engine::new(rate as f64);
     #[cfg(feature = "host-68k")]
     {
         e.m.os.libs_dir = args.libs.clone().or_else(default_libs_dir);
@@ -290,7 +297,7 @@ fn render_wav(args: &Args) -> Result<()> {
     // an archive: its entries in order, each rendered as a module given alone would be (up to
     // --seconds or its song end), one after the other; the entries no player takes are skipped
     let items = amigaplayer_rs::playlist::items(file, args.archive_entry.as_deref()).map_err(anyhow::Error::msg)?;
-    let total = (args.seconds * SAMPLE_RATE as f64) as usize;
+    let total = (args.seconds * rate as f64) as usize;
     let mut out: Vec<f32> = Vec::new();
     let mut done = 0;
     let mut played = 0;
@@ -326,14 +333,15 @@ fn render_wav(args: &Args) -> Result<()> {
         let start = done;
         out.resize(out.len() + total * 2, 0.0);
         while done - start < total {
-            let n = (total - (done - start)).min(4800);
+            // blocks of 0.1 s
+            let n = (total - (done - start)).min(rate as usize / 10);
             e.render(&mut out[done * 2..(done + n) * 2]);
             done += n;
             if e.playing.is_none() {
                 break;
             }
             if e.songend() {
-                eprintln!("song end after {:.1}s", (done - start) as f64 / SAMPLE_RATE as f64);
+                eprintln!("song end after {:.1}s", (done - start) as f64 / rate as f64);
                 break;
             }
         }
@@ -382,7 +390,7 @@ fn render_wav(args: &Args) -> Result<()> {
             n.calls, n.native, n.interpreted, n.patched_calls
         );
     }
-    write_wav(wav, SAMPLE_RATE, &out)
+    write_wav(wav, rate, &out)
 }
 
 /// Prints what loading the 68k player directories found.

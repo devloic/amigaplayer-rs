@@ -62,6 +62,24 @@ The two sample streams are compared and each file gets a class:
   NOREF       no original available (neutral: not counted as an inconsistency); also a file the
               port does not render when no original plays it either
 
+  NORATE      the reference tool cannot render at the run's --rate (neutral, like NOREF: nothing
+              is verified; a reference is never resampled to the run's rate)
+
+The sample rate (--rate N, default 48000): both sides render at N. The port and every engine
+reference (the original 68k players) through `amigaplayer-rs --rate N` (the option is passed only
+when N is not 48000, so a 48 kHz run's commands and cache keys are those of before the option);
+uade123 with --frequency=N; libxmp through a rate-capable copy of the C harness (XMP_ORACLE_RATE:
+`render MODULE OUT.raw SECONDS RATE`, same source, libxmp.a and flags; byte-identical to `render`
+at 48000) and AtariAudio through a rate-capable copy of its harness (SNDH_ORACLE_RATE, its 6th
+argument; byte-identical at 48000); libgme and openmpt123 at N; sox and ffmpeg decode at the
+file's rate and the port's own rate conversion (src/aiff.rs) takes it to N, as at 48 kHz. HVL's
+tick dump and Fibonacci 8SVX's Paula-fetch comparison do not depend on the output rate. A
+reference whose tool has no build for N (the copies above absent) is NORATE. Every 48000 of
+the comparison is the run's rate: the lag search (LAG_MAX frames at 48 kHz, scaled), the
+cross-correlation window (10 s), the LENGTH tolerance and the TEMPO minimum length. Cache keys
+carry the rate (when not 48000). The baseline is tools/refcmp-baseline.tsv at 48000 and
+tools/refcmp-baseline-N.tsv at any other N (--baseline overrides it).
+
 Outputs (in --out): refcmp.tsv, summary.txt, report.html. The baseline
 (tools/refcmp-baseline.tsv) holds each file's class and numbers; a run reports
 NEW inconsistencies (bad now, good or absent before) and FIXED ones, and exits 1
@@ -91,11 +109,25 @@ DELI_STORE = os.path.expanduser('~/.config/deliplayer/DeliPlayers/PlayerStore')
 # DeliTracker's NotePlayer genies (4Voices, 8Voices, 32Voices ...)
 NOTE_GENIES = SCRATCH + '/extract/DeliTracker_II/Files/x_genies/DeliGenies'
 XMP_ORACLE = SCRATCH + '/ports/x01-core/harness/render'
+# the same harness with the rate as its 4th argument (render.c copied with RATE read from argv,
+# built against the same libxmp.a with the same flags; equal to XMP_ORACLE's output at 48000)
+XMP_ORACLE_RATE = SCRATCH + '/fixround/rate441/oracles/xmp/render'
 LISTEN_PY = SCRATCH + '/listen/listen.py'
 BASELINE = os.path.join(HERE, 'refcmp-baseline.tsv')
+RATE = 48000            # Hz: the default --rate, at which BASELINE is measured
+
+
+def baseline_for(rate):
+    """The default baseline file of a run at `rate`."""
+    return BASELINE if rate == RATE else os.path.join(HERE, f'refcmp-baseline-{rate}.tsv')
+
+
+def rate_key(rate):
+    """What a cache key gets for the rate: nothing at 48000 (the keys of before --rate), else the rate."""
+    return [] if rate == RATE else [rate]
 
 # ---- thresholds -------------------------------------------------------------
-LAG_MAX = 4000          # frames: largest shift searched (83 ms at 48 kHz)
+LAG_MAX = 4000          # frames at 48 kHz: largest shift searched (83 ms; scaled to the run's rate, lag_max)
 LAG_PCT = 99.9          # % of frames equal after the shift for LAG-ONLY
 NEAR_MAXABS = 2         # LSB: largest difference of a NEAR file
 SIMILAR_DB = 1.0        # dB: band and level tolerance of SIMILAR
@@ -141,7 +173,7 @@ BAND_MIN_DB = -75.0     # bands quieter than this (re full scale) are ignored
 # builtin-voices: a reference played through our own NotePlayer renderer is not the original's
 MUST_MATCH = ('filter', 'led', 'sep', 'mono', 'resampler', 'volume', 'interp', 'xmp-filter', 'builtin-voices')
 
-GOOD = ('IDENTICAL', 'LAG-ONLY', 'NEAR', 'SIMILAR', 'NOREF')
+GOOD = ('IDENTICAL', 'LAG-ONLY', 'NEAR', 'SIMILAR', 'NOREF', 'NORATE')
 CLASSES = GOOD + ('FAIL', 'STAGE-MISMATCH', 'SILENT', 'LENGTH', 'FILTER', 'LEVEL', 'PITCH', 'TEMPO', 'DIFF')
 
 
@@ -157,8 +189,13 @@ def read_wav(path):
     return rate, a[:, :2]
 
 
-def read_raw(path):
-    return 48000, np.fromfile(path, dtype='<i2').reshape(-1, 2)
+def read_raw(path, rate=RATE):
+    return rate, np.fromfile(path, dtype='<i2').reshape(-1, 2)
+
+
+def lag_max(rate):
+    """LAG_MAX (frames at 48 kHz) at `rate`: the same 83 ms."""
+    return LAG_MAX if rate == RATE else int(round(LAG_MAX * rate / RATE))
 
 
 def _bands(mid, rate):
@@ -277,17 +314,18 @@ def _silent_frac(mid, rate):
     return float((rms < SILENT_RMS).mean())
 
 
-def _best_lag(a, b):
+def _best_lag(a, b, rate=RATE):
     """Shift s (b[i+s] ~ a[i]) with the highest cross-correlation of the mid channels."""
-    n = min(len(a), len(b), 10 * 48000)
-    if n < 2 * LAG_MAX:
+    lm = lag_max(rate)
+    n = min(len(a), len(b), 10 * rate)
+    if n < 2 * lm:
         return 0
     x = a[:n].mean(axis=1)
     y = b[:n].mean(axis=1)
     size = 1 << (2 * n - 1).bit_length()
     c = np.fft.irfft(np.fft.rfft(y, size) * np.conj(np.fft.rfft(x, size)), size)
-    cand = np.concatenate([c[:LAG_MAX + 1], c[size - LAG_MAX:]])
-    lags = np.concatenate([np.arange(LAG_MAX + 1), np.arange(-LAG_MAX, 0)])
+    cand = np.concatenate([c[:lm + 1], c[size - lm:]])
+    lags = np.concatenate([np.arange(lm + 1), np.arange(-lm, 0)])
     return int(lags[np.argmax(cand)])
 
 
@@ -301,7 +339,7 @@ def _aligned(a, b, s):
     return a2[:n], b2[:n]
 
 
-def compare(a, b, rate=48000):
+def compare(a, b, rate=RATE):
     """Numbers for the pair a (reference) and b (port), int16 (n, 2) arrays."""
     # A 68k player cannot tell the engine that its song has ended: the original goes on rendering
     # to the time limit while the port reports the end and stops. When all the reference has
@@ -309,7 +347,7 @@ def compare(a, b, rate=48000):
     # and the two are compared up to the port's end.
     if 0 < len(b) < len(a) and not a[len(b):].any():
         a = a[:len(b)]
-    r = {'len_a': len(a), 'len_b': len(b)}
+    r = {'len_a': len(a), 'len_b': len(b), 'rate': rate}
     n = min(len(a), len(b))
     x, y = a[:n].astype(np.int32), b[:n].astype(np.int32)
     d = np.abs(x - y)
@@ -326,8 +364,8 @@ def compare(a, b, rate=48000):
     r['level_db'] = round(20 * np.log10((rb + 1e-9) / (ra + 1e-9)), 2) if ra > 0 and rb > 0 else None
     # lag
     r['lag'], r['lag_pct'], r['lag_maxabs'] = 0, r['pct_identical'], r['maxabs']
-    if not r['identical'] and n > 2 * LAG_MAX and ra > 0 and rb > 0:
-        s = _best_lag(a, b)
+    if not r['identical'] and n > 2 * lag_max(rate) and ra > 0 and rb > 0:
+        s = _best_lag(a, b, rate)
         if s:
             a2, b2 = _aligned(a, b, s)
             dd = np.abs(a2.astype(np.int32) - b2.astype(np.int32))
@@ -352,6 +390,7 @@ def classify(r):
     if r['identical']:
         return 'IDENTICAL'
     la, lb = r['len_a'], r['len_b']
+    rate = r.get('rate', RATE)
     if r['lag'] and r['lag_pct'] >= LAG_PCT and abs(la - lb) <= abs(r['lag']) + 1:
         return 'LAG-ONLY'
     if la == lb and r['maxabs'] <= NEAR_MAXABS:
@@ -361,7 +400,7 @@ def classify(r):
     sa, sb = r['silent_a'], r['silent_b']
     if (r['rms_a'] == 0) != (r['rms_b'] == 0) or abs(sa - sb) > SILENT_FRAC:
         return 'SILENT'
-    tol = max(LENGTH_TOL_S * 48000, LENGTH_TOL_PCT / 100.0 * max(la, lb))
+    tol = max(LENGTH_TOL_S * rate, LENGTH_TOL_PCT / 100.0 * max(la, lb))
     if abs(la - lb) > tol:
         return 'LENGTH'
     db = [v for v in r['bands_db'] if v is not None]
@@ -372,7 +411,7 @@ def classify(r):
         return 'LEVEL'
     if abs(r['pitch_cents']) >= PITCH_CENTS and r['pitch_gain'] >= PITCH_GAIN:
         return 'PITCH'
-    if max(la, lb) >= 3 * 48000 and abs(r['tempo_drift_s']) >= TEMPO_DRIFT_S:
+    if max(la, lb) >= 3 * rate and abs(r['tempo_drift_s']) >= TEMPO_DRIFT_S:
         return 'TEMPO'
     if abs(lv) <= SIMILAR_DB and all(abs(v) <= SIMILAR_DB for v in db):
         return 'SIMILAR'
@@ -518,7 +557,10 @@ class Ctx:
                 self.stage = mod.stage
             except Exception as e:  # noqa
                 print('listen.py staging unavailable:', e, file=sys.stderr)
-        self.oracle = a.oracle
+        self.rate = a.rate
+        # off 48000 the rate-capable harness copies (at 48000 the fixed ones: the keys of before --rate)
+        self.oracle = a.oracle if a.rate == RATE else a.oracle_rate
+        self.sndh_oracle = SNDH_ORACLE if a.rate == RATE else SNDH_ORACLE_RATE
         self.hvl_testbin = a.hvl_testbin
 
 
@@ -553,7 +595,7 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None, fast_c
         # the port says its original's code does not fit a 68000's time (see needs_fast_reference_cpu)
         env['DELI_CPU_SPEED'] = '8'
     cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else ['--68k-players']), *ctx.flags, *extra,
-           '--wav', '@WAV@', '--seconds', str(ctx.secs), mod]
+           *(['--rate', str(ctx.rate)] if ctx.rate != RATE else []), '--wav', '@WAV@', '--seconds', str(ctx.secs), mod]
     wav, lines = _run_cached(ctx, mod, cmd, env, os.path.dirname(mod), None)
     play = next((l for l in lines if l.startswith('playing')), None)
     out = next((l for l in lines if l.startswith('output:')), None)
@@ -568,11 +610,12 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None, fast_c
 
 
 def render_oracle(ctx, mod):
-    h = hashlib.sha1(json.dumps([mod, ctx.secs, os.path.getmtime(ctx.oracle)]).encode()).hexdigest()[:20]
+    h = hashlib.sha1(json.dumps([mod, ctx.secs, os.path.getmtime(ctx.oracle), *rate_key(ctx.rate)]).encode()).hexdigest()[:20]
     raw = os.path.join(ctx.cache, h + '.xmp.raw')
     inf = raw + '.txt'
     if not os.path.exists(inf):
-        r = subprocess.run([ctx.oracle, mod, raw, str(ctx.secs)], capture_output=True, text=True,
+        r = subprocess.run([ctx.oracle, mod, raw, str(ctx.secs), *([str(ctx.rate)] if ctx.rate != RATE else [])],
+                           capture_output=True, text=True,
                            cwd=os.path.dirname(mod), timeout=300)
         open(inf, 'w').write(r.stdout.strip())
     return (raw if os.path.exists(raw) else None), open(inf).read()
@@ -744,7 +787,7 @@ def render_uade123(ctx, mod, po, want):
         sep, vol = float(po['sep']), float(po['volume'])
     except (KeyError, ValueError):
         return None
-    args = ['-1', '-t', str(ctx.secs), '--frequency=48000', f'--filter={filt}', '-p', f'{1 - sep:.3f}', '-G', f'{vol:.3f}']
+    args = ['-1', '-t', str(ctx.secs), f'--frequency={ctx.rate}', f'--filter={filt}', '-p', f'{1 - sep:.3f}', '-G', f'{vol:.3f}']
     h = hashlib.sha1(json.dumps([int(os.path.getmtime(UADE123)), mod, args]).encode()).hexdigest()[:20]
     raw = os.path.join(ctx.cache, h + '.uade.raw')
     inf = raw + '.txt'
@@ -763,7 +806,7 @@ def render_uade123(ctx, mod, po, want):
     info = open(inf).read()
     if not os.path.exists(raw) or not os.path.getsize(raw):
         return None
-    data = read_raw(raw)
+    data = read_raw(raw, ctx.rate)
     if not data[1].any():
         return None
     return dict(kind='uade123', wav=raw, data=data, out='uade123 ' + info, led='', player='uade123: ' + info, o={}, note='')
@@ -864,22 +907,29 @@ def ptk_cleared_copy(ctx, mod):
 # corpus files within 0.13 dB, every band alike), so it is compared only at that volume; the port's
 # SNDH output is mono, the same on both channels, so the separation does not enter.
 SNDH_ORACLE = SCRATCH + '/fixround/port-sndh/ref/cbuild/ref'
+# the same build with the rate as its 6th argument (main.cpp's 48000s read from argv; equal at 48000)
+SNDH_ORACLE_RATE = SCRATCH + '/fixround/rate441/oracles/sndh/ref'
+
+
+class NoRate(str):
+    """A NOREF note that says the reference tool cannot render at the run's rate (class NORATE)."""
 
 
 def render_sndh_oracle(ctx, mod, po, pplay):
     """AtariAudio's render of an SNDH file for the port's subsong, or a NOREF note (str)."""
-    if not os.path.exists(SNDH_ORACLE):
-        return 'no AtariAudio reference build'
+    if not os.path.exists(ctx.sndh_oracle):
+        return 'no AtariAudio reference build' if ctx.rate == RATE else NoRate(f'no AtariAudio build that renders at {ctx.rate} Hz')
     if po.get('volume') != '0.80' or po.get('mono', '0') != '0':
         return f'AtariAudio is compared at volume 0.80 only (port: volume {po.get("volume")})'
     m = re.search(r'\(current (\d+)\)', pplay or '')
     sub = int(m.group(1)) + 1 if m else 1
-    h = hashlib.sha1(json.dumps([int(os.path.getmtime(SNDH_ORACLE)), mod, sub, ctx.secs]).encode()).hexdigest()[:20]
+    h = hashlib.sha1(json.dumps([int(os.path.getmtime(ctx.sndh_oracle)), mod, sub, ctx.secs, *rate_key(ctx.rate)]).encode()).hexdigest()[:20]
     wav = os.path.join(ctx.cache, h + '.sndh.wav')
     inf = wav + '.txt'
     if not os.path.exists(inf):
         try:
-            r = subprocess.run([SNDH_ORACLE, mod, wav, wav + '.ymlog', str(sub), str(ctx.secs)], capture_output=True, text=True,
+            r = subprocess.run([ctx.sndh_oracle, mod, wav, wav + '.ymlog', str(sub), str(ctx.secs),
+                                *([str(ctx.rate)] if ctx.rate != RATE else [])], capture_output=True, text=True,
                                cwd=os.path.dirname(mod), timeout=ctx.secs * 4 + 120)
             text = (r.stdout.splitlines() or [''])[0]
         except subprocess.TimeoutExpired:
@@ -1081,7 +1131,7 @@ def original_before_blackbox(ctx, mod, want):
     return dict(kind='engine', wav=rw, data=data, out=rout, led=rled or '', player=f"{'ep206' if eagle else 'deli'}+original: {rplay}", o=o, note='')
 
 
-def port_rate_conversion(x, src, dst=48000):
+def port_rate_conversion(x, src, dst=RATE):
     """src/aiff.rs's rate conversion of float frames x (n, ch) from src to dst Hz: the position steps
     by src/dst from 0 (f64, added up frame by frame); upwards linear interpolation in f32, downwards
     the mean of the source frames from the position's frame to that of position + step."""
@@ -1111,8 +1161,9 @@ def render_blackbox(ctx, mod, po, pplay, tool):
         return f'{tool} is compared at the default output stage only (volume 0.80, stereo, linear interpolation)'
     m = re.search(r'\(current (\d+)\)', pplay or '')
     sub = int(m.group(1)) if m else 0
-    h = hashlib.sha1(json.dumps([tool, int(os.path.getmtime(exe)), mod, sub, ctx.secs]).encode()).hexdigest()[:20]
+    h = hashlib.sha1(json.dumps([tool, int(os.path.getmtime(exe)), mod, sub, ctx.secs, *rate_key(ctx.rate)]).encode()).hexdigest()[:20]
     wav = os.path.join(ctx.cache, h + '.' + tool + '.wav')
+    rt = ctx.rate
     inf = wav + '.txt'
     cwd = os.path.dirname(mod)
     if not os.path.exists(inf):
@@ -1135,27 +1186,27 @@ def render_blackbox(ctx, mod, po, pplay, tool):
                     x = np.fromfile(raw, dtype='<f4')
                     x = x[:len(x) // ch * ch].reshape(-1, ch)
                     x = np.repeat(x, 2, axis=1) if ch == 1 else x[:, :2]
-                    y = port_rate_conversion(x, rate) if rate != 48000 else x
-                    y = y[:ctx.secs * 48000]
+                    y = port_rate_conversion(x, rate, rt) if rate != rt else x
+                    y = y[:ctx.secs * rt]
                     s = np.clip(np.round(y.astype(np.float32) * np.float32(32768.0)), -32768, 32767).astype('<i2')
                     with wave.open(wav, 'wb') as w:
                         w.setnchannels(2)
                         w.setsampwidth(2)
-                        w.setframerate(48000)
+                        w.setframerate(rt)
                         w.writeframes(s.tobytes())
-                    text = f'{"sox 14.4.2" if tool == "sox" else "ffmpeg"} at {rate} Hz, {ch} channel(s), port rate conversion to 48000'
+                    text = f'{"sox 14.4.2" if tool == "sox" else "ffmpeg"} at {rate} Hz, {ch} channel(s), port rate conversion to {rt}'
                 else:
                     text = f'{tool}: ' + r.stderr.strip()[:80]
                 if os.path.exists(raw):
                     os.unlink(raw)
             elif tool == 'gme':
                 r = subprocess.run([FFMPEG, '-nostdin', '-loglevel', 'error', '-y', '-f', 'libgme', '-track_index', str(sub),
-                                    '-sample_rate', '48000', '-i', mod, '-t', str(ctx.secs), '-c:a', 'pcm_s16le', wav],
+                                    '-sample_rate', str(rt), '-i', mod, '-t', str(ctx.secs), '-c:a', 'pcm_s16le', wav],
                                    capture_output=True, text=True, cwd=cwd, timeout=ctx.secs * 4 + 120)
                 text = f'libgme (ffmpeg) track {sub}' if r.returncode == 0 else 'ffmpeg libgme: ' + r.stderr.strip()[:80]
             else:
                 r = subprocess.run([OPENMPT123, '-q', '--batch', '--force', '--no-float', '--dither', '0', '--filter', '2',
-                                    '--samplerate', '48000', '--subsong', str(sub), '--end-time', str(ctx.secs), '-o', wav, mod],
+                                    '--samplerate', str(rt), '--subsong', str(sub), '--end-time', str(ctx.secs), '-o', wav, mod],
                                    capture_output=True, text=True, cwd=cwd, timeout=ctx.secs * 4 + 120)
                 text = f'openmpt123 0.7.3 subsong {sub}' if r.returncode == 0 else 'openmpt123: ' + (r.stderr or r.stdout).strip()[:80]
         except (subprocess.TimeoutExpired, ValueError) as e:
@@ -1289,11 +1340,13 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
         return ref if isinstance(ref, dict) else dict(none, note=(why + '; ' if why else '') + ref)
     if po.get('backend') == 'libxmp-port':
         if not os.path.exists(ctx.oracle):
+            if ctx.rate != RATE:
+                return dict(none, note=f'no libxmp harness build that renders at {ctx.rate} Hz', norate=True)
             return dict(none, note='no libxmp oracle')
         raw, info = render_oracle(ctx, mod)
         if not raw or '\t' not in info:
             return dict(none, note='oracle: ' + info[:100], noref=False)
-        return dict(kind='libxmp', wav=raw, data=read_raw(raw), out='libxmp 4.7.4 ' + info.replace('\t', ' '),
+        return dict(kind='libxmp', wav=raw, data=read_raw(raw, ctx.rate), out='libxmp 4.7.4 ' + info.replace('\t', ' '),
                     led='', player='libxmp 4.7.4 (oracle)', o={}, note='')
     want = _norm(po.get('format', ''))
     if want == 'hivelytracker':
@@ -1304,7 +1357,7 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
     if want == 'sndh':
         # an Atari ST program: the 68k DeliPlayer chain accepts the files and plays them silent (README)
         ref = render_sndh_oracle(ctx, mod, po, pplay)
-        return ref if isinstance(ref, dict) else dict(none, note=ref)
+        return ref if isinstance(ref, dict) else dict(none, note=str(ref), norate=isinstance(ref, NoRate))
     dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
     if want in UADE_FIRST:
         dirs = dirs[::-1]
@@ -1539,7 +1592,7 @@ def process(ctx, f):
                                         'the original on the TFMX twin ' + os.path.basename(twin) + ')')
                     ref = tref
         if ref['kind'] == 'none':
-            row['cls'] = 'NOREF' if ref['noref'] else 'FAIL'
+            row['cls'] = 'NORATE' if ref.get('norate') else 'NOREF' if ref['noref'] else 'FAIL'
             row['note'] = ref['note']
             return row
         if ref['kind'] == 'hvl-ticks':
@@ -1677,19 +1730,32 @@ def main():
     ap.add_argument('--flags', nargs='*', default=[], help='extra amigaplayer-rs flags for both sides, e.g. --flags --filter a1200')
     ap.add_argument('--out', default=SCRATCH + '/refcmp-out')
     ap.add_argument('--cache', default=SCRATCH + '/refcmp-cache')
-    ap.add_argument('--baseline', default=BASELINE)
+    ap.add_argument('--rate', type=int, default=RATE, help='sample rate of both sides (default 48000; each reference '
+                    'tool renders at it, or the row is NORATE)')
+    ap.add_argument('--baseline', default=None, help='default: tools/refcmp-baseline.tsv at 48000, '
+                    'tools/refcmp-baseline-RATE.tsv otherwise')
     ap.add_argument('--update-baseline', action='store_true')
     ap.add_argument('--listen', default=LISTEN_PY, help='listen.py, for its staging of modules with companions')
     ap.add_argument('--oracle', default=XMP_ORACLE)
+    ap.add_argument('--oracle-rate', default=XMP_ORACLE_RATE, help='the libxmp harness that takes the rate (used off 48000)')
     ap.add_argument('--hvl-testbin', default=None, help='the lib unit-test executable (has replay::hvl::tests::dump); '
                     'default: built with `cargo test --release --lib --no-run` (honours CARGO_TARGET_DIR / CARGO_BUILD_BUILD_DIR)')
     a = ap.parse_args()
+    if not 8000 <= a.rate <= 192000:
+        ap.error('--rate must be 8000 to 192000')
+    if a.baseline is None:
+        a.baseline = baseline_for(a.rate)
     # the reference side needs the 68k hosting: a default build refuses --68k-players (with
     # --wav so that a build that has it does not open a window)
     probe = subprocess.run([a.bin, '--68k-players', '--wav', os.devnull, os.devnull + '.none'], capture_output=True, text=True,
                            env=dict(os.environ, SDL_AUDIO_DRIVER='dummy'))
     if 'built without 68k player support' in probe.stderr:
         ap.error(f'{a.bin} has no 68k player support: build it with `cargo build --release --features host-68k`')
+    if a.rate != RATE:
+        # a binary without --rate would take the option for a file name: its usage must name it
+        probe = subprocess.run([a.bin, '--help'], capture_output=True, text=True, env=dict(os.environ, SDL_AUDIO_DRIVER='dummy'))
+        if '[--rate HZ]' not in probe.stderr:
+            ap.error(f'{a.bin} has no --rate option (rebuild it from a checkout that has it)')
     files = json.load(open(a.list))
     if not a.all:
         if not a.fmt and not a.id:
@@ -1716,6 +1782,8 @@ def main():
         elif not bad_now and bad_then:
             fixed.append(r)
     text = summary(rows)
+    if a.rate != RATE:
+        text += f'\nsample rate {a.rate} Hz (both sides; NORATE: the reference tool cannot render at it)'
     fbs = [r for r in rows if 'REF-FALLBACK' in r['note']]
     newfb = [r for r in fbs if 'REF-FALLBACK' not in (base.get(r['path']) or {}).get('note', '')]
     if fbs:

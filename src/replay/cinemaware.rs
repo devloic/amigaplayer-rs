@@ -15,6 +15,11 @@
 //! slot loaded as its own copy. Four voices, one Paula channel each; the period
 //! comes from a pitch in 1/20 semitones and a rate per wave. The tick is the game's
 //! 60 Hz CIA timer; at the end the song pauses 25 ticks and starts again.
+//!
+//! Timing: every write lands at the colour clock the original's would, from 68000
+//! cycle costs per code path (`COST`, fitted to the measured write times of the
+//! reference, black box) and the beam waits before a voice's DMA turns on; the song
+//! starts where the original's init would end (`init_clocks`).
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -126,12 +131,61 @@ pub struct Cinemaware {
     ped: [u8; 16],
     v: [Voice; 4],
     songend: bool,
+    /// The tick's start (colour clock) and the original's 68000 cycles since then.
+    t0: u64,
+    cy: i64,
 }
 
 /// The offset of a slot's sample data in its 8SVX file: 8 bytes after the first
 /// `BODY`, searched from offset 8 in steps of 2.
 fn body(f: &[u8]) -> Option<usize> {
     (8..f.len().saturating_sub(3)).step_by(2).find(|&o| f[o..o + 4] == *b"BODY").map(|o| o + 8)
+}
+
+/// The colour clocks the original's check and init take before the song starts, from their
+/// measured 68000 cycle costs (each stretch between two host calls rounds its cycles/2 down):
+/// the check (the distance from the channel table to `ASEQ`), the instrument loads in record
+/// order (the directory string is copied per file), the sample setup in program order, the scan
+/// of the sequence up to its end row, then three constant calls.
+fn init_clocks(d: &[u8], n: usize, aseq: usize, dirlen: usize, rec: &[Option<usize>; 128]) -> u64 {
+    let ct = 6 + REC * n;
+    let k = (aseq as i64 - ct as i64 - 18) / 2;
+    let mut cc = (316 + 52 * k) / 2;
+    let file = |r: usize, j: usize| be32(d, 6 + REC * r + 0x3C + 26 * j + 6) != 0;
+    // Instrument loads: every slot in record order.
+    let slots: Vec<(usize, usize)> = (0..n).flat_map(|r| (0..3).map(move |j| (r, j))).filter(|&(r, j)| file(r, j)).collect();
+    let Some(&(r0, j0)) = slots.first() else { return 0 };
+    cc += (159 + 43 * (3 * r0 + j0) as i64) / 2;
+    for (q, &(r, j)) in slots.iter().enumerate() {
+        let w = 6 + REC * r + 0x3C + 26 * j;
+        let len = d[w..w + 6].iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |p| p + 1);
+        cc += (580 + 17 * dirlen as i64 + 59 * (6 - len as i64)) / 2;
+        cc += match slots.get(q + 1) {
+            Some(&(r2, j2)) => (150 + 43 * (3 * (r2 - r) + j2 - j - 1) as i64 + 26 * (r2 - r) as i64) / 2,
+            None => (81 + 43 * (3 * (n - r) - j - 1) as i64) / 2,
+        };
+    }
+    // Sample setup: the programs' records in program order.
+    let ps: Vec<(i64, i64)> =
+        (0..128).filter_map(|p| rec[p].map(|r| (p, r))).flat_map(|(p, r)| (0..3).filter(move |&j| file(r, j)).map(move |j| (p as i64, j as i64))).collect();
+    let Some(&(p0, s0)) = ps.first() else { return 0 };
+    cc += 18 + (10297 + 153 * n as i64 + 80 * p0 + 120 * s0) / 2;
+    for w in ps.windows(2) {
+        let ((pa, ja), (pb, jb)) = (w[0], w[1]);
+        cc += if pa == pb { (2538 + 120 * (jb - ja - 1)) / 2 } else { (2542 + 80 * (pb - pa) + 120 * (2 - ja + jb)) / 2 };
+    }
+    let (pl, jl) = ps[ps.len() - 1];
+    let mut rows = 0i64;
+    let mut o = aseq + 4;
+    while o + 5 <= d.len() {
+        rows += if d[o + 4] != 0 { 44 } else if d[o + 3] == 0x2F { 94 } else { 69 };
+        if d[o + 2] >> 4 == 1 {
+            break;
+        }
+        o += 5;
+    }
+    cc += (3174 + 80 * (127 - pl) + 120 * (2 - jl) + rows + 47 * k) / 2;
+    (cc + 8 + 740 + 740 + 5161) as u64
 }
 
 fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -186,7 +240,11 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         ped: [0; 16],
         v: Default::default(),
         songend: false,
+        t0: 0,
+        cy: 0,
     };
+    let dirlen = m.bus.read_cstr(m.deli.dir_buf).len();
+    m.bus.clock += init_clocks(d, n, aseq, dirlen, &rec);
     r.reset();
     let mut hw = Hw { bus: &mut m.bus };
     for ch in 0..4 {
@@ -195,9 +253,153 @@ fn new(d: &[u8], _base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     Some(Box::new(r))
 }
 
+/// The original's code paths, each with its 68000 cycles in `COST`: the tick's writes are direct
+/// Paula writes, each at the tick's start plus half the cycles its code took to reach it.
+mod k {
+    pub const TICK: usize = 0;
+    pub const PAUSE: usize = 1;
+    pub const ROW: usize = 2;
+    pub const EV_END: usize = 3;
+    pub const EV_OFF: usize = 4;
+    pub const EV_ON0: usize = 5;
+    pub const EV_ON: usize = 6;
+    pub const EV_CTL1: usize = 7;
+    pub const EV_CTL7: usize = 8;
+    pub const EV_CTL40: usize = 9;
+    pub const EV_CTLX: usize = 10;
+    pub const EV_PROG: usize = 11;
+    pub const EV_BEND: usize = 12;
+    pub const EV_X: usize = 13;
+    pub const ROW_NEXT: usize = 14;
+    pub const EOF: usize = 15;
+    pub const DEC: usize = 16;
+    pub const NOFF_V: usize = 17;
+    pub const NOFF_REL: usize = 18;
+    pub const REL_NOREC: usize = 19;
+    pub const PED_V: usize = 20;
+    pub const PED_HELD: usize = 21;
+    pub const PED_REL: usize = 22;
+    pub const PED_NONE: usize = 23;
+    pub const ON_NOREC: usize = 24;
+    pub const ON_DYN: usize = 25;
+    pub const SC: usize = 26;
+    pub const SC_FREE: usize = 27;
+    pub const SC_NG: usize = 28;
+    pub const SC_NG_SAME: usize = 29;
+    pub const SC_CH: usize = 30;
+    pub const SC_CH_NOTE: usize = 31;
+    pub const SC_NOTE: usize = 32;
+    pub const SC_AGE: usize = 33;
+    pub const SC_BEST: usize = 34;
+    pub const ON_NOBEST: usize = 35;
+    pub const WS_MISS: usize = 36;
+    pub const WS_HIT: usize = 37;
+    pub const ON_NOWAVE: usize = 38;
+    pub const ON_NOSMP: usize = 39;
+    pub const ON_PER: usize = 40;
+    pub const ON_DMA: usize = 41;
+    pub const ON_LOOP: usize = 42;
+    pub const ON_NOLOOP: usize = 43;
+    pub const ON_PED: usize = 44;
+    pub const ON_VOL: usize = 45;
+    pub const ON_LOC: usize = 46;
+    pub const ON_LEN: usize = 47;
+    pub const ON_END: usize = 48;
+    pub const V_IDLE: usize = 49;
+    pub const V_NOREC: usize = 50;
+    pub const V: usize = 51;
+    pub const AGE: usize = 52;
+    pub const RR1: usize = 53;
+    pub const VUP: usize = 54;
+    pub const VUP_REACH: usize = 55;
+    pub const VDN: usize = 56;
+    pub const VDN_REACH: usize = 57;
+    pub const VOFF: usize = 58;
+    pub const VSUS: usize = 59;
+    pub const V8: usize = 60;
+    pub const P: usize = 61;
+    pub const PUP: usize = 62;
+    pub const PUP_REACH: usize = 63;
+    pub const PDN: usize = 64;
+    pub const PDN_REACH: usize = 65;
+    pub const PSUS: usize = 66;
+    pub const LFO_LO: usize = 67;
+    pub const LFO_HI: usize = 68;
+    pub const PB_FF: usize = 69;
+    pub const DIV0: usize = 70;
+    pub const V_PER: usize = 71;
+    pub const LCNT: usize = 72;
+    pub const LOOP_LOC: usize = 73;
+    pub const LOOP_LEN: usize = 74;
+    pub const V_VOL: usize = 75;
+    pub const VV_CLAMP: usize = 76;
+    pub const V_WAIT: usize = 77;
+    pub const V_DMA_ON: usize = 78;
+    pub const V_DMA_OFF: usize = 79;
+    pub const END_RESET: usize = 80;
+    pub const SC_NOTBEST: usize = 81;
+    // 82..=101: unused (zero cost).
+    pub const PER_BIT: usize = 102;
+    pub const WAIT_V: usize = 103;
+    pub const LOOP_END_V: usize = 107;
+    pub const HELD_V: usize = 111;
+    pub const HELD_P: usize = 112;
+    pub const V_OFF_END: usize = 113;
+    /// a note off's test of a voice: note and channel (`NOFF_NC + 2 * note equal + channel equal`)
+    pub const NOFF_NC: usize = 114;
+    pub const NOFF_NOTG: usize = 118;
+    /// a write by its site (12) and voice: `WS + 4 * site + voice`
+    pub const WS: usize = 119;
+    pub const SC_NG_CH: usize = 167;
+    pub const PED_HELD_UP: usize = 168;
+    pub const PED_UP: usize = 169;
+    pub const PED_CH: usize = 170;
+    pub const N: usize = 171;
+}
+
+const COST: [i32; k::N] = [0, 0, 978, 0, -1, 30, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 415, 192, 400, 0, 305, 60, 416, 0, 0, 1, 339, 28, 69, 8, 57, 12, 12, 40, 32, 0, 359, 0, 0, 0, 1148, 34, 1130, 0, 10, 1526, 616, 713, 111, 136, 0, 2850, 16, 16, 0, 36, 15, 36, 32, 16, 0, 0, 0, 0, 0, 299, 16, 0, 0, -2, 0, 0, 37, 178, 193, 724, 16, 157, 79, 103, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 10, 10, 10, 0, 85, 54, 23, 15, 45, 0, 10, 0, 0, 41, 66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 31, 62, 70, 0, 0, 0, 0, 0, 31, 62, 70, 0, 31, 62, 70, 0, 54, 108, 139, 10, 10, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 37, -10, 25, 46];
+
 impl Cinemaware {
     fn rb(&self, o: usize) -> u8 {
         self.d.get(o).copied().unwrap_or(0)
+    }
+
+    /// The cycles of a code path.
+    fn k(&mut self, l: usize) {
+        self.cy += COST[l] as i64;
+    }
+
+    /// Before a write of register `kind` of voice `v`.
+    fn w(&mut self, hw: &mut Hw, kind: usize, v: usize) {
+        self.k(k::WS + 4 * kind + v);
+        self.at(hw);
+    }
+
+    /// The clock of the next write (or beam read): the tick's start plus half the cycles.
+    fn at(&mut self, hw: &mut Hw) {
+        let t = self.t0 + self.cy.max(0) as u64 / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+    }
+
+    /// The original's wait for nine changes of the beam's line: it reads the line, then reads
+    /// again every 25 cycles until it differs, nine times.
+    fn wait_lines(&mut self, hw: &mut Hw) {
+        use crate::paula::LINE;
+        self.at(hw);
+        let mut c = self.cy.max(0) as u64;
+        for n in 0..9 {
+            let l = (self.t0 + c / 2) / LINE;
+            c += 16;
+            while (self.t0 + c / 2) / LINE == l {
+                c += 25;
+            }
+            if n < 8 {
+                c += 35;
+            }
+        }
+        self.cy = c as i64;
     }
 
     /// The song from its first row, as at init and at every restart.
@@ -224,96 +426,161 @@ impl Cinemaware {
         let ch = (st & 15) as usize;
         match st >> 4 {
             0x1 => {
+                self.k(k::EV_END);
                 self.songend = true;
                 self.pause = 25;
                 self.reset();
+                self.k(k::END_RESET);
                 return true;
             }
-            0x8 => self.note_off(ch, d1),
-            0x9 if d2 == 0 => self.note_off(ch, d1),
-            0x9 => self.note_on(self.prog[ch], d1, d2, ch, hw),
+            0x8 => {
+                self.k(k::EV_OFF);
+                self.note_off(ch, d1)
+            }
+            0x9 if d2 == 0 => {
+                self.k(k::EV_ON0);
+                self.note_off(ch, d1)
+            }
+            0x9 => {
+                self.k(k::EV_ON);
+                self.note_on(self.prog[ch], d1, d2, ch, hw)
+            }
             0xB => match d1 {
-                1 => self.modw[ch] = d2,
-                7 => self.cvol[ch] = d2,
+                1 => {
+                    self.k(k::EV_CTL1);
+                    self.modw[ch] = d2
+                }
+                7 => {
+                    self.k(k::EV_CTL7);
+                    self.cvol[ch] = d2
+                }
                 0x40 => {
+                    self.k(k::EV_CTL40);
                     self.ped[ch] = d2;
                     self.pedal(ch, d2);
                 }
-                _ => {}
+                _ => self.k(k::EV_CTLX),
             },
-            0xC => self.prog[ch] = d1,
-            0xE => self.bend[ch] = d2,
-            _ => {}
+            0xC => {
+                self.k(k::EV_PROG);
+                self.prog[ch] = d1
+            }
+            0xE => {
+                self.k(k::EV_BEND);
+                self.bend[ch] = d2
+            }
+            _ => self.k(k::EV_X),
         }
         false
     }
 
     fn note_on(&mut self, prog: u8, note: u8, vel: u8, ch: usize, hw: &mut Hw) {
-        let Some(r) = self.rec.get(prog as usize).copied().flatten() else { return };
+        let Some(r) = self.rec.get(prog as usize).copied().flatten() else {
+            self.k(k::ON_NOREC);
+            return;
+        };
         let mut v = self.ctab[ch] as usize;
         if v > 3 {
+            self.k(k::ON_DYN);
             let (mut best, mut max, mut minage) = (None, 0u8, 0xFFu8);
-            for (i, x) in self.v.iter().enumerate() {
+            for i in 0..4 {
+                let x = self.v[i];
+                self.k(k::SC);
                 let mut score = 0u8;
                 if x.chan < 0 {
+                    self.k(k::SC_FREE);
                     score |= 0x10;
                 }
                 if x.flags & G == 0 {
+                    self.k(k::SC_NG);
                     score |= 0x08;
+                    if x.chan as i32 == ch as i32 {
+                        self.k(k::SC_NG_CH);
+                    }
                     if x.chan as i32 == ch as i32 && self.ctab[15] == 0 {
+                        self.k(k::SC_NG_SAME);
                         score |= 0x30;
                     }
                 }
                 if x.chan as i32 == ch as i32 {
+                    self.k(k::SC_CH);
                     score |= 0x04;
                     if x.note as u8 == note {
+                        self.k(k::SC_CH_NOTE);
                         score |= 0x08;
                     }
                 }
                 if x.note as u8 == note {
+                    self.k(k::SC_NOTE);
                     score |= 0x02;
                 }
                 if x.age < minage {
+                    self.k(k::SC_AGE);
                     minage = x.age;
                     score |= 0x01;
                 }
                 if score > max {
+                    self.k(k::SC_BEST);
                     max = score;
                     best = Some(i);
+                } else {
+                    self.k(k::SC_NOTBEST);
                 }
             }
-            let Some(b) = best else { return };
+            let Some(b) = best else {
+                self.k(k::ON_NOBEST);
+                return;
+            };
             v = b;
         }
-        let Some(j) = (0..3).find(|&j| {
+        let mut found = None;
+        for j in 0..3 {
             let w = r + 0x3C + 26 * j;
             let lo = self.rb(w + 10) as i8 as i16 as u16;
             let hi = self.rb(w + 11) as i8 as i16 as u16;
-            lo <= note as u16 && note as u16 <= hi
-        }) else {
+            if lo <= note as u16 && note as u16 <= hi {
+                self.k(k::WS_HIT);
+                found = Some(j);
+                break;
+            }
+            self.k(k::WS_MISS);
+        }
+        let Some(j) = found else {
+            self.k(k::ON_NOWAVE);
             return;
         };
         let w = r + 0x3C + 26 * j;
         if be32(&self.d, w + 6) == 0 {
+            self.k(k::ON_NOSMP);
             return;
         }
         let rate = be16(&self.d, w + 12);
         let (start, lp, end) = (be32(&self.d, w + 14) as i32, be32(&self.d, w + 18) as i32, be32(&self.d, w + 22) as i32);
         let smp = self.sample[(r - 6) / REC][j];
         let lfos = self.rb(r + 0x16) as i16;
-        let held = if self.ped[ch] != 0 { G | S } else { G };
-        let x = &mut self.v[v];
-        x.chan = -1;
+        self.v[v].chan = -1;
+        self.k(k::ON_PER);
+        self.w(hw, 0, v);
         hw.per(v, 0x0080);
+        self.k(k::ON_DMA);
+        self.w(hw, 1, v);
         hw.dmacon(1 << v);
-        hw.wait(1150);
-        if lp >= 0 {
-            x.lpos = smp.wrapping_add((lp / 2 * 2) as u32);
-            x.llen = (end.wrapping_sub(lp) / 2) as u16;
+        let held = if self.ped[ch] != 0 {
+            self.k(k::ON_PED);
+            G | S
         } else {
-            x.lpos = self.silent;
-            x.llen = 2;
-        }
+            G
+        };
+        let (lpos, llen) = if lp >= 0 {
+            self.k(k::ON_LOOP);
+            (smp.wrapping_add((lp / 2 * 2) as u32), (end.wrapping_sub(lp) / 2) as u16)
+        } else {
+            self.k(k::ON_NOLOOP);
+            (self.silent, 2)
+        };
+        let x = &mut self.v[v];
+        x.lpos = lpos;
+        x.llen = llen;
         x.lcnt = 2;
         x.note = note as i8;
         x.inst = prog;
@@ -328,16 +595,23 @@ impl Cinemaware {
         x.lfos = lfos;
         x.flags = held;
         x.chan = ch as i8;
+        self.k(k::ON_VOL);
+        self.w(hw, 2, v);
         hw.vol(v, 0);
-        hw.wait(240);
+        self.k(k::ON_LOC);
+        self.w(hw, 3, v);
         hw.loc(v, smp.wrapping_add((start / 2 * 2) as u32));
-        hw.wait(310);
+        self.k(k::ON_LEN);
+        self.w(hw, 4, v);
         hw.len(v, (end.wrapping_sub(start) / 2) as u16);
-        hw.wait(1280);
+        self.k(k::ON_END);
     }
 
     fn release(&mut self, v: usize) {
-        let Some(r) = self.rec[(self.v[v].inst & 0x7F) as usize] else { return };
+        let Some(r) = self.rec[(self.v[v].inst & 0x7F) as usize] else {
+            self.k(k::REL_NOREC);
+            return;
+        };
         let (vi, pi) = (self.rb(r + 0x2A) as i8, self.rb(r + 0x18) as i8);
         let x = &mut self.v[v];
         x.vidx = vi;
@@ -348,8 +622,16 @@ impl Cinemaware {
     fn note_off(&mut self, ch: usize, n: u8) {
         for v in 0..4 {
             let x = self.v[v];
-            if x.note as u8 == n && x.chan as i32 == ch as i32 && x.flags & G != 0 {
-                self.release(v);
+            self.k(k::NOFF_V);
+            let (ne, ce) = (x.note as u8 == n, x.chan as i32 == ch as i32);
+            self.k(k::NOFF_NC + 2 * ne as usize + ce as usize);
+            if ne && ce {
+                if x.flags & G != 0 {
+                    self.k(k::NOFF_REL);
+                    self.release(v);
+                } else {
+                    self.k(k::NOFF_NOTG);
+                }
             }
         }
     }
@@ -357,24 +639,42 @@ impl Cinemaware {
     fn pedal(&mut self, ch: usize, val: u8) {
         for v in 0..4 {
             let x = self.v[v];
+            self.k(k::PED_V);
             if x.chan as i32 != ch as i32 {
                 continue;
             }
+            self.k(k::PED_CH);
             if x.flags & G != 0 {
+                self.k(k::PED_HELD);
+                if val == 0 {
+                    self.k(k::PED_HELD_UP);
+                }
                 self.v[v].flags = if val != 0 { G | S } else { G };
-            } else if val == 0 && x.flags & S != 0 {
+            } else if val == 0 && {
+                self.k(k::PED_UP);
+                true
+            } && x.flags & S != 0
+            {
+                self.k(k::PED_REL);
                 self.release(v);
                 self.v[v].flags = 0;
+            } else {
+                self.k(k::PED_NONE);
             }
         }
     }
 
     /// The period of voice `v` on MIDI channel `ch` with record `r`.
-    fn period(&self, v: usize, ch: usize, r: usize) -> u16 {
-        let x = &self.v[v];
+    fn period(&mut self, v: usize, ch: usize, r: usize) -> u16 {
+        let x = self.v[v];
         let tr = self.rb(r + 0x12) as i8 as i16;
         let pb = self.rb(r + 0x17);
-        let mut d: i16 = if pb == 0xFF { tr.wrapping_add(60).wrapping_mul(20) } else { (x.note as i16).wrapping_add(tr).wrapping_mul(20) };
+        let mut d: i16 = if pb == 0xFF {
+            self.k(k::PB_FF);
+            tr.wrapping_add(60).wrapping_mul(20)
+        } else {
+            (x.note as i16).wrapping_add(tr).wrapping_mul(20)
+        };
         d = d.wrapping_add(x.lfo / 5);
         d = d.wrapping_add((x.penv.wrapping_sub(0x80) << 2) as i16);
         let b = (self.bend[ch] as u16).wrapping_sub(0x40);
@@ -387,6 +687,7 @@ impl Cinemaware {
         let t = PITCH.get(rem.max(0) as usize).copied().unwrap_or(0) as u32;
         let mut div = t.checked_shl((q & 63) as u32).unwrap_or(0);
         if div == 0 {
+            self.k(k::DIV0);
             div = 1;
         }
         (((x.rate as u32) << 20) as i32).wrapping_div(div as i32) as u16
@@ -395,99 +696,152 @@ impl Cinemaware {
     fn voice(&mut self, v: usize, hw: &mut Hw) {
         let x = self.v[v];
         if x.chan < 0 {
+            self.k(k::V_IDLE);
             return;
         }
         let ch = x.chan as usize & 15;
-        let Some(r) = self.rec[(x.inst & 0x7F) as usize] else { return };
+        let Some(r) = self.rec[(x.inst & 0x7F) as usize] else {
+            self.k(k::V_NOREC);
+            return;
+        };
+        self.k(k::V);
         let held = x.flags & G != 0;
         let rb = |o: usize, i: i8| self.d.get((r + o).wrapping_add_signed(i as isize)).copied().unwrap_or(0);
         let (vr, vt) = (rb(0x34, x.vidx), rb(0x2C, x.vidx));
         let (pt, pr) = (rb(0x1A, x.pidx), rb(0x22, x.pidx));
         let (vsus, psus, depth, step) = (self.rb(r + 0x2B) as i8, self.rb(r + 0x19) as i8, self.rb(r + 0x15), self.rb(r + 0x16));
-        let x = &mut self.v[v];
+        let mut x = self.v[v];
         if x.age != 0 {
+            self.k(k::AGE);
             x.age -= 1;
         }
         // the volume envelope
+        if held {
+            self.k(k::HELD_V);
+        }
         let mut rr = vr as i16;
         if !held && rr == 0 {
+            self.k(k::RR1);
             rr = 1;
         }
         let t = vt as i16;
         if t > x.lvl {
+            self.k(k::VUP);
             x.lvl = x.lvl.wrapping_add(rr);
             if t <= x.lvl {
+                self.k(k::VUP_REACH);
                 x.lvl = t;
                 x.vidx = x.vidx.wrapping_add(1);
             }
         } else {
+            self.k(k::VDN);
             x.lvl = x.lvl.wrapping_sub(rr);
             if t >= x.lvl {
+                self.k(k::VDN_REACH);
                 x.lvl = t;
                 x.vidx = x.vidx.wrapping_add(1);
             }
             if x.lvl < 1 {
+                self.k(k::VOFF);
                 x.chan = -1;
                 x.flags &= S;
             }
         }
         if held && x.vidx > vsus {
+            self.k(k::VSUS);
             x.vidx = 0;
         }
         if x.vidx > 7 {
+            self.k(k::V8);
             x.lvl = 0;
             x.chan = -1;
         }
         // the pitch envelope
         if x.pidx < 8 {
+            self.k(k::P);
             let (t, r) = (pt as u16, pr as u16);
             if t > x.penv {
+                self.k(k::PUP);
                 x.penv = x.penv.wrapping_add(r);
                 if t <= x.penv {
+                    self.k(k::PUP_REACH);
                     x.penv = t;
                     x.pidx = x.pidx.wrapping_add(1);
                 }
             } else {
+                self.k(k::PDN);
                 x.penv = x.penv.wrapping_sub(r);
                 if t >= x.penv {
+                    self.k(k::PDN_REACH);
                     x.penv = t;
                     x.pidx = x.pidx.wrapping_add(1);
                 }
             }
+            if held {
+                self.k(k::HELD_P);
+            }
             if held && x.pidx > psus {
+                self.k(k::PSUS);
                 x.pidx = 0;
             }
         }
         // the LFO
         x.lfo = x.lfo.wrapping_add(x.lfos);
         if x.lfo < 0 {
+            self.k(k::LFO_LO);
             x.lfo = 0;
             x.lfos = step as i16;
         }
         if x.lfo > depth as i16 {
+            self.k(k::LFO_HI);
             x.lfo = depth as i16;
             x.lfos = -(step as i16);
         }
+        self.v[v] = x;
         let per = self.period(v, ch, r);
+        self.k(k::V_PER);
+        for _ in 0..per.count_ones() {
+            self.k(k::PER_BIT);
+        }
+        self.w(hw, 5, v);
         hw.per(v, per);
-        let x = &mut self.v[v];
-        if x.lcnt != 0 {
-            x.lcnt -= 1;
-            if x.lcnt == 0 {
-                hw.wait(80);
-                hw.loc(v, x.lpos);
-                hw.wait(90);
-                hw.len(v, x.llen);
+        if self.v[v].lcnt != 0 {
+            self.k(k::LCNT);
+            self.v[v].lcnt -= 1;
+            if self.v[v].lcnt == 0 {
+                self.k(k::LOOP_LOC);
+                self.w(hw, 6, v);
+                hw.loc(v, self.v[v].lpos);
+                self.k(k::LOOP_LEN);
+                self.w(hw, 7, v);
+                hw.len(v, self.v[v].llen);
+                self.k(k::LOOP_END_V + v);
             }
         }
-        hw.wait(350);
-        let vv = (x.vel as u16 + self.rb(r + 0x14) as u16).min(0x7F);
+        let x = self.v[v];
+        let mut vv = x.vel as u16 + self.rb(r + 0x14) as u16;
+        if vv > 0x7F {
+            self.k(k::VV_CLAMP);
+            vv = 0x7F;
+        }
         let a = (self.cvol[ch] as u16).wrapping_mul(vv) >> 7;
-        let vol = (a.wrapping_mul(self.v[v].lvl as u16) >> 9) & 0x7F;
+        let vol = (a.wrapping_mul(x.lvl as u16) >> 9) & 0x7F;
+        self.k(k::V_VOL);
+        self.w(hw, 8, v);
         hw.vol(v, vol);
-        hw.wait(1930);
-        hw.dmacon(if self.v[v].chan < 0 { 1 << v } else { 0x8200 | 1 << v });
-        hw.wait(1500);
+        if self.v[v].chan < 0 {
+            self.k(k::V_DMA_OFF);
+            self.w(hw, 9, v);
+            hw.dmacon(1 << v);
+            self.k(k::V_OFF_END);
+        } else {
+            self.k(k::V_WAIT);
+            self.k(k::WAIT_V + v);
+            self.wait_lines(hw);
+            self.k(k::V_DMA_ON);
+            self.w(hw, 10, v);
+            hw.dmacon(0x8200 | 1 << v);
+        }
     }
 }
 
@@ -509,26 +863,34 @@ impl Replayer for Cinemaware {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t0 = hw.bus.clock;
+        self.cy = 0;
         if self.pause != 0 {
+            self.k(k::PAUSE);
+            self.w(hw, 11, 0);
             hw.dmacon(0x000F);
             self.pause -= 1;
             return;
         }
-        hw.wait(1100);
+        self.k(k::TICK);
         while self.wait <= 0 {
+            self.k(k::ROW);
             if self.event(hw) {
                 return;
             }
             self.pos += 5;
             if self.pos + 5 > self.d.len() {
                 // a list without an end row: the end of the file ends it
+                self.k(k::EOF);
                 self.songend = true;
                 self.pause = 25;
                 self.reset();
                 return;
             }
+            self.k(k::ROW_NEXT);
             self.wait = be16(&self.d, self.pos) as i16;
         }
+        self.k(k::DEC);
         self.wait -= 1;
         for v in 0..4 {
             self.voice(v, hw);

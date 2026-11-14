@@ -92,9 +92,10 @@ longer than the formula by 1543 / 2000 (125), 1323 / 627 (60), 4286 / 1128 (100)
 2333 / 3132 (200) colour clocks (0.4 to 7 %; 2.2 % and 2.8 % at 125 BPM, which is the drift the
 port had). The delays follow the genie's own interrupt timing (a chain of one handler a channel,
 3000 to 3400 colour clocks apart, started by each note), so a tick's lateness is neither a function
-of the tick's changes nor of the tempo; no formula was found. The port adds the mean of the ten
-means, 1800 colour clocks, to every tick. The NotePlayer call moves by up to about 1100
-colour clocks with the player's own time. Speed (ticks a row) starts at 6.
+of the tick's changes nor of the tempo. The port gets it by playing the genie's handlers with their
+measured durations (section 9), which hold its ticks back as the genie's hold the original's. The
+NotePlayer call moves by up to about 1100 colour clocks with the player's own time. Speed (ticks a
+row) starts at 6.
 
 The first tick sets every channel to period 256 and volume 0 (change bits FREQ | VOL) and plays row 0
 of position 0.
@@ -184,24 +185,66 @@ zeros up to a point and 0x80 from it: voices 4-7 audible or silent). Negative (0
 sides; else the centre. Both archive modules agree (`SPM.antarctica` 6060 bytes, song block 424:
 byte 9474 = 0x04, the centre; `SPM.teinteremix22` 824 bytes, song block 154: byte 14240 = 0xD6, the
 sides). Past the end of the sample file the byte is not known (the port assumes the centre). `SPM.teinteremix22` gets the sides, `SPM.antarctica` the centre
-(its channels 4-7 are silent under DeliTracker). The genie plays a lone voice on Paula channel
-`voice % 4` at the voice's own period and mixes the voices that share a channel.
+(its channels 4-7 are silent under DeliTracker). How the genie plays the voices: section 9.
 
 ## 8. Known differences of the port
 
-- Voices 4-7 are silent when the byte of section 7 is not negative, as the genie leaves them; the
-  port tests that byte (`sides`, of the first song) and then plays only voices 0-3, each on its own
-  channel at its own period (a lone voice on the genie), at a boost of 185 % of the amplifier's
-  default (the level of `SPM.antarctica` for 20 s within 0.1 dB of the original; refcmp bands
-  still +2.2 / +0.4 / -1.1 / +1.0 / 0.0 dB, so FILTER; the original's lone-voice path is not
-  reproduced exactly). Where the original's rule reads outside the sample
-  file the port plays the centre (silent).
-- The tick is the genie's average (section 4), not each tick's own lateness: the port's ticks are
-  all the same, the original's differ by up to 7000 colour clocks, so the audio differs at note
-  starts by up to a tick.
-- The mix is the host amplifier's NotePlayer genie mix (8 bits, 14477 Hz, wrapping), also for a lone
-  voice.
+- The genie's handlers and the tick take the reference's most frequent times (section 9); the
+  reference's take a few hundred colour clocks more at some effects, and its Paula fetches fall up
+  to a raster line (227 colour clocks) away from the port's, set by when the host started it. So a
+  tick's change can reach a buffer the port fills one handler earlier or later (a volume slide one
+  step apart for one buffer).
+- Where the rule of section 7 reads outside the sample file the port plays the centre (silent).
 - A single-sample bank plays; a jump to or past the end of the position list ends the song and starts
   again at position 0, with no stray patterns.
 - A note with no instrument ever given plays nothing (no change bits), where the original triggers an
   empty sample.
+
+## 9. The 8Voices-NotePlayer genie (v2.10), measured
+
+Measured as a black box from the reference's Paula register writes (`DELI_WRITE_LOG`), Paula's DMA
+fetches (`DELI_DMA_LOG`) and the NoteStruct at each NotePlayer call, on both archive modules (20 s)
+and synthetic modules (one or two voices, sides byte set or not, periods 113 to 961, volumes, one-shot
+and looped samples of odd and even lengths). Colour clocks throughout.
+
+Buffers. Each Paula channel plays a double buffer of 192 bytes (LEN 0x60). The channel's audio
+interrupt (a buffer started) runs a handler that writes PER, VOL 10 later, then LC of the other half,
+which it fills, and acknowledges the interrupt (INTREQ) last. The PER and VOL written are those of the
+buffer filled by the handler before (the one now starting). An interrupt the channel raises while its
+own handler runs is lost: the acknowledge clears it (the next comes a buffer later).
+
+Periods. The host gives the genie a voice's frequency `round(3546895 / per)`; the genie's period is
+`floor(3546895 / f)`.
+
+Mode A (voices 4-7 centred): Paula channel `k` plays voice `k` alone: PER the voice's genie period,
+VOL 64, each byte `(s * vol) >> 6` (arithmetic), one source byte a buffer byte. A voice that is off
+gives zeros.
+
+Mode B (sides): channel 0 plays voices 0 and 3, channel 1 voices 1 and 2, channel 2 voices 5 and 6,
+channel 3 voices 4 and 7. PER is the smaller of the two voices' genie periods (a voice that is off
+counts as period 256), VOL the larger volume `vmax`; each voice adds `(s * (vol * 64 / vmax)) >> 6`,
+the sum wrapping at 8 bits. A voice at the channel's period copies one byte a buffer byte from the
+first; the other steps by `floor((PER << 16) / per) + 1` in 1/65536 of a byte, the fraction added
+before each byte. `vmax` 0: VOL 0; with both voices off the buffer is zeros, else the voices play
+on unscaled (`s` itself; their positions move as at any volume) and are not heard at VOL 0.
+
+Samples. Starts are rounded down to even, lengths up to even (a one-shot of 601 bytes plays 602); a
+repeat of length 0 is silence after the sample.
+
+Handler times (PER to acknowledge, the most frequent): mode A 5824 for a voice that is off, 4645 at
+volume 64, else about 5549 + 0.894 per period unit (5662 at 127, 5702 at 170, 5778 at 254, 5854 at
+340, 6090 at 604); mode B 3296 silent, 5822 at the channel's period, 6291 when a voice is resampled,
+4743 for voices playing at volume 0 (LC at 246).
+Each channel's first handler is shorter: 142 (mode A), 191 (mode A, voice off), 147 (mode B), 96
+(mode B silent). LC comes 352 after PER in mode A, 347 in mode B, 174 in mode B silent. An interrupt
+raised while a handler or the tick runs is taken 68 after its acknowledge (the next handler's PER);
+an interrupt that finds nothing running has its PER 100 later.
+
+Ticks. A tick held back by a handler starts 82 after its acknowledge; ticks are otherwise the
+player's own period apart from the last start. From the tick's start to the NotePlayer call and to
+the tick's end: mode A 1417 and 2238, at a row 1788 and 2609; mode B 1689 and 2874, at a row 2151 and
+3336 (ticks with effects take up to a few hundred more); the next handler's PER is 86 after the
+end. The first tick comes after the genie's set-up: DMA off, the four channels on a zero buffer
+(LOC, LEN 0x60, PER 128, VOL 0 at 2834 + 47c and 8 apart, from the set-up's first write), DMA and
+audio interrupts on at 3369, the tick 593 later; mode B's channel writes and DMA come 652 later. The
+first tick's NotePlayer call and end: 5349 and 7098 (mode A), 5448 and 7993 (mode B).

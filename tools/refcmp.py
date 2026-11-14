@@ -30,7 +30,8 @@ settings, WAV for WAV:
              (UADE123_REF) uade123 itself with the port's output stage. A silent
              original is the reference of a port that is silent too. The formats
              no Amiga player plays here (BLACKBOX_REF: 8SVX, AIFF, WAV, MPEG audio,
-             ZX AY, NSF, Symphonie) are checked against sox, ffmpeg, libgme or
+             ZX AY, NSF, Symphonie; and X-Tracker, whose original's output stage the port
+             does not have) are checked against sox, ffmpeg, libgme or
              openmpt123 instead; where an original does run (ORIGINAL_BEFORE_BLACKBOX: NSF's
              DeliPlayer) it comes first and the tool is the fallback, and Fibonacci 8SVX is
              checked on the data the original Eagleplayer's Paula fetches (render_8svx_dma). uade123's
@@ -923,7 +924,21 @@ OPENMPT123 = '/usr/bin/openmpt123'
 BLACKBOX_REF = {'iff8svx': 'sox', 'aiff': 'sox', 'riffwave': 'sox', 'riffwaveadpcm': 'sox',
                 'iff8svxfibonacci': None, 'zxayemul': 'gme', 'nsf': 'gme',
                 'symphonie': 'openmpt123', 'symphoniepro': 'openmpt123',
-                'mpegaudiolayer1': 'ffmpeg', 'mpegaudiolayer2': 'ffmpeg', 'mpegaudiolayer3': 'ffmpeg'}
+                'mpegaudiolayer1': 'ffmpeg', 'mpegaudiolayer2': 'ffmpeg', 'mpegaudiolayer3': 'ffmpeg',
+                'delusiondigitalmusicformat': 'openmpt123'}
+# X-Tracker (DDMF; the format name carries the file's version and tracker, matched by this prefix): the
+# port follows libopenmpt 0.8.7 with its own mixer (no Paula, no filter, the module's panning: output
+# stage filter=none sep=libxmp(100) resampler=libxmp-mixer, README). Its Amiga original, the DeliPlayer
+# "XTracker" (SOAMC V0.8), mixes in software onto Paula through the A500 filter at separation 0.70: an
+# output stage the port does not have (refcmp's STAGE-MISMATCH on all 4 rows), so openmpt123 is the
+# reference, at the port's stage (48 kHz, linear interpolation, full stereo, no dither).
+BLACKBOX_PREFIX = ('delusiondigitalmusicformat',)
+
+
+def blackbox_key(fmt):
+    """The BLACKBOX_REF key of a port format name, or None."""
+    n = _norm(fmt)
+    return n if n in BLACKBOX_REF else next((k for k in BLACKBOX_PREFIX if n.startswith(k)), None)
 
 # Formats of BLACKBOX_REF whose original Amiga player does run in the engine: it is the reference,
 # the black-box tool only the fallback (the original renders nothing or silence). Normalised port
@@ -1216,11 +1231,6 @@ def special_reference(mod, fmt):
     """A per-module original where one player does not cover the format: Digital Sound
     Studio modules with a tempo byte play on UADE's DSS 1.0-3.0 player (V1.2), as the
     V1.71 Eagleplayer the port follows for the others reads the tempo as part of the speed."""
-    if fmt.startswith('delusiondigitalmusicformat'):
-        # X-Tracker (DDMF): the port follows libopenmpt, which libxmp's oracle cannot load; the
-        # Amiga original is the DeliPlayer "XTracker" (SOAMC's V0.8, alone in its directory)
-        return [('deli', ('deli', SOAMC + '/DDMF_(Delusion_Digital_Music Format-XTracker)/0.8_(26.Aug.1996)'),
-                 ('--player', 'XTracker'))]
     if fmt in DELI_REF and os.path.isdir(DELI_STORE):
         return [('deli', ('deli', DELI_STORE), ('--player', DELI_REF[fmt]))]
     if fmt == 'tfmx15':
@@ -1254,7 +1264,8 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
     `playing` line): dict(kind 'engine'|'libxmp'|'uade123'|'atariaudio'|'none', wav (path),
     data ((rate, samples)), out, led, player, o, note, noref)."""
     none = dict(kind='none', note='', noref=True)
-    if _norm(po.get('format', '')) in BLACKBOX_REF:
+    bbkey = blackbox_key(po.get('format', ''))
+    if bbkey:
         why = ''
         if _norm(po['format']) == 'iff8svxfibonacci':
             ref = render_8svx_dma(ctx, mod)
@@ -1264,11 +1275,11 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
             if isinstance(orig, dict):
                 return orig
             why = orig
-        ref = render_blackbox(ctx, mod, po, pplay, BLACKBOX_REF[_norm(po['format'])])
+        ref = render_blackbox(ctx, mod, po, pplay, BLACKBOX_REF[bbkey])
         if isinstance(ref, dict) and why:
             ref['fallback'] = f'REF-FALLBACK (black box: {why})'
         return ref if isinstance(ref, dict) else dict(none, note=(why + '; ' if why else '') + ref)
-    if po.get('backend') == 'libxmp-port' and not _norm(po.get('format', '')).startswith('delusiondigitalmusicformat'):
+    if po.get('backend') == 'libxmp-port':
         if not os.path.exists(ctx.oracle):
             return dict(none, note='no libxmp oracle')
         raw, info = render_oracle(ctx, mod)

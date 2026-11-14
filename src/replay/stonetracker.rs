@@ -14,18 +14,19 @@
 //! ending the row, and `FF nn` skipping nn+1 rows. The samples are in a second file
 //! (`SPS\x02`): `SPS.<name>` beside `SPM.<name>`.
 //!
-//! The voices are the host's amplifier's (`Hw::voice_*`), one a channel, sides left,
-//! right, right, left for 0-3 and again for 4-7, mixed as the NotePlayer genie does (8
-//! bits, wrapping). Where this differs from the original under DeliTracker:
-//! - the genie that plays it there (8Voices-NotePlayer) plays a lone voice on its Paula
-//!   channel at the voice's own period and mixes only the voices that share one; this
-//!   always mixes, at the 32-voice genie's rate;
-//! - the original gives voices 4-7 the centre position (which the genie leaves silent) or
-//!   their sides depending on a byte it reads from outside the module (in the sample file, see
-//!   `sides`); the port reads that byte and leaves them out the same way, and plays voices
-//!   0-3 unmixed at their own periods (the genie's lone voices) when they are out;
-//! - the original's ticks are held back by the genie's interrupt handlers by a varying amount;
-//!   the port's tick is the player's own timer plus the mean of that (`GENIE_LATENCY`);
+//! Under DeliTracker the voices go to the 8Voices-NotePlayer genie, which this plays as it
+//! does, measured as a black box from its Paula writes and DMA fetches (SPEC section 9):
+//! a double buffer of 192 bytes a Paula channel, refilled from that channel's audio
+//! interrupt. Voices 4-7 take the centre position (which the genie leaves silent) or their
+//! sides depending on a byte the original reads from outside the module (in the sample
+//! file, see `sides`): with them out each of voices 0-3 has its channel at its own period
+//! (mode A), else two voices share a channel, resampled to the faster one's period and
+//! summed in 8 bits, wrapping (mode B). The handlers and the player's tick hold each other
+//! back by the colour clocks the reference takes (`H_*`, `T_*`). Where this differs from
+//! the original under DeliTracker:
+//! - the reference's handlers and ticks take a few hundred colour clocks more at some
+//!   effects, and its Paula fetches fall up to a raster line apart from the port's, so a
+//!   change can land a buffer apart;
 //! - a sample bank of one sample plays (the original reads none of its data);
 //! - a position jump to or past the end of the list ends the song (the original reads past it);
 //! - a note when no instrument was ever given plays nothing (the original triggers an empty
@@ -33,6 +34,7 @@
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
+use m68k::AddressBus;
 
 pub const OPEN: Open = Open { name: "StoneTracker", detect, new };
 
@@ -51,18 +53,38 @@ const MAX_ROWS: usize = 256;
 /// Effects kept a row and channel (a real row has one or two).
 const MAX_FX: usize = 16;
 
-/// The genie's mix (as `ptm.rs`): Paula period 245 (14477 Hz), boost 3.9.
-const MIX_PERIOD: u16 = 245;
-const MIX_BOOST: u32 = 39;
-/// The boost percent of the plain amplifier for voices alone on their channels: the level of
-/// `SPM.antarctica` 20 s against the original (-5.3 dB at 100, +1.0 at 200).
-const ALONE_GAIN: u32 = 185;
-
-/// Colour clocks the genie adds to a tick on average (see SPEC section 4): the player's timer is
-/// exact, but the genie's audio interrupt handlers hold the next timer interrupt back whenever it
-/// falls inside one. Fitted: the two modules at 125 BPM give 1543 and 2000, the same two at 60 to
-/// 200 BPM 627 to 4286 (mean 1881); the delays are a chaotic function of the genie's own timing.
-const GENIE_LATENCY: u64 = 1800;
+/// The 8Voices-NotePlayer genie's output, measured as a black box (SPEC section 9): a double buffer of
+/// `GBUF` bytes a Paula channel, refilled from that channel's audio interrupt.
+const GBUF: usize = 192;
+/// Paula's clock the host converts the player's periods to frequencies with (and the genie back).
+const CLOCK: u32 = 3_546_895;
+/// Mode B (voices 4-7 on the sides): the voices of each Paula channel (two a channel, the left
+/// voices 0, 3, 4, 7 on channels 0, 0, 3, 3, the right ones 1, 2, 5, 6 on 1, 1, 2, 2).
+const PAIRS: [[usize; 2]; 4] = [[0, 3], [1, 2], [5, 6], [4, 7]];
+/// The genie's handler, in colour clocks (from the reference's write logs): from the interrupt to
+/// its first write (PER) when nothing holds it back; from PER to VOL, and to LC (mode A, mode B with
+/// sound, mode B silent, mode B with its voices playing at volume 0). The acknowledge (INTREQ) that
+/// ends it comes after a time that depends on the work (`Genie::fill`).
+const H_FIRST: u64 = 100;
+const H_VOL: u64 = 10;
+const H_LC: [u64; 4] = [352, 347, 174, 246];
+/// After an acknowledge, the next handler's PER, and a held-back tick's start.
+const H_NEXT: u64 = 68;
+const H_TICK: u64 = 82;
+/// The tick (the player's CIA-B interrupt, which the audio handlers hold back and which holds them
+/// back): from its start to the NotePlayer call (when the genie takes the changes) and to its
+/// end, after which the next handler's PER comes 86 later. Indexed [mode A, mode B] and by
+/// [other tick, tick that reads a row, first tick]: the reference's most frequent times (write logs
+/// of both archive modules, 20 s; ticks with effects take up to a few hundred clocks more).
+const T_NOTE: [[u64; 3]; 2] = [[1417, 1788, 5349], [1689, 2151, 5448]];
+const T_END: [[u64; 3]; 2] = [[2238, 2609, 7098], [2874, 3336, 7993]];
+const T_AFTER: u64 = 86;
+/// The genie's set-up (before the first tick): from its first write to the channels' writes and
+/// to DMA on; mode B's comes 652 later. The first tick starts 593 after DMA on.
+const S_CHAN: u64 = 2834;
+const S_DMA: u64 = 3369;
+const S_MODE_B: u64 = 652;
+const S_TICK: u64 = 593;
 
 /// ProTracker's vibrato sine, the first half.
 const SINE: [u8; 32] =
@@ -150,7 +172,6 @@ pub struct StoneTracker {
     patterns: Vec<Vec<(u16, Row)>>,
     ins: Vec<Ins>,
     data: u32,
-    silence: u32,
     sub: usize,
     ch: Vec<Ch>,
     pos: usize,
@@ -165,10 +186,57 @@ pub struct StoneTracker {
     first: bool,
     stopped: bool,
     songend: bool,
-    /// Voices the genie leaves silent (4-7 when the song's `sides` is off).
-    muted: [bool; VOICES],
-    /// Voices the amplifier has (the muted ones are left out when it plays them unmixed).
-    amp_voices: usize,
+    /// The genie's state.
+    g: Genie,
+}
+
+/// One NoteStruct channel as the genie holds it.
+#[derive(Clone, Copy)]
+struct GVoice {
+    on: bool,
+    /// The part playing (address, bytes) and the repeat that follows it.
+    cur: (u32, u32),
+    rep: (u32, u32),
+    pos: u32,
+    frac: u32,
+    /// The genie's Paula period of the voice's frequency, and its volume.
+    per: u32,
+    vol: u32,
+}
+
+impl Default for GVoice {
+    fn default() -> Self {
+        GVoice { on: false, cur: (0, 0), rep: (0, 0), pos: 0, frac: 0, per: genie_period(256), vol: 0 }
+    }
+}
+
+/// The 8Voices-NotePlayer genie's Paula side.
+struct Genie {
+    /// Mode B: voices 4-7 on the sides, two voices a channel; else mode A, voices 0-3 alone.
+    pairs: bool,
+    /// The zero buffer of the set-up, then two buffers a channel.
+    buf: u32,
+    half: [usize; 4],
+    /// The PER and VOL of the buffer filled last, written when Paula starts it.
+    pending: [(u16, u16); 4],
+    v: [GVoice; VOICES],
+    /// The earliest PER of the next handler, and the earliest start of the next tick.
+    free: u64,
+    tick_free: u64,
+    /// When the last handler (or the tick, as far as it ran here) returned.
+    end: u64,
+    /// The last tick's start (the next is due a period later).
+    last_tick: Option<u64>,
+    set_up: bool,
+    /// Which channels' handlers ran since the set-up.
+    filled: [bool; 4],
+}
+
+/// The genie's Paula period for a NoteStruct period: the host gives it the frequency
+/// `round(CLOCK / per)`, and the genie divides the clock by that.
+fn genie_period(per: u16) -> u32 {
+    let f = (CLOCK as f64 / per.max(1) as f64).round().max(1.0) as u32;
+    CLOCK / f
 }
 
 /// The block offsets after the header: the info block, the songs, the patterns.
@@ -303,8 +371,7 @@ fn build(d: &[u8], sps: &[u8], m: &mut Machine) -> Option<StoneTracker> {
     let bytes = sps.get(table..).unwrap_or(&[]);
     let size = bytes.len() as u32;
     let data = m.alloc(size.max(4));
-    let silence = m.alloc(4);
-    if data == 0 || silence == 0 {
+    if data == 0 {
         return None;
     }
     m.bus.write_bytes(data, bytes);
@@ -325,20 +392,24 @@ fn build(d: &[u8], sps: &[u8], m: &mut Machine) -> Option<StoneTracker> {
 
     let name = &d[4..0x24];
     let title = String::from_utf8_lossy(&name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())]).trim().to_string();
-    let flags = crate::eagle::epamb::DIRECT | crate::eagle::epamb::BIT8 | crate::eagle::epamb::CHIP_RAM;
-    // voices 4-7 silent: voices 0-3 are alone on their Paula channels, which the genie plays at
-    // their own periods, unmixed; else all eight go through the genie's mix
-    let sides = songs.first().is_some_and(|s| s.sides);
-    let amp_voices = if sides { VOICES } else { 4 };
-    let pans: Vec<i16> = (0..amp_voices).map(|v| if matches!(v % 4, 0 | 3) { 1 } else { -1 }).collect();
-    let ok = if sides {
-        crate::amplifier::start_panned_mix(m, VOICES, flags, &pans, MIX_PERIOD, MIX_BOOST)
-    } else {
-        crate::amplifier::start_panned(m, amp_voices, flags, &pans, ALONE_GAIN)
-    };
-    if !ok {
+    // the genie's buffers: voices 4-7 centred (silent) give mode A, else mode B
+    let gbuf = m.alloc((GBUF * 9) as u32);
+    if gbuf == 0 {
         return None;
     }
+    let g = Genie {
+        pairs: songs.first().is_some_and(|s| s.sides),
+        buf: gbuf,
+        half: [0; 4],
+        pending: [(128, 0); 4],
+        v: [GVoice::default(); VOICES],
+        free: 0,
+        tick_free: 0,
+        end: 0,
+        last_tick: None,
+        set_up: false,
+        filled: [false; 4],
+    };
     let mut p = StoneTracker {
         title,
         songs,
@@ -346,7 +417,6 @@ fn build(d: &[u8], sps: &[u8], m: &mut Machine) -> Option<StoneTracker> {
         patterns,
         ins,
         data,
-        silence,
         sub: 0,
         ch: Vec::new(),
         pos: 0,
@@ -361,8 +431,7 @@ fn build(d: &[u8], sps: &[u8], m: &mut Machine) -> Option<StoneTracker> {
         first: true,
         stopped: false,
         songend: false,
-        muted: [false; VOICES],
-        amp_voices,
+        g,
     };
     p.init(0);
     Some(p)
@@ -378,8 +447,7 @@ impl StoneTracker {
         self.first = true;
         self.stopped = self.bpm == 0;
         self.songend = self.stopped;
-        let sides = self.songs[sub].sides;
-        self.muted = std::array::from_fn(|v| v >= 4 && !sides);
+        self.g.v = [GVoice::default(); VOICES];
     }
 
     fn row_at(&self, c: usize) -> Option<&Row> {
@@ -779,44 +847,149 @@ impl StoneTracker {
         }
     }
 
-    fn apply(&mut self, hw: &mut Hw) {
-        let muted = self.muted;
+    /// The tick's changes, as the genie takes them from the NoteStruct (Paula semantics on bytes:
+    /// starts rounded down and lengths up to whole words; a repeat of 0 bytes ends the voice).
+    fn apply(&mut self) {
+        let word = |a: u32, n: u32| (a & !1, (n + 1) & !1);
         for v in 0..VOICES {
             let ch = &mut self.ch[v];
             let chg = std::mem::take(&mut ch.chg);
             ch.last_chg = chg;
-            if chg == 0 || v >= self.amp_voices {
-                continue;
-            }
+            let g = &mut self.g.v[v];
             if chg & TRIG != 0 {
-                hw.voice_dma(1 << v, false);
-                if ch.smp.1 == 0 {
-                    hw.voice_loc_byte(v, self.silence);
-                    hw.voice_len(v, 1);
-                } else {
-                    hw.voice_loc_byte(v, self.data + ch.smp.0);
-                    hw.voice_len_bytes(v, ch.smp.1);
-                }
-            }
-            if chg & FREQ != 0 {
-                hw.voice_per(v, ch.out_per);
-            }
-            if chg & VOL != 0 {
-                hw.voice_vol(v, if muted[v] { 0 } else { ch.out_vol });
-            }
-            if chg & TRIG != 0 {
-                hw.voice_dma(1 << v, true);
+                g.cur = word(self.data + ch.smp.0, ch.smp.1);
+                (g.pos, g.frac) = (0, 0);
+                g.on = g.cur.1 != 0;
             }
             if chg & (TRIG | REP) != 0 {
-                if ch.rep.1 == 0 {
-                    hw.voice_loc_byte(v, self.silence);
-                    hw.voice_len(v, 1);
-                } else {
-                    hw.voice_loc_byte(v, self.data + ch.rep.0);
-                    hw.voice_len_bytes(v, ch.rep.1);
+                g.rep = word(self.data + ch.rep.0, ch.rep.1);
+            }
+            if chg & FREQ != 0 {
+                g.per = genie_period(ch.out_per);
+            }
+            if chg & VOL != 0 {
+                g.vol = ch.out_vol as u32;
+            }
+        }
+    }
+
+    /// The genie's first writes (its set-up, before the first tick): every channel on the zero
+    /// buffer, its audio interrupts on, at the reference's colour clocks from the first write
+    /// (channel `c`'s LOC, LEN, PER and VOL at S_CHAN + 47c and 8 apart, DMA on at S_DMA, both
+    /// S_MODE_B later in mode B).
+    fn set_up(&mut self, hw: &mut Hw) {
+        let zero = self.g.buf;
+        hw.bus.ram[zero as usize..zero as usize + GBUF * 9].fill(0);
+        let t0 = hw.bus.clock;
+        let shift = if self.g.pairs { S_MODE_B } else { 0 };
+        let at = |hw: &mut Hw, t: u64| {
+            let now = hw.bus.clock;
+            hw.wait((t0 + t).saturating_sub(now));
+        };
+        for (i, (r, v)) in [(0xdff096, 0x000f), (0xdff09e, 0x00ff), (0xdff09c, 0x0780), (0xdff09a, 0x0780)].into_iter().enumerate() {
+            at(hw, 8 * i as u64);
+            hw.bus.write_word(r, v);
+        }
+        for c in 0..4 {
+            let b = S_CHAN + shift + 47 * c as u64;
+            at(hw, b);
+            hw.loc(c, zero);
+            at(hw, b + 8);
+            hw.len(c, (GBUF / 2) as u16);
+            at(hw, b + 16);
+            hw.per(c, 128);
+            at(hw, b + 24);
+            hw.vol(c, 0);
+        }
+        for (i, (r, v)) in [(0xdff096, 0x800f), (0xdff09e, 0x00ff), (0xdff09c, 0x0780), (0xdff09a, 0x8780)].into_iter().enumerate() {
+            at(hw, S_DMA + shift + 8 * i as u64);
+            hw.bus.write_word(r, v);
+        }
+    }
+
+    /// Fills Paula channel `c`'s next buffer: its PER, VOL, which of the handler cases of `H_LC` it
+    /// was and the colour clocks from the handler's PER to its acknowledge. Those are the reference's
+    /// most frequent durations (write logs of both archive modules, 20 s): mode A 5824 for a voice
+    /// that is off, 4645 at volume 64 and about 5549 + 0.894 per period unit otherwise (5662 at 127,
+    /// 5702 at 170, 5778 at 254, 5854 at 340, 6090 at 604); mode B 3296 silent, 5822 for voices at
+    /// the channel's period, 6291 when one is resampled, 4743 for voices playing at volume 0.
+    fn fill(&mut self, c: usize, out: &mut [u8; GBUF], ram: &[u8]) -> (u16, u16, usize, u64) {
+        let g = &mut self.g;
+        let (members, n, per, vmax, case): ([usize; 2], usize, u32, u32, usize) = if g.pairs {
+            let m = PAIRS[c];
+            let per = g.v[m[0]].per.min(g.v[m[1]].per);
+            let vmax = g.v[m[0]].vol.max(g.v[m[1]].vol);
+            let case = match (vmax, g.v[m[0]].on || g.v[m[1]].on) {
+                (0, false) => 2,
+                (0, true) => 3,
+                _ => 1,
+            };
+            (m, 2, per, vmax, case)
+        } else {
+            ([c, c], 1, g.v[c].per, 64, 0)
+        };
+        let ack = match case {
+            0 if !g.v[c].on => 5824,
+            0 if g.v[c].vol >= 64 => 4645,
+            0 => 5549 + per as u64 * 894 / 1000,
+            1 if members.iter().any(|&m| g.v[m].on && g.v[m].vol > 0 && g.v[m].per != per) => 6291,
+            1 => 5822,
+            2 => 3296,
+            _ => 4743,
+        } - if g.filled[c] {
+            0
+        } else {
+            // a channel's first handler after the set-up is shorter (mode A 142, 191 for a voice
+            // that is off; mode B 147, 96 silent)
+            g.filled[c] = true;
+            match case {
+                0 if !g.v[c].on => 191,
+                0 => 142,
+                1 => 147,
+                2 => 96,
+                _ => 0,
+            }
+        };
+        let mut acc = [0i32; GBUF];
+        if case != 2 {
+            for &vi in &members[..n] {
+                let v = &mut g.v[vi];
+                // voices at volume 0 play on, unscaled (heard at VOL 0)
+                let factor = if vmax == 0 { 64 } else { (v.vol * 64 / vmax) as i32 };
+                let step = if v.per == per { 0x10000 } else { (per << 16) / v.per.max(1) + 1 };
+                for a in acc.iter_mut() {
+                    if !v.on {
+                        break;
+                    }
+                    if step != 0x10000 {
+                        v.frac += step;
+                        v.pos += v.frac >> 16;
+                        v.frac &= 0xffff;
+                    }
+                    while v.on && v.pos >= v.cur.1 {
+                        if v.rep.1 == 0 {
+                            v.on = false;
+                        } else {
+                            v.pos -= v.cur.1;
+                            v.cur = v.rep;
+                        }
+                    }
+                    if !v.on {
+                        break;
+                    }
+                    let s = ram.get((v.cur.0 + v.pos) as usize).copied().unwrap_or(0) as i8 as i32;
+                    *a += (s * factor) >> 6;
+                    if step == 0x10000 {
+                        v.pos += 1;
+                    }
                 }
             }
         }
+        for (o, a) in out.iter_mut().zip(acc) {
+            *o = a as u8;
+        }
+        let vol = if g.pairs { vmax } else { 64 };
+        (per.min(0xffff) as u16, vol as u16, case, ack)
     }
 }
 
@@ -843,12 +1016,72 @@ impl Replayer for StoneTracker {
     }
 
     /// The player's own CIA-B timer: 1789773 / BPM less 42 E-clock ticks of 5 colour clocks,
-    /// 32 BPM the slowest, and the genie's average delay (`GENIE_LATENCY`).
+    /// 32 BPM the slowest.
     fn tick_clocks(&self) -> u64 {
-        (1_789_773 / self.bpm.max(32) as u64 - 42) * 5 + GENIE_LATENCY
+        (1_789_773 / self.bpm.max(32) as u64 - 42) * 5
+    }
+
+    /// The next tick is due a period after this one's start, which a genie handler may have
+    /// held back.
+    fn next_tick_at(&self) -> Option<u64> {
+        self.g.last_tick.map(|t| t + self.tick_clocks())
+    }
+
+    /// A genie handler: PER and VOL of the buffer Paula starts, LC of the other, which is filled.
+    fn audio_irq_ch(&mut self, c: usize, hw: &mut Hw) -> bool {
+        if !self.g.set_up {
+            return false;
+        }
+        // a request raised while this channel's own handler ran is gone: its acknowledge cleared it
+        if hw.bus.paula.intreq & (0x80 << c) == 0 {
+            return true;
+        }
+        // an interrupt raised while a handler or the tick ran is taken as soon as that ends
+        let now = hw.bus.clock;
+        let start = if now <= self.g.end { self.g.free } else { (now + H_FIRST).max(self.g.free) };
+        hw.wait(start - now);
+        let (per, vol) = self.g.pending[c];
+        hw.per(c, per);
+        hw.wait(H_VOL);
+        hw.vol(c, vol);
+        let mut out = [0u8; GBUF];
+        let (per, vol, case, ack) = self.fill(c, &mut out, &hw.bus.ram);
+        self.g.pending[c] = (per, vol);
+        let h = self.g.half[c] ^ 1;
+        self.g.half[c] = h;
+        let a = self.g.buf + (GBUF * (1 + 2 * c + h)) as u32;
+        hw.bus.ram[a as usize..a as usize + GBUF].copy_from_slice(&out);
+        hw.wait(H_LC[case] - H_VOL);
+        hw.loc(c, a);
+        hw.wait(ack - H_LC[case]);
+        hw.bus.write_word(0xdff09c, 0x0080 << c);
+        let end = hw.bus.clock;
+        self.g.end = end;
+        self.g.free = end + H_NEXT;
+        self.g.tick_free = end + H_TICK;
+        true
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        // the tick starts once a genie handler that holds it back has ended
+        let now = hw.bus.clock;
+        let start = now.max(self.g.tick_free);
+        hw.wait(start - now);
+        let first = !self.g.set_up;
+        let mode = self.g.pairs as usize;
+        if first {
+            self.g.set_up = true;
+            self.set_up(hw);
+            let t = hw.bus.clock;
+            let shift = if self.g.pairs { S_MODE_B } else { 0 };
+            hw.wait((start + S_DMA + shift + S_TICK).saturating_sub(t));
+        }
+        let kind = if first { 2 } else if self.t == 0 && !self.in_pdelay { 1 } else { 0 };
+        let start = hw.bus.clock;
+        self.g.last_tick = Some(start);
+        self.g.free = start + T_END[mode][kind] + T_AFTER;
+        hw.wait(T_NOTE[mode][kind]);
+        self.g.end = hw.bus.clock;
         if self.stopped {
             return;
         }
@@ -869,7 +1102,7 @@ impl Replayer for StoneTracker {
                 }
             }
         }
-        self.apply(hw);
+        self.apply();
         self.t += 1;
         if self.t >= self.speed {
             self.t = 0;
@@ -1013,23 +1246,21 @@ mod tests {
         let d = module(&[&[0xff, 0x3f]], &[vec![0]], 125);
         // the sample file is too short for the byte: voices 4-7 centred, silent
         let (p, _) = player(&d, &samples());
-        assert_eq!(p.muted, [false, false, false, false, true, true, true, true]);
-        assert_eq!(p.amp_voices, 4, "the four voices alone on their channels are played unmixed");
+        assert!(!p.g.pairs, "mode A: voices 0-3 alone on their channels, 4-7 silent");
         // with the byte negative: all play
         let song = be32(&d, 0x30) as usize;
         let mut s = samples();
         s.resize(song + 14086 + 1, 0);
         s[song + 14086] = 0x80;
         let (p, _) = player(&d, &s);
-        assert_eq!(p.muted, [false; 8]);
-        assert_eq!(p.amp_voices, 8);
+        assert!(p.g.pairs, "mode B: two voices a channel");
     }
 
     #[test]
-    fn tick_adds_the_genies_delay() {
+    fn tick_period() {
         let d = module(&[&[0xff, 0x3f]], &[vec![0]], 200);
         let (p, _) = player(&d, &samples());
-        assert_eq!(p.tick_clocks(), 5 * (1_789_773 / 200 - 42) + GENIE_LATENCY);
+        assert_eq!(p.tick_clocks(), 5 * (1_789_773 / 200 - 42));
     }
 
     #[test]
@@ -1044,7 +1275,7 @@ mod tests {
         // note 25 with sample 1, then a volume slide down 4 on the next row
         let pat: &[u8] = &[0x19, 0x01, 0xff, 0x00, 0xaf, 0x04, 0xff, 0x3d];
         let (mut p, mut m) = player(&module(&[&[0xff, 0x3f], pat], &[vec![1]], 125), &samples());
-        assert_eq!(p.tick_clocks(), 71380 + GENIE_LATENCY);
+        assert_eq!(p.tick_clocks(), 71380);
         let t = run(&mut p, &mut m, 12);
         assert_eq!(t[0][0], (TRIG | SMP | REP | FREQ | VOL, 214, 64));
         assert_eq!(t[0][1], (FREQ | VOL, 256, 0));
@@ -1070,7 +1301,7 @@ mod tests {
     #[test]
     fn song_end_and_slow_bpm() {
         let (mut p, mut m) = player(&module(&[&[0xff, 0x3f]], &[vec![0, 0]], 10), &samples());
-        assert_eq!(p.tick_clocks(), (1_789_773 / 32 - 42) * 5 + GENIE_LATENCY);
+        assert_eq!(p.tick_clocks(), (1_789_773 / 32 - 42) * 5);
         run(&mut p, &mut m, 2 * 64 * 6 - 1);
         assert!(!p.songend());
         run(&mut p, &mut m, 1);

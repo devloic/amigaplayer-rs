@@ -33,6 +33,11 @@
 //! Eagleplayer amplifier's (`Hw::voice_*`), poked as Paula's channels are, with the
 //! amplifier's own side for each (Amiga LRRL, repeating). A note is a DMA off, LOC,
 //! LEN, period, DMA on and then the loop's LOC and LEN, as ProTracker writes them.
+//!
+//! The FastTracker and TakeTracker tags play as PS3M plays them on the same amplifier (EP206's
+//! DeliPlayer, measured as a black box from its AudioStructs and its timer): every sample's first
+//! four bytes are cleared, and the first tick comes where PS3M's falls among the amplifier's
+//! buffers (`timer_delay`).
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -42,6 +47,17 @@ pub const OPEN: Open = Open { name: "Multichannel MOD", detect: |d| kind_of(d).i
 pub const OPEN_FLT8: Open = Open { name: "StarTrekker 8", detect: |d| kind_of(d).is_some_and(|k| k.1 == Kind::Flt8), new: |d, b, m| new(d, b, m, Kind::Flt8) };
 
 include!("multimod_tables.rs");
+
+/// When PS3M's first tick comes among the amplifier's buffers (EP206's PS3M, which mixes in its
+/// AudioStructs a buffer at a time, so that a tick's changes are heard from the buffer mixed
+/// after it): measured on 10 FST modules of 6 and 8 voices and a one-pattern probe, its first
+/// tick comes 82516 colour clocks plus 3.28 per pattern and channel (the time its set-up takes
+/// over the patterns, within 250) after the buffer before its first buffer interrupt, a buffer
+/// earlier than this port's first one; this port's first tick, without a delay, comes 70713
+/// after that.
+const PS3M_FIRST_TICK: u64 = 82516;
+const PS3M_PER_PATTERN_CHANNEL: u64 = 328;
+const PORT_FIRST_TICK: u64 = 70713;
 
 const NOTES: usize = 36;
 const MIN_PERIOD: i32 = 113;
@@ -302,6 +318,17 @@ fn new(d: &[u8], base: u32, m: &mut Machine, want: Kind) -> Option<Box<dyn Repla
     }
     let title = d[..20].iter().take_while(|&&c| c != 0).map(|&c| c as char).collect::<String>().trim().to_string();
     let pc = matches!(&d[1080..1084], [b'1'..=b'9', b'C', b'H', b'N'] | [b'1'..=b'3', b'0'..=b'9', b'C', b'H']);
+    if pc {
+        // PS3M plays every sample with its first four bytes cleared (the bytes its AudioStructs'
+        // parts start with, 12 FST modules: silent at each turn of a loop from the sample's start)
+        for smp in samples.iter().filter(|s| s.len != 0) {
+            let a = smp.addr as usize;
+            let k = (2 * smp.len as usize).min(4);
+            if let Some(w) = m.bus.ram.get_mut(a..a + k) {
+                w.fill(0);
+            }
+        }
+    }
     let mut s = MultiMod {
         kind,
         pc,
@@ -369,6 +396,14 @@ impl Replayer for MultiMod {
         // the first tempo command
         let clock = if self.pc && self.bpm_set { 1_789_773 } else { 1_773_447 };
         (clock / self.bpm.max(1) as u64 + 1) * 5
+    }
+
+    fn timer_delay(&self) -> u64 {
+        if !self.pc {
+            return 0;
+        }
+        let set_up = (self.patterns.len() * self.n) as u64 * PS3M_PER_PATTERN_CHANNEL / 100;
+        (PS3M_FIRST_TICK + set_up).saturating_sub(PORT_FIRST_TICK)
     }
 
     fn tick(&mut self, hw: &mut Hw) {

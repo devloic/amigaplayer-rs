@@ -40,11 +40,14 @@
 //!   range-checked; the original's word and byte arithmetic is kept.
 //!
 //! A module is taken when both the Eagleplayer's check and NostalgicPlayer's
-//! pass. The writes come when the original's do: `At` holds the time its code
-//! takes between them, fitted by least squares to the reference's write times
-//! (84640 gaps of 20 modules: rms 7.8 colour clocks, 90% within 6), and the
-//! start waits as long as the reference's check, InitPlayer and InitSound
-//! (`Scan::start`).
+//! pass. The writes come at the original's colour clocks: each is a host call
+//! (ENPP_PokeAdr, ...; the song's end calls ENPP_SongEnd), which the engine runs
+//! at the 68000 cycles the original's code took since the last one, halved and
+//! rounded down. `At` holds the cycles of each path between them, integers
+//! fitted to every host-call gap of the reference (the 12 modules the
+//! Eagleplayer plays, 20 s and 90 s, and about 150 modified copies taking the
+//! paths they do not: 903 409 gaps, all exact), and the start waits as long as
+//! the reference's check, InitPlayer and InitSound (`Scan::start`).
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -183,8 +186,14 @@ fn ep_check(d: &[u8]) -> Option<Scan> {
                 if r(a + 1) != 0xff {
                     return None;
                 }
+                if c == 0xff {
+                    s.ff_skips += 1;
+                } else {
+                    s.skips += 1;
+                }
                 a += 4;
             } else if r(a - 2) == 0xff {
+                s.short_end = true;
                 return Some(s);
             } else if c != 0xff || r(a - 3) != 0xff {
                 return None;
@@ -199,24 +208,43 @@ fn ep_check(d: &[u8]) -> Option<Scan> {
 }
 
 /// What the Eagleplayer's check read: rows whose first byte is a character, rows
-/// whose first byte is 0, and track names (with the row that ends each track).
+/// whose first byte is 0, track names (with the row that ends each track), the
+/// tracks that end instead on a row followed by an $FFFF (a row whose first byte
+/// is neither, or $FF), and whether the last track ended on its row's third byte
+/// rather than on a name of zeros.
 #[derive(Default)]
 struct Scan {
     text: u32,
     zero: u32,
     names: u32,
+    skips: u32,
+    ff_skips: u32,
+    short_end: bool,
 }
 
 impl Scan {
     /// The colour clocks from the start of the reference's run of the
-    /// Eagleplayer (its check, InitPlayer and InitSound) to the first write of
-    /// 3.x's InitSound, or to the end of 4.0/5.0's (fitted to the reference's
-    /// write logs and timer starts: exact on the 8 3.x modules, within 51 on
-    /// the 12 4.0/5.0 ones).
+    /// Eagleplayer to the first write of 3.x's InitSound, or to the end of
+    /// 4.0/5.0's. The check is one stretch of 68000 code with no host call, so
+    /// it takes its cycles halved, rounded down (`check_cycles`); InitPlayer and
+    /// InitSound up to there take the same time on every module (measured on
+    /// the 12 modules the Eagleplayer plays).
     fn start(&self, v4: bool) -> u64 {
-        let (t, z, n) = (self.text as f64, self.zero as f64, self.names as f64);
-        let c = if v4 { 8915.0 + 78.0 * t + 78.6 * z + 578.8 * n } else { 4771.3 + 77.5 * t + 68.5 * z + 585.0 * n };
-        c.round() as u64
+        self.check_cycles(v4) / 2 + if v4 { 8830 } else { 4697 }
+    }
+
+    /// The check's 68000 cycles, by what it read: integers fitted exactly to
+    /// the reference's check times of the 12 modules, and of modified copies
+    /// for the track ends on an $FFFF (16 of a first byte other than $FF, 1 of
+    /// $FF); the short end was seen on one module (-92 fits it too), the end on
+    /// an $FFFF after $FF on one copy (-24 fits it too).
+    fn check_cycles(&self, v4: bool) -> u64 {
+        let c = 149 + if v4 { 20 } else { 0 } + 155 * self.text as i64 + 137 * self.zero as i64
+            + 1170 * self.names as i64
+            - 41 * self.skips as i64
+            - 25 * self.ff_skips as i64
+            - if self.short_end { 93 } else { 0 };
+        c.max(0) as u64
     }
 }
 
@@ -239,34 +267,52 @@ fn detect(d: &[u8]) -> bool {
     np_check(d) && ep_check(d).is_some()
 }
 
-/// Code points of the original, where it spends the time between its register
-/// writes: Paula stops a playing voice only at the end of its word, so the time
-/// from a note's DMA off to its DMA on decides whether the note starts, and the
-/// DMA slots of a line make the place of a write in its line matter.
+/// Code paths of the original between its host calls. Each register write is a
+/// host call (ENPP_PokeAdr, ENPP_PokeLen, ...), which the engine runs at the
+/// 68000 cycles the code took since the previous one (or since the tick's
+/// start), halved and rounded down; the engine charges a fixed figure per
+/// instruction (crates/m68k-rc/src/cycles.rs), so a path's time depends only on
+/// the branches it takes, and each branch of the port is one of these. Paula
+/// stops a playing voice only at the end of its word, so the time from a note's
+/// DMA off to its DMA on decides whether the note starts, and the DMA slots of a
+/// line make the place of a write in its line matter.
 #[derive(Clone, Copy, Debug)]
 enum At {
-    /// The interrupt up to the replayer, and its return.
+    /// The interrupt up to the replayer.
     Tick,
     // 3.x
-    /// A ProcessCounter call, and one that reads the tracks.
+    /// The fourth tick's second ProcessCounter; a ProcessCounter call, and one
+    /// that reads the tracks.
+    Count3Fourth,
     Counter3,
     Rows3,
-    /// The sixth track: at its end, waiting, a row, a transposing row.
+    /// The sixth track: at its end, waiting, a row, a transposing row (to every
+    /// voice: and the four).
     Six3End,
     Six3Wait,
     Six3Row,
     Six3Trsp,
+    Six3All,
     /// A voice: waiting, a new row (no note), a note to its sample, each step of
-    /// its transpose, a note of volume $80.
+    /// its transpose (down or up, and across an octave), a rest (sample $FF), a
+    /// note of volume $80. UNSURE: the original does not just drop a note of
+    /// volume $80 (on modified copies it takes time on later ticks and leaves
+    /// out later notes); no module has one.
     Wait3,
     Row3,
     Note3,
-    Trsp3,
+    Trsp3Down,
+    Trsp3DownWrap,
+    Trsp3Up,
+    Trsp3UpWrap,
+    Rest3,
     Hold3,
-    /// The sample: each step of its note transpose, to its LOC; between its
-    /// writes; after the DMA on (with a loop, and between its two writes); the
-    /// rest of the voice.
+    /// The sample: each step of its note transpose (and across an octave), to
+    /// its LOC; between its writes; after the DMA on (with a loop, and between
+    /// its two writes); the rest of the voice.
+    STrsp3Any,
     STrsp3,
+    STrsp3Wrap,
     Smp3,
     LocLen3,
     LenPer3,
@@ -279,151 +325,250 @@ enum At {
     NoLoop3,
     Loop3,
     LoopLoc3,
+    LoopEnd3,
     SmpEnd3,
-    /// The next position.
+    /// The next position, and the song's end (to the host's SongEnd, and
+    /// after it); the new position's tracks.
     Pos3,
+    Pos3End,
+    Pos3EndTail,
+    Pos3Tracks,
     // 4.0/5.0
-    /// The speed counter, and a step that reads the tracks.
+    /// The speed counter, each step of it, and a step that reads the tracks.
     Counter4,
     Step4,
-    /// The sixth track: waiting, a row.
+    Step4Track,
+    /// The sixth track: waiting, a row, a row going back, a transposing row (to
+    /// every voice).
     Six4Wait,
     Six4Row,
-    /// A voice's track: waiting, a row without a note, a note.
+    Six4Back,
+    Six4Trsp,
+    Six4All,
+    /// A voice's track: waiting, a row without a note, a note on the muted
+    /// voice, a note.
     Wait4,
     Row4,
+    Row4Muted,
     Note4,
-    /// The next position.
+    /// The next position, from a note of $FF or an instrument of $FF; the
+    /// position list's end (to the host's SongEnd, and after it); the new
+    /// position's tracks.
+    Pos4Note,
+    Pos4Instr,
     Pos4,
-    /// The sample commands: a voice, a waiting voice, one command, and each kind.
+    Pos4End,
+    Pos4EndTail,
+    Pos4Tracks,
+    /// The sample commands: a voice with none, a waiting voice, one command,
+    /// either argument taken from the repeat values, and each command.
     Cmds4,
+    CmdsNone4,
     CmdWait4,
     Cmd4,
-    CmdSwitch4,
-    CmdAdr4,
-    CmdLen4,
-    CmdPer4,
-    CmdRepeat4,
+    CmdArg5,
+    CmdArg6,
     CmdStop4,
+    CmdSwitch4,
     CmdWaitSet4,
-    CmdVol4,
-    CmdValue4,
+    CmdAdr3,
+    CmdAdr4,
+    CmdLen5,
+    CmdLen6,
+    CmdPer7,
+    CmdPer8,
+    /// After the write of each of these.
+    CmdAdr3Tail,
+    CmdAdr4Tail,
+    CmdLen5Tail,
+    CmdLen6Tail,
+    CmdPer7Tail,
+    CmdPer8Tail,
+    /// The volume command, and its clamps below 0 and at $40.
+    CmdVol9,
+    CmdVolNeg,
+    CmdVolMax,
+    CmdSet10,
+    /// The repeat command, counting down, going back or not.
+    CmdRep11,
+    CmdRep11Down,
+    CmdRep11Again,
+    CmdRep11Done,
+    CmdValue12,
+    CmdValue13,
     CmdNop4,
-    /// An argument taken from the repeat values.
-    CmdArg4,
-    /// The play sample command's three ticks: to the first write and between them.
+    /// The play sample command's three ticks: to the first write, between
+    /// writes, and after the last; a phase past the three.
     Play0,
+    Play0Dma,
     Play0Len,
     Play0Per,
     Play0Vol,
+    PlayEnd0,
     Play1,
     Play1Per,
     Play1Len,
     Play1On,
+    PlayEnd1,
     Play2,
-    Play2Loc,
-    PlayEnd,
     Play2NoLoop,
     Play2NoLoopEnd,
+    Play2Loop,
+    Play2Loc,
     Play2End,
-    /// The volumes: the envelope counting, or a step of its attack, decay,
-    /// sustain, release or end, and its next phase; the volume write.
+    PlayNone,
+    /// The volumes: the envelope counting, or a step of its attack (reaching
+    /// the top), decay (reaching the level), sustain (released), release or
+    /// end; the volume write, or a voice not written.
     EnvCount4,
     EnvAttack4,
+    EnvAttackTop,
     EnvDecay4,
+    EnvDecayLevel,
     EnvSustain4,
+    EnvSustainNext,
     EnvRelease4,
     EnvDone4,
-    EnvNext4,
     Vol4,
+    VolSkip4,
 }
 
 impl At {
-    /// Colour clocks, fitted by non-negative least squares to the gaps between
-    /// the reference's writes (`SOUNDCONTROL_TRACE`); a cost of 0 is taken by
-    /// the code points around it. No module of the corpus has a note of volume
-    /// $80, a sample note transpose, the release or the end of an envelope, or
-    /// commands 12 to 14 and 16 to 31: those take the cost of the nearest path
-    /// (a row, a transpose step, the decay, the sustain, the volume command).
-    fn cost(self) -> u64 {
+    /// 68000 cycles, fitted as integers to the reference's host-call gaps
+    /// (`SOUNDCONTROL_TRACE` against the reference's DELI_TRACE): each gap is
+    /// the sum along its path, halved and rounded down. The fit fixes only the
+    /// sums, so where a cost could move to its neighbour one split was chosen
+    /// (the nearest to an earlier fit). UNSURE: the paths no module or copy took
+    /// (a muted voice or one the voice mask leaves out, a play phase past the
+    /// three, the envelope's release and end: nothing sets them), and the note of
+    /// volume $80.
+    fn cycles(self) -> u64 {
         use At::*;
         match self {
-            Tick => 113,
-            Counter3 => 51,
-            Rows3 => 163,
-            Six3End => 4,
-            Six3Wait => 0,
-            Six3Row => 58,
-            Six3Trsp => 51,
-            Wait3 => 50,
-            Row3 => 92,
-            Note3 => 13,
-            Trsp3 => 30,
-            Hold3 => 92,
-            STrsp3 => 30,
-            Smp3 => 334,
-            LocLen3 => 99,
-            LenPer3 => 85,
-            PerOff3 => 88,
-            OffVol3 => 87,
-            VolPer3 => 87,
-            PerLen3 => 105,
-            LenLoc3 => 108,
-            LocOn3 => 100,
-            NoLoop3 => 109,
-            Loop3 => 125,
-            LoopLoc3 => 112,
-            SmpEnd3 => 211,
-            Pos3 => 654,
-            Counter4 => 144,
-            Step4 => 78,
-            Six4Wait => 305,
-            Six4Row => 350,
-            Wait4 => 1,
-            Row4 => 37,
-            Note4 => 411,
-            Pos4 => 360,
-            Cmds4 => 201,
-            CmdWait4 => 37,
-            Cmd4 => 80,
-            CmdSwitch4 => 34,
-            CmdAdr4 => 69,
-            CmdLen4 => 67,
-            CmdPer4 => 38,
-            CmdRepeat4 => 13,
-            CmdStop4 => 17,
-            CmdWaitSet4 => 128,
-            CmdVol4 => 0,
-            CmdValue4 => 0,
-            CmdNop4 => 0,
-            CmdArg4 => 0,
-            Play0 => 100,
-            Play0Len => 107,
-            Play0Per => 85,
-            Play0Vol => 83,
-            Play1 => 18,
-            Play1Per => 95,
-            Play1Len => 105,
-            Play1On => 112,
-            Play2 => 50,
-            Play2Loc => 118,
-            PlayEnd => 136,
+            Tick => 226,
+            Count3Fourth => 0,
+            Counter3 => 103,
+            Rows3 => 323,
+            Six3End => 10,
+            Six3Wait => 49,
+            Six3Row => 114,
+            Six3Trsp => 94,
+            Six3All => 44,
+            Wait3 => 101,
+            Row3 => 183,
+            Note3 => 25,
+            Trsp3Down => 59,
+            Trsp3DownWrap => 14,
+            Trsp3Up => 59,
+            Trsp3UpWrap => 14,
+            Rest3 => 18,
+            Hold3 => 183,
+            STrsp3Any => 16,
+            STrsp3 => 43,
+            STrsp3Wrap => 4,
+            Smp3 => 668,
+            LocLen3 => 198,
+            LenPer3 => 170,
+            PerOff3 => 176,
+            OffVol3 => 174,
+            VolPer3 => 174,
+            PerLen3 => 210,
+            LenLoc3 => 216,
+            LocOn3 => 200,
+            NoLoop3 => 218,
+            Loop3 => 250,
+            LoopLoc3 => 224,
+            LoopEnd3 => 8,
+            SmpEnd3 => 422,
+            Pos3 => 173,
+            Pos3End => 0,
+            Pos3EndTail => 155,
+            Pos3Tracks => 1135,
+            Counter4 => 307,
+            Step4 => 157,
+            Step4Track => 0,
+            Six4Wait => 204,
+            Six4Row => 259,
+            Six4Back => 49,
+            Six4Trsp => 119,
+            Six4All => 28,
+            Wait4 => 104,
+            Row4 => 172,
+            Row4Muted => 172,
+            Note4 => 915,
+            Pos4Note => 0,
+            Pos4Instr => 83,
+            Pos4 => 69,
+            Pos4End => 0,
+            Pos4EndTail => 74,
+            Pos4Tracks => 1083,
+            Cmds4 => 365,
+            CmdsNone4 => 45,
+            CmdWait4 => 102,
+            Cmd4 => 163,
+            CmdArg5 => 22,
+            CmdArg6 => 22,
+            CmdStop4 => 34,
+            CmdSwitch4 => 198,
+            CmdWaitSet4 => 22,
+            CmdAdr3 => 39,
+            CmdAdr4 => 81,
+            CmdLen5 => 24,
+            CmdLen6 => 98,
+            CmdPer7 => 0,
+            CmdPer8 => 58,
+            CmdAdr3Tail => 232,
+            CmdAdr4Tail => 248,
+            CmdLen5Tail => 224,
+            CmdLen6Tail => 224,
+            CmdPer7Tail => 236,
+            CmdPer8Tail => 224,
+            CmdVol9 => 68,
+            CmdVolNeg => 4,
+            CmdVolMax => 4,
+            CmdSet10 => 104,
+            CmdRep11 => 120,
+            CmdRep11Down => 0,
+            CmdRep11Again => 0,
+            CmdRep11Done => 20,
+            CmdValue12 => 40,
+            CmdValue13 => 36,
+            CmdNop4 => 10,
+            Play0 => 81,
+            Play0Dma => 193,
+            Play0Len => 214,
+            Play0Per => 170,
+            Play0Vol => 166,
+            PlayEnd0 => 248,
+            Play1 => 48,
+            Play1Per => 190,
+            Play1Len => 210,
+            Play1On => 224,
+            PlayEnd1 => 264,
+            Play2 => 115,
             Play2NoLoop => 0,
-            Play2NoLoopEnd => 116,
-            Play2End => 120,
-            EnvCount4 => 84,
-            EnvAttack4 => 169,
-            EnvDecay4 => 174,
-            EnvSustain4 => 143,
-            EnvRelease4 => 174,
-            EnvDone4 => 143,
-            EnvNext4 => 16,
-            Vol4 => 155,
+            Play2NoLoopEnd => 224,
+            Play2Loop => 4,
+            Play2Loc => 236,
+            Play2End => 232,
+            PlayNone => 0,
+            EnvCount4 => 168,
+            EnvAttack4 => 337,
+            EnvAttackTop => 32,
+            EnvDecay4 => 349,
+            EnvDecayLevel => 28,
+            EnvSustain4 => 277,
+            EnvSustainNext => 28,
+            EnvRelease4 => 349,
+            EnvDone4 => 277,
+            Vol4 => 310,
+            VolSkip4 => 0,
         }
     }
 }
 
-/// The trace of code points for fitting their costs (SOUNDCONTROL_TRACE=file).
+/// The trace of code paths for fitting their cycles (SOUNDCONTROL_TRACE=file):
+/// each host call's clock and the paths since the previous one.
 #[derive(Default)]
 struct Trace {
     out: Option<std::io::BufWriter<std::fs::File>>,
@@ -436,13 +581,6 @@ impl Trace {
             .and_then(|p| std::fs::File::create(p).ok())
             .map(std::io::BufWriter::new);
         Trace { out, pend: Vec::new() }
-    }
-
-    fn at(&mut self, hw: &mut Hw, e: At) {
-        hw.wait(e.cost());
-        if self.out.is_some() {
-            self.pend.push(e);
-        }
     }
 
     /// A register write is about to be made (or a tick starts).
@@ -466,6 +604,10 @@ pub struct SoundControl {
     h0: u32,
     h1: u32,
     songend: bool,
+    /// The clock of the last host call's return (or the tick's start), and the
+    /// 68000 cycles spent since.
+    seg: u64,
+    cyc: u64,
     trace: Trace,
 }
 
@@ -486,6 +628,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         h0,
         h1,
         songend: false,
+        seg: 0,
+        cyc: 0,
         trace: Trace::open(),
     };
     // the initialised data of the original's first hunk
@@ -530,8 +674,10 @@ impl Replayer for SoundControl {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.seg = hw.bus.clock;
+        self.cyc = 0;
         self.trace.write(hw, "tick");
-        self.trace.at(hw, At::Tick);
+        self.go(At::Tick);
         if self.v4 {
             self.play4(hw);
         } else {
@@ -565,33 +711,64 @@ impl SoundControl {
         hw.bus.w32(self.at(a), v)
     }
 
+    /// The original's code takes path `e`.
+    fn go(&mut self, e: At) {
+        self.cyc += e.cycles();
+        if self.trace.out.is_some() {
+            self.trace.pend.push(e);
+        }
+    }
+
+    /// A host call: it runs at the clock the cycles since the last one reach.
+    fn host(&mut self, hw: &mut Hw, what: &str) {
+        hw.bus.clock = hw.bus.clock.max(self.seg + self.cyc / 2);
+        self.trace.write(hw, what);
+    }
+
+    /// The code goes on from the host call's return.
+    fn rebase(&mut self, hw: &Hw) {
+        self.seg = hw.bus.clock;
+        self.cyc = 0;
+    }
+
     // The host's ENPP_Poke* and ENPP_DMAMask, as the original's wrappers call
     // them: an address of 0 is the second hunk's zeros; DMACON takes bit 15 and
     // the low 4 bits of the mask; with voices on the host waits for the DMA as
     // dtg_WaitAudioDMA does, to 10 lines past the current one.
     fn poke_adr(&mut self, hw: &mut Hw, ch: usize, a: u32) {
-        self.trace.write(hw, "loc");
+        self.host(hw, "loc");
         hw.loc(ch, if a == 0 { self.h1 } else { a });
+        self.rebase(hw);
     }
     fn poke_len(&mut self, hw: &mut Hw, ch: usize, v: u16) {
-        self.trace.write(hw, "len");
+        self.host(hw, "len");
         hw.len(ch, v);
+        self.rebase(hw);
     }
     fn poke_per(&mut self, hw: &mut Hw, ch: usize, v: u16) {
-        self.trace.write(hw, "per");
+        self.host(hw, "per");
         hw.per(ch, v);
+        self.rebase(hw);
     }
     fn poke_vol(&mut self, hw: &mut Hw, ch: usize, v: u16) {
-        self.trace.write(hw, "vol");
+        self.host(hw, "vol");
         hw.vol(ch, v);
+        self.rebase(hw);
+    }
+    /// ENPP_SongEnd.
+    fn song_end(&mut self, hw: &mut Hw) {
+        self.host(hw, "end");
+        self.songend = true;
+        self.rebase(hw);
     }
     fn dma_mask(&mut self, hw: &mut Hw, v: u16) {
-        self.trace.write(hw, "dma");
+        self.host(hw, "dma");
         hw.dmacon(v & 0x800f);
         if v & 0x8000 != 0 {
             let now = hw.bus.clock;
             hw.wait((now / LINE + 10) * LINE - now);
         }
+        self.rebase(hw);
     }
 
     // ---------------------------------------------------------------- 3.x
@@ -641,6 +818,7 @@ impl SoundControl {
         let c = self.r16(hw, COUNTER1).wrapping_add(1);
         self.w16(hw, COUNTER1, c);
         if c == 4 {
+            self.go(At::Count3Fourth);
             self.counter3(hw);
             self.w16(hw, COUNTER1, 0);
         }
@@ -648,11 +826,11 @@ impl SoundControl {
     }
 
     fn counter3(&mut self, hw: &mut Hw) {
-        self.trace.at(hw, At::Counter3);
+        self.go(At::Counter3);
         let c = self.r16(hw, COUNTER2).wrapping_add(1);
         self.w16(hw, COUNTER2, c);
         if c == 2 {
-            self.trace.at(hw, At::Rows3);
+            self.go(At::Rows3);
             self.process_track3(hw);
             self.w16(hw, COUNTER2, 0);
         }
@@ -691,14 +869,15 @@ impl SoundControl {
             // the sixth track: the voices' transposes
             let row = self.r32(hw, TRACKS3 + 20);
             if hw.bus.r8(row) == 0xff {
-                self.trace.at(hw, At::Six3End);
+                self.go(At::Six3End);
             } else if let Some(row) = self.step(hw, TRACKS3 + 20, WAITS3 + 10) {
-                self.trace.at(hw, At::Six3Row);
+                self.go(At::Six3Row);
                 if hw.bus.r8(row) != 0 {
-                    self.trace.at(hw, At::Six3Trsp);
+                    self.go(At::Six3Trsp);
                     let t = hw.bus.r8(row.wrapping_add(3)) & 0x3f;
                     let v = hw.bus.r8(row.wrapping_add(2)).wrapping_sub(1);
                     if v == 4 {
+                        self.go(At::Six3All);
                         for i in 0..4 {
                             self.w8(hw, TRANSPOSE3 + i, t);
                         }
@@ -706,13 +885,13 @@ impl SoundControl {
                     self.w8(hw, TRANSPOSE3 + (v & 3) as u32, t);
                 }
             } else {
-                self.trace.at(hw, At::Six3Wait);
+                self.go(At::Six3Wait);
             }
 
             for i in 0..4usize {
                 let (track, wait) = (TRACKS3 + 4 * i as u32, WAITS3 + 2 * i as u32);
                 let Some(row) = self.step(hw, track, wait) else {
-                    self.trace.at(hw, At::Wait3);
+                    self.go(At::Wait3);
                     continue;
                 };
                 let note = hw.bus.r8(row);
@@ -721,39 +900,43 @@ impl SoundControl {
                     continue 'redo;
                 }
                 if note == 0 {
-                    self.trace.at(hw, At::Row3);
+                    self.go(At::Row3);
                     continue;
                 }
-                self.trace.at(hw, At::Note3);
+                self.go(At::Note3);
                 // the transpose, less one, a semitone at a time (the low nibble
                 // is the note, 0-11)
                 let mut note = note as u16;
                 let mut t = self.r8(hw, TRANSPOSE3 + i as u32).wrapping_add(0xff);
                 while t != 0 {
-                    self.trace.at(hw, At::Trsp3);
                     if (t as i8) < 0 {
+                        self.go(At::Trsp3Down);
                         t = t.wrapping_add(1);
                         note = note.wrapping_sub(1);
                         if note & 15 == 15 {
+                            self.go(At::Trsp3DownWrap);
                             note = note.wrapping_sub(4);
                         }
                     } else {
+                        self.go(At::Trsp3Up);
                         t -= 1;
                         note = note.wrapping_add(1);
                         if note & 15 == 12 {
+                            self.go(At::Trsp3UpWrap);
                             note = note.wrapping_add(4);
                         }
                     }
                 }
                 let (mut sample, mut vol) = (hw.bus.r8(row.wrapping_add(2)) as u32, hw.bus.r8(row.wrapping_add(3)));
                 if sample == 0xff {
+                    self.go(At::Rest3);
                     sample = 1;
                     vol = 0;
                     self.w16(hw, wait, 0);
                 }
                 if vol == 0x80 {
                     // the original keeps the note in a list it never plays
-                    self.trace.at(hw, At::Hold3);
+                    self.go(At::Hold3);
                     continue;
                 }
                 let st = self.r32(hw, SAMPLES3);
@@ -765,15 +948,18 @@ impl SoundControl {
     }
 
     fn next_pos3(&mut self, hw: &mut Hw) {
-        self.trace.at(hw, At::Pos3);
+        self.go(At::Pos3);
         let pos = self.r16(hw, POS3).wrapping_add(12);
         self.w16(hw, POS3, pos);
         let pl = self.r32(hw, POSITIONS3).wrapping_add(sx(pos));
         if hw.bus.r8(pl.wrapping_add(1)) != 1 && hw.bus.r8(pl.wrapping_add(3)) != 1 {
+            self.go(At::Pos3End);
+            self.song_end(hw);
+            self.go(At::Pos3EndTail);
             let start = self.r16(hw, START_POS);
             self.w16(hw, POS3, start);
-            self.songend = true;
         }
+        self.go(At::Pos3Tracks);
         self.set_tracks3(hw);
     }
 
@@ -782,47 +968,52 @@ impl SoundControl {
     fn play_sample3(&mut self, hw: &mut Hw, ch: usize, h: u32, mut note: u16, vol: u16) {
         let bit = 1 << ch;
         let nt = hw.bus.r16(h.wrapping_add(0x2a));
+        if nt != 0 {
+            self.go(At::STrsp3Any);
+        }
         for _ in 0..nt {
-            self.trace.at(hw, At::STrsp3);
+            self.go(At::STrsp3);
             note = note.wrapping_add(1);
             if note & 15 == 12 {
+                self.go(At::STrsp3Wrap);
                 note = note.wrapping_add(4);
             }
         }
         let per = self.r16(hw, PERIODS3 + 2 * (note & 0xff) as u32);
         let data = h.wrapping_add(0x40);
-        self.trace.at(hw, At::Smp3);
+        self.go(At::Smp3);
         self.poke_adr(hw, ch, data);
-        self.trace.at(hw, At::LocLen3);
+        self.go(At::LocLen3);
         self.poke_len(hw, ch, 1);
-        self.trace.at(hw, At::LenPer3);
+        self.go(At::LenPer3);
         self.poke_per(hw, ch, 1);
-        self.trace.at(hw, At::PerOff3);
+        self.go(At::PerOff3);
         self.dma_mask(hw, bit);
-        self.trace.at(hw, At::OffVol3);
+        self.go(At::OffVol3);
         self.poke_vol(hw, ch, vol);
-        self.trace.at(hw, At::VolPer3);
+        self.go(At::VolPer3);
         self.poke_per(hw, ch, per);
-        self.trace.at(hw, At::PerLen3);
+        self.go(At::PerLen3);
         let len = hw.bus.r16(h.wrapping_add(0x10)) >> 1;
         self.poke_len(hw, ch, len);
-        self.trace.at(hw, At::LenLoc3);
+        self.go(At::LenLoc3);
         hw.bus.w32(data, 0);
         self.poke_adr(hw, ch, data);
-        self.trace.at(hw, At::LocOn3);
+        self.go(At::LocOn3);
         self.dma_mask(hw, 0x8200 | bit);
         let start = hw.bus.r16(h.wrapping_add(0x12));
         if start == 0 {
-            self.trace.at(hw, At::NoLoop3);
+            self.go(At::NoLoop3);
             self.poke_len(hw, ch, 1);
         } else {
-            self.trace.at(hw, At::Loop3);
+            self.go(At::Loop3);
             let end = hw.bus.r16(h.wrapping_add(0x14));
             self.poke_len(hw, ch, end.wrapping_sub(start) >> 1);
-            self.trace.at(hw, At::LoopLoc3);
+            self.go(At::LoopLoc3);
             self.poke_adr(hw, ch, data.wrapping_add(sx(start)));
+            self.go(At::LoopEnd3);
         }
-        self.trace.at(hw, At::SmpEnd3);
+        self.go(At::SmpEnd3);
     }
 
     // ---------------------------------------------------------------- 4.0/5.0
@@ -886,7 +1077,7 @@ impl SoundControl {
     }
 
     fn counter4(&mut self, hw: &mut Hw) {
-        self.trace.at(hw, At::Counter4);
+        self.go(At::Counter4);
         let speed = self.r16(hw, SPEED4);
         let acc = self.r16(hw, SPEED_ACC).wrapping_add(speed);
         self.w16(hw, SPEED_ACC, acc);
@@ -896,13 +1087,14 @@ impl SoundControl {
             if max >= acc {
                 return;
             }
-            self.trace.at(hw, At::Step4);
+            self.go(At::Step4);
             self.w16(hw, SPEED_ACC, acc - max);
             let s = self.r16(hw, STEPS).wrapping_add(1);
             self.w16(hw, STEPS, s);
             let s = self.r16(hw, STEPS4).wrapping_add(1);
             self.w16(hw, STEPS4, s);
             if s & 3 == 0 && self.r16(hw, HALT) == 0 {
+                self.go(At::Step4Track);
                 self.process_track4(hw);
             }
         }
@@ -927,20 +1119,25 @@ impl SoundControl {
             for i in 0..4usize {
                 let (track, wait) = (TRACKS4 + 4 * i as u32, WAITS4 + 2 * i as u32);
                 let Some(row) = self.step(hw, track, wait) else {
-                    self.trace.at(hw, At::Wait4);
+                    self.go(At::Wait4);
                     continue;
                 };
                 let note = hw.bus.r8(row);
                 let instr = hw.bus.r8(row.wrapping_add(2));
                 if note == 0xff || (note != 0 && instr == 0xff) {
+                    self.go(if note == 0xff { At::Pos4Note } else { At::Pos4Instr });
                     self.next_pos4(hw);
                     continue 'redo;
                 }
-                if note == 0 || i as u16 == self.r16(hw, MUTED4) {
-                    self.trace.at(hw, At::Row4);
+                if note == 0 {
+                    self.go(At::Row4);
                     continue;
                 }
-                self.trace.at(hw, At::Note4);
+                if i as u16 == self.r16(hw, MUTED4) {
+                    self.go(At::Row4Muted);
+                    continue;
+                }
+                self.go(At::Note4);
                 let vol = hw.bus.r8(row.wrapping_add(3));
                 self.note4(hw, i, note as u16, instr as u16, vol as u16);
             }
@@ -951,20 +1148,23 @@ impl SoundControl {
     /// The sixth track: the voices' transposes.
     fn six4(&mut self, hw: &mut Hw) {
         let Some(row) = self.step(hw, TRACKS4 + 20, WAITS4 + 10) else {
-            self.trace.at(hw, At::Six4Wait);
+            self.go(At::Six4Wait);
             return;
         };
-        self.trace.at(hw, At::Six4Row);
+        self.go(At::Six4Row);
         match hw.bus.r8(row) {
             0 => {}
             0xff => {
+                self.go(At::Six4Back);
                 let p = self.r32(hw, TRACKS4 + 20);
                 self.w32(hw, TRACKS4 + 20, p.wrapping_sub(4));
             }
             _ => {
+                self.go(At::Six4Trsp);
                 let t = (hw.bus.r8(row.wrapping_add(3)) & 0x3f) as u16;
                 let v = hw.bus.r8(row.wrapping_add(2)).wrapping_sub(1);
                 if v == 4 {
+                    self.go(At::Six4All);
                     for i in 0..4 {
                         self.w16(hw, TRANSPOSE4 + 2 * i, t);
                     }
@@ -976,14 +1176,17 @@ impl SoundControl {
     }
 
     fn next_pos4(&mut self, hw: &mut Hw) {
-        self.trace.at(hw, At::Pos4);
+        self.go(At::Pos4);
         let pos = self.r16(hw, POS4).wrapping_add(12);
         self.w16(hw, POS4, pos);
         if pos == self.r16(hw, END_POS4) {
+            self.go(At::Pos4End);
+            self.song_end(hw);
+            self.go(At::Pos4EndTail);
             let start = self.r16(hw, START_POS4);
             self.w16(hw, POS4, start);
-            self.songend = true;
         }
+        self.go(At::Pos4Tracks);
         self.set_tracks4(hw);
     }
 
@@ -1018,11 +1221,12 @@ impl SoundControl {
 
     /// Voice `ch`'s sample commands, up to a wait.
     fn commands4(&mut self, hw: &mut Hw, ch: usize) {
-        self.trace.at(hw, At::Cmds4);
+        self.go(At::Cmds4);
         let v = self.at(VOICES4[ch]);
         let b = |o: u32| v + o;
         let mut a0 = hw.bus.r32(b(V_CMDS));
         if a0 == 0 {
+            self.go(At::CmdsNone4);
             return;
         }
         // the DMA mask is the original's d4: the voice's bit until a switch
@@ -1032,12 +1236,12 @@ impl SoundControl {
         for _ in 0..MAX_LOOP {
             let w = hw.bus.r16(b(V_WAIT));
             if w != 0 {
-                self.trace.at(hw, At::CmdWait4);
+                self.go(At::CmdWait4);
                 hw.bus.w16(b(V_WAIT), w - 1);
                 hw.bus.w32(b(V_CMDS), a0);
                 return;
             }
-            self.trace.at(hw, At::Cmd4);
+            self.go(At::Cmd4);
             let mut a1 = a0;
             let cmd = hw.bus.r16(a0);
             let mut d5 = hw.bus.r16(a0.wrapping_add(2));
@@ -1045,23 +1249,23 @@ impl SoundControl {
             let values = b(V_VALUES);
             let value = |n: u16| values.wrapping_add(sx(n.wrapping_add(n)));
             if cmd & 0x4000 != 0 {
-                self.trace.at(hw, At::CmdArg4);
+                self.go(At::CmdArg5);
                 d5 = hw.bus.r16(value(d5));
             }
             if cmd & 0x8000 != 0 {
-                self.trace.at(hw, At::CmdArg4);
+                self.go(At::CmdArg6);
                 d6 = hw.bus.r16(value(d6));
             }
             match cmd & 0x1f {
                 // stop: this command again next tick
                 0 => {
-                    self.trace.at(hw, At::CmdStop4);
+                    self.go(At::CmdStop4);
                     a1 = a1.wrapping_sub(6);
                     hw.bus.w16(b(V_WAIT), 1);
                 }
                 // switch sample: its length, note and period
                 1 => {
-                    self.trace.at(hw, At::CmdSwitch4);
+                    self.go(At::CmdSwitch4);
                     hw.bus.w16(b(V_SAMPLE_NR), d5);
                     let s = self.sample4(hw, d5);
                     hw.bus.w32(b(V_SAMPLE), s);
@@ -1073,66 +1277,74 @@ impl SoundControl {
                     hw.bus.w32(b(V_DATA), s.wrapping_add(0x40));
                 }
                 2 => {
-                    self.trace.at(hw, At::CmdWaitSet4);
+                    self.go(At::CmdWaitSet4);
                     hw.bus.w16(b(V_WAIT), d5);
                 }
                 // change address: in the sample, at once
                 3 => {
-                    self.trace.at(hw, At::CmdAdr4);
+                    self.go(At::CmdAdr3);
                     let a = hw.bus.r32(b(V_SAMPLE)).wrapping_add(0x40).wrapping_add(sx(d5));
                     self.poke_adr(hw, ch, a);
+                    self.go(At::CmdAdr3Tail);
                 }
                 4 => {
-                    self.trace.at(hw, At::CmdAdr4);
+                    self.go(At::CmdAdr4);
                     hw.bus.w16(b(V_SAMPLE_NR), d5);
                     let s = self.sample4(hw, d5);
                     hw.bus.w32(b(V_SAMPLE), s);
                     let a = s.wrapping_add(0x40);
                     self.poke_adr(hw, ch, a);
+                    self.go(At::CmdAdr4Tail);
                     hw.bus.w32(b(V_DATA), a);
                 }
                 5 => {
-                    self.trace.at(hw, At::CmdLen4);
+                    self.go(At::CmdLen5);
                     hw.bus.w16(b(V_LENGTH), d5);
                     self.poke_len(hw, ch, d5 >> 1);
+                    self.go(At::CmdLen5Tail);
                 }
                 6 => {
-                    self.trace.at(hw, At::CmdLen4);
+                    self.go(At::CmdLen6);
                     hw.bus.w16(b(V_SAMPLE_NR), d5);
                     let s = self.sample4(hw, d5);
                     hw.bus.w32(b(V_SAMPLE), s);
                     let l = hw.bus.r16(s.wrapping_add(0x10));
                     hw.bus.w16(b(V_LENGTH), l);
                     self.poke_len(hw, ch, l >> 1);
+                    self.go(At::CmdLen6Tail);
                 }
                 7 => {
-                    self.trace.at(hw, At::CmdPer4);
+                    self.go(At::CmdPer7);
                     let p = hw.bus.r16(b(V_PERIOD)).wrapping_add(d5);
                     self.poke_per(hw, ch, p);
+                    self.go(At::CmdPer7Tail);
                     hw.bus.w16(b(V_PERIOD), p);
                 }
                 8 => {
-                    self.trace.at(hw, At::CmdPer4);
+                    self.go(At::CmdPer8);
                     let n = hw.bus.r16(b(V_SAMPLE_NOTE)).wrapping_add(d5);
                     hw.bus.w16(b(V_SAMPLE_NOTE), n);
                     let p = hw.bus.r16(periods.wrapping_add(sx(n.wrapping_add(n))));
                     hw.bus.w16(b(V_PERIOD), p);
                     self.poke_per(hw, ch, p);
+                    self.go(At::CmdPer8Tail);
                 }
                 9 => {
-                    self.trace.at(hw, At::CmdVol4);
+                    self.go(At::CmdVol9);
                     let mut vol = hw.bus.r16(b(V_VOLUME)).wrapping_add(d5);
                     if (vol as i16) < 0 {
+                        self.go(At::CmdVolNeg);
                         vol = 0;
                     }
                     if vol >= 0x40 {
+                        self.go(At::CmdVolMax);
                         vol = 0x40;
                     }
                     hw.bus.w16(b(V_VOLUME), vol);
                 }
                 // set repeat: push this command, set its value
                 10 => {
-                    self.trace.at(hw, At::CmdRepeat4);
+                    self.go(At::CmdSet10);
                     let sp = hw.bus.r32(b(V_STACK_PTR)).wrapping_add(4);
                     hw.bus.w32(sp, a1);
                     hw.bus.w32(b(V_STACK_PTR), sp);
@@ -1141,26 +1353,33 @@ impl SoundControl {
                 // repeat: step the set command's value (by its raw argument) and
                 // go back after it until the value passes d5
                 11 => {
-                    self.trace.at(hw, At::CmdRepeat4);
+                    self.go(At::CmdRep11);
                     let sp = hw.bus.r32(b(V_STACK_PTR));
                     let set = hw.bus.r32(sp);
                     let at = value(hw.bus.r16(set.wrapping_add(2)));
                     let n = hw.bus.r16(at).wrapping_add(d6);
                     hw.bus.w16(at, n);
-                    let again = if (d6 as i16) < 0 { d5 < n } else { d5 >= n };
+                    let again = if (d6 as i16) < 0 {
+                        self.go(At::CmdRep11Down);
+                        d5 < n
+                    } else {
+                        d5 >= n
+                    };
                     if again {
+                        self.go(At::CmdRep11Again);
                         a1 = set;
                     } else {
+                        self.go(At::CmdRep11Done);
                         hw.bus.w32(b(V_STACK_PTR), sp.wrapping_sub(4));
                     }
                 }
                 12 => {
-                    self.trace.at(hw, At::CmdValue4);
+                    self.go(At::CmdValue12);
                     let n = hw.bus.r16(value(d5)).wrapping_add(d6);
                     hw.bus.w16(value(d5), n);
                 }
                 13 => {
-                    self.trace.at(hw, At::CmdValue4);
+                    self.go(At::CmdValue13);
                     hw.bus.w16(value(d5), d6);
                 }
                 15 => {
@@ -1169,64 +1388,65 @@ impl SoundControl {
                     match ph {
                         // LOC, DMA on, LEN 1, PER 1, VOL 0, and again next tick
                         0 => {
-                            self.trace.at(hw, At::Play0);
+                            self.go(At::Play0);
                             let a = hw.bus.r32(b(V_DATA));
                             self.poke_adr(hw, ch, a);
-                            self.trace.at(hw, At::Play0);
+                            self.go(At::Play0Dma);
                             self.dma_mask(hw, d4 | 0x8200);
                             d4 &= 0xf;
-                            self.trace.at(hw, At::Play0Len);
+                            self.go(At::Play0Len);
                             self.poke_len(hw, ch, 1);
-                            self.trace.at(hw, At::Play0Per);
+                            self.go(At::Play0Per);
                             self.poke_per(hw, ch, 1);
-                            self.trace.at(hw, At::Play0Vol);
+                            self.go(At::Play0Vol);
                             self.poke_vol(hw, ch, 0);
                             hw.bus.w16(b(V_WAIT), 1);
                             a1 = a1.wrapping_sub(6);
-                            self.trace.at(hw, At::PlayEnd);
+                            self.go(At::PlayEnd0);
                         }
                         // DMA off, PER, LEN, the first long cleared, DMA on
                         4 => {
-                            self.trace.at(hw, At::Play1);
+                            self.go(At::Play1);
                             self.dma_mask(hw, d4);
-                            self.trace.at(hw, At::Play1Per);
+                            self.go(At::Play1Per);
                             let p = hw.bus.r16(b(V_PERIOD));
                             self.poke_per(hw, ch, p);
-                            self.trace.at(hw, At::Play1Len);
+                            self.go(At::Play1Len);
                             let l = hw.bus.r16(b(V_LENGTH)) >> 1;
                             self.poke_len(hw, ch, l);
                             let s = hw.bus.r32(b(V_SAMPLE));
                             hw.bus.w32(s.wrapping_add(0x40), 0);
-                            self.trace.at(hw, At::Play1On);
+                            self.go(At::Play1On);
                             self.dma_mask(hw, d4 | 0x8200);
                             d4 &= 0xf;
                             hw.bus.w16(b(V_WAIT), 1);
                             a1 = a1.wrapping_sub(6);
-                            self.trace.at(hw, At::PlayEnd);
+                            self.go(At::PlayEnd1);
                         }
                         // the loop, and on to the next command
                         8 => {
-                            self.trace.at(hw, At::Play2);
+                            self.go(At::Play2);
                             hw.bus.w16(b(V_PHASE), 0);
                             let s = hw.bus.r32(b(V_SAMPLE));
                             let end = hw.bus.r16(s.wrapping_add(0x14));
                             if end == 0 {
-                                self.trace.at(hw, At::Play2NoLoop);
+                                self.go(At::Play2NoLoop);
                                 self.poke_len(hw, ch, 2);
-                                self.trace.at(hw, At::Play2NoLoopEnd);
+                                self.go(At::Play2NoLoopEnd);
                             } else {
+                                self.go(At::Play2Loop);
                                 let start = hw.bus.r16(s.wrapping_add(0x12));
                                 self.poke_len(hw, ch, end.wrapping_sub(start) >> 1);
-                                self.trace.at(hw, At::Play2Loc);
+                                self.go(At::Play2Loc);
                                 self.poke_adr(hw, ch, s.wrapping_add(0x40).wrapping_add(sx(start)));
-                                self.trace.at(hw, At::Play2End);
+                                self.go(At::Play2End);
                             }
                         }
                         // past the original's table of the three
-                        _ => {}
+                        _ => self.go(At::PlayNone),
                     }
                 }
-                _ => self.trace.at(hw, At::CmdNop4),
+                _ => self.go(At::CmdNop4),
             }
             a0 = a1.wrapping_add(6);
         }
@@ -1240,26 +1460,23 @@ impl SoundControl {
             let b = |o: u32| v + o;
             let c = hw.bus.r16(b(V_ENV_COUNTER));
             if c != 0 {
-                self.trace.at(hw, At::EnvCount4);
+                self.go(At::EnvCount4);
                 hw.bus.w16(b(V_ENV_COUNTER), c - 1);
             } else {
                 let instr = hw.bus.r16(b(V_INSTR));
                 let e = it.wrapping_add(sx(hw.bus.r16(it.wrapping_add(sx(instr.wrapping_add(instr))))));
                 let env = hw.bus.r16(b(V_ENV_VOLUME));
                 let phase = hw.bus.r16(b(V_ENV));
-                let next = |hw: &mut Hw, t: &mut Trace| {
-                    t.at(hw, At::EnvNext4);
-                    hw.bus.w16(b(V_ENV), phase.wrapping_add(1))
-                };
-                let t = &mut self.trace;
-                t.at(hw, [At::EnvAttack4, At::EnvDecay4, At::EnvSustain4, At::EnvRelease4, At::EnvDone4][(phase as usize).min(4)]);
+                let next = |hw: &mut Hw| hw.bus.w16(b(V_ENV), phase.wrapping_add(1));
+                self.go([At::EnvAttack4, At::EnvDecay4, At::EnvSustain4, At::EnvRelease4, At::EnvDone4][(phase as usize).min(4)]);
                 match phase {
                     // attack to 256
                     0 => {
                         let mut n = env.wrapping_add(hw.bus.r8(e + 0x13) as u16);
                         if n as i16 >= 0x100 {
                             n = 0x100;
-                            next(hw, t);
+                            self.go(At::EnvAttackTop);
+                            next(hw);
                         }
                         hw.bus.w16(b(V_ENV_VOLUME), n);
                         hw.bus.w16(b(V_ENV_COUNTER), hw.bus.r8(e + 0x12) as u16);
@@ -1270,7 +1487,8 @@ impl SoundControl {
                         let level = hw.bus.r8(e + 0x17) as u16;
                         if (level as i16) >= n as i16 {
                             n = level;
-                            next(hw, t);
+                            self.go(At::EnvDecayLevel);
+                            next(hw);
                         }
                         hw.bus.w16(b(V_ENV_VOLUME), n);
                         hw.bus.w16(b(V_ENV_COUNTER), hw.bus.r8(e + 0x14) as u16);
@@ -1278,7 +1496,8 @@ impl SoundControl {
                     // sustain (nothing sets the release)
                     2 => {
                         if hw.bus.r16(b(V_RELEASE)) == 0x80 {
-                            next(hw, t);
+                            self.go(At::EnvSustainNext);
+                            next(hw);
                         }
                     }
                     3 => {
@@ -1293,8 +1512,10 @@ impl SoundControl {
             let vol = (x as u16) >> 8;
             if ch as u16 != self.r16(hw, MUTED4) && self.r16(hw, VOICE_MASK4) & (1 << ch) != 0 {
                 let vol = (vol as u32 * self.r16(hw, MASTER4) as u32) as u16 >> 6;
-                self.trace.at(hw, At::Vol4);
+                self.go(At::Vol4);
                 self.poke_vol(hw, ch, vol);
+            } else {
+                self.go(At::VolSkip4);
             }
         }
     }

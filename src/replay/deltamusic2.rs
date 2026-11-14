@@ -26,15 +26,22 @@
 //! * instrument 0 is not the first instrument: its offset is read 64K after
 //!   the offset table, as the original's word arithmetic does;
 //! * effects 9 to $80 are effects 1 to 8 again;
-//! * the writes are spaced as the original's (`Globals::gap`), so that a note's
-//!   DMA off has time to stop the voice before the tick's DMA on;
+//! * every write is at the original's colour clock: whole 68000 cycles per code
+//!   path (`K`), a write at the previous one's clock plus half the cycles since,
+//!   rounded down (fitted exactly on the write gaps of the 10 refcmp rows and 85
+//!   other archive files); the song starts and the host's timer runs at the
+//!   original's clocks (`INIT_CLOCKS`, `TIMER_DELAY`);
+//! * the next tick's noise waveform goes into chip RAM `NOISE_LEAD` colour
+//!   clocks before that tick, as the reference's DMA fetches see it;
 //! * any byte with bit 7 set marks a sample (not only $FF); and indexes past the
 //!   period table or the track read on in memory, as the original does.
 //!
 //! The one read this cannot follow exactly: a period past the table (note,
 //! transpose and arpeggio adding up to 85 or more) lands in the original's
 //! variables, which hold its running state there and the editor's saved state
-//! here. No module of the archive plays one.
+//! here. No module of the archive plays one. Nor a voice with no location written
+//! (module 581's first voice): it plays memory from address 0 on, through the
+//! module's variables, which hold the original's running state there.
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -146,11 +153,12 @@ struct Globals {
     /// DMACON's high byte at the end of a tick (the module's, $80).
     dma: u8,
     songend: bool,
-    /// The last register write of this tick, for `gap`.
-    last: Option<Site>,
-    /// The paths the original's code has taken since its last write (`P_*`, and above bit 26 the
-    /// number of the effect), whose costs `gap` adds.
-    path: u32,
+    /// The 68000 cycles the original's code has run since its last write (`K`).
+    acc: i64,
+    /// The clock of that write (or of the tick's start, or of a call into the host).
+    t0: u64,
+    fit: Option<std::io::BufWriter<std::fs::File>>,
+    counts: Vec<(u8, u32)>,
 }
 
 /// The register writes of a tick, by the place in the code that makes them.
@@ -168,106 +176,142 @@ enum Site {
     DmaOn,
 }
 
-// The paths the original's code takes between two writes (`Globals::path`). Its time between two
-// writes is a constant for the pair plus the cost of each path taken, measured over the reference
-// runs of ten modules (every gap within a few colour clocks; `PATH_COST`).
-const P_TICK0: u32 = 1 << 0;
-const P_BLOCK: u32 = 1 << 1;
-const P_EFFECT: u32 = 1 << 2;
-const P_TBL_SKIP: u32 = 1 << 4;
-const P_TBL_RUN: u32 = 1 << 5;
-const P_TBL_JUMP: u32 = 1 << 6;
-const P_TBL_END: u32 = 1 << 7;
-const P_VIB_SUSTAIN: u32 = 1 << 8;
-const P_VIB_STEP: u32 = 1 << 9;
-const P_VIB_WRAP: u32 = 1 << 10;
-const P_VIB_FLIP: u32 = 1 << 11;
-const P_VIB_DOWN: u32 = 1 << 12;
-const P_VOL_SUSTAIN: u32 = 1 << 13;
-const P_VOL_UP: u32 = 1 << 14;
-const P_VOL_REACHED: u32 = 1 << 15;
-const P_VOL_DOWN: u32 = 1 << 17;
-const P_VOL_DOWN_REACHED: u32 = 1 << 18;
-const P_ARP_WRAP: u32 = 1 << 22;
-const P_ARP_LOOKUP: u32 = 1 << 23;
-const P_CLAMP_MAX: u32 = 1 << 24;
-const P_CLAMP_GLOBAL: u32 = 1 << 25;
-/// The song's end (the track wraps; one module in the runs, so the cost is one measurement).
-const P_TRACK_END: u32 = 1 << 30;
-/// The effect's number (0 to 7) is kept above this bit.
-const P_EFFECT_SHIFT: u32 = 27;
+macro_rules! costs {
+    ($($name:ident = $c:expr,)*) => {
+        /// The original's code paths, one label per branch, each with the 68000 cycles it takes:
+        /// fitted to the gaps between the writes of the Eagleplayer's write logs (the cycles from
+        /// a run and a second one with the count started a cycle late). The replayer writes Paula
+        /// directly: a write comes at the last one's clock plus half the cycles since, rounded down.
+        #[derive(Clone, Copy)]
+        #[allow(dead_code)]
+        enum K { $($name,)* }
+        const COSTS: &[i64] = &[$($c,)*];
+        #[allow(dead_code)]
+        const K_NAMES: &[&str] = &[$(stringify!($name),)*];
+    };
+}
 
-/// Colour clocks each path costs (the fit is not unique: the table works as a whole).
-const PATH_COST: [(u32, i32); 21] = [
-    (P_TRACK_END, 48),
-    (P_TICK0, 73),
-    (P_BLOCK, 79),
-    (P_TBL_SKIP, 24),
-    (P_TBL_RUN, 176),
-    (P_TBL_JUMP, 40),
-    (P_TBL_END, -136),
-    (P_VIB_SUSTAIN, 98),
-    (P_VIB_STEP, 115),
-    (P_VIB_WRAP, 8),
-    (P_VIB_FLIP, 18),
-    (P_VIB_DOWN, -5),
-    (P_VOL_SUSTAIN, 42),
-    (P_VOL_UP, 86),
-    (P_VOL_REACHED, 28),
-    (P_VOL_DOWN, 86),
-    (P_VOL_DOWN_REACHED, 29),
-    (P_ARP_WRAP, 42),
-    (P_ARP_LOOKUP, 213),
-    (P_CLAMP_MAX, 6),
-    (P_CLAMP_GLOBAL, 6),
-];
-
-/// What an effect costs, by its number.
-const EFFECT_COST: [i32; 8] = [64, 123, 66, 64, 60, 64, 64, 90];
-
-/// The constant of a pair of writes (previous, next), colour clocks.
-const PAIR_COST: [(Site, Site, i32); 14] = [
-    (Site::DmaOff, Site::NoteLoc, 257),
-    (Site::DmaOff, Site::TblLoc, 250),
-    (Site::LoopLen, Site::LoopLoc, 115),
-    (Site::LoopLoc, Site::Per, 35),
-    (Site::NoteLen, Site::Per, 126),
-    (Site::NoteLoc, Site::NoteLen, 99),
-    (Site::Per, Site::Vol, 127),
-    (Site::TblLen, Site::Per, 5),
-    (Site::TblLoc, Site::TblLen, 101),
-    (Site::Vol, Site::DmaOff, 170),
-    (Site::Vol, Site::DmaOn, 232),
-    (Site::Vol, Site::LoopLen, 232),
-    (Site::Vol, Site::Per, 86),
-    (Site::Vol, Site::TblLoc, 95),
-];
-
-/// The constant of a tick's first write, by the write: from the tick's start (the timer's, which
-/// `TIMER_DELAY` places 140 colour clocks before the earliest of them).
-const START_COST: [(Site, i32); 4] = [(Site::DmaOff, 182), (Site::LoopLen, 254), (Site::Per, 99), (Site::TblLoc, 107)];
+costs! {
+    TickStart = -2000,
+    TickReload = 20,
+    Voice0 = 2490,
+    Voice1 = -2000,
+    Voice2 = -2000,
+    Voice3 = -2000,
+    NoLoop = -2000,
+    LoopPending = 0,
+    LoopLenLoc = 231,
+    LoopAfter = -1655,
+    NotTick0 = 1698,
+    Tick0 = 6022,
+    NoBlock = -2000,
+    Block = -1841,
+    TrackEnd = 94,
+    NoNote = -179,
+    Note = -2000,
+    NoteSample = 514,
+    NoteLocLen = 198,
+    NoteSampleAfter = -2000,
+    NoteSynth = -1787,
+    NoteTail = 4258,
+    EffectNone = -2000,
+    Effect0 = -1872,
+    Effect1 = -2000,
+    Effect1Post = 247,
+    Effect2 = -1868,
+    Effect3 = -1872,
+    Effect4 = -1880,
+    Effect5 = -1872,
+    Effect6 = -1872,
+    Effect7 = -1820,
+    TblSample = -2000,
+    TblSkip = -1953,
+    TblRun = 79,
+    TblJump = 80,
+    TblEnd = -2000,
+    TblWave = 302,
+    TblLocLen = 202,
+    TblAfter = -2000,
+    VibUp = -1990,
+    VibDown = -2000,
+    VibNoFlip = -2000,
+    VibFlip = -1964,
+    VibSustain = -2000,
+    VibStep = -1965,
+    VibWrap = 16,
+    VolSustain = -2000,
+    VolUp = -1912,
+    VolUpReached = 73,
+    VolPos15 = 0,
+    VolDown = -1912,
+    VolDownReached = 58,
+    PortaNone = 16690,
+    PortaUp = 0,
+    PortaUpClamp = 12,
+    PortaDown = 0,
+    PortaDownClamp = 22,
+    ArpPos0 = -2000,
+    ArpPosN = -1983,
+    ArpWrap = 85,
+    ArpLookup = -2000,
+    ArpNoLookup = 14712,
+    PerPre = -2000,
+    ClampMax = 12,
+    ClampGlobal = 12,
+    VolPre = 255,
+    VoiceEnd = 2464,
+    DmaOnPre = -2000,
+}
 
 impl Globals {
-    /// Lets the time pass that the original takes between its last write and this one: the
-    /// constant of the pair plus the cost of the paths its code took meanwhile. Paula stops a
-    /// playing voice only at the end of its word and restarts it only once stopped, so the time
-    /// from a note's DMA off to the tick's DMA on decides whether the note starts.
-    fn gap(&mut self, hw: &mut Hw, next: Site) {
-        let base = match self.last {
-            None => START_COST.iter().find(|e| e.0 == next).map_or(0, |e| e.1),
-            Some(prev) => PAIR_COST.iter().find(|e| e.0 == prev && e.1 == next).map_or(250, |e| e.2),
-        };
-        let mut clocks = base + PATH_COST.iter().filter(|e| self.path & e.0 != 0).map(|e| e.1).sum::<i32>();
-        if self.path & P_EFFECT != 0 {
-            clocks += EFFECT_COST[(self.path >> P_EFFECT_SHIFT & 7) as usize];
+    /// Lets label `k`'s cycles of the original's code pass.
+    fn c(&mut self, k: K) {
+        let k = k as usize;
+        self.acc += COSTS[k];
+        if self.fit.is_some() {
+            match self.counts.iter_mut().find(|e| e.0 as usize == k) {
+                Some(e) => e.1 += 1,
+                None => self.counts.push((k as u8, 1)),
+            }
         }
-        hw.wait(clocks.max(0) as u64);
-        self.path = 0;
-        self.last = Some(next);
+    }
+
+    /// A write or a call into the host: the time is the last one's plus half the cycles since,
+    /// rounded down, and counts on from there.
+    fn call(&mut self) {
+        self.t0 += (self.acc.max(0) / 2) as u64;
+        self.acc = 0;
+    }
+
+    /// Brings the clock to the original's write `s`: the last write's (or the tick's start) plus
+    /// half the cycles since, rounded down.
+    fn w(&mut self, hw: &mut Hw, s: Site) {
+        let at = self.t0 + (self.acc.max(0) / 2) as u64;
+        if let Some(f) = &mut self.fit {
+            use std::io::Write;
+            let names: Vec<String> = self.counts.iter().map(|(k, n)| format!("{}:{n}", K_NAMES[*k as usize])).collect();
+            let kind = match s {
+                Site::DmaOff => "off",
+                Site::NoteLoc | Site::LoopLoc | Site::TblLoc => "loc",
+                Site::NoteLen | Site::LoopLen | Site::TblLen => "len",
+                Site::Per => "per",
+                Site::Vol => "vol",
+                Site::DmaOn => "on",
+            };
+            let _ = writeln!(f, "{at} {kind} {}", names.join(" "));
+        }
+        self.counts.clear();
+        if hw.bus.clock < at {
+            hw.wait(at - hw.bus.clock);
+        }
+        // the 68000's time counts on from the write
+        self.call();
     }
 }
 
 pub struct DeltaMusic2 {
+    /// The noise of the next tick is in chip RAM already.
+    noise_ahead: bool,
     song: Song,
     g: Globals,
     voices: [Voice; 4],
@@ -277,7 +321,7 @@ pub struct DeltaMusic2 {
 /// one period (measured in the reference runs). Together with `TIMER_DELAY` it also sets where the
 /// output sample grid falls against the register writes: with these two the render of a module
 /// whose writes match to the colour clock is sample for sample the reference's (module 556).
-const INIT_CLOCKS: u64 = 11191;
+const INIT_CLOCKS: u64 = 11217;
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let a = refs(d)?;
@@ -317,8 +361,10 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         tick: 1,
         dma: d[g],
         songend: false,
-        last: None,
-        path: 0,
+        acc: 0,
+        t0: 0,
+        fit: std::env::var_os("DM2_FIT").and_then(|p| std::fs::File::create(p).ok()).map(std::io::BufWriter::new),
+        counts: Vec::new(),
     };
     let voices = std::array::from_fn(|i| {
         // what the original's InitSound leaves as the editor saved it
@@ -358,12 +404,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let mut hw = Hw { bus: &mut m.bus };
     hw.dmacon(0x000F);
     hw.dmacon(0x000F);
-    Some(Box::new(DeltaMusic2 { song, g: globals, voices }))
+    Some(Box::new(DeltaMusic2 { noise_ahead: false, song, g: globals, voices }))
 }
 
 /// Colour clocks from the song's start to the host's timer start, beyond the first period (measured
 /// in the reference runs).
-const TIMER_DELAY: u64 = 710;
+const TIMER_DELAY: u64 = 684;
 
 impl Replayer for DeltaMusic2 {
     fn format(&self) -> &'static str {
@@ -383,25 +429,55 @@ impl Replayer for DeltaMusic2 {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        // the noise waveform (waveform 0) is new every tick
-        let mut n = self.g.noise;
-        for i in 0..16 {
-            n = n.rotate_left(7).wrapping_add(0x6eca756d) ^ 0x9e59a92b;
-            hw.bus.w32(self.song.waveforms + 4 * i, n);
+        self.g.t0 = hw.bus.clock;
+        self.g.acc = 0;
+        if let Some(f) = &mut self.g.fit {
+            use std::io::Write;
+            let _ = writeln!(f, "{} tick", hw.bus.clock);
         }
-        self.g.noise = n;
+        self.g.c(K::TickStart);
+        let start = hw.bus.clock;
+        // the noise waveform (waveform 0) is new every tick (from the tick before on, but for the
+        // first)
+        if !self.noise_ahead {
+            self.noise(hw);
+        }
 
-        self.g.last = None;
         self.g.tick = self.g.tick.wrapping_sub(1);
         if (self.g.tick as i8) < 0 {
+            self.g.c(K::TickReload);
             self.g.tick = self.g.speed;
         }
         for (i, v) in self.voices.iter_mut().enumerate() {
             v.play(i, hw, &self.song, &mut self.g);
         }
         // every voice played
-        self.g.gap(hw, Site::DmaOn);
+        self.g.c(K::DmaOnPre);
+        self.g.w(hw, Site::DmaOn);
         hw.dmacon(if self.g.dma & 0x80 != 0 { 0x800F } else { 0x000F });
+        // the original's stores of the next tick's noise show to Paula's fetches from NOISE_LEAD
+        // before that tick's start on (where its Paula catches up with the beam, before its code
+        // runs): they go into chip RAM now, Paula having fetched up to then
+        let at = (start + super::DT_TICK).saturating_sub(NOISE_LEAD).max(hw.bus.clock);
+        hw.bus.paula.sync(at, &hw.bus.ram);
+        self.noise(hw);
+        self.noise_ahead = true;
+    }
+}
+
+/// Colour clocks before a tick's start from which the reference's fetches see that tick's noise
+/// (measured on its DMA fetches of the noise waveform: 683 before, the new noise; 684, the old).
+const NOISE_LEAD: u64 = 684;
+
+impl DeltaMusic2 {
+    /// The tick's noise waveform (waveform 0), from the running seed.
+    fn noise(&mut self, hw: &mut Hw) {
+        let mut n = self.g.noise;
+        for i in 0..16 {
+            n = n.rotate_left(7).wrapping_add(0x6eca756d) ^ 0x9e59a92b;
+            hw.bus.w32(self.song.waveforms + 4 * i, n);
+        }
+        self.g.noise = n;
     }
 }
 
@@ -415,35 +491,44 @@ impl Voice {
         let r8 = |hw: &Hw, a: u32| hw.bus.r8(a);
         let r16 = |hw: &Hw, a: u32| hw.bus.r16(a);
         let mut ins = self.instrument;
-        g.path |= if g.tick == 0 { P_TICK0 } else { 0 };
+        g.c([K::Voice0, K::Voice1, K::Voice2, K::Voice3][i]);
 
         if self.loop_pending {
-                        self.loop_pending = false;
+            self.loop_pending = false;
             let s = Self::sample(hw, song, ins);
-            g.gap(hw, Site::LoopLen);
+            g.c(K::LoopPending);
+            g.w(hw, Site::LoopLen);
             hw.len(i, r16(hw, ins + 4));
             hw.bus.w16(s, 0);
-            g.gap(hw, Site::LoopLoc);
+            g.c(K::LoopLenLoc);
+            g.w(hw, Site::LoopLoc);
             hw.loc(i, s + r16(hw, ins + 2) as u32);
+            g.c(K::LoopAfter);
+        } else {
+            g.c(K::NoLoop);
         }
 
         if g.tick == 0 {
+            g.c(K::Tick0);
             if self.block_position == 0 {
-                g.path |= P_BLOCK;
+                g.c(K::Block);
                 let t = self.track.wrapping_add(self.track_position as i16 as u32);
                 self.block = song.blocks + ((r8(hw, t) as u32) << 6);
                 self.transpose = r8(hw, t + 1);
                 self.track_position = self.track_position.wrapping_add(2);
                 if !mi(self.track_position, self.track_length) {
                     self.track_position = self.track_loop;
-                    g.path |= P_TRACK_END;
+                    g.c(K::TrackEnd);
                     g.songend = true;
                 }
+            } else {
+                g.c(K::NoBlock);
             }
             let row = self.block + self.block_position as u32;
             let note = r8(hw, row);
             if note != 0 {
-                g.gap(hw, Site::DmaOff);
+                g.c(K::Note);
+                g.w(hw, Site::DmaOff);
                 hw.dmacon(1 << i);
                 self.note = note;
                 self.period = r16(hw, song.periods + 2 * note.wrapping_add(self.transpose) as u32);
@@ -454,11 +539,17 @@ impl Voice {
                 self.loop_pending = r8(hw, ins + 0x26) & 0x80 != 0;
                 if self.loop_pending {
                     let s = Self::sample(hw, song, ins);
-                    g.gap(hw, Site::NoteLoc);
+                    g.c(K::NoteSample);
+                    g.w(hw, Site::NoteLoc);
                     hw.loc(i, s);
-                    g.gap(hw, Site::NoteLen);
+                    g.c(K::NoteLocLen);
+                    g.w(hw, Site::NoteLen);
                     hw.len(i, r16(hw, ins));
+                    g.c(K::NoteSampleAfter);
+                } else {
+                    g.c(K::NoteSynth);
                 }
+                g.c(K::NoteTail);
                 self.table_delay = 0;
                 self.table_position = 0;
                 self.volume = 0;
@@ -470,19 +561,22 @@ impl Voice {
                 self.vibrato_delay = r8(hw, ins + 0x16);
                 self.vibrato_position = 0;
                 self.vibrato_sustain = r8(hw, ins + 0x17);
+            } else {
+                g.c(K::NoNote);
             }
             // effects 1 to $80; 9 and on are 1 to 8 again
             let effect = r8(hw, row + 2).wrapping_sub(1);
             if (effect as i8) >= 0 {
-                g.path |= P_EFFECT;
-            }
-            if (effect as i8) >= 0 {
                 let arg = r8(hw, row + 3);
-                g.path |= ((effect & 7) as u32) << P_EFFECT_SHIFT;
+                g.c([K::Effect0, K::Effect1, K::Effect2, K::Effect3, K::Effect4, K::Effect5, K::Effect6, K::Effect7]
+                    [(effect & 7) as usize]);
                 match effect & 7 {
                     0 => g.speed = arg & 0x0f,
                     1 => {
-                        // the LED filter, as ENPP_PokeCommand sets it
+                        // the LED filter, as ENPP_PokeCommand sets it: a call into the host, whose
+                        // time the code's counts on from
+                        g.call();
+                        g.c(K::Effect1Post);
                         if arg == 0 {
                             hw.bus.ciaa.pra |= 2;
                         } else {
@@ -496,44 +590,53 @@ impl Voice {
                     6 => g.global_volume = arg & 0x3f,
                     _ => self.arpeggio = song.arpeggios + ((arg & 0x3f) as u32) * 16,
                 }
+            } else {
+                g.c(K::EffectNone);
             }
             self.block_position = (self.block_position + 4) & 0x3f;
+        } else {
+            g.c(K::NotTick0);
         }
 
         // the sound table, for a synth sound
         if r8(hw, ins + 0x26) & 0x80 == 0 {
             if self.table_delay != 0 {
-                g.path |= P_TBL_SKIP;
+                g.c(K::TblSkip);
                 self.table_delay -= 1;
             } else {
-                g.path |= P_TBL_RUN;
+                g.c(K::TblRun);
                 self.table_delay = r8(hw, ins + 0x27);
                 let table = ins + 0x28;
                 let mut pos = self.table_position;
                 let mut wave = r8(hw, table + pos as u32);
                 if wave == 0xff {
-                    g.path |= P_TBL_JUMP;
+                    g.c(K::TblJump);
                     pos = r8(hw, table + pos as u32 + 1);
                     wave = r8(hw, table + pos as u32);
                 }
                 if wave == 0xff {
-                    g.path |= P_TBL_END;
+                    g.c(K::TblEnd);
                 }
                 if wave != 0xff {
                     let a = song.waveforms + ((wave as u32) << 8);
-                    g.gap(hw, Site::TblLoc);
+                    g.c(K::TblWave);
+                    g.w(hw, Site::TblLoc);
                     hw.loc(i, a);
-                    g.gap(hw, Site::TblLen);
+                    g.c(K::TblLocLen);
+                    g.w(hw, Site::TblLen);
                     hw.len(i, r16(hw, ins));
+                    g.c(K::TblAfter);
                     self.table_position = pos.wrapping_add(1) & 0x3f;
                 }
             }
+        } else {
+            g.c(K::TblSample);
         }
 
         // vibrato
         let vib = ins + 0x15 + self.vibrato_position as u32;
         let speed = r8(hw, vib) as u16;
-        g.path |= if self.vibrato_down != 0 { P_VIB_DOWN } else { 0 };
+        g.c(if self.vibrato_down != 0 { K::VibDown } else { K::VibUp });
         self.vibrato_period = if self.vibrato_down == 0 {
             self.vibrato_period.wrapping_add(speed)
         } else {
@@ -541,18 +644,20 @@ impl Voice {
         };
         self.vibrato_delay = self.vibrato_delay.wrapping_sub(1);
         if self.vibrato_delay == 0 {
-            g.path |= P_VIB_FLIP;
+            g.c(K::VibFlip);
             self.vibrato_delay = r8(hw, vib + 1);
             self.vibrato_down = !self.vibrato_down;
+        } else {
+            g.c(K::VibNoFlip);
         }
         if self.vibrato_sustain != 0 {
-            g.path |= P_VIB_SUSTAIN;
+            g.c(K::VibSustain);
             self.vibrato_sustain -= 1;
         } else {
-            g.path |= P_VIB_STEP;
+            g.c(K::VibStep);
             self.vibrato_position = self.vibrato_position.wrapping_add(3);
             if self.vibrato_position == 15 {
-                g.path |= P_VIB_WRAP;
+                g.c(K::VibWrap);
                 self.vibrato_position = 12;
             }
             // the next step's sustain; after the last step, the sample flag ($26)
@@ -561,30 +666,31 @@ impl Voice {
 
         // the volume envelope
         if self.volume_sustain != 0 {
-            g.path |= P_VOL_SUSTAIN;
+            g.c(K::VolSustain);
             self.volume_sustain -= 1;
         } else {
             let env = ins + 6 + self.volume_position as u32;
             let speed = r8(hw, env) as u16;
             let level = r8(hw, env + 1) as u16;
             if !mi(level, self.volume) {
-                g.path |= P_VOL_UP;
+                g.c(K::VolUp);
                 self.volume = self.volume.wrapping_add(speed);
                 if mi(level, self.volume) {
-                    g.path |= P_VOL_REACHED;
+                    g.c(K::VolUpReached);
                     self.volume = level;
                     self.volume_position = self.volume_position.wrapping_add(3);
                     if self.volume_position == 15 {
+                        g.c(K::VolPos15);
                         self.volume_position = 12;
                     }
                     self.volume_sustain = r8(hw, env + 2);
                 }
             } else {
-                g.path |= P_VOL_DOWN;
+                g.c(K::VolDown);
                 self.volume = self.volume.wrapping_sub(speed);
                 // going down, the envelope does not stop at its last step
                 if !mi(level, self.volume) {
-                    g.path |= P_VOL_DOWN_REACHED;
+                    g.c(K::VolDownReached);
                     self.volume = level;
                     self.volume_position = self.volume_position.wrapping_add(3);
                     self.volume_sustain = r8(hw, env + 2);
@@ -596,50 +702,62 @@ impl Voice {
         let speed = self.portamento as u16;
         if speed != 0 {
             if !mi(self.period, self.final_period) {
+                g.c(K::PortaUp);
                 self.final_period = self.final_period.wrapping_add(speed);
                 if mi(self.period, self.final_period) {
+                    g.c(K::PortaUpClamp);
                     self.final_period = self.period;
                 }
             } else {
+                g.c(K::PortaDown);
                 self.final_period = self.final_period.wrapping_sub(speed);
                 if !mi(self.period, self.final_period) {
+                    g.c(K::PortaDownClamp);
                     self.final_period = self.period;
                 }
             }
+        } else {
+            g.c(K::PortaNone);
         }
 
         // arpeggio
         let mut arp = r8(hw, self.arpeggio + self.arpeggio_position as u32);
+        g.c(if self.arpeggio_position as u8 != 0 { K::ArpPosN } else { K::ArpPos0 });
         if self.arpeggio_position as u8 != 0 && arp == 0x80 {
-            g.path |= P_ARP_WRAP;
+            g.c(K::ArpWrap);
             self.arpeggio_position = 0;
             arp = r8(hw, self.arpeggio);
         }
         self.arpeggio_position = (self.arpeggio_position + 1) & 0x0f;
         let mut period = self.final_period;
         if self.portamento == 0 {
-            g.path |= P_ARP_LOOKUP;
+            g.c(K::ArpLookup);
             let n = arp.wrapping_add(self.note).wrapping_add(self.transpose);
             period = r16(hw, song.periods + 2 * n as u32);
             self.final_period = period;
+        } else {
+            g.c(K::ArpNoLookup);
         }
 
         let bend = r16(hw, ins + 0x24).wrapping_sub(self.pitch_bend);
         self.vibrato_period = self.vibrato_period.wrapping_sub(bend);
-        g.gap(hw, Site::Per);
+        g.c(K::PerPre);
+        g.w(hw, Site::Per);
         hw.per(i, period.wrapping_add(self.vibrato_period));
 
         let mut volume = ((self.volume >> 2) & 0x3f) as u8;
         if (volume.wrapping_sub(self.max_volume) as i8) >= 0 {
             volume = self.max_volume;
-            g.path |= P_CLAMP_MAX;
+            g.c(K::ClampMax);
         }
         if (volume.wrapping_sub(g.global_volume) as i8) >= 0 {
             volume = g.global_volume;
-            g.path |= P_CLAMP_GLOBAL;
+            g.c(K::ClampGlobal);
         }
-        g.gap(hw, Site::Vol);
+        g.c(K::VolPre);
+        g.w(hw, Site::Vol);
         hw.vol(i, volume as u16);
+        g.c(K::VoiceEnd);
     }
 
     /// Guest address of the instrument's sample (one of 8).

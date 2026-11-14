@@ -800,6 +800,15 @@ impl Engine {
         }
         let addr = self.m.alloc(need);
         if addr == 0 {
+            // a PC tracker module the libxmp port plays on its own mixer needs no guest memory:
+            // one larger than the guest's (an Impulse Tracker file of 15 MB) still plays
+            if self.open_replayers {
+                if let Some(x) =
+                    crate::xmp::detect_open(&data).and_then(|_| crate::xmp::XmpPlayer::open(&data, self.rate as u32, Some(path)))
+                {
+                    return self.start_mix(Box::new(x), path);
+                }
+            }
             bail!("module too large");
         }
         self.m.bus.write_bytes(addr, &data);

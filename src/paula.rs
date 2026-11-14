@@ -315,12 +315,13 @@ impl Paula {
                     best = c.evtime;
                 }
             }
-            best = best.min(self.out.until_sample() as u64).min(n);
+            let until = self.out.until_sample();
+            best = best.min(until as u64).min(n);
             let o: [i32; 4] = std::array::from_fn(|i| {
                 let c = &self.ch[i];
                 (c.current_sample * c.vol as i32) & c.adk_mask
             });
-            if let Some(s) = self.out.step(o, best as u32) {
+            if let Some(s) = self.out.step_rounded(o, best as u32, until) {
                 self.samples.push_back(s);
             }
             for c in &mut self.ch {

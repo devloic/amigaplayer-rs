@@ -92,9 +92,16 @@ impl OutputStage {
     }
 
     /// Colour clocks until the next output sample.
+    #[inline]
     pub fn until_sample(&self) -> u32 {
-        let mut r = self.next.floor() as u32;
-        if self.next - r as f32 >= 0.5 {
+        // `next` is never negative here: a step shorter than the rounded window
+        // leaves at least its integer part, and one that ends a sample adds a whole
+        // interval (over 18 clocks) to the at most half a clock it overshot by. For a
+        // value of 0 or more, conversion (truncation) is floor, without the libm call
+        // `f32::floor` is on x86-64 without SSE4.1.
+        let n = self.next;
+        let mut r = if n >= 0.0 { n as u32 } else { n.floor() as u32 };
+        if n - r as f32 >= 0.5 {
             r += 1;
         }
         r
@@ -102,8 +109,16 @@ impl OutputStage {
 
     /// The channels output `out` for `clocks` (at most `until_sample()`) colour
     /// clocks. Returns the sample that ends there, if one does.
+    #[inline]
     pub fn step(&mut self, out: [i32; 4], clocks: u32) -> Option<(i16, i16)> {
         let rounded = self.until_sample();
+        self.step_rounded(out, clocks, rounded)
+    }
+
+    /// `step` with `until_sample()` already known (`rounded`).
+    #[inline]
+    pub fn step_rounded(&mut self, out: [i32; 4], clocks: u32, rounded: u32) -> Option<(i16, i16)> {
+        debug_assert_eq!(rounded, self.until_sample());
         debug_assert!(clocks <= rounded);
         self.next -= clocks as f32;
         for i in 0..4 {
@@ -133,8 +148,9 @@ impl OutputStage {
     /// every sample.
     pub fn run(&mut self, out: [i32; 4], mut clocks: u32, mut emit: impl FnMut(i16, i16)) {
         while clocks > 0 {
-            let n = clocks.min(self.until_sample());
-            if let Some((l, r)) = self.step(out, n) {
+            let until = self.until_sample();
+            let n = clocks.min(until);
+            if let Some((l, r)) = self.step_rounded(out, n, until) {
                 emit(l, r);
             }
             clocks -= n;

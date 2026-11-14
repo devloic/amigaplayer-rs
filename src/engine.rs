@@ -181,6 +181,14 @@ pub struct Engine {
     unwrapped_copy: Option<PathBuf>,
     scope_ring: Vec<Vec<f32>>,
     scope_pos: usize,
+    /// The channel outputs after each of the samples `advance` ran on in one call, for
+    /// the frames that take them (see `advance`); the queue's first samples.
+    batch_scopes: std::collections::VecDeque<[f32; 4]>,
+    /// What follows those samples is still to run (`advance_tail`, with the timer period).
+    tail_pending: Option<Option<u64>>,
+    /// Whether `advance` may run on over several samples (off: one call per sample, as
+    /// the tests compare).
+    batch: bool,
     a500: OnePole,
     led: Biquad,
     /// When the next vertical blank and DeliTracker timer interrupt are due
@@ -278,6 +286,9 @@ impl Engine {
             unwrapped_copy: None,
             scope_ring: Vec::new(),
             scope_pos: 0,
+            batch_scopes: Default::default(),
+            tail_pending: None,
+            batch: true,
             a500: OnePole::new(rate, 4420.0),
             led: Biquad::lowpass(rate, 3275.0, 0.707),
             next_vblank: FRAME,
@@ -667,6 +678,8 @@ impl Engine {
         self.m.bus.paula.sync(self.m.bus.clock, &self.m.bus.ram);
         self.m.bus.paula.align_to_start(self.m.bus.clock);
         self.m.bus.paula.samples.clear();
+        self.batch_scopes.clear();
+        self.tail_pending = None;
         self.heard = false;
         self.led_log.clear();
         self.led_changes = 0;
@@ -1453,7 +1466,21 @@ impl Engine {
     /// Runs the machine to the next thing that happens: a timer or vertical blank
     /// interrupt that is due, an audio interrupt, or the end of an output sample.
     /// Interrupts that came due while guest code ran are taken late, at once.
-    fn advance(&mut self) {
+    ///
+    /// `frames` is the number of output frames the caller still has to fill (at least 1).
+    /// Output samples at whose end nothing happens (no interrupt or timer due, nothing
+    /// for audio.device or the audio interrupts to do) are run on in one call, up to
+    /// that many, as consecutive calls would have done, keeping the channel outputs the
+    /// scopes would have seen after each (`batch_scopes`). What follows the last one
+    /// (`advance_tail`) then waits for the frame that would have run it
+    /// (`tail_pending`): the frame that takes that sample, or the next call if that
+    /// step ended without one. So guest code, and everything it changes, runs at the
+    /// same frame as before, and every sample is the same.
+    fn advance(&mut self, frames: usize) {
+        if let Some(period) = self.tail_pending.take() {
+            self.advance_tail(period);
+            return;
+        }
         let Some(p) = &mut self.playing else { return };
         let now = self.m.bus.clock;
         // the time guest code took since Paula last ran (its interrupts were requested
@@ -1486,14 +1513,62 @@ impl Engine {
         }
         let cias = [&self.m.bus.ciaa, &self.m.bus.ciab];
         let cia_due = cias.iter().filter_map(|c| c.until_underflow()).min().map(|n| (self.m.bus.e_ticks + n) * ECLOCK_DIV);
-        let paula = &self.m.bus.paula;
-        let mut t = paula.now() + paula.out.until_sample() as u64;
+        let mut due = u64::MAX;
         for d in [Some(self.next_vblank), self.next_timer, cia_due].into_iter().flatten() {
-            t = t.min(d);
+            due = due.min(d);
         }
-        if t > now {
-            self.m.bus.clock = self.m.bus.paula.sync_to_irq(t, &self.m.bus.ram);
+        // nothing outside Paula looks at the time between two samples: no task to
+        // schedule (it may wait for a time), no voices of the built-in NotePlayer (they
+        // render per frame from the guest's memory)
+        let batch = self.batch && self.m.deli.procs.is_empty() && !self.m.deli.voices.in_use;
+        let mut steps = 0;
+        loop {
+            let now = self.m.bus.clock;
+            self.m.bus.paula.sync(now, &self.m.bus.ram);
+            let paula = &self.m.bus.paula;
+            let t = (paula.now() + paula.out.until_sample() as u64).min(due);
+            if t > now {
+                self.m.bus.clock = self.m.bus.paula.sync_to_irq(t, &self.m.bus.ram);
+            }
+            steps += 1;
+            if !(batch && steps < frames && self.m.bus.paula.samples.len() == steps && self.tail_is_idle(due)) {
+                break;
+            }
+            let paula = &self.m.bus.paula;
+            self.batch_scopes.push_back([paula.output(0), paula.output(1), paula.output(2), paula.output(3)]);
+            // the LED filter as the frame that would have run the next step sets it (guest
+            // code earlier in this frame may have switched the LED since `render` set it)
+            let led_on = self.settings.led_force || self.m.bus.led();
+            let out = &mut self.m.bus.paula.out;
+            out.led = out.filter() != Filter::None && self.settings.led_filter && led_on;
         }
+        if self.batch_scopes.is_empty() {
+            self.advance_tail(period);
+        } else {
+            self.tail_pending = Some(period);
+        }
+    }
+
+    /// Whether `advance_tail` would do nothing now (with `due` the earliest timer,
+    /// vertical blank or CIA underflow): nothing due, no CIA interrupt pending, no
+    /// crash, no audio.device channel with a request, no audio interrupt raised or
+    /// newly enabled. (`audio_irqs` also clears the INTREQ bits other than the audio
+    /// ones from `raised`, which nothing else reads: the next tail that runs does.)
+    #[inline]
+    fn tail_is_idle(&self, due: u64) -> bool {
+        let b = &self.m.bus;
+        let p = &b.paula;
+        b.clock < due
+            && !b.ciaa.has_pending()
+            && !b.ciab.has_pending()
+            && self.m.crashed.is_none()
+            && (p.raised | p.intreq & p.intena & !self.intena_seen) & (0xF << 7) == 0
+            && crate::os::audio_service_idle(&self.m)
+    }
+
+    /// The rest of `advance` once Paula has run: the interrupts and timers that are due,
+    /// audio.device, the player's processes and the audio interrupts.
+    fn advance_tail(&mut self, period: Option<u64>) {
         let now = self.m.bus.clock;
         // CIA timers (players with their own interrupt)
         self.m.bus.cia_sync();
@@ -1763,7 +1838,8 @@ impl Engine {
         let vol = self.settings.volume;
         let filter = self.output_filter();
         self.m.bus.paula.out.set_filter(filter);
-        for frame in out.chunks_exact_mut(2) {
+        let frames = out.len() / 2;
+        for (k, frame) in out.chunks_exact_mut(2).enumerate() {
             if self.playing.is_none() || self.paused {
                 frame[0] = 0.0;
                 frame[1] = 0.0;
@@ -1781,14 +1857,22 @@ impl Engine {
             self.led_seen = Some(led_now);
             let led_on = self.settings.led_force || led_now;
             self.m.bus.paula.out.led = filter != Filter::None && self.settings.led_filter && led_on;
+            let mut scopes = None;
             let (pl, pr) = loop {
                 if let Some(s) = self.m.bus.paula.samples.pop_front() {
+                    scopes = self.batch_scopes.pop_front();
+                    if scopes.is_none() {
+                        if let Some(period) = self.tail_pending.take() {
+                            // the last sample `advance` ran on: what followed it
+                            self.advance_tail(period);
+                        }
+                    }
                     break s;
                 }
                 if self.playing.is_none() {
                     break (0, 0);
                 }
-                self.advance();
+                self.advance(frames - k);
             };
             self.heard |= pl != 0 || pr != 0;
             let (hl, hr) = (pl as f32 / 32768.0, pr as f32 / 32768.0);
@@ -1822,8 +1906,10 @@ impl Engine {
                 p.frames += 1;
             }
             let paula = &self.m.bus.paula;
-            self.push_scopes([paula.output(0), paula.output(1), paula.output(2), paula.output(3)]);
+            self.push_scopes(scopes.unwrap_or_else(|| [paula.output(0), paula.output(1), paula.output(2), paula.output(3)]));
         }
+        // (`advance` runs on no further than the frames asked for)
+        debug_assert!(self.tail_pending.is_none() && self.batch_scopes.is_empty());
         self.skip_empty_subsong();
     }
 
@@ -2010,5 +2096,39 @@ mod tests {
         assert_ne!(e.m.bus.ram[..0x400], boot[..]);
         assert!(e.play_data(Path::new("/vec-test/b.bin"), junk).is_err());
         assert_eq!(e.m.bus.ram[..0x400], boot[..]);
+    }
+
+    /// `advance` running on over the samples where nothing happens gives the samples, scopes
+    /// and LED report of one call per sample, whatever the size of the caller's buffer: for
+    /// the built-in ProTracker and for a custom module whose interrupt flips the LED filter.
+    #[test]
+    #[cfg(feature = "custom-modules")]
+    fn running_on_between_samples_changes_nothing() {
+        // bchg #1,$bfe001 ; rts
+        let led = [0x08, 0x79, 0x00, 0x01, 0x00, 0xBF, 0xE0, 0x01, 0x4E, 0x75];
+        let mods = [("a.mod", crate::testdata::minimal_mod()), ("cust.a", crate::testdata::custom_with(&[], &led))];
+        for (name, data) in mods {
+            let run = |batch: bool, chunk: usize| {
+                let mut e = Engine::new(48000.0);
+                e.batch = batch;
+                e.play_data(&Path::new("/batch-test").join(name), data.clone()).unwrap();
+                let (mut pcm, mut scopes, mut buf) = (Vec::new(), Vec::new(), vec![0f32; 2 * chunk]);
+                for call in 0..48000 / chunk {
+                    e.render(&mut buf);
+                    pcm.extend_from_slice(&buf);
+                    if call % (1 + 200 / chunk) == 0 {
+                        scopes.push(e.scope_data());
+                    }
+                }
+                (pcm, scopes, e.led_report())
+            };
+            for chunk in [1, 2, 5, 64, 333, 4096] {
+                let (a, b) = (run(false, chunk), run(true, chunk));
+                assert!(a.0.iter().any(|&x| x != 0.0), "{name} is silent");
+                let first = a.0.iter().zip(&b.0).position(|(x, y)| x != y);
+                assert!(a == b, "{name}, {chunk} frames a call: pcm first {first:?} of {}, scopes {}, led {} / {}", a.0.len(), a.1 == b.1, a.2, b.2);
+            }
+            assert!(!name.starts_with("cust") || run(true, 64).2.contains("yes"), "{name}: the LED switches");
+        }
     }
 }

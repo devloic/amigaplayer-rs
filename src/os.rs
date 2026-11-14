@@ -1654,6 +1654,13 @@ fn audio_command(m: &mut Machine, ioreq: u32, cmd: u16) -> bool {
 /// Paula reloaded a channel audio.device plays on: a pass of the latched write starts,
 /// and the one before it ended. Called after each output sample; takes the interrupts of
 /// those channels.
+/// Whether `audio_service` would do nothing now: no channel audio.device plays on has
+/// its interrupt request set.
+#[inline]
+pub fn audio_service_idle(m: &Machine) -> bool {
+    (0..4).all(|ch| m.bus.paula.intreq & (0x80u16 << ch) == 0 || !m.os.audio[ch].busy())
+}
+
 pub fn audio_service(m: &mut Machine) {
     for ch in 0..4 {
         let bit = 0x80u16 << ch;

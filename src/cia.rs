@@ -160,6 +160,11 @@ impl Cia {
         std::mem::take(&mut self.pending)
     }
 
+    /// Whether an enabled interrupt is waiting for `take_pending`.
+    pub fn has_pending(&self) -> bool {
+        self.pending != 0
+    }
+
     /// E-clock ticks until either timer underflows.
     pub fn until_underflow(&self) -> Option<u64> {
         match (self.ta.until_underflow(), self.tb.until_underflow()) {

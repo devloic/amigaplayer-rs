@@ -30,11 +30,137 @@ pub const OPEN: Open = Open { name: "Maniacs of Noise", detect, new };
 
 /// Endless loops in the data (a back-jump onto itself) give up after this many steps.
 const GUARD: u32 = 4096;
-/// Colour clocks between the writes of two voices (about 570 in the reference).
-const VOICE_GAP: u64 = 440;
+
+// The 68000 cycles of the original's code paths (see `Clk`), by label: a label names a branch of
+// this player (`pat.note` a note of a pattern, `smp.start` a sample start, ...); the cycles are
+// fitted, as whole numbers, to every gap between two host calls of the reference runs (the
+// Eagleplayer M.O.N. of EP206 on the engine; each gap's cycles exactly, from a second run whose
+// count starts one cycle late) of 34 modules (every build of the corpus, 243,172 gaps, all
+// exact; 7 modules held out of a first fit came out exact too). The several code variants of
+// build 3 take the same cycles; builds 1 and 2 differ on a few paths. No multiplication or
+// division time depends on its operands here. Not measured: the wave-sequence instruments of
+// build 3c, which EP206's player does not play (it writes no sample for them; the port plays
+// them as UADE's player does), and the instruments' pitch envelope of build 3b, which it leaves
+// out too (Dragon Wars' game tune from 14.7 s on; a copy given one more such instrument confirms
+// it).
+
+/// Build 3 (all its code variants alike), by code path.
+const COSTS: &[(&str, i32)] = &[
+    ("dur", 118), ("env.loop", 92), ("env.rel", 82), ("env.step", 275), ("env.sus", 96), ("env.wait", -21),
+    ("ord", 111), ("ord.c2", 64), ("ord.c5", 124), ("ord.c6", 314), ("pat", 89), ("pat.c0", 35), ("pat.c0.rep", 18),
+    ("pat.c1", 106), ("pat.c4", 64), ("pat.c5", 144), ("pat.c5.end", 42), ("pat.c6", 82), ("pat.note", 254),
+    ("pat.note.end", 22), ("per", 226), ("proc.per", 22), ("proc.vol", 202), ("sl.end", 10), ("sl.init2", 124),
+    ("sl.init3", 125), ("sl.run", 351), ("smp.loop", 45), ("smp.loop.end", 223), ("smp.loop.len", 202),
+    ("smp.sil", 27), ("smp.sil.end", 235), ("smp.sil.len", 190), ("smp.start.dma", 188), ("smp.start.end", 231),
+    ("smp.start.len", 198), ("tick", 54), ("v", 138), ("v.off", 49), ("v.pat", 13), ("vib", 442), ("vib.del", 26),
+    ("vib.loop", 75), ("vib.none", -21), ("vib.step", 238), ("vib.wait", 25), ("wt", 29), ("wt.dma", 277),
+    ("wt.end", 221), ("wt.jump", 137), ("wt.nodma", 65), ("wt.reset", 86), ("wt.st2", 25), ("wt.wave", 157),
+    ("wt.wave.loc", 166),
+];
+/// Build 2: the paths whose cycles differ from build 3's.
+const B2_DELTA: &[(&str, i32)] = &[
+    ("dur", -36), ("env.loop", -39), ("env.step", -8), ("env.wait", 21), ("pat.c1", -20), ("proc.per", -21),
+    ("proc.vol", -28), ("vib.none", 21), ("wt.new", -25),
+];
+/// Build 1: the paths whose cycles differ from build 3's.
+const B1_DELTA: &[(&str, i32)] = &[
+    ("dur", -36), ("env.loop", -39), ("env.step", -8), ("env.wait", 21), ("pat.c0", 53), ("pat.c1", -43),
+    ("pat.note.end", -16), ("pe.loop", 53), ("pe.none", -21), ("pe.step", 236), ("proc.per", -21), ("proc.vol", -28),
+    ("vib.none", 21), ("wt.new", -25), ("wt.st2", 21), ("wt.wait", 21),
+];
 
 fn rb(d: &[u8], o: usize) -> u8 {
     d.get(o).copied().unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------------
+// Time
+
+/// The original's time: every Paula write of the reference (EP206's Eagleplayer M.O.N.) goes
+/// through one of the host's ENPP_Poke* / ENPP_DMAMask calls, and the engine starts its count of
+/// the 68000 cycles anew at each one, at a whole colour clock. A write therefore lands at the previous host call's end (or the tick's
+/// start) plus half the cycles of the code paths taken since, rounded down; a DMA on waits up to
+/// the tenth raster line after it, as the host's DMAMask does.
+struct Clk {
+    /// 68000 cycles since `tl`.
+    cy: i64,
+    /// The colour clock of the last host call's end, or of the tick's start.
+    tl: u64,
+    costs: &'static [(&'static str, i32)],
+    /// The build's differences from `costs`.
+    delta: &'static [(&'static str, i32)],
+}
+
+impl Clk {
+    fn new(build: Build) -> Clk {
+        let delta = match build {
+            Build::B1 => B1_DELTA,
+            Build::B2 => B2_DELTA,
+            Build::B3 => &[],
+        };
+        Clk { cy: 0, tl: 0, costs: COSTS, delta }
+    }
+
+    /// A code path of the original.
+    fn k(&mut self, l: &'static str) {
+        for t in [self.costs, self.delta] {
+            if let Ok(i) = t.binary_search_by(|e| e.0.cmp(l)) {
+                self.cy += t[i].1 as i64;
+            }
+        }
+    }
+
+    fn start(&mut self, hw: &mut Hw) {
+        self.tl = hw.bus.clock;
+        self.cy = 0;
+    }
+
+    /// Up to the clock of the next host call.
+    fn at(&mut self, hw: &mut Hw) {
+        let t = self.tl + self.cy.max(0) as u64 / 2;
+        if hw.bus.clock < t {
+            hw.bus.clock = t;
+        }
+        self.cy = 0;
+    }
+
+    fn done(&mut self, hw: &mut Hw) {
+        self.tl = hw.bus.clock;
+    }
+
+    fn dmacon(&mut self, hw: &mut Hw, v: u16) {
+        self.at(hw);
+        hw.dmacon(v);
+        if v & 0x8000 != 0 {
+            let (now, line) = (hw.bus.clock, crate::paula::LINE);
+            hw.bus.clock = (now / line + 10) * line;
+        }
+        self.done(hw);
+    }
+
+    fn loc(&mut self, hw: &mut Hw, ch: usize, a: u32) {
+        self.at(hw);
+        hw.loc(ch, a);
+        self.done(hw);
+    }
+
+    fn len(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.at(hw);
+        hw.len(ch, v);
+        self.done(hw);
+    }
+
+    fn per(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.at(hw);
+        hw.per(ch, v);
+        self.done(hw);
+    }
+
+    fn vol(&mut self, hw: &mut Hw, ch: usize, v: u16) {
+        self.at(hw);
+        hw.vol(ch, v);
+        self.done(hw);
+    }
 }
 
 fn rw(d: &[u8], o: usize) -> u16 {
@@ -216,6 +342,7 @@ struct Mon {
     /// The register that tracks the current instrument across voices.
     a1: usize,
     v: [Voice; 4],
+    c: Clk,
 }
 
 fn sx(base: usize, w: u16) -> usize {
@@ -256,8 +383,10 @@ impl Mon {
         rw(&self.d, self.lay.pt + 2 * n as usize) as u32
     }
 
-    fn period(&self, n: u8, w: u16) -> u16 {
-        ((self.ptword(n) * w as u32) >> 10) as u16
+    fn period(&mut self, n: u8, w: u16) -> u16 {
+        let pt = self.ptword(n);
+        self.c.k("per");
+        ((pt * w as u32) >> 10) as u16
     }
 
     fn start(&mut self) {
@@ -276,7 +405,9 @@ impl Mon {
         self.ftarget = 0;
         self.initvol = rb(&self.d, e + 8);
         self.tempo = rb(&self.d, e + 10);
-        self.master = 64;
+        // EP206 starts the master volume at the entry's volume (Flimbo's Quest: 40, every write
+        // 40/64 of the volume), not at 64
+        self.master = self.initvol;
         self.mask = 0x0F;
         self.a1 = 0;
         for ch in 0..4 {
@@ -296,16 +427,23 @@ impl Mon {
 
     /// ORDER: false when the end-of-music command stops the tick.
     fn order(&mut self, ch: usize, hw: &mut Hw) -> bool {
+        const L: [&str; 16] = [
+            "ord.c0", "ord.c1", "ord.c2", "ord.c3", "ord.c4", "ord.c5", "ord.c6", "ord.c7", "ord.c8", "ord.c9", "ord.c10",
+            "ord.c11", "ord.c12", "ord.c13", "ord.c14", "ord.c15",
+        ];
         for _ in 0..GUARD {
+            self.c.k("ord");
             let w = rw(&self.d, self.v[ch].optr);
             self.v[ch].optr += 2;
             if w < 0xF000 {
+                self.c.k("ord.pat");
                 let p = self.ptr(w);
                 self.v[ch].pstart = p;
                 self.v[ch].pat = p;
                 return true;
             }
             let a = w as u8;
+            self.c.k(L[((w >> 8) & 15) as usize]);
             match (w >> 8) & 15 {
                 0 => self.v[ch].transpose = a,
                 1 => self.v[ch].rpt = a,
@@ -323,11 +461,16 @@ impl Mon {
                     self.ftarget = 0;
                 }
                 4 => self.tempo = a,
-                5 => self.v[ch].optr = self.v[ch].olist + 2 * a as usize,
+                5 => {
+                    // EP206 reports the song's end on every jump (any voice, any target), and
+                    // plays on
+                    self.v[ch].optr = self.v[ch].olist + 2 * a as usize;
+                    self.songend = true;
+                }
                 6 => {
                     self.playing = false;
                     self.songend = true;
-                    hw.dmacon(0);
+                    self.c.dmacon(hw, 0);
                     return false;
                 }
                 _ => {}
@@ -342,8 +485,12 @@ impl Mon {
 
     /// `d * tempo - shorten` (16 bit); builds 3 take the shortening, only once.
     fn dur_of(&mut self, ch: usize, d: u8) -> u16 {
+        self.c.k("dur");
         let mut x = (d as u16).wrapping_mul(self.tempo as u16);
         if self.lay.build == Build::B3 {
+            if self.v[ch].shorten != 0 {
+                self.c.k("dur.short");
+            }
             x = x.wrapping_sub(self.v[ch].shorten);
             self.v[ch].shorten = 0;
         }
@@ -352,9 +499,14 @@ impl Mon {
 
     /// PATTERN: false when the tick is aborted by the end-of-music command.
     fn pattern(&mut self, ch: usize, hw: &mut Hw) -> bool {
+        const L: [&str; 16] = [
+            "pat.c0", "pat.c1", "pat.c2", "pat.c3", "pat.c4", "pat.c5", "pat.c6", "pat.c7", "pat.c8", "pat.c9", "pat.c10",
+            "pat.c11", "pat.c12", "pat.c13", "pat.c14", "pat.c15",
+        ];
         let b1 = self.lay.build == Build::B1;
         let b3 = self.lay.build == Build::B3;
         for _ in 0..GUARD {
+            self.c.k("pat");
             let b = rb(&self.d, self.v[ch].pat);
             self.v[ch].pat += 1;
             let cmd = if b1 {
@@ -372,6 +524,7 @@ impl Mon {
                 b & 15
             };
             if cmd == 99 {
+                self.c.k("pat.note");
                 let n = b.wrapping_add(self.v[ch].transpose);
                 let w = self.iw(self.a1, 2);
                 let p = self.period(n, w);
@@ -401,15 +554,20 @@ impl Mon {
                     v.wcnt = 1;
                 }
                 if self.emask_ok(ch) {
-                    hw.dmacon(1 << ch);
+                    self.c.dmacon(hw, 1 << ch);
+                } else {
+                    self.c.k("pat.note.masked");
                 }
+                self.c.k("pat.note.end");
                 return true;
             }
+            self.c.k(L[cmd as usize & 15]);
             match cmd {
                 0 => {
                     let v = &mut self.v[ch];
                     v.rpt = v.rpt.wrapping_sub(1);
                     if v.rpt != 0 {
+                        self.c.k("pat.c0.rep");
                         v.pat = v.pstart;
                     } else {
                         v.rpt = 1;
@@ -469,8 +627,11 @@ impl Mon {
                     let dur = self.dur_of(ch, d);
                     self.v[ch].dur = dur;
                     if self.emask_ok(ch) {
-                        hw.vol(ch, 0);
+                        self.c.vol(hw, ch, 0);
+                    } else {
+                        self.c.k("pat.c5.masked");
                     }
+                    self.c.k("pat.c5.end");
                     self.v[ch].running = false;
                     return true;
                 }
@@ -491,7 +652,8 @@ impl Mon {
                     self.v[ch].pat += 1;
                     self.v[ch].dur = d as u16;
                     self.v[ch].running = false;
-                    hw.dmacon(1 << ch);
+                    self.c.dmacon(hw, 1 << ch);
+                    self.c.k("pat.c7.end");
                     return true;
                 }
                 8 if b3 => {
@@ -516,26 +678,32 @@ impl Mon {
     /// The volume envelope (6.4).
     fn envelope(&mut self, ch: usize) {
         let b3 = self.lay.build == Build::B3;
+        self.c.k("env");
         let v = &mut self.v[ch];
         v.ecnt = v.ecnt.wrapping_sub(1);
         if v.ecnt != 0 {
+            self.c.k("env.wait");
             return;
         }
         let a1 = self.a1;
         let (reload, ptrw) = (self.ib(a1, 0x0F), self.iw(a1, 0x0C));
         let a2 = sx(self.lay.base, ptrw);
         let d = &self.d;
+        let c = &mut self.c;
         let v = &mut self.v[ch];
+        c.k("env.step");
         v.ecnt = reload;
         let mut x = 0u8;
         for _ in 0..GUARD {
             x = rb(d, a2 + v.eidx as usize);
             if b3 {
                 if x == 0x81 && !v.sus {
+                    c.k("env.rel");
                     v.eidx = v.eidx.wrapping_add(2);
                     continue;
                 }
                 if x == 0x80 || x == 0x81 {
+                    c.k(if x == 0x80 { "env.loop" } else { "env.sus" });
                     let k = rb(d, a2 + v.eidx.wrapping_add(1) as usize);
                     v.eidx = v.eidx.wrapping_sub(k);
                     continue;
@@ -545,6 +713,7 @@ impl Mon {
             } else {
                 let mut g = 0;
                 while x & 0x80 != 0 && g < GUARD {
+                    c.k("env.loop");
                     v.eidx = x & 0x7F;
                     x = rb(d, a2 + v.eidx as usize);
                     g += 1;
@@ -560,8 +729,11 @@ impl Mon {
     /// The slide (6.6).
     fn slide(&mut self, ch: usize) {
         let b1 = self.lay.build == Build::B1;
+        let c = &mut self.c;
         let v = &mut self.v[ch];
+        c.k("sl");
         if v.plen == 0 {
+            c.k("sl.none");
             return;
         }
         let init = v.state == 3 || v.state == 2;
@@ -569,6 +741,7 @@ impl Mon {
             v.state = 0;
         }
         if init {
+            c.k(if v.state == 2 { "sl.init2" } else { "sl.init3" });
             v.pcnt = 1;
             v.pout = v.ptgt;
             if b1 {
@@ -581,15 +754,19 @@ impl Mon {
             }
         } else if b1 {
             // decision: build 1 is written from the specification only (its one file never slides)
+            c.k("sl.b1");
             v.pout = v.pout.wrapping_sub(v.pdelta);
             v.plen = v.plen.wrapping_sub(1);
             if v.plen == 0 {
+                c.k("sl.b1.end");
                 v.pout = v.pout.wrapping_sub(v.prem);
             }
         } else {
+            c.k("sl.run");
             let q = (v.pcnt as i16 as i32 * v.pdelta as i16 as i32) / (v.plen as i16 as i32);
             v.pout = v.ptgt.wrapping_sub(q as u16);
             if v.pcnt == v.plen {
+                c.k("sl.end");
                 v.plen = 0;
             } else {
                 v.pcnt = v.pcnt.wrapping_add(1);
@@ -605,16 +782,21 @@ impl Mon {
         let b3 = self.lay.build == Build::B3;
         let a1 = self.a1;
         let ptrw = if b3 { self.v[ch].ppitch } else { self.iw(a1, 0x14) };
+        self.c.k("pe");
         if ptrw == 0 {
+            self.c.k("pe.none");
             return;
         }
         let speed = self.ib(a1, 0x16);
         let a2 = self.ptr(ptrw);
+        let c = &mut self.c;
         let v = &mut self.v[ch];
         v.pcntr = v.pcntr.wrapping_sub(1);
         if v.pcntr != 0 {
+            c.k("pe.wait");
             return;
         }
+        c.k("pe.step");
         v.pcntr = speed;
         let d = &self.d;
         let mut x = rb(d, a2 + v.pidx as usize);
@@ -631,6 +813,7 @@ impl Mon {
                 }
                 v.pidx = x & 0x7F;
             }
+            c.k("pe.loop");
             x = rb(d, a2 + v.pidx as usize);
         }
         v.pidx = v.pidx.wrapping_add(1);
@@ -649,19 +832,24 @@ impl Mon {
         let reload = self.ib(a1, 0x13);
         let a2 = self.ptr(tw);
         let d = &self.d;
+        let c = &mut self.c;
         let v = &mut self.v[ch];
+        c.k("vib");
         if tw != 0 {
             if v.vdel != 0 {
+                c.k("vib.del");
                 v.vdel -= 1;
             } else {
                 v.vcnt = v.vcnt.wrapping_sub(1);
                 if v.vcnt == 0 {
+                    c.k("vib.step");
                     v.vcnt = reload;
                     let mut x = rb(d, a2 + v.vidx as usize);
                     for _ in 0..GUARD {
                         if x != 0x80 {
                             break;
                         }
+                        c.k("vib.loop");
                         let k = rb(d, a2 + v.vidx.wrapping_add(1) as usize);
                         v.vidx = if b3 { v.vidx.wrapping_sub(k) } else { k };
                         x = rb(d, a2 + v.vidx as usize);
@@ -670,8 +858,12 @@ impl Mon {
                     let d1 = (v.outper >> 7) as i16 as i32;
                     let d0 = x.wrapping_neg() as i8 as i32;
                     v.voff = (d0 * d1) as u16;
+                } else {
+                    c.k("vib.wait");
                 }
             }
+        } else {
+            c.k("vib.none");
         }
         v.outper = v.outper.wrapping_add(v.voff);
     }
@@ -683,30 +875,46 @@ impl Mon {
         let g = self.gbase;
         let base = self.lay.base;
         let has_sample = if self.lay.build == Build::B3 { ty != 0 } else { ty == 0 };
+        self.c.k("smp");
         if has_sample {
             let s = (base as u32).wrapping_add(self.il(a1, 4));
             let len = self.iw(a1, 8);
             let lp = self.iw(a1, 10);
+            let c = &mut self.c;
             let v = &mut self.v[ch];
             if v.state != 0 {
                 v.state -= 1;
                 if v.state != 0 {
-                    hw.loc(ch, g.wrapping_add(s));
-                    hw.len(ch, len);
-                    hw.dmacon(0x8000 | 1 << ch);
+                    c.k("smp.start");
+                    c.loc(hw, ch, g.wrapping_add(s));
+                    c.k("smp.start.len");
+                    c.len(hw, ch, len);
+                    c.k("smp.start.dma");
+                    c.dmacon(hw, 0x8000 | 1 << ch);
+                    c.k("smp.start.end");
                 } else if lp == 0xFFFF {
-                    hw.loc(ch, g.wrapping_add(self.lay.sil as u32));
-                    hw.len(ch, 4);
+                    c.k("smp.sil");
+                    c.loc(hw, ch, g.wrapping_add(self.lay.sil as u32));
+                    c.k("smp.sil.len");
+                    c.len(hw, ch, 4);
+                    c.k("smp.sil.end");
                 } else {
+                    c.k("smp.loop");
                     // build 1 alone takes the loop start in bytes
                     let off = if self.lay.build == Build::B1 { lp as u32 } else { (2 * lp as i16 as i32) as u32 };
-                    hw.loc(ch, g.wrapping_add(s).wrapping_add(off));
-                    hw.len(ch, len.wrapping_sub(lp));
+                    c.loc(hw, ch, g.wrapping_add(s).wrapping_add(off));
+                    c.k("smp.loop.len");
+                    c.len(hw, ch, len.wrapping_sub(lp));
+                    c.k("smp.loop.end");
                 }
+            } else {
+                c.k("smp.idle");
             }
         } else if self.lay.build == Build::B3 {
             if let Some(wt) = self.lay.wt {
                 self.wave_seq(ch, a1, wt, hw);
+            } else {
+                self.c.k("smp.nowave");
             }
         } else {
             self.wave_table(ch, a1, hw);
@@ -722,7 +930,16 @@ impl Mon {
         let a2 = self.ptr(list);
         let st = self.v[ch].state;
         let run;
+        self.c.k("wt");
+        self.c.k(if ty == 2 { "wt.t2" } else { "wt.tn" });
+        if st == 2 {
+            self.c.k("wt.st2");
+        }
+        if st == 2 && self.v[ch].newinst {
+            self.c.k("wt.new");
+        }
         if st == 2 && (self.v[ch].newinst || ty != 2) {
+            self.c.k("wt.reset");
             self.v[ch].wpos = 0;
             self.v[ch].wcnt = 0;
             run = true;
@@ -730,10 +947,12 @@ impl Mon {
             self.v[ch].wcnt = self.v[ch].wcnt.wrapping_sub(1);
             run = self.v[ch].wcnt == 0;
             if run {
+                self.c.k("wt.run");
                 self.v[ch].wcnt = speed;
             }
         }
         if !run {
+            self.c.k("wt.wait");
             return;
         }
         for _ in 0..GUARD {
@@ -742,23 +961,35 @@ impl Mon {
             let arg = rw(&self.d, p + 2);
             match w {
                 0xFFFD => {
+                    self.c.k("wt.len");
                     self.v[ch].wlen = arg;
                     self.v[ch].wpos = self.v[ch].wpos.wrapping_add(4);
                 }
                 0xFFFE => {
+                    self.c.k("wt.per");
                     self.v[ch].outper = arg;
                     self.v[ch].wpos = self.v[ch].wpos.wrapping_add(4);
                 }
-                0xFFFF => self.v[ch].wpos = self.v[ch].wpos.wrapping_sub(arg),
+                0xFFFF => {
+                    self.c.k("wt.jump");
+                    self.v[ch].wpos = self.v[ch].wpos.wrapping_sub(arg)
+                }
                 _ => {
-                    hw.len(ch, self.v[ch].wlen);
-                    hw.loc(ch, g.wrapping_add(self.ptr(w) as u32));
+                    self.c.k("wt.wave");
+                    self.c.len(hw, ch, self.v[ch].wlen);
+                    self.c.k("wt.wave.loc");
+                    let a = g.wrapping_add(self.ptr(w) as u32);
+                    self.c.loc(hw, ch, a);
                     self.v[ch].wcnt = speed;
                     self.v[ch].wpos = self.v[ch].wpos.wrapping_add(2);
                     if self.v[ch].state == 2 {
                         self.v[ch].state = 0;
-                        hw.dmacon(0x8000 | 1 << ch);
+                        self.c.k("wt.dma");
+                        self.c.dmacon(hw, 0x8000 | 1 << ch);
+                    } else {
+                        self.c.k("wt.nodma");
                     }
+                    self.c.k("wt.end");
                     break;
                 }
             }
@@ -771,28 +1002,35 @@ impl Mon {
         let g = self.gbase;
         let seq = self.ptr(self.iw(a1, 4));
         let d = &self.d;
+        let c = &mut self.c;
         let v = &mut self.v[ch];
+        c.k("ws");
         if v.state == 2 && (v.newinst || flags & 1 != 0) {
+            c.k("ws.reset");
             v.wpos = 0;
             v.wcnt = 1;
         }
         v.wcnt = v.wcnt.wrapping_sub(1);
         if v.wcnt == 0 {
+            c.k("ws.step");
             v.wcnt = v.wspd;
             for _ in 0..GUARD {
                 let x = rb(d, seq + v.wpos as usize);
                 match x {
                     0xFE => {
+                        c.k("ws.speed");
                         let k = rb(d, seq + v.wpos as usize + 1);
                         v.wspd = k;
                         v.wcnt = k;
                         v.wpos = v.wpos.wrapping_add(2);
                     }
                     0xFF => {
+                        c.k("ws.jump");
                         let k = rb(d, seq + v.wpos as usize + 1) as u16;
                         v.wpos = (v.wpos.wrapping_sub(k)) & 0xFF;
                     }
                     _ => {
+                        c.k("ws.wave");
                         v.wpos = v.wpos.wrapping_add(1);
                         let e = wt + 4 * x as usize;
                         v.wlen = rw(d, e);
@@ -801,20 +1039,28 @@ impl Mon {
                     }
                 }
             }
+        } else {
+            c.k("ws.wait");
         }
-        hw.loc(ch, g.wrapping_add(v.waddr));
-        hw.len(ch, v.wlen);
+        c.loc(hw, ch, g.wrapping_add(v.waddr));
+        c.k("ws.len");
+        c.len(hw, ch, v.wlen);
         if v.state == 2 {
             v.state = 0;
-            hw.dmacon(0x8000 | 1 << ch);
+            c.k("ws.dma");
+            c.dmacon(hw, 0x8000 | 1 << ch);
         }
+        c.k("ws.end");
     }
 
     fn process(&mut self, ch: usize, hw: &mut Hw) {
+        self.c.k("proc");
         if !self.v[ch].running {
+            self.c.k("proc.off");
             return;
         }
         if !self.emask_ok(ch) {
+            self.c.k("proc.masked");
             self.v[ch].state = 0;
             return;
         }
@@ -826,34 +1072,43 @@ impl Mon {
         self.vibrato(ch);
         self.sample(ch, hw);
         self.v[ch].newinst = false;
-        hw.per(ch, self.v[ch].outper);
-        hw.vol(ch, self.v[ch].outvol);
+        self.c.k("proc.per");
+        self.c.per(hw, ch, self.v[ch].outper);
+        self.c.k("proc.vol");
+        self.c.vol(hw, ch, self.v[ch].outvol);
+        self.c.k("proc.end");
     }
 
     /// One voice's tick; false when the end-of-music command aborted the whole tick.
     fn voice_tick(&mut self, ch: usize, hw: &mut Hw) -> bool {
         if self.v[ch].reset {
+            self.c.k("v.reset");
             self.v[ch].reset = false;
             return self.order(ch, hw) && self.pattern(ch, hw);
         }
         self.a1 = self.v[ch].inst;
         self.v[ch].dur = self.v[ch].dur.wrapping_sub(1);
         if self.v[ch].dur == 0 {
+            self.c.k("v.pat");
             self.pattern(ch, hw)
         } else {
+            self.c.k("v.proc");
             self.process(ch, hw);
             true
         }
     }
 
     fn fade_step(&mut self, hw: &mut Hw) {
+        self.c.k("fade");
         if self.fdir == 0 {
             return;
         }
+        self.c.k("fade.on");
         self.fcnt = self.fcnt.wrapping_sub(1);
         if self.fcnt != 0 {
             return;
         }
+        self.c.k("fade.step");
         self.fcnt = self.fspeed;
         self.master = self.master.wrapping_add(self.fdir);
         if self.master != self.ftarget {
@@ -861,7 +1116,8 @@ impl Mon {
         }
         self.fdir = 0;
         if self.master == 0 {
-            hw.dmacon(self.mask as u16);
+            self.c.k("fade.end");
+            self.c.dmacon(hw, self.mask as u16);
             self.playing = false;
             self.songend = true;
         }
@@ -897,20 +1153,40 @@ impl Replayer for Mon {
         if !self.started {
             self.start();
         }
+        self.c.start(hw);
         if !self.playing {
             return;
         }
+        self.c.k("tick");
         for ch in (0..4).rev() {
             if self.mask & (1 << ch) == 0 {
+                self.c.k("v.off");
                 continue;
             }
-            hw.wait(VOICE_GAP);
+            self.c.k("v");
             if !self.voice_tick(ch, hw) {
                 return;
             }
         }
         self.fade_step(hw);
     }
+}
+
+/// The time from the Eagleplayer's call before InitPlayer to the end of InitSound (the song's
+/// start), as the reference takes it: the gaps between its calls and host calls, each half its
+/// 68000 cycles rounded down (measured on the 34 corpus files, both parities, all exact). Only the
+/// module's own init code differs by build, and InitSound's last part takes 10 cycles more for
+/// a song entry that switches the LED on and for each voice the entry leaves off. The calls
+/// start on the raster line where the host starts every call (the line phase matters: the DMA-on
+/// waits run to a line).
+fn start_clocks(build: Build, led: bool, off: i64) -> u64 {
+    let (a, b, c) = match build {
+        Build::B1 => (607, 654, 1367),
+        Build::B2 => (489, 536, 1377),
+        Build::B3 => (584, 631, 1640),
+    };
+    let gaps = [a, 26, 67, 8987, 22, b, 22, c, 949 + 10 * led as i64 + 10 * off];
+    gaps.iter().map(|g| (g / 2) as u64).sum()
 }
 
 /// The LED the song init sets for subsong `sub`: on when the
@@ -927,6 +1203,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         // the song init: ENPP_PokeCommand 1 with the song entry's byte 9
         if on { m.bus.ciaa.pra &= !2 } else { m.bus.ciaa.pra |= 2 }
     }
+    let build = lay.build;
+    let off = (0..4).filter(|ch| lay.nsub > 0 && rw(d, lay.base + 2 * ch) == 0).count() as i64;
+    m.bus.clock += start_clocks(build, led == Some(true), off);
     Some(Box::new(Mon {
         d: d.to_vec(),
         gbase: base,
@@ -946,6 +1225,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         ftarget: 0,
         a1: 0,
         v: Default::default(),
+        c: Clk::new(build),
     }))
 }
 

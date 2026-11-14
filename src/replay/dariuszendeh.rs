@@ -9,9 +9,10 @@
 //! variants exist: A (older, 4-byte sample entries), B (8-byte entries) and C (B plus a period
 //! slide feature and 32 steps per row). One song of four voices; a row tick (every second 50 Hz
 //! call) writes all four channels and starts DMA, the tick in between stops the voices marked as
-//! retriggering. Register writes are placed at the clocks the specification measured; the +-1
-//! (A, B) and +-2 (C) colour clock jitter of the original is not modelled (C's fractional gap
-//! means are kept in half colour clocks).
+//! retriggering. Register writes are placed at the clocks the specification measured, kept in
+//! half colour clocks: the original's half-clock gaps (A and B: 36.5 from period to volume; a row
+//! change 18.5 or 22.5) round down to whole clocks, which gives the +-1 colour clock alternation
+//! of the reference's writes between ticks with and without a row change.
 //!
 //! The Mark II driver (prefixes `mk2`, `mkii`) is a different driver and is not covered. The
 //! fade and sound-effect commands of the driver are not used by the player and are not
@@ -204,8 +205,8 @@ impl DariusZendeh {
 
     fn gaps(&self) -> Gaps {
         match self.l.var {
-            Variant::A => Gaps { len_lc: 42, lc_per: 42, per_vol: 74, vol_next: 232, last: 106 },
-            Variant::B => Gaps { len_lc: 46, lc_per: 42, per_vol: 72, vol_next: 236, last: 116 },
+            Variant::A => Gaps { len_lc: 42, lc_per: 42, per_vol: 73, vol_next: 233, last: 107 },
+            Variant::B => Gaps { len_lc: 46, lc_per: 42, per_vol: 73, vol_next: 235, last: 115 },
             Variant::C => Gaps { len_lc: 46, lc_per: 121, per_vol: 81, vol_next: 237, last: 117 },
         }
     }
@@ -272,7 +273,7 @@ impl DariusZendeh {
         if self.rec_entry(0, self.step)[0] == 0xFF || self.step >= self.l.steps {
             self.step = 0;
             self.row += 1;
-            extra += if self.l.var == Variant::A { 38 } else { 44 };
+            extra += if self.l.var == Variant::A { 37 } else { 45 };
             if self.song_byte(self.row, 0) == 0xFF {
                 self.row = 0;
                 extra += 78; // a restart costs 61 in all, 39 more than a row change
@@ -308,8 +309,8 @@ impl Replayer for DariusZendeh {
         } else {
             self.gate = true;
             let extra = self.advance();
-            let first = if self.l.var == Variant::A { 341 } else { 366 };
-            self.write_row(hw, t0, 2 * first + extra);
+            let first = if self.l.var == Variant::A { 683 } else { 732 };
+            self.write_row(hw, t0, first + extra);
         }
     }
 }

@@ -160,6 +160,9 @@ const T_TRACKS: usize = 15;
 /// change (measured, with it).
 const INIT_REST: i64 = 2915;
 const SUBSONG_LEAD: u64 = 219;
+/// The song start's lag behind the end of InitSound (measured: the reference's song starts that
+/// much later, its first tick does not).
+const START_LATE: u64 = 60;
 
 fn detect(d: &[u8]) -> bool {
     // the original checks the mark only
@@ -437,6 +440,8 @@ pub struct Actionamics {
     /// The odd 68000 cycle not yet waited (`spend`).
     cycles: i64,
     trace: Trace,
+    /// The first tick's clock, taken by the engine at the start.
+    first_tick: Option<u64>,
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
@@ -463,9 +468,14 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
         cycles: 0,
         trace: Trace::open(),
+        first_tick: None,
     };
     let mut hw = Hw { bus: &mut m.bus };
     a.start_sound(0, &mut hw, 687);
+    // the reference's start call ends START_LATE colour clocks later, its timer runs from where
+    // it would have without them
+    a.first_tick = Some(hw.bus.clock + super::DT_TICK);
+    hw.wait(START_LATE);
     Some(Box::new(a))
 }
 
@@ -484,6 +494,10 @@ impl Replayer for Actionamics {
 
     fn subsongs(&self) -> (u16, u16, u16) {
         (0, 31, self.sub)
+    }
+
+    fn subsong_tick_at(&mut self) -> Option<u64> {
+        self.first_tick.take()
     }
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {

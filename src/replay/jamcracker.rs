@@ -9,6 +9,14 @@
 //! the sample. A note's sample pointer and length go to Paula before its DMA goes
 //! on, and the loop (or, for a one-shot sample, one word of silence) right after;
 //! both DMACON masks are written on every row, even when no note starts.
+//!
+//! Every write is at the original's colour clock: whole 68000 cycles per code path
+//! (`K`, per voice where the original's differ), a write at the previous one's
+//! clock plus half the cycles since, rounded down, and the song's end a call into
+//! the host; fitted exactly on the write gaps of the Eagleplayer's runs of 48
+//! archive modules and 120 one-change copies (every effect on every voice), and
+//! exact on 28 more copies not in the fit (effects combined). The
+//! song starts on the clock the original's InitPlayer reaches (`start_clocks`).
 
 use super::{be16, be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -51,7 +59,155 @@ struct Voice {
     flags: u8,
 }
 
+macro_rules! costs {
+    ($($name:ident = $c:expr,)*) => {
+        /// The original's code paths, one label per branch, each with the 68000 cycles it takes:
+        /// fitted to the gaps between the writes of the Eagleplayer's write logs (the cycles from
+        /// a run and a second one with the count started a cycle late). The replayer writes Paula
+        /// directly: a write comes at the last one's clock plus half the cycles since, rounded down.
+        #[derive(Clone, Copy)]
+        #[allow(dead_code)]
+        enum K { $($name,)* }
+        const COSTS: &[[i64; 5]] = &[$($c,)*];
+        #[allow(dead_code)]
+        const K_NAMES: &[&str] = &[$(stringify!($name),)*];
+    };
+}
+
+costs! {
+    TickStart = [187, 187, 187, 187, 187],
+    NoRow = [0, 0, 0, 0, 0],
+    Row = [1, 1, 1, 1, 1],
+    PatternEnd = [217, 217, 217, 217, 217],
+    SongWrap = [120, 120, 120, 120, 120],
+    NwVoice = [0, 0, 0, 0, 0],
+    NoteNone = [0, 0, 0, 0, 0],
+    NotePorta = [198, 198, 198, 198, 198],
+    NotePortaIdle = [91, 91, 91, 91, 91],
+    Note = [364, 364, 364, 364, 364],
+    InstZero = [0, 0, 0, 0, 0],
+    InstAm = [63, 63, 63, 63, 63],
+    InstPlain = [79, 79, 79, 79, 79],
+    SpeedNone = [0, 0, 0, 0, 0],
+    Speed = [16, 16, 16, 16, 16],
+    ArpNone = [439, 439, 439, 439, 439],
+    ArpOff = [514, 514, 514, 514, 514],
+    Arp = [566, 566, 566, 566, 566],
+    VibNone = [0, 0, 0, 0, 0],
+    VibOff = [67, 67, 67, 67, 67],
+    Vib = [115, 115, 115, 115, 115],
+    PhaseNone = [0, 0, 0, 0, 0],
+    PhaseOff = [59, 59, 59, 59, 59],
+    Phase = [57, 57, 57, 57, 57],
+    VolOff = [18, 18, 18, 18, 18],
+    VolSet = [67, 67, 67, 67, 67],
+    VolSlide = [56, 56, 56, 56, 56],
+    VolSlideDown = [60, 60, 60, 60, 60],
+    VolSetZero = [60, 60, 60, 60, 60],
+    VolNone = [0, 0, 0, 0, 0],
+    PortaNone = [0, 0, 0, 0, 0],
+    PortaOff = [51, 51, 51, 51, 51],
+    PortaToUp = [0, 0, 0, 0, 0],
+    PortaToDown = [14, 14, 14, 14, 14],
+    PortaDown = [127, 127, 127, 127, 127],
+    PortaUp = [113, 113, 113, 113, 113],
+    DmaOffPre = [0, 0, 0, 0, 0],
+    DmaNoNote = [0, 0, 0, 0, 0],
+    DmaNote = [261, 336, 411, 486, 0],
+    DmaNoteLen = [190, 190, 190, 190, 0],
+    DmaNotePer = [211, 211, 211, 211, 0],
+    OneShot = [350, 337, 324, 265, 0],
+    Looped = [185, 141, 97, 30, 0],
+    DmaOnPre = [516, 516, 516, 516, 516],
+    LoopLoc = [198, 190, 190, 190, 0],
+    LoopLen = [190, 190, 190, 190, 0],
+    Chan = [381, 18, 18, 0, 0],
+    PerRot = [129, 129, 129, 129, 129],
+    PorNeg = [30, 30, 30, 30, 30],
+    PorNegMax = [52, 52, 52, 52, 52],
+    PorPos = [30, 30, 30, 30, 30],
+    PorPosMin = [42, 42, 42, 42, 42],
+    PorZero = [0, 0, 0, 0, 0],
+    PerLo = [1, 1, 1, 1, 1],
+    PerHi = [8, 8, 8, 8, 8],
+    PerIn = [0, 0, 0, 0, 0],
+    PorAddLo = [1, 1, 1, 1, 1],
+    PorAddHi = [16, 16, 16, 16, 16],
+    PorAddIn = [0, 0, 0, 0, 0],
+    VibIdle = [596, 596, 596, 596, 596],
+    VibStep = [649, 649, 649, 649, 649],
+    VibTurn = [36, 36, 36, 36, 36],
+    VolWrite = [0, 23, 46, 46, 0],
+    VolCap = [4, 4, 4, 4, 4],
+    VolLo = [1, 1, 1, 1, 1],
+    VolHi = [16, 16, 16, 16, 16],
+    VolIn = [0, 0, 0, 0, 0],
+    NoAm = [0, 0, 0, 0, 0],
+    AmNoPhase = [21, 21, 21, 21, 21],
+    AmPhase = [3617, 3617, 3617, 3617, 3617],
+    AmPhaseNeg = [16, 16, 16, 16, 16],
+    AmPhaseWrap = [20, 20, 20, 20, 20],
+    ChanEnd = [506, 506, 506, 506, 506],
+}
+
+/// The original's time: 68000 cycles since its last write, and that write's clock.
+struct Timing {
+    acc: i64,
+    t0: u64,
+    fit: Option<std::io::BufWriter<std::fs::File>>,
+    counts: Vec<(u16, u32)>,
+    /// The voice the code works on (4: none); the original's code differs per voice.
+    v: usize,
+}
+
+impl Timing {
+    /// Lets label `k`'s cycles of the original's code pass.
+    fn c(&mut self, k: K) {
+        let k = k as usize;
+        self.acc += COSTS[k][self.v];
+        if self.fit.is_some() {
+            let key = (k * 5 + self.v) as u16;
+            match self.counts.iter_mut().find(|e| e.0 == key) {
+                Some(e) => e.1 += 1,
+                None => self.counts.push((key, 1)),
+            }
+        }
+    }
+
+    /// A call into the host: the time is the last write's (or call's) plus half the cycles since,
+    /// rounded down, and counts on from there.
+    fn call(&mut self) {
+        self.t0 += (self.acc.max(0) / 2) as u64;
+        self.acc = 0;
+    }
+
+    /// Brings the clock to the original's next write (of kind `kind`): the last write's (or the
+    /// tick's start) plus half the cycles since, rounded down; the time counts on from there.
+    fn w(&mut self, hw: &mut Hw, kind: &str) {
+        let at = self.t0 + (self.acc.max(0) / 2) as u64;
+        if let Some(f) = &mut self.fit {
+            use std::io::Write;
+            let names: Vec<String> = self
+                .counts
+                .iter()
+                .map(|&(k, n)| match k % 5 {
+                    4 => format!("{}:{n}", K_NAMES[k as usize / 5]),
+                    v => format!("{}.{v}:{n}", K_NAMES[k as usize / 5]),
+                })
+                .collect();
+            let _ = writeln!(f, "{at} {kind} {}", names.join(" "));
+        }
+        self.counts.clear();
+        if hw.bus.clock < at {
+            hw.wait(at - hw.bus.clock);
+        }
+        self.t0 = at;
+        self.acc = 0;
+    }
+}
+
 pub struct JamCracker {
+    t: Timing,
     /// Guest addresses of the instrument table (40 bytes an instrument), the
     /// pattern table (6 bytes a pattern) and the song table (one word a position).
     inst_table: u32,
@@ -106,6 +262,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         a = a.wrapping_add(be32(d, inst_off + 40 * i + 0x20));
     }
 
+    m.bus.clock += start_clocks(d, num_inst, num_patt, patt_off, song_off, song_len, data_off, a.wrapping_sub(base) as usize);
+
     // a one-shot AM instrument makes the phase effect rewrite 64 bytes below and
     // at the silence (the original: its own 4-byte data hunk and what follows it);
     // here they stay in this allocation
@@ -124,6 +282,13 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
 
     let mut p = JamCracker {
+        t: Timing {
+            acc: 0,
+            t0: 0,
+            fit: std::env::var_os("JAM_FIT").and_then(|p| std::fs::File::create(p).ok()).map(std::io::BufWriter::new),
+            counts: Vec::new(),
+            v: 4,
+        },
         inst_table: base + inst_off as u32,
         patt_table: base + patt_off as u32,
         song_table: base + song_off as u32,
@@ -145,6 +310,47 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     Some(Box::new(p))
 }
 
+/// Colour clocks from the host's call of the original's InitPlayer to the song's start, beyond
+/// the walk of the song (measured in the reference runs).
+const INIT_CLOCKS: u64 = 6443;
+
+/// The time the original takes from InitPlayer to the song's start (measured on the Eagleplayer's
+/// runs of 48 archive modules and 33 one-change copies, exact on all): a walk of the song, 422
+/// 68000 cycles a row and 27 a row per tick of the speed then (a speed set on a row counts from
+/// the next row), 4 a speed set; 108 an instrument, 308 a pattern, 414 a song position; and 34
+/// when the file runs on past its samples.
+fn start_clocks(d: &[u8], num_inst: usize, num_patt: usize, patt_off: usize, song_off: usize, song_len: u16, data_off: usize, end: usize) -> u64 {
+    let rows: Vec<usize> = (0..num_patt).map(|i| be16(d, patt_off + 6 * i) as usize).collect();
+    let mut start = Vec::with_capacity(num_patt);
+    let mut a = data_off;
+    for r in &rows {
+        start.push(a);
+        a += 32 * r;
+    }
+    let mut c: u64 = 108 * num_inst as u64 + 308 * num_patt as u64 + 414 * song_len as u64;
+    let mut wait = 6u64;
+    for k in 0..song_len as usize {
+        let p = be16(d, song_off + 2 * k) as usize;
+        if p >= num_patt {
+            continue;
+        }
+        for r in 0..rows[p] {
+            c += 422 + 27 * wait;
+            for v in 0..4 {
+                let s = d.get(start[p] + 32 * r + 8 * v + 2).copied().unwrap_or(0) & 15;
+                if s != 0 {
+                    wait = s as u64;
+                    c += 4;
+                }
+            }
+        }
+    }
+    if d.len() > end {
+        c += 34;
+    }
+    INIT_CLOCKS + (c + 1) / 2
+}
+
 impl Replayer for JamCracker {
     fn format(&self) -> &'static str {
         "JamCracker"
@@ -159,10 +365,22 @@ impl Replayer for JamCracker {
     }
 
     fn tick(&mut self, hw: &mut Hw) {
+        self.t.t0 = hw.bus.clock;
+        self.t.acc = 0;
+        self.t.counts.clear();
+        if let Some(f) = &mut self.t.fit {
+            use std::io::Write;
+            let _ = writeln!(f, "{} tick", hw.bus.clock);
+        }
+        self.t.v = 4;
+        self.t.c(K::TickStart);
         self.wait_cnt = self.wait_cnt.wrapping_sub(1);
         if self.wait_cnt == 0 {
+            self.t.c(K::Row);
             self.new_note(hw);
             self.wait_cnt = self.wait;
+        } else {
+            self.t.c(K::NoRow);
         }
         for i in 0..4 {
             self.set_channel(i, hw);
@@ -190,9 +408,13 @@ impl JamCracker {
         self.row = self.row.wrapping_add(32);
         self.note_cnt = self.note_cnt.wrapping_sub(1);
         if self.note_cnt == 0 {
+            self.t.c(K::PatternEnd);
             self.song_pos = self.song_pos.wrapping_add(2);
             self.positions_left = self.positions_left.wrapping_sub(1);
             if self.positions_left == 0 {
+                self.t.c(K::SongWrap);
+                // the original tells the host of the song end: a call, and the time counts on from it
+                self.t.call();
                 self.songend = true;
                 self.song_pos = self.song_table;
                 self.positions_left = self.song_len;
@@ -204,33 +426,56 @@ impl JamCracker {
         for i in 0..4 {
             self.nw_note(row + 8 * i as u32, i, hw);
         }
+        self.t.v = 4;
+        self.t.c(K::DmaOffPre);
+        self.t.w(hw, "off");
         hw.dmacon(self.tmp_dmacon);
         // Paula stops a playing voice only at the end of its word, and restarts it
         // only once stopped: the time the original takes between DMA off and on
-        // (measured: 258 colour clocks, and 450 more for each note) decides which
-        // notes retrigger
-        hw.wait(258 + 450 * self.tmp_dmacon.count_ones() as u64);
+        // decides which notes retrigger
         for i in 0..4 {
+            self.t.v = i;
             let v = &mut self.voices[i];
             if self.tmp_dmacon & v.dmacon != 0 {
+                self.t.c(K::DmaNote);
+                self.t.w(hw, "loc");
                 hw.loc(i, v.addr);
+                self.t.c(K::DmaNoteLen);
+                self.t.w(hw, "len");
                 hw.len(i, v.len);
+                self.t.c(K::DmaNotePer);
+                self.t.w(hw, "per");
                 hw.per(i, v.pers[0]);
                 if v.flags & LOOP == 0 {
+                    self.t.c(K::OneShot);
                     v.addr = self.silence;
                     v.len = 1;
+                } else {
+                    self.t.c(K::Looped);
                 }
+            } else {
+                self.t.c(K::DmaNoNote);
             }
         }
+        self.t.v = 4;
+        self.t.c(K::DmaOnPre);
+        self.t.w(hw, "on");
         hw.dmacon(0x8000 | self.tmp_dmacon);
         // the host's ENPP_DMAMask waits for the DMA as dtg_WaitAudioDMA does: to
         // 10 lines past the current one
         let now = hw.bus.clock;
         hw.wait((now / LINE + 10) * LINE - now);
+        self.t.t0 = hw.bus.clock;
         // every voice's loop, whether a note started on it or not
-        for (i, v) in self.voices.iter().enumerate() {
-            hw.loc(i, v.addr);
-            hw.len(i, v.len);
+        for i in 0..4 {
+            self.t.v = i;
+            let (a, l) = (self.voices[i].addr, self.voices[i].len);
+            self.t.c(K::LoopLoc);
+            self.t.w(hw, "loc");
+            hw.loc(i, a);
+            self.t.c(K::LoopLen);
+            self.t.w(hw, "len");
+            hw.len(i, l);
         }
     }
 
@@ -240,12 +485,19 @@ impl JamCracker {
         let b: [u8; 8] = std::array::from_fn(|k| bus.r8(a + k as u32));
         let [note, instr, speed, arp, vib, phase, vol, porta] = b;
         let v = &mut self.voices[i];
+        let t = &mut self.t;
+        t.v = i;
+        t.c(K::NwVoice);
 
-        if note != 0 {
+        if note == 0 {
+            t.c(K::NoteNone);
+        } else {
             let index = note as usize - 1;
             if speed & SPEED_PORTA_TO_NOTE != 0 {
+                t.c(if porta == 0 { K::NotePortaIdle } else { K::NotePorta });
                 v.por_level = period(index) as i16;
             } else {
+                t.c(K::Note);
                 self.tmp_dmacon |= v.dmacon;
                 v.per_index = index;
                 v.pers = [period(index); 3];
@@ -255,15 +507,18 @@ impl JamCracker {
                 let rec = self.inst_table.wrapping_add((instr as i8 as i16 as u16 as u32) * 40);
                 let addr = bus.r32(rec + 0x24);
                 if addr == 0 {
+                    t.c(K::InstZero);
                     v.addr = self.silence;
                     v.len = 1;
                     v.flags = 0;
                 } else {
                     let flags = bus.r8(rec + 0x1f);
                     if flags & AM == 0 {
+                        t.c(K::InstPlain);
                         v.addr = addr;
                         v.len = (bus.r32(rec + 0x20) >> 1) as u16;
                     } else {
+                        t.c(K::InstAm);
                         // NostalgicPlayer copies the waveform to a buffer; the
                         // original plays (and phases) it in place
                         v.addr = addr.wrapping_add(v.wave_offset as u32);
@@ -276,26 +531,37 @@ impl JamCracker {
         }
 
         if speed & 15 != 0 {
+            t.c(K::Speed);
             self.wait = speed & 15;
+        } else {
+            t.c(K::SpeedNone);
         }
 
         let pi = v.per_index;
-        if arp != 0 {
+        if arp == 0 {
+            t.c(K::ArpNone);
+        } else {
             if arp == 255 {
+                t.c(K::ArpOff);
                 v.pers = [period(pi); 3];
             } else {
+                t.c(K::Arp);
                 v.pers[2] = period(pi + (arp & 15) as usize);
                 v.pers[1] = period(pi + (arp >> 4) as usize);
                 v.pers[0] = period(pi);
             }
         }
 
-        if vib != 0 {
+        if vib == 0 {
+            t.c(K::VibNone);
+        } else {
             if vib == 255 {
+                t.c(K::VibOff);
                 v.vib = 0;
                 v.delta_vib = 0;
                 v.vib_cnt = 0;
             } else {
+                t.c(K::Vib);
                 v.vib = 0;
                 v.delta_vib = (vib & 15) as i16;
                 v.vib_max = vib >> 4;
@@ -303,25 +569,36 @@ impl JamCracker {
             }
         }
 
-        if phase != 0 {
+        if phase == 0 {
+            t.c(K::PhaseNone);
+        } else {
+            t.c(if phase == 255 { K::PhaseOff } else { K::Phase });
             v.phase = 0;
             v.delta_phase = if phase == 255 { -1 } else { (phase & 15) as i16 };
         }
 
         // the original sets only the low bytes of the volume words
         if vol == 255 {
+            t.c(K::VolOff);
             v.delta_vol = 0;
         } else if speed & SPEED_SET_VOLUME != 0 {
+            t.c(if vol == 0 { K::VolSetZero } else { K::VolSet });
             v.vol = (v.vol & !0xff) | vol as i16;
             v.vol_level = (v.vol_level & !0xff) | vol as u16;
             v.delta_vol = 0;
         } else if vol != 0 {
+            t.c(if vol & 0x80 != 0 { K::VolSlideDown } else { K::VolSlide });
             let d = (vol & 0x7f) as i16;
             v.delta_vol = if vol & 0x80 != 0 { -d } else { d };
+        } else {
+            t.c(K::VolNone);
         }
 
-        if porta != 0 {
+        if porta == 0 {
+            t.c(K::PortaNone);
+        } else {
             if porta == 255 {
+                t.c(K::PortaOff);
                 v.por = 0;
                 v.delta_por = 0;
             } else {
@@ -330,14 +607,18 @@ impl JamCracker {
                 // a note is negative (NostalgicPlayer keeps it positive)
                 let d = if speed & SPEED_PORTA_TO_NOTE != 0 {
                     if v.por_level > v.pers[0] as i16 {
+                        t.c(K::PortaToUp);
                         porta
                     } else {
+                        t.c(K::PortaToDown);
                         porta.wrapping_neg()
                     }
                 } else if porta & 0x80 == 0 {
+                    t.c(K::PortaDown);
                     v.por_level = 135;
                     porta.wrapping_neg()
                 } else {
+                    t.c(K::PortaUp);
                     v.por_level = 1019;
                     porta & 0x7f
                 };
@@ -348,42 +629,72 @@ impl JamCracker {
 
     fn set_channel(&mut self, i: usize, hw: &mut Hw) {
         let v = &mut self.voices[i];
+        let t = &mut self.t;
+        t.v = i;
+        t.c(K::Chan);
         // (all three periods are never 0: the first one is a note's)
         for _ in 0..3 {
             if v.pers[0] != 0 {
                 break;
             }
+            t.c(K::PerRot);
             v.pers.rotate_left(1);
         }
 
         let mut per = (v.pers[0] as i16).wrapping_add(v.por);
         if v.por < 0 {
+            t.c(if per < v.por_level { K::PorNegMax } else { K::PorNeg });
             per = per.max(v.por_level);
         } else if v.por != 0 {
+            t.c(if per > v.por_level { K::PorPosMin } else { K::PorPos });
             per = per.min(v.por_level);
+        } else {
+            t.c(K::PorZero);
         }
-        per = per.wrapping_add(v.vib).clamp(135, 1019);
+        per = per.wrapping_add(v.vib);
+        t.c(if per < 135 { K::PerLo } else if per > 1019 { K::PerHi } else { K::PerIn });
+        per = per.clamp(135, 1019);
+        t.w(hw, "per");
         hw.per(i, per as u16);
         v.pers.rotate_left(1);
 
-        v.por = v.por.wrapping_add(v.delta_por).clamp(-1019, 1019);
+        let por = v.por.wrapping_add(v.delta_por);
+        t.c(if por < -1019 { K::PorAddLo } else if por > 1019 { K::PorAddHi } else { K::PorAddIn });
+        v.por = por.clamp(-1019, 1019);
 
         if v.vib_cnt != 0 {
+            t.c(K::VibStep);
             v.vib = v.vib.wrapping_add(v.delta_vib);
             v.vib_cnt -= 1;
             if v.vib_cnt == 0 {
+                t.c(K::VibTurn);
                 v.delta_vib = v.delta_vib.wrapping_neg();
                 v.vib_cnt = v.vib_max;
             }
+        } else {
+            t.c(K::VibIdle);
         }
 
         // the original's volume routine masks the volume to 7 bits and caps it at 64
+        t.c(K::VolWrite);
+        if (v.vol as u16) & 0x7f >= 0x40 {
+            t.c(K::VolCap);
+        }
+        t.w(hw, "vol");
         hw.vol(i, ((v.vol as u16) & 0x7f).min(0x40));
-        v.vol = v.vol.wrapping_add(v.delta_vol).clamp(0, 64);
+        let vol = v.vol.wrapping_add(v.delta_vol);
+        t.c(if vol < 0 { K::VolLo } else if vol > 64 { K::VolHi } else { K::VolIn });
+        v.vol = vol.clamp(0, 64);
 
         // NostalgicPlayer tests the loop flag here; the original the AM flag
-        if v.flags & AM != 0 && v.delta_phase != 0 {
+        if v.flags & AM == 0 {
+            t.c(K::NoAm);
+        } else if v.delta_phase == 0 {
+            t.c(K::AmNoPhase);
+        } else {
+            t.c(K::AmPhase);
             if v.delta_phase < 0 {
+                t.c(K::AmPhaseNeg);
                 v.delta_phase = 0;
             }
             // the waveform at the voice's offset in the sample becomes the mean
@@ -397,9 +708,12 @@ impl JamCracker {
             }
             v.phase = v.phase.wrapping_add(v.delta_phase as u16);
             if v.phase as i16 >= 0x100 {
+                t.c(K::AmPhaseWrap);
                 v.phase -= 0x100;
             }
         }
+        t.c(K::ChanEnd);
+        t.v = 4;
     }
 }
 

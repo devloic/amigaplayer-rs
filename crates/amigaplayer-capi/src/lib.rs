@@ -16,10 +16,12 @@ use std::ffi::{c_char, c_double, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Version of this C API, not of the crate: `major * 10000 + minor * 100 + patch`.
-const API_VERSION: c_int = 200; // 0.2.0
+const API_VERSION: c_int = 300; // 0.3.0
 
 thread_local! {
     static LAST: RefCell<(c_int, CString)> = RefCell::new((0, CString::default()));
+    /// The files the last AP_ERR_MISSING_COMPANION named.
+    static MISSING: RefCell<Vec<CString>> = const { RefCell::new(Vec::new()) };
 }
 
 const E_NOT_RECOGNISED: c_int = 1;
@@ -31,6 +33,7 @@ const E_ARGUMENT: c_int = 6;
 const E_GUEST: c_int = 7;
 #[cfg_attr(all(feature = "custom-modules", feature = "songdb"), allow(dead_code))]
 const E_UNSUPPORTED: c_int = 8;
+const E_MISSING_COMPANION: c_int = 9;
 
 /// `ap_open_opts` flag: custom modules may play (their own 68k code is run).
 const OPEN_CUSTOM: u32 = 1;
@@ -38,6 +41,7 @@ const OPEN_CUSTOM: u32 = 1;
 fn set_error(code: c_int, msg: &str) {
     let msg = CString::new(msg.replace('\0', " ")).unwrap_or_default();
     LAST.with(|l| *l.borrow_mut() = (code, msg));
+    MISSING.with(|m| m.borrow_mut().clear());
 }
 
 fn code_of(e: &Error) -> c_int {
@@ -47,12 +51,16 @@ fn code_of(e: &Error) -> c_int {
         Error::InvalidRate(_) => E_RATE,
         Error::SubsongOutOfRange { .. } => E_SUBSONG,
         Error::Guest(_) => E_GUEST,
+        Error::MissingCompanion { .. } => E_MISSING_COMPANION,
         _ => E_INTERNAL,
     }
 }
 
 fn set_from(e: &Error) {
     set_error(code_of(e), &e.to_string());
+    if let Error::MissingCompanion { wanted, .. } = e {
+        MISSING.with(|m| *m.borrow_mut() = wanted.iter().map(|w| cstring(w)).collect());
+    }
 }
 
 /// Runs `f`, turning a panic into an error and `fail`.
@@ -110,6 +118,17 @@ pub extern "C" fn ap_last_error() -> *const c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn ap_last_error_code() -> c_int {
     LAST.with(|l| l.borrow().0)
+}
+
+/// After `AP_ERR_MISSING_COMPANION`: the `i`-th file the format looked for and did not find
+/// (a path relative to the module, as `ap_open_with` takes it), or null past the last. Valid
+/// until the next failing call on this thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn ap_last_missing(i: c_int) -> *const c_char {
+    MISSING.with(|m| {
+        let m = m.borrow();
+        usize::try_from(i).ok().and_then(|i| m.get(i)).map_or(std::ptr::null(), |c| c.as_ptr())
+    })
 }
 
 /// Asks which format plays `data`; copies its NUL-terminated name into `out` (cut to `cap`

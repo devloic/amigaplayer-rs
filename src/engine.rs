@@ -13,6 +13,28 @@ use std::path::{Path, PathBuf};
 
 pub const SCOPE_LEN: usize = 512;
 
+/// The error of a module that an open replayer recognises but cannot set up because files it
+/// reads beside the module are not there (a TFMX `mdat.*` without its `smpl.*`, an IFF-SMUS
+/// score without its `Instruments/`), when no other player takes the module either. In the
+/// engine's `anyhow` errors (downcast to it); the library's `Error::MissingCompanion`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingCompanion {
+    /// The replayer that recognised the module ("TFMX Pro", "IFF-SMUS", ...).
+    pub format: String,
+    /// The files it looked for and did not find, in the order it tried them, each relative to
+    /// the module's directory where it lies in it. Where a replayer tries other names for the
+    /// same file (`smpl.tune`, `tune.smpl`, `smpl.set`), each is listed: one of them is enough.
+    pub wanted: Vec<String>,
+}
+
+impl std::fmt::Display for MissingCompanion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} module, but a file it needs beside it is missing (looked for: {})", self.format, self.wanted.join(", "))
+    }
+}
+
+impl std::error::Error for MissingCompanion {}
+
 /// The NotePlayer genies played through when none was chosen, cheapest first (the
 /// first with enough voices plays); players needing more voices than any has are left
 /// to the built-in renderer.
@@ -828,12 +850,15 @@ impl Engine {
         }) {
             return self.start_native(path, &data, addr, fmt);
         }
+        // an open replayer that recognised the module but missed files beside it
+        let mut declined: Option<MissingCompanion> = None;
         if self.open_replayers {
             // (the format recognised by its file name needs it to be told)
             crate::replay::adpcmmono::set_name(&file_name(path));
             let found = crate::replay::REPLAYERS.iter().find(|o| (o.detect)(&data));
             crate::replay::adpcmmono::set_name("");
             if let Some(o) = found {
+                self.m.os.clear_missing();
                 // a replayer's InitSound may write Paula's registers, as the 68k
                 // players' do after start_deli's reset; it starts at the same phase
                 self.align_start();
@@ -851,6 +876,11 @@ impl Engine {
                     return self.start_replay(r, path);
                 }
                 self.m.heap.free_since(&mark);
+                // declined: for want of its companions, if it looked for files it did not find
+                let wanted = self.m.os.missing_names();
+                if !wanted.is_empty() {
+                    declined = Some(MissingCompanion { format: o.name.to_string(), wanted });
+                }
             }
             // the PC tracker formats of libxmp's loaders (those the open chain
             // takes: see xmp::LEFT_TO_OTHER_PLAYERS)
@@ -910,6 +940,9 @@ impl Engine {
         }
         self.m.deli.list.clear();
         self.m.heap.free(addr);
+        if let Some(e) = declined {
+            return Err(e.into());
+        }
         bail!("unknown module format")
     }
 

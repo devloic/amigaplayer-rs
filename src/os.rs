@@ -127,7 +127,14 @@ pub struct OsState {
     pub new_procs: HashSet<u32>,
     /// dos Delay() of one of `new_procs`: the bus clock it sleeps until.
     pub delays: HashMap<u32, u64>,
+    /// The files `read_file` looked for and did not find, in order (at most `MISSING_MAX`):
+    /// what an open replayer that declines a module was missing (the engine clears it before
+    /// it starts one, and reports it as `engine::MissingCompanion`).
+    missing: std::sync::Mutex<Vec<PathBuf>>,
 }
+
+/// The most names `OsState::missing` keeps.
+const MISSING_MAX: usize = 32;
 
 /// The largest compressed twin (`NAME.xz`, `NAME.gz`) a lookup reads, and the most it
 /// unpacks to.
@@ -1937,7 +1944,34 @@ impl OsState {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.read_twin(p).ok_or(e),
             r => r,
         };
+        if r.is_err() {
+            if let Ok(mut v) = self.missing.lock() {
+                if v.len() < MISSING_MAX && !v.iter().any(|q| q == p) {
+                    v.push(p.to_path_buf());
+                }
+            }
+        }
         r
+    }
+
+    /// Forgets the files `read_file` did not find so far.
+    pub fn clear_missing(&self) {
+        if let Ok(mut v) = self.missing.lock() {
+            v.clear();
+        }
+    }
+
+    /// The files `read_file` looked for and did not find since `clear_missing`, in order,
+    /// each relative to the module's directory where it lies in it (`smpl.tune`,
+    /// `Instruments/Piano.instr`).
+    pub fn missing_names(&self) -> Vec<String> {
+        let v = self.missing.lock().map(|v| v.clone()).unwrap_or_default();
+        v.iter()
+            .map(|p| match p.strip_prefix(&self.module_dir) {
+                Ok(r) if !self.module_dir.as_os_str().is_empty() && !r.as_os_str().is_empty() => r.to_string_lossy().into_owned(),
+                _ => p.to_string_lossy().into_owned(),
+            })
+            .collect()
     }
 
     /// The file a lookup of `p` finds compressed on disk when `p` itself is not there:

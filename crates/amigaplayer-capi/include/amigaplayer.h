@@ -43,7 +43,9 @@ enum {
     AP_ERR_INTERNAL = 5,       /* a replayer failed internally; the song is unusable */
     AP_ERR_ARGUMENT = 6,       /* NULL or malformed argument */
     AP_ERR_GUEST = 7,          /* the 68k code of a custom module failed; the song is silent */
-    AP_ERR_UNSUPPORTED = 8     /* the library was built without what was asked for */
+    AP_ERR_UNSUPPORTED = 8,    /* the library was built without what was asked for */
+    AP_ERR_MISSING_COMPANION = 9 /* recognised, but files it needs beside the module are not
+                                    among the companions: see ap_last_missing() */
 };
 
 /* Flags of ap_open_opts(). */
@@ -59,13 +61,21 @@ enum {
     AP_OPEN_CUSTOM = 1
 };
 
-/* The version of this API: major * 10000 + minor * 100 + patch (0.2.0 is 200). */
+/* The version of this API: major * 10000 + minor * 100 + patch (0.3.0 is 300). */
 int ap_version(void);
 
 /* The message of the last failed call on this thread (empty if none). */
 const char *ap_last_error(void);
 /* The AP_ERR_* code of the last failed call on this thread, 0 if none. */
 int ap_last_error_code(void);
+/*
+ * After AP_ERR_MISSING_COMPANION: the i-th file (from 0) the format looked for and did not
+ * find, a path relative to the module as ap_open_with() takes it ("smpl.tune",
+ * "Instruments/Piano.instr"), or NULL past the last. Where a format knows other names for the
+ * same file each is listed, and one of them is enough. Valid until the next failing call.
+ * New in 0.3.0.
+ */
+const char *ap_last_missing(int i);
 
 /*
  * Which format would play data[0..len)? Copies the NUL-terminated name into out (cut to cap

@@ -85,7 +85,32 @@ while !song.songend() && song.elapsed_secs() < 120.0 {
 | `duration_hint()` | seconds, for recordings and PC trackers; `None` for Amiga replayers |
 | `elapsed_secs()` / `restart()` / `seek(secs)` | position; `seek` restarts and renders up to the point |
 | `title()` / `format()` / `sample_rate()` | metadata |
-| `Error` | `NotRecognised`, `Invalid(String)`, `InvalidRate(u32)`, `SubsongOutOfRange{..}`, `Internal(String)`, `Guest(String)`; `#[non_exhaustive]` |
+| `Error` | `NotRecognised`, `MissingCompanion { format, wanted }`, `Invalid(String)`, `InvalidRate(u32)`, `SubsongOutOfRange{..}`, `Internal(String)`, `Guest(String)`; `#[non_exhaustive]` |
+
+`Error::NotRecognised` means that no replayer claims the bytes. A module a replayer does
+recognise but cannot set up because files it reads beside the module are not there is
+`Error::MissingCompanion { format, wanted }` instead: `format` is the replayer's name (the one
+`detect` gives for the bytes alone: "TFMX Pro", "IFF-SMUS"), `wanted` the files it looked for
+and did not find, in the order it tried them, as paths relative to the module, the form
+`open_with` takes companions in. A host can show them, or fetch them and open again:
+
+```rust
+# use amigaplayer_rs::{Error, Song};
+# let (name, bytes) = ("mdat.tune", amigaplayer_rs::testdata::minimal_mod());
+match Song::open(name, &bytes, 48000) {
+    Err(Error::MissingCompanion { format, wanted }) => eprintln!("{format}: needs one of {wanted:?}"),
+    Err(e) => eprintln!("{e}"),
+    Ok(_song) => {}
+}
+```
+
+Where a format knows other names for the same file each is listed, and one of them is enough
+(a TFMX Pro module `mdat.tune` names `smpl.tune`, then `smpl.set`, the samples of an early
+song; `Tune.tfx` also `Tune.smpl` and `Tune.sam`). A format that stops at the first file it
+misses names that one, and more may be missing after it (IFF-SMUS stops at its first missing
+instrument, `Instruments/Piano.instr`). It is reported only when nothing else plays the module
+either: a format whose check another replayer's module also passes still falls through to the
+other players first.
 
 Rates from 1000 to 768000 Hz are accepted; 44100 and 48000 are what the output stage is
 tuned for. A `Song` is `Send`, not `Sync`; use one per thread. It allocates the emulated machine's
@@ -281,7 +306,18 @@ end, after `--silence` seconds of silence (10) or after `--seconds` (600). `--in
 line of JSON (`title`, `format`, `author`, `backend`, `subsong_min`, `subsong_max`,
 `subsong_default`, `subsong`) and renders nothing; a render prints the same line on standard
 error. Exit status 0 played, 1 not playable (missing, not recognised, no such subsong: nothing
-is written to standard output), 2 wrong usage. A WAV on standard output carries the largest
+is written to standard output), 2 wrong usage. A module that no player recognises is
+`unknown module format`; one that a replayer recognises but cannot play for want of the files
+beside it names the format and what it looked for, e.g. `IFF-SMUS module, but a file it needs
+beside it is missing (looked for: Instruments/AcousticGuitar.ss)` (the player window shows the
+same text).
+
+In builds with the `archives` feature (the default of the applications) a companion looked for
+on disk that is not there as named is also found compressed beside it, `NAME.xz` or `NAME.gz`
+(in any case), and read unpacked: archive collections keep every file so (`mdat.tune.xz`
+beside `smpl.tune.xz`, `song.smus.xz` beside `Instruments/Piano.instr.xz`). The module itself
+may be such a wrapper as before. `Song::open_with` reads no disk: hand it the companions
+unpacked. A WAV on standard output carries the largest
 length in its header, as streams do.
 
 Built with the `songdb` feature as well (`--features "host-68k songdb"`), `--songdb DIR` looks
@@ -328,15 +364,18 @@ The header is `crates/amigaplayer-capi/include/amigaplayer.h` (hand-written, doc
 `ap_open` / `ap_open_with` / `ap_open_opts`, `ap_render_s16` / `ap_render_f32`, `ap_subsongs`,
 `ap_set_subsong`, `ap_songend`, `ap_error` / `ap_error_code`, `ap_elapsed_secs`,
 `ap_duration_hint`, `ap_restart`, `ap_seek`, `ap_title`, `ap_format`, `ap_detect`,
-`ap_detect_custom`, `ap_close`, `ap_last_error` / `ap_last_error_code`, `ap_version`, and the
-`ap_songdb_*` functions.
+`ap_detect_custom`, `ap_close`, `ap_last_error` / `ap_last_error_code` / `ap_last_missing`,
+`ap_version`, and the `ap_songdb_*` functions. `Error::MissingCompanion` is
+`AP_ERR_MISSING_COMPANION` (9): `ap_last_missing(i)` gives the `i`-th file looked for and not
+found (NULL past the last), and `ap_last_error()` names them too.
 An `ap_song *` is an opaque handle; failures return NULL or a negative number and set a
 per-thread error. Custom modules play through `ap_open_opts(..., AP_OPEN_CUSTOM)` (see
 [Custom modules](#custom-modules); `ap_error` reports a module whose code failed); the
 library is built with `custom-modules` by default, and `--no-default-features` leaves the 68000
 hosting out (the flag then fails with `AP_ERR_UNSUPPORTED`). API 0.2.0 (`ap_version()` 200)
 added `ap_open_opts`, `ap_detect_custom`, `ap_error` and `ap_error_code`; nothing changed in
-the functions of 0.1.0. Linking statically needs `-lpthread -ldl -lm`. Other languages bind to it with
+the functions of 0.1.0. API 0.3.0 (`ap_version()` 300) added `AP_ERR_MISSING_COMPANION` and
+`ap_last_missing` (a module recognised without its companions was `AP_ERR_INVALID` before). Linking statically needs `-lpthread -ldl -lm`. Other languages bind to it with
 their FFI (Python `ctypes`/`cffi`, C#, Go `cgo`, Zig, ...).
 
 The [song database](#song-database) is in a library built with the `songdb` feature (off by

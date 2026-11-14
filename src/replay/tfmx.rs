@@ -6650,4 +6650,30 @@ mod tests {
         assert_eq!(super::smpl_names("tune"), ["smpl.tune"]);
         assert_eq!(super::smpl_names(".tfx"), ["smpl..tfx"]);
     }
+
+    #[test]
+    fn a_module_without_its_samples_names_them() {
+        // the library: the format, and each name the samples were looked for under
+        let e = crate::Song::open("mdat.lost", &mdat(b"TFMX-SONG ", &MACRO), 48000).err();
+        let wanted: Vec<String> = ["smpl.lost", "smpl.set"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(e, Some(crate::Error::MissingCompanion { format: "TFMX Pro".into(), wanted: wanted.clone() }));
+        assert_eq!(crate::detect(&mdat(b"TFMX-SONG ", &MACRO)).as_deref(), Some("TFMX Pro"));
+        // given them, it plays
+        let smpl = vec![0x40u8; 64];
+        assert!(crate::Song::open_with("mdat.lost", &mdat(b"TFMX-SONG ", &MACRO), &[("smpl.lost", &smpl)], 48000).is_ok());
+        // the engine's error, on disk (a name of NostalgicPlayer's form adds its two)
+        let dir = std::env::temp_dir().join(format!("amigaplayer-tfmx-test-lost-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        let r = e.play_data(&dir.join("Lost.tfx"), mdat(b"TFMX-SONG ", &MACRO));
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = r.unwrap_err();
+        let m = err.downcast_ref::<crate::engine::MissingCompanion>().unwrap();
+        assert_eq!(m.format, "TFMX Pro");
+        assert_eq!(m.wanted, ["smpl.Lost.tfx", "Lost.smpl", "Lost.sam", "smpl.set"]);
+        assert!(err.to_string().starts_with("TFMX Pro module, but a file it needs beside it is missing (looked for: smpl.Lost.tfx, "));
+        // a module nothing recognises is still that
+        assert_eq!(crate::Song::open("x", b"nothing at all", 48000).err(), Some(crate::Error::NotRecognised));
+    }
 }

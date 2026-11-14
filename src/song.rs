@@ -17,6 +17,21 @@ pub enum Error {
     /// A replayer claims the bytes but cannot play them: corrupt or truncated data, or a
     /// variant it does not support (an AIFF compression, for instance). The text says why.
     Invalid(String),
+    /// A replayer recognises the module but cannot set it up: files it reads beside the module
+    /// are not among the companions given (or, for a module played from disk, not in its
+    /// directory). [`detect`] names the format all the same. Hand the files over with
+    /// [`Song::open_with`] and open it again.
+    MissingCompanion {
+        /// The format that recognised the module ([`detect`]'s answer, "TFMX Pro", "IFF-SMUS").
+        format: String,
+        /// The files it looked for and did not find, in the order it tried them, as paths
+        /// relative to the module (`"smpl.tune"`, `"Instruments/Piano.instr"`), the form
+        /// [`Song::open_with`] takes them in. Where a format knows other names for the same
+        /// file (TFMX: `smpl.tune`, `tune.smpl`, `tune.sam`, `smpl.set`) each is listed, and one
+        /// of them is enough; a format that stops at the first file it misses (IFF-SMUS at
+        /// its first instrument) names that one, and more may be missing after it.
+        wanted: Vec<String>,
+    },
     /// The sample rate is outside `1000..=768000` Hz.
     InvalidRate(u32),
     /// [`Song::set_subsong`] was asked for a subsong outside `first..=last`.
@@ -44,6 +59,9 @@ impl fmt::Display for Error {
         match self {
             Error::NotRecognised => f.write_str("no replayer recognises this data"),
             Error::Invalid(why) => write!(f, "cannot play this module: {why}"),
+            Error::MissingCompanion { format, wanted } => {
+                write!(f, "{format} module, but a file it needs beside it is missing (looked for: {})", wanted.join(", "))
+            }
             Error::InvalidRate(r) => write!(f, "sample rate {r} Hz is outside 1000..=768000"),
             Error::SubsongOutOfRange { requested, first, last } => {
                 write!(f, "subsong {requested} is outside {first}..={last}")
@@ -317,7 +335,10 @@ impl Song {
         };
         match catch_unwind(AssertUnwindSafe(open)) {
             Ok(Ok(s)) => Ok(s),
-            Ok(Err(e)) => Err(Error::Invalid(e.to_string())),
+            Ok(Err(e)) => Err(match e.downcast_ref::<crate::engine::MissingCompanion>() {
+                Some(m) => Error::MissingCompanion { format: m.format.clone(), wanted: m.wanted.clone() },
+                None => Error::Invalid(e.to_string()),
+            }),
             Err(p) => Err(Error::Internal(panic_text(p))),
         }
     }

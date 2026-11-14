@@ -32,13 +32,22 @@
 //!   four voices have jumped;
 //! * the writes come when the original's do (`DeltaMusic1::gap`), so that a
 //!   note's DMA off has time to stop the voice before the tick's DMA on, and so
-//!   that they fall in the same place of a line as the original's.
+//!   that they fall in the same place of a line as the original's: the times are
+//!   the 68000 cycles of the original's code paths, which the engine charges as
+//!   fixed costs per instruction (some odd, so the colour clocks between two host
+//!   calls are half the cycles, rounded down), and the song starts where
+//!   InitSound returns.
 //!
-//! The one difference left: a voice without a note yet reads the last four bytes
-//! of its arpeggio from the code hunk's pointer to the data hunk, so its period
-//! (at volume 0) depends on where the hunks were loaded, and with it whether the
-//! DMA off and on of the voice's first note restart it (a word at that period
-//! can outlast the time between them).
+//! A voice without a note yet reads the last four bytes of its arpeggio from the
+//! code hunk's pointer to the data hunk, so its period (at volume 0) depends on
+//! where the hunks were loaded, and with it whether the DMA off and on of the
+//! voice's first note restart it (a word at that period can outlast the time
+//! between them). The hunks go where the reference loads them (`REF_BLOCK`), so the
+//! periods and those restarts are the reference's. The one difference left: such a
+//! voice plays its waveform from the data hunk + $4E, which is the original's code;
+//! here it is zeros (68k instruction bytes are not embedded). Only when a note's
+//! DMA off and on do not restart the voice is that heard, for the rest of the word
+//! being played, at the note's volume.
 
 use super::{be32, Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -63,6 +72,10 @@ const INSTRUMENTS: u32 = POINTERS + 20;
 const CODE_SIZE: u32 = 0xd00;
 /// The data hunk, all zeros.
 const DATA_SIZE: u32 = 16;
+/// Where the reference's loader puts the data hunk's block: the data hunk at $AC2348 (a voice
+/// without a note writes its waveform, the data hunk + $4E, to AUDxLC: $AC2396 in every reference
+/// run), below the other EP206 Eagleplayers the reference has at the top of the heap.
+const REF_BLOCK: u32 = 0xac2348 - 8;
 
 // A voice's variables.
 const V_HW: u32 = 0x00;
@@ -144,7 +157,7 @@ pub struct DeltaMusic1 {
     songend: bool,
     /// The last register write of this tick, for `gap`.
     last: Option<Write>,
-    /// Colour clocks the original spends on the branches taken since the last
+    /// 68000 cycles the original spends on the branches taken since the last
     /// write, for `gap`.
     spent: i64,
 }
@@ -155,9 +168,16 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     }
     // The hunks as the loader leaves them, from the top of memory: the data hunk's
     // block (size, next segment, 16 bytes), then the code hunk's (size, BPTR to
-    // the data hunk's block, code).
+    // the data hunk's block, code). They go where the reference's loader puts them (`REF_BLOCK`),
+    // or as near below as the heap allows.
     let top = std::mem::replace(&mut m.alloc_top, true);
-    let blk = m.alloc(8 + DATA_SIZE + 8 + CODE_SIZE);
+    let size = 8 + DATA_SIZE + 8 + CODE_SIZE;
+    let mut blk = m.alloc(size);
+    if blk > REF_BLOCK {
+        m.heap.free(blk);
+        m.alloc((blk - REF_BLOCK + 7) & !7);
+        blk = m.alloc(size);
+    }
     m.alloc_top = top;
     if blk == 0 {
         return None;
@@ -193,7 +213,8 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         hw.len(i as usize, 16);
         hw.wait(93);
         hw.vol(i as usize, 0);
-        hw.wait(if i < 3 { 318 } else { 342 });
+        // (InitSound returns 322 after the last write: the song starts there)
+        hw.wait(if i < 3 { 318 } else { 322 });
         for o in (4..VOICE_SIZE).step_by(2) {
             hw.bus.w16(v + o, 0);
         }
@@ -224,6 +245,12 @@ impl Replayer for DeltaMusic1 {
         self.songend
     }
 
+    /// The reference's interrupt calls the player one period after InitSound returns; the
+    /// costs of a tick's first write (`gap`) count from 20 colour clocks after that call.
+    fn timer_delay(&self) -> u64 {
+        20
+    }
+
     fn tick(&mut self, hw: &mut Hw) {
         self.last = None;
         for i in 0..4 {
@@ -236,17 +263,20 @@ impl Replayer for DeltaMusic1 {
         let (now, line) = (hw.bus.clock, crate::paula::LINE);
         hw.wait((now / line + 10) * line - now + 110);
 
-        // every sample's loop, every tick (the original's times: 31 colour clocks
-        // to look at a voice, 118 from its length to its location, 102 after)
+        // every sample's loop, every tick (the original's times, in 68000 cycles
+        // between the host calls: 61 to look at a voice, 2 more to the first
+        // length, 236 from a length to its location, 206 more to the next voice's)
+        let mut c = 2;
         for i in 0..4 {
-            hw.wait(31);
+            c += 61;
             let ins = hw.bus.r32(self.voice(i) + V_INSTRUMENT);
             if hw.bus.r8(ins + I_SAMPLE) != 0 {
+                hw.wait(c / 2);
                 hw.len(i, hw.bus.r16(ins + I_REPEAT_LENGTH));
                 hw.wait(118);
                 let a = ins.wrapping_add(hw.bus.r16(ins + I_REPEAT) as u32).wrapping_add(I_DATA);
                 self.poke_adr(hw, i, a);
-                hw.wait(102);
+                c = 206;
             }
         }
     }
@@ -270,14 +300,7 @@ impl DeltaMusic1 {
     /// The period of note `n`, read from the original's table and past it.
     fn period(&self, hw: &Hw, n: u8) -> u16 {
         // A note past the 84-entry table reads the words that follow it in the original (its
-        // variables and code). Of those only two have been seen read in the reference runs
-        // (notes 124 and 185, 0x11d0 and 0x46a0, where this model's variables hold other
-        // values); the rest read the model's memory.
-        match n {
-            124 => return 0x11d0,
-            185 => return 0x46a0,
-            _ => {}
-        }
+        // variables and code): the model's memory, laid out as the original's at its address.
         hw.bus.r16(self.code + PERIOD_TABLE + 2 * n as u32)
     }
 
@@ -291,26 +314,29 @@ impl DeltaMusic1 {
     /// to the host and the code around it take for this pair of writes. Paula
     /// stops a playing voice only at the end of its word and restarts it only
     /// once stopped, so the time from a note's DMA off to the tick's DMA on
-    /// decides whether the note starts. The times are fitted to the Eagleplayer's
-    /// write logs (to within a few colour clocks); the tick's start counts as a
-    /// volume write.
+    /// decides whether the note starts. The times are in 68000 cycles, and the
+    /// wait is half of them rounded down, as the engine counts the original's
+    /// cycles between two host calls; they are fitted exactly (an integer program
+    /// over every gap) to the Eagleplayer's write logs of seven corpus modules,
+    /// 20 s each, and equal on the other two; the first of a tick counts from the
+    /// tick's start, which counts as a volume write.
     fn gap(&mut self, hw: &mut Hw, next: Write) {
         use Write::*;
         let call: i64 = match (self.last.unwrap_or(Vol), next) {
-            (Vol, Per) => 67,
-            (Vol, Loc) => -5,
-            (Vol, DmaOff) => 3,
-            (Vol, DmaOn) => 108,
-            (DmaOff, Len) => 228,
-            (DmaOff, Loc) => 222,
-            (Loc, Len) => 107,
-            (Len, Loc) => 43,
-            (Len, Per) => 113,
-            (Loc, Per) => 144,
-            (Per, Vol) => 146,
-            _ => 100,
+            (Vol, Per) => 134,
+            (Vol, Loc) => -10,
+            (Vol, DmaOff) => 6,
+            (Vol, DmaOn) => 216,
+            (DmaOff, Len) => 456,
+            (DmaOff, Loc) => 444,
+            (Loc, Len) => 214,
+            (Len, Loc) => 82,
+            (Len, Per) => 226,
+            (Loc, Per) => 288,
+            (Per, Vol) => 291,
+            _ => 200,
         };
-        hw.wait((self.spent + call).max(0) as u64);
+        hw.wait(((self.spent + call) / 2).max(0) as u64);
         self.spent = 0;
         self.last = Some(next);
     }
@@ -323,15 +349,15 @@ impl DeltaMusic1 {
         let r16 = |hw: &Hw, a: u32| hw.bus.r16(a);
         let r32 = |hw: &Hw, a: u32| hw.bus.r32(a);
 
-        self.spent += 130;
+        self.spent += 260;
         let c = r8(hw, v + V_COUNTER).wrapping_sub(1);
         hw.bus.w8(v + V_COUNTER, c);
         if c == 0 {
-            self.spent += 94;
+            self.spent += 188;
             hw.bus.w8(v + V_COUNTER, r8(hw, code + SPEED));
             if r32(hw, v + V_BLOCK_POS) == 0 {
                 // the next block of the track; $FFFF jumps
-                self.spent += 74;
+                self.spent += 149;
                 let mut word;
                 let mut guard = 0;
                 loop {
@@ -341,7 +367,7 @@ impl DeltaMusic1 {
                     if word != 0xffff {
                         break;
                     }
-                    self.spent += 121;
+                    self.spent += 242;
                     let mut ended = r16(hw, code + ENDED) | 1 << (10 + i);
                     if ended == 0x3c00 {
                         self.songend = true;
@@ -364,13 +390,13 @@ impl DeltaMusic1 {
             }
             let row = r32(hw, v + V_BLOCK).wrapping_add(r32(hw, v + V_BLOCK_POS));
             if r8(hw, row + 2) != 0 {
-                self.spent += 20;
+                self.spent += 40;
                 hw.bus.w8(v + V_EFFECT, r8(hw, row + 2));
                 hw.bus.w8(v + V_ARG, r8(hw, row + 3));
             }
             let note = r8(hw, row + 1);
             if note != 0 {
-                self.spent += 7;
+                self.spent += 14;
                 hw.bus.w8(v + V_NOTE, note.wrapping_add(r8(hw, v + V_TRANSPOSE)));
                 self.gap(hw, Write::DmaOff);
                 hw.dmacon(r16(hw, v + V_DMA).wrapping_sub(0x8000) & 0xf);
@@ -392,7 +418,7 @@ impl DeltaMusic1 {
                 }
                 self.gap(hw, Write::Len);
                 hw.len(i, ((r16(hw, ins + I_LENGTH) as i16) >> 1) as u16);
-                self.spent += 156;
+                self.spent += 312;
                 hw.bus.w8(v + V_VIB_WAIT, r8(hw, ins + I_VIB_WAIT));
                 let len = r8(hw, ins + I_VIB_LENGTH);
                 hw.bus.w8(v + V_VIB_LENGTH, len);
@@ -408,36 +434,38 @@ impl DeltaMusic1 {
             }
             let pos = r32(hw, v + V_BLOCK_POS).wrapping_add(4);
             if pos == 0x40 {
-                self.spent += 12;
+                self.spent += 24;
             }
             hw.bus.w32(v + V_BLOCK_POS, if pos == 0x40 { 0 } else { pos });
         }
 
         // the sound table, for a synth sound
         if r8(hw, ins + I_SAMPLE) == 0 {
-            self.spent += 28;
+            self.spent += 55;
             let delay = r8(hw, v + V_TABLE_DELAY);
             if delay != 0 {
-                self.spent -= 4;
+                self.spent -= 8;
                 hw.bus.w8(v + V_TABLE_DELAY, delay - 1);
             } else {
-                self.spent += 32;
+                self.spent += 64;
                 hw.bus.w8(v + V_TABLE_DELAY, r8(hw, ins + I_TABLE_DELAY));
                 // the original loops for ever on a table without a waveform
                 for _ in 0..0x1000 {
-                    self.spent += 69;
+                    self.spent += 137;
                     let mut pos = r8(hw, v + V_TABLE_POS);
                     if (pos.wrapping_sub(0x30) as i8) >= 0 {
-                        self.spent += 10; // estimated: 20 cycles
+                        self.spent += 20; // estimated: 20 cycles
                         hw.bus.w8(v + V_TABLE_POS, 0);
                         pos = 0;
                     }
                     let a = r32(hw, v + V_TABLE).wrapping_add(pos as u32);
                     let step = r8(hw, a);
                     if step == 0xff {
+                        self.spent -= 8;
                         hw.bus.w8(v + V_TABLE_POS, r8(hw, a + 1));
                     } else if step & 0x80 != 0 {
                         // a new delay, in the instrument
+                        self.spent += 4;
                         hw.bus.w8(ins + I_TABLE_DELAY, step & 0x7f);
                         hw.bus.w8(v + V_TABLE_POS, pos.wrapping_add(1));
                     } else {
@@ -459,10 +487,10 @@ impl DeltaMusic1 {
             let d1 = r16(hw, v + V_PORTAMENTO);
             let target = self.period(hw, r8(hw, v + V_NOTE)).wrapping_add(r16(hw, v + V_BEND));
             if d1 == 0 {
-                self.spent += 41;
+                self.spent += 82;
                 hw.bus.w16(v + V_PORTAMENTO, target);
             } else if d1 != target {
-                self.spent += 66;
+                self.spent += 132;
                 let p = if d1 < target {
                     let p = d1.wrapping_add(speed as u16);
                     if (p.wrapping_sub(target) as i16) < 0 {
@@ -480,32 +508,32 @@ impl DeltaMusic1 {
                 };
                 hw.bus.w16(v + V_PORTAMENTO, p);
             } else {
-                self.spent += 50;
+                self.spent += 100;
             }
         }
 
         // vibrato
         let wait = r8(hw, v + V_VIB_WAIT);
         if wait != 0 {
-            self.spent += 158;
+            self.spent += 316;
             hw.bus.w8(v + V_VIB_WAIT, wait - 1);
         } else {
-            self.spent += 232;
+            self.spent += 464;
             let pos = r8(hw, v + V_VIB_POS);
             hw.bus.w16(v + V_VIB_FREQ, pos as u16 * r8(hw, ins + I_VIB_STEP) as u16);
             let status = r8(hw, v + V_STATUS);
             let pos = if status & 1 == 0 {
                 let p = pos.wrapping_add(1);
                 if p == r8(hw, v + V_VIB_COMPARE) {
-                    self.spent += 10;
+                    self.spent += 20;
                     hw.bus.w8(v + V_STATUS, status ^ 1);
                 }
                 p
             } else {
-                self.spent -= 11;
+                self.spent -= 22;
                 let p = pos.wrapping_sub(1);
                 if p == 0 {
-                    self.spent += 10;
+                    self.spent += 20;
                     hw.bus.w8(v + V_STATUS, status ^ 1);
                 }
                 p
@@ -517,7 +545,7 @@ impl DeltaMusic1 {
         let rate = r8(hw, ins + I_BEND_RATE);
         let bend = r16(hw, v + V_BEND);
         let bend = if rate & 0x80 != 0 {
-            self.spent += 7;
+            self.spent += 14;
             bend.wrapping_add(rate.wrapping_neg() as u16)
         } else {
             bend.wrapping_sub(rate as u16)
@@ -530,19 +558,19 @@ impl DeltaMusic1 {
         let clamped = |s: &mut i64, b: u8| {
             // estimated: 8 cycles
             if (b.wrapping_sub(0x41) as i8) >= 0 {
-                *s += 4;
+                *s += 8;
             }
             clamp(b)
         };
         let effect = r8(hw, v + V_EFFECT) & 0x1f;
         self.spent += match effect {
-            0x00 | 0x1f => 52,
-            0x01 => 68,
-            0x02 | 0x03 => 60,
-            0x04 => 122,
-            0x0a | 0x17 | 0x19 | 0x1d => 66,
-            0x13..=0x16 => 64, // estimated: one store more
-            _ => 58,
+            0x00 | 0x1f => 104,
+            0x01 => 137,
+            0x02 | 0x03 => 120,
+            0x04 => 244,
+            0x0a | 0x17 | 0x19 | 0x1d => 133,
+            0x13..=0x16 => 128, // estimated: one store more
+            _ => 116,
         };
         match effect {
             0x01 => {
@@ -610,11 +638,11 @@ impl DeltaMusic1 {
                     hw.bus.w8(v + V_ATTACK, d - 1);
                     break 'envelope;
                 }
-                self.spent += 32;
+                self.spent += 69;
                 hw.bus.w8(v + V_ATTACK, r8(hw, ins + I_ATTACK_DELAY));
                 vol = vol.wrapping_add(r8(hw, ins + I_ATTACK_STEP));
                 if vol >= 0x40 {
-                    self.spent += 19;
+                    self.spent += 37;
                     phase |= 2;
                     status(hw, &|s| s | 2);
                     vol = 0x40;
@@ -623,15 +651,15 @@ impl DeltaMusic1 {
             if phase == 2 {
                 let d = r8(hw, v + V_DECAY);
                 if d != 0 {
-                    self.spent += 5;
+                    self.spent += 11;
                     hw.bus.w8(v + V_DECAY, d - 1);
                     break 'envelope;
                 }
-                self.spent += 38;
+                self.spent += 77;
                 hw.bus.w8(v + V_DECAY, r8(hw, ins + I_DECAY_DELAY));
                 vol = vol.wrapping_sub(r8(hw, ins + I_DECAY_STEP));
                 if vol <= r8(hw, ins + I_VOLUME) {
-                    self.spent += 19;
+                    self.spent += 40;
                     vol = r8(hw, ins + I_VOLUME);
                     phase |= 6;
                     status(hw, &|s| s | 6);
@@ -640,26 +668,26 @@ impl DeltaMusic1 {
             if phase == 6 {
                 let s = r16(hw, v + V_SUSTAIN);
                 if s != 0 {
-                    self.spent += 16;
+                    self.spent += 30;
                     hw.bus.w16(v + V_SUSTAIN, s - 1);
                     break 'envelope;
                 }
-                self.spent += 26;
+                self.spent += 49;
                 phase |= 0x0e;
                 status(hw, &|s| s | 0x0e);
             }
             if phase == 0x0e {
                 let d = r8(hw, v + V_RELEASE);
                 if d != 0 {
-                    self.spent += 22;
+                    self.spent += 45;
                     hw.bus.w8(v + V_RELEASE, d - 1);
                     break 'envelope;
                 }
-                self.spent += 30;
+                self.spent += 61;
                 hw.bus.w8(v + V_RELEASE, r8(hw, ins + I_RELEASE_DELAY));
                 vol = vol.wrapping_sub(r8(hw, ins + I_RELEASE_STEP));
                 if (vol as i8) < 0 {
-                    self.spent += 12;
+                    self.spent += 24;
                     status(hw, &|s| s & 9);
                     vol = 0;
                 }

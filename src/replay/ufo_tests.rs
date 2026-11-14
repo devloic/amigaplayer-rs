@@ -156,7 +156,7 @@ fn chunk_walk_and_limits() {
     assert_eq!(p.insts[5].loop_start - p.insts[5].start, 4);
     // the chunk after the unknown id is not read
     assert!(!p.tracks[1].active);
-    assert_eq!(p.counts, [1, 2, 1, 0]);
+    assert_eq!(p.counts, [1, 2, 1, 2, 1, 1, 0]);
 }
 
 #[test]

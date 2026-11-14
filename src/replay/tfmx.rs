@@ -820,20 +820,48 @@ fn divu(n: u32, d: u16) -> u16 {
     }
 }
 
+/// The names the samples of the module `file` are looked for under, in order: the
+/// original's ExtLoad, `smpl.NAME` for `mdat.NAME` (the prefix in any case), else `smpl.FILE`;
+/// then, as NostalgicPlayer looks for them, `NAME.smpl` and `NAME.sam` for a module named
+/// `NAME.EXT` (`NAME.tfx` / `NAME.sam` in the NostalgicPlayer collections). A `.xz` or `.gz`
+/// suffix of the module's name (a wrapper the engine undid) is left out of the later names.
+fn smpl_names(file: &str) -> Vec<String> {
+    fn prefixed(f: &str) -> Option<&str> {
+        match f.get(..5) {
+            Some(p) if p.eq_ignore_ascii_case("mdat.") => Some(&f[5..]),
+            _ => None,
+        }
+    }
+    let mut v = vec![format!("smpl.{}", prefixed(file).unwrap_or(file))];
+    let lower = file.to_ascii_lowercase();
+    let bare = if lower.ends_with(".xz") || lower.ends_with(".gz") { &file[..file.len() - 3] } else { file };
+    match prefixed(bare) {
+        Some(rest) => v.push(format!("smpl.{rest}")),
+        None => {
+            if let Some((stem, _)) = bare.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) {
+                v.push(format!("{stem}.smpl"));
+                v.push(format!("{stem}.sam"));
+            }
+        }
+    }
+    v.dedup();
+    v
+}
+
+/// The module's samples: the first of `smpl_names` there is.
+fn read_smpl(m: &Machine) -> Option<Vec<u8>> {
+    let file = m.bus.read_cstr(m.deli.file_buf);
+    smpl_names(&file).iter().find_map(|n| crate::deli::read_companion(m, n).1.ok())
+}
+
 fn new_pro(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_pro(d) {
         return None;
     }
-    // ExtLoad: smpl.NAME for mdat.NAME (the prefix in any case), else smpl.FILE
-    let file = m.bus.read_cstr(m.deli.file_buf);
-    let rest = match file.get(..5) {
-        Some(p) if p.eq_ignore_ascii_case("mdat.") => &file[5..],
-        _ => &file[..],
-    };
-    let smpl_data = match crate::deli::read_companion(m, &format!("smpl.{rest}")).1 {
-        Ok(s) => s,
+    let smpl_data = match read_smpl(m) {
+        Some(s) => s,
         // an early song of the fixed tables, whose samples are `smpl.set`
-        Err(_) => return new_early(d, base, m),
+        None => return new_early(d, base, m),
     };
     let smpl = m.alloc((smpl_data.len() as u32).max(4));
     if smpl == 0 {
@@ -3296,12 +3324,7 @@ fn new_15(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_15(d) {
         return None;
     }
-    let file = m.bus.read_cstr(m.deli.file_buf);
-    let rest = match file.get(..5) {
-        Some(p) if p.eq_ignore_ascii_case("mdat.") => &file[5..],
-        _ => &file[..],
-    };
-    let smpl_data = crate::deli::read_companion(m, &format!("smpl.{rest}")).1.ok()?;
+    let smpl_data = read_smpl(m)?;
     build_15(d, base, m, &smpl_data, false)
 }
 
@@ -4695,12 +4718,7 @@ fn new_7v(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_7v(d) {
         return None;
     }
-    let file = m.bus.read_cstr(m.deli.file_buf);
-    let rest = match file.get(..5) {
-        Some(p) if p.eq_ignore_ascii_case("mdat.") => &file[5..],
-        _ => &file[..],
-    };
-    let smpl_data = crate::deli::read_companion(m, &format!("smpl.{rest}")).1.ok()?;
+    let smpl_data = read_smpl(m)?;
     let smpl = m.alloc((smpl_data.len() as u32).max(4));
     if smpl == 0 {
         return None;
@@ -6588,5 +6606,16 @@ mod tests {
         let b: Vec<u8> = (0..240).map(|i| e.m.bus.r8(buf + i)).collect();
         assert!(b.iter().all(|&x| x == 0x30 || x == 0xd0 || x == 0), "{b:02x?}");
         assert!(b.contains(&0x30) && b.contains(&0xd0));
+    }
+
+    #[test]
+    fn sample_file_names() {
+        assert_eq!(super::smpl_names("mdat.Tune"), ["smpl.Tune"]);
+        assert_eq!(super::smpl_names("MDAT.tune.xz"), ["smpl.tune.xz", "smpl.tune"]);
+        // NostalgicPlayer's names: NAME.tfx beside NAME.sam (or NAME.smpl)
+        assert_eq!(super::smpl_names("X-Out - Title.tfx"), ["smpl.X-Out - Title.tfx", "X-Out - Title.smpl", "X-Out - Title.sam"]);
+        assert_eq!(super::smpl_names("Tune.mdat.gz"), ["smpl.Tune.mdat.gz", "Tune.smpl", "Tune.sam"]);
+        assert_eq!(super::smpl_names("tune"), ["smpl.tune"]);
+        assert_eq!(super::smpl_names(".tfx"), ["smpl..tfx"]);
     }
 }

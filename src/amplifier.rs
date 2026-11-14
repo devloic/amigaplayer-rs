@@ -96,15 +96,33 @@ pub enum Poke {
     /// OctaMED SoundStudio's does, play samples that long). Latched like LEN.
     LenBytes(u32),
     Per(u16),
-    /// The period in 1/PER_SUB colour clocks, for a player that hands its mixer a pitch finer than
-    /// Paula's whole periods (its log entry is the rounded period).
-    PerFine(u32),
+    /// The sample rate in Hz, for a voice of a NotePlayer genie's mix (PolyTracker): the genie
+    /// steps through the sample by `genie_step` a mixed sample, not by colour clocks (its log
+    /// entry is the nearest Paula period).
+    Rate(u32),
     Vol(u16),
     Dma(bool),
 }
 
 /// Units of a direct voice's period in a colour clock.
 pub const PER_SUB: u32 = 1024;
+
+/// The NotePlayer genie's mix rate in whole Hz, which its steps count in (Paula plays its buffers
+/// at period 245, 14477.1 Hz).
+const GENIE_HZ: u64 = 14477;
+
+/// A genie voice's step through its sample a mixed sample, 16.16 fixed point, for a sample rate
+/// of `hz`: `hz * 65536 / 14477` rounded down. Measured on the genie's DMA fetches (19 PolyTracker
+/// modules, 543 notes of 60-300 mixed samples from their start): the positions it plays are those
+/// of this step from a zero fraction at the note's start, where the exact clock ratio drifts by
+/// a sample in a few hundred.
+fn genie_step(hz: u32) -> u32 {
+    (hz as u64 * 65536 / GENIE_HZ).min(u32::MAX as u64) as u32
+}
+
+fn rate_period(hz: u32) -> f64 {
+    PAULA_CLOCK_PAL / hz.max(1) as f64
+}
 
 /// A virtual voice fed by pokes: Paula's registers and its DMA's position.
 #[derive(Clone, Default)]
@@ -123,6 +141,10 @@ struct Voice {
     /// The byte playing, and the colour clocks it has played.
     pos: u32,
     phase: u32,
+    /// A genie voice's 16.16 step a mixed sample (`Poke::Rate`; 0: it steps by `per`), and the
+    /// fraction of the byte it is in.
+    step: u32,
+    frac: u32,
 }
 
 impl Voice {
@@ -136,12 +158,15 @@ impl Voice {
             }
             Poke::LenBytes(b) => self.len_bytes = b.max(1),
             Poke::Per(p) => self.per = p as u32 * PER_SUB,
-            Poke::PerFine(p) => self.per = p,
+            Poke::Rate(r) => {
+                self.per = (rate_period(r) * PER_SUB as f64).round().clamp(1.0, u32::MAX as f64) as u32;
+                self.step = genie_step(r);
+            }
             Poke::Vol(v) => self.vol = if v & 64 != 0 { 64 } else { (v & 63) as u8 },
             Poke::Dma(true) if !self.on => {
                 self.on = true;
                 self.latch();
-                (self.pos, self.phase) = (0, 0);
+                (self.pos, self.phase, self.frac) = (0, 0, 0);
             }
             Poke::Dma(true) => {}
             Poke::Dma(false) => self.on = false,
@@ -163,6 +188,13 @@ impl Voice {
     /// Plays `cc` colour clocks. Returns whether a block ended (Paula's
     /// interrupt).
     fn run(&mut self, cc: u32) -> bool {
+        if self.step != 0 {
+            // a genie voice: its step a mixed sample
+            self.frac += self.step & 0xFFFF;
+            self.pos += (self.step >> 16) + (self.frac >> 16);
+            self.frac &= 0xFFFF;
+            return self.wrap();
+        }
         let per = if self.per == 0 { 0x10000 * PER_SUB } else { self.per };
         self.phase += cc * PER_SUB;
         if self.phase < per {
@@ -170,6 +202,12 @@ impl Voice {
         }
         self.pos += self.phase / per;
         self.phase %= per;
+        self.wrap()
+    }
+
+    /// Past the block's end: the next block, as Paula reloads LOC and LEN. Returns whether a block
+    /// ended (Paula's interrupt).
+    fn wrap(&mut self) -> bool {
         let mut ended = false;
         while self.pos >= self.bytes {
             self.pos -= self.bytes;
@@ -396,7 +434,7 @@ impl Amplifier {
                 }
                 Poke::LenBytes(x) => l.push((a + 4, (x / 2).min(0xFFFF) as u16, t)),
                 Poke::Per(x) => l.push((a + 6, x, t)),
-                Poke::PerFine(x) => l.push((a + 6, ((x + PER_SUB / 2) / PER_SUB).min(0xFFFF) as u16, t)),
+                Poke::Rate(r) => l.push((a + 6, rate_period(r).round().min(65535.0) as u16, t)),
                 Poke::Vol(x) => l.push((a + 8, x, t)),
                 Poke::Dma(on) => l.push((a + 0xA, if on { 0x8000 } else { 0 }, t)),
             }
@@ -417,7 +455,7 @@ impl Amplifier {
                 w8(ram, s + aus::LOOP, (b != 0) as u8);
             }
             Poke::Per(p) => w16(ram, s + aus::PER, p << 2),
-            Poke::PerFine(p) => w16(ram, s + aus::PER, (p * 4 / PER_SUB).min(0xFFFF) as u16),
+            Poke::Rate(r) => w16(ram, s + aus::PER, (4.0 * rate_period(r)).round().min(65535.0) as u16),
             Poke::Vol(x) => {
                 w16(ram, s + aus::VOL, x.min(64));
                 w16(ram, s + aus::VOL + 2, x.min(64));

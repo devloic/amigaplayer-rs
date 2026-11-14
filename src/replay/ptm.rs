@@ -34,8 +34,9 @@
 //!   interpolation; a 16-bit sample keeps its high byte;
 //! - effect 1 slides the pitch down and 2 up (libxmp's loader maps them the other way round),
 //!   as the Eagleplayer does (measured with synthetic modules on it, plain, fine and extra fine);
-//! - the voice's pitch is not rounded to a whole Paula period (`Hw::voice_per_fine`, 1/1024 colour
-//!   clock): the genie's mix steps by the exact pitch, where whole periods were up to 0.1% off;
+//! - the voice's pitch is not a Paula period: the genie's mix steps through the sample by the rate
+//!   in Hz over its 14477 Hz in 16.16 fixed point, rounded down (`Hw::voice_rate`, measured on the
+//!   genie's DMA fetches), where whole periods were up to 0.1% off;
 //! - the sample rate is a whole number of Hz (rounded down) and a sample's C4 speed acts as the exact
 //!   ratio to 8363 Hz, not cut to a semitone shift and a 1/128 semitone fine tune (both measured
 //!   with synthetic modules on the Eagleplayer: its pitches are multiples of 1 Hz, to 1 ppm);
@@ -51,7 +52,6 @@
 //! loop's LOC and LEN, as ProTracker writes them.
 
 use super::{Hw, Open, Replayer};
-use crate::amplifier::PER_SUB;
 use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "PolyTracker", detect, new };
@@ -96,7 +96,6 @@ const INSTR: usize = 80;
 /// Period of C-0, and the period of the C4 speed's note in the colour clocks of
 /// Paula over the mixer's: the voice period is `libxmp period * PAULA / (428 * 8363)`.
 const PERIOD_BASE: f64 = 13696.0;
-const PAULA_PAL: f64 = 3_546_895.0;
 const KEY_OFF: u16 = 0xFFFF;
 
 // Row flags, as libxmp's SET/TEST.
@@ -1021,7 +1020,7 @@ impl Ptm {
         }
     }
 
-    /// One tick of one channel. Returns the voice's period and volume, if it plays.
+    /// One tick of one channel. Returns the voice's sample rate (Hz) and volume, if it plays.
     fn play_channel(&mut self, chn: usize) -> Option<(i32, i32)> {
         if self.ch[chn].delay > 0 {
             self.ch[chn].delay -= 1;
@@ -1137,10 +1136,9 @@ impl Ptm {
         let fin = PERIOD_BASE / 2f64.powf((xc.note as f64 + bend as f64 / 12800.0) / 12.0);
         // the sample rate in whole Hz (C4 at 8363 Hz for the period 428), rounded down, as the
         // Eagleplayer hands it to the genie, with the C4 speed's exact ratio (not cut to 1/128
-        // semitones); the voice's period is the clock over that rate
+        // semitones); the genie steps by it
         let rate = (428.0 * 8363.0 / fin * self.smps[xc.smp].corr).floor().max(1.0);
-        let per = (PAULA_PAL / rate * PER_SUB as f64).round().clamp(PER_SUB as f64, 65535.0 * PER_SUB as f64) as i32;
-        Some((per, out_vol))
+        Some((rate.min(i32::MAX as f64) as i32, out_vol))
     }
 
     fn voice_start(&self, hw: &mut Hw, v: usize, off: i32) {
@@ -1235,7 +1233,7 @@ impl Replayer for Ptm {
             if let (Some((per, vol)), true) = (r, loop_after) {
                 if per != self.ch[v].last_per {
                     self.ch[v].last_per = per;
-                    hw.voice_per_fine(v, per as u32);
+                    hw.voice_rate(v, per as u32);
                 }
                 if vol != self.ch[v].last_vol {
                     self.ch[v].last_vol = vol;

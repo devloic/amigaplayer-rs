@@ -622,8 +622,8 @@ impl Hw<'_> {
         self.bus.amp_poke(v, Poke::Per(period));
     }
     /// The period in 1/PER_SUB colour clocks (`amplifier::PER_SUB`).
-    pub fn voice_per_fine(&mut self, v: usize, period: u32) {
-        self.bus.amp_poke(v, Poke::PerFine(period));
+    pub fn voice_rate(&mut self, v: usize, hz: u32) {
+        self.bus.amp_poke(v, Poke::Rate(hz));
     }
     pub fn voice_vol(&mut self, v: usize, vol: u16) {
         self.bus.amp_poke(v, Poke::Vol(vol));

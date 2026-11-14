@@ -12,6 +12,7 @@ mod crunchmania;
 mod ice;
 mod imploder;
 mod mmcmp;
+mod modcrusher;
 mod powerplayer;
 mod s404;
 mod sqsh;
@@ -22,9 +23,14 @@ mod ancient_tests;
 mod depack_tests;
 #[cfg(test)]
 mod imploder_tests;
+#[cfg(test)]
+mod modcrusher_tests;
 
 /// libxmp's `LIBXMP_DEPACK_LIMIT`.
 pub(crate) const DEPACK_LIMIT: usize = 512 << 20;
+
+/// The largest file modCRUSHER output may claim.
+const MAX_RAW_OUT: usize = 32 << 20;
 
 /// Zeroed buffer that fails instead of aborting when it cannot be allocated.
 pub(crate) fn alloc_zeroed(n: usize) -> Option<Vec<u8>> {
@@ -70,6 +76,7 @@ pub(crate) enum Kind {
     CrunchMania,
     PowerPlayer,
     Imploder,
+    ModCrusher,
     Xpk(xpk::Method),
     #[cfg(feature = "archives")]
     Gzip,
@@ -91,6 +98,8 @@ fn ancient_kind(data: &[u8]) -> Option<Kind> {
         Some(Kind::PowerPlayer)
     } else if imploder::test(data) {
         Some(Kind::Imploder)
+    } else if modcrusher::test(data) {
+        Some(Kind::ModCrusher)
     } else {
         xpk::test(data).map(Kind::Xpk)
     }
@@ -101,6 +110,7 @@ fn ancient_depack(kind: Kind, data: &[u8]) -> Option<Vec<u8>> {
         Kind::CrunchMania => crunchmania::depack(data),
         Kind::PowerPlayer => powerplayer::depack(data),
         Kind::Imploder => imploder::depack(data),
+        Kind::ModCrusher => modcrusher::depack(data),
         Kind::Xpk(_) => xpk::depack(data),
         _ => None,
     }
@@ -111,6 +121,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::CrunchMania => "CrunchMania",
         Kind::PowerPlayer => "PowerPlayer",
         Kind::Imploder => "Imploder",
+        Kind::ModCrusher => "modCRUSHER",
         Kind::Xpk(m) => m.name(),
         _ => "",
     }
@@ -162,7 +173,7 @@ pub(crate) fn unpack_identified(data: &[u8]) -> Option<(Kind, Option<Vec<u8>>)> 
             }
         }
         Kind::StoneCracker => s404::depack(data),
-        Kind::CrunchMania | Kind::PowerPlayer | Kind::Imploder | Kind::Xpk(_) => ancient_depack(kind, data),
+        Kind::CrunchMania | Kind::PowerPlayer | Kind::Imploder | Kind::ModCrusher | Kind::Xpk(_) => ancient_depack(kind, data),
         #[cfg(feature = "archives")]
         Kind::Gzip | Kind::Xz => crate::archive::unwrap_single(data, WRAPPER_LIMIT).flatten(),
     };

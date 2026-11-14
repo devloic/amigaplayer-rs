@@ -16,6 +16,7 @@
 //! | [`CrunchMania`](Packer::CrunchMania) | `CrM!` / `CrM2` / `Crm!` / `Crm2` (and renamed headers) |
 //! | [`PowerPlayer`](Packer::PowerPlayer) | `SFHD` / `SFCD` |
 //! | [`Imploder`](Packer::Imploder)     | `IMP!` and its variants (`ATN!`, `EDAM`, `M.H.`, `BDPI`, `CHFI`, `RDC9`, `Dupa`, `FLT!`, `PARA`) |
+//! | [`ModCrusher`](Packer::ModCrusher) | `Okm0` / `OkmC` (clean-room; not streams past 32451 symbols) |
 //! | [`XpkImpl`](Packer::XpkImpl)         | XPK container with the IMPL (Imploder) method |
 //! | [`XpkBzp2`](Packer::XpkBzp2)         | XPK container with the BZP2 method |
 //! | [`XpkBlzw`](Packer::XpkBlzw)         | XPK container with the BLZW method |
@@ -65,6 +66,8 @@ pub enum Packer {
     PowerPlayer,
     /// File Imploder (`IMP!` and the variants of other crunchers and productions).
     Imploder,
+    /// modCRUSHER (`Okm0`, `OkmC`).
+    ModCrusher,
     /// XPK container using the IMPL (Imploder) method.
     XpkImpl,
     /// XPK container using the BZP2 (bzip2) method.
@@ -105,6 +108,7 @@ impl Packer {
             Packer::CrunchMania => "CrunchMania",
             Packer::PowerPlayer => "PowerPlayer",
             Packer::Imploder => "Imploder",
+            Packer::ModCrusher => "modCRUSHER",
             Packer::XpkImpl => "XPK IMPL",
             Packer::XpkBzp2 => "XPK BZP2",
             Packer::XpkBlzw => "XPK BLZW",
@@ -140,6 +144,7 @@ impl From<Kind> for Packer {
             Kind::CrunchMania => Packer::CrunchMania,
             Kind::PowerPlayer => Packer::PowerPlayer,
             Kind::Imploder => Packer::Imploder,
+            Kind::ModCrusher => Packer::ModCrusher,
             Kind::Xpk(m) => match m {
                 XpkMethod::Impl => Packer::XpkImpl,
                 XpkMethod::Bzp2 => Packer::XpkBzp2,

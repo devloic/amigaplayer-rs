@@ -55,6 +55,9 @@ fn sample_loop(s: &Smp, len: usize) -> (bool, bool, u32, u32) {
 
 /// The sample pre-amp libopenmpt sets from the header's sample volume.
 fn preamp(song: &Song) -> u32 {
+    if let Some(v) = song.mix_volume {
+        return v;
+    }
     if song.sample_volume < 0 {
         (song.sample_volume as i32 + 52) as u32
     } else {

@@ -990,8 +990,9 @@ BLACKBOX_PREFIX = ('delusiondigitalmusicformat',)
 # the port lifts libxmp's 512 KB cap on a packed 8-bit sample. Un4seen MO3: libxmp has no loader (the
 # port reads the file as libopenmpt 0.8.7 does and plays the module put back into its format on the
 # libxmp port's loader of that format). The port plays them on libxmp's mixer, openmpt123 on its own:
-# at best SIMILAR.
-XMP_REFUSED_BLACKBOX = ('digitrakker', 'un4seenmo3')
+# at best SIMILAR. DSIK RIFF DSM: no libxmp loader either (the port reads it as libopenmpt 0.8.7 does
+# and plays it put into S3M, src/mptconv).
+XMP_REFUSED_BLACKBOX = ('digitrakker', 'un4seenmo3', 'dsikriffdsm')
 
 
 def blackbox_key(fmt):

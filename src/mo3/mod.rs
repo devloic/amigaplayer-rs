@@ -21,7 +21,7 @@
 
 mod codec;
 pub mod unpack;
-mod write;
+pub(crate) mod write;
 
 use crate::xmp::load::Hio;
 use crate::xmp::module::ModuleData;
@@ -284,6 +284,9 @@ pub(crate) struct Song {
     pub mtm_version: Option<u8>,
     pub rows_per_beat: Option<(u8, u8)>,
     pub midi: Option<Vec<u8>>,
+    /// The sample pre-amp itself (OpenMPT's `m_nSamplePreAmp`), for a module not read from an
+    /// MO3 file (`crate::mptconv`); None: from `sample_volume`.
+    pub mix_volume: Option<u32>,
 }
 
 /// `MO3FileHeader::MO3HeaderFlags`.
@@ -592,6 +595,7 @@ pub(crate) fn read(file: &[u8]) -> Option<Song> {
         mtm_version: None,
         rows_per_beat: None,
         midi: None,
+        mix_volume: None,
     };
     for (i, m) in song.fixed_macros.iter_mut().enumerate() {
         *m = [h[166 + i * 2], h[167 + i * 2]];

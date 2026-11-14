@@ -527,7 +527,16 @@ fn render_module(e: &mut Engine, a: &Args, st: &Started, out: &mut Sink) -> Resu
     // database's length, which are not written until sound follows them
     let window = (SONGDB_SILENCE_SECS * a.rate as f64) as u64;
     let (mut run, mut held) = (0u64, 0u64);
-    let i16_of = |s: f32| (s * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+    // (s * 32768).round().clamp(-32768, 32767), without the libm call `round` is on x86-64
+    // before SSE4.1: clamping first gives the same (the bounds are whole numbers), and in
+    // that range truncation and the fraction left are exact. NaN gives 0 either way.
+    let i16_of = |s: f32| {
+        let x = (s * 32768.0).clamp(-32768.0, 32767.0);
+        let t = x as i32;
+        let f = x - t as f32;
+        // (without branches: which way a sample rounds is unpredictable)
+        (t + (f >= 0.5) as i32 - (f <= -0.5) as i32) as i16
+    };
     while done < limit {
         let mut n = (limit - done).min(4096) as usize;
         if let Some(len) = songdb_len.filter(|&len| done < len) {

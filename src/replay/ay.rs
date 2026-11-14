@@ -188,6 +188,12 @@ pub fn detect(d: &[u8]) -> bool {
     d.len() >= 8 && (&d[..8] == MAGIC || &d[..8] == MAGIC_AMAD) && parse(d).is_some()
 }
 
+/// The format name the player reports for the tune: "ZXAYAMAD" or "ZXAYEMUL".
+pub fn format_of(d: &[u8]) -> Option<&'static str> {
+    let ay = parse(d)?;
+    Some(if ay.songs[ay.first as usize].amad.is_some() { "ZXAYAMAD" } else { "ZXAYEMUL" })
+}
+
 /// The container's type tag ("EMUL", "AMAD", "ST11", "STRC", ...) of a `ZXAY` file.
 pub fn type_id(d: &[u8]) -> Option<&[u8]> {
     (d.len() >= 8 && &d[..4] == b"ZXAY").then(|| &d[4..8])

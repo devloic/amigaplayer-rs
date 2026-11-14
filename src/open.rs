@@ -19,6 +19,24 @@ pub fn detect(data: &[u8]) -> Option<String> {
     if crate::aiff::detect(data) {
         return Some("AIFF".to_string());
     }
+    // the recorded-audio formats the engine plays on the same player, in its order (IFF 8SVX and
+    // RIFF WAVE of the kinds the decoders know, MPEG audio that decodes, ZX Spectrum AY tunes);
+    // one that does not decode is not claimed
+    if crate::iff8svx::detect(data) {
+        return crate::iff8svx::decode(data.to_vec()).ok().map(|p| p.format.to_string());
+    }
+    if crate::riffwave::detect(data) {
+        return crate::riffwave::decode(data.to_vec()).ok().map(|p| p.format.to_string());
+    }
+    if crate::mpegaudio::detect(data) {
+        // (a stream the frame check takes but that does not decode is left to the other players)
+        if let Ok(p) = crate::mpegaudio::decode(data.to_vec()) {
+            return Some(p.format.to_string());
+        }
+    }
+    if crate::replay::ay::detect(data) {
+        return crate::replay::ay::format_of(data).map(str::to_string);
+    }
     // an NSF that needs an expansion chip does not play: not claimed
     if crate::replay::nsf::detect(data) {
         return crate::replay::nsf::check(data).ok().map(|_| "NSF".to_string());
@@ -47,7 +65,13 @@ pub fn detect(data: &[u8]) -> Option<String> {
 /// files: Infogrames and Rob Hubbard 2 modules are one format and pass both checks, and
 /// Infogrames hands a module with no bank of its own name (`rh.ins` beside it) to Rob Hubbard 2.
 pub fn claimed_by_several(data: &[u8]) -> bool {
-    if crate::aiff::detect(data) || crate::replay::nsf::detect(data) {
+    if crate::aiff::detect(data)
+        || crate::iff8svx::detect(data)
+        || crate::riffwave::detect(data)
+        || crate::mpegaudio::detect(data)
+        || crate::replay::ay::detect(data)
+        || crate::replay::nsf::detect(data)
+    {
         return false;
     }
     let data = crate::decrunch::decrunch(data.to_vec());

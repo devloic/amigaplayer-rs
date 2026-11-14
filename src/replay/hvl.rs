@@ -6,8 +6,8 @@
 //! the original's flags say, not by visiting a position twice). HivelyTracker
 //! is AHX's successor: up to 16 channels with a pan each, two effects a step
 //! and a play list entry, and a speed multiplier of 1 to 4. AHX-format modules
-//! ("THX") play through `ahx.rs`, which follows the Eagleplayer's binary
-//! replayer instead.
+//! ("THX") play through `ahx.rs`, which follows the AHX-DeliPlayer 2.3d-sp3
+//! instead.
 //!
 //! The original is a software mixer: every voice is a 640-byte waveform loop
 //! (the instrument's wavelength repeated) played at 3546895 / period Hz at a

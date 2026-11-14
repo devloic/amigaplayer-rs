@@ -3,43 +3,52 @@
 //! BSD 3-Clause licence: see LICENSE-ahx2play), a port of AHX 2.3d-sp3's
 //! replayer.
 //!
-//! The Eagleplayer ("THX Soundsystem Eagleplayer Replayer module V2.1",
-//! Martin Wodok and Buggs of DEFECT) runs AHX's external replayer, the
-//! "THX-Sound_System_BinaryPlayer_2.00", which differs from the tracker's
-//! replayer that ahx2play ports; where they differ this follows the
-//! Eagleplayer. It plays from the module in memory, as the original does:
-//! tracks are `TrackLength` rows apart and read from the module (track 0 of a
-//! module that leaves it out reads 64 KB past the tracks for a position
-//! jump's parameter), instruments and their play lists are the module's (a
-//! jump past an instrument's list reads the next one), and nothing is clamped
-//! or range-checked. Its waveforms (triangles, sawtooths, squares, noise and
-//! their 31 low- and high-pass filtered copies) are built in guest memory in
-//! the original's layout, and each voice's 0x280-byte buffer in chip memory is
-//! rewritten from them when its waveform changes, as the original's SetAudio
-//! does. Every tick starts with SetAudio: a new period goes out with a volume
-//! of 0 after it (the Eagleplayer's poke), then the buffer is copied, then the
-//! volume.
+//! It follows the "AHX-DeliPlayer 2.3d-sp3" (UADE's AbyssHighestExperience,
+//! the original the comparisons run), checked against its Paula write logs
+//! and the words its Paula fetches, not ahx2play where the two differ. It
+//! plays from the module in memory: tracks are `TrackLength` rows apart and
+//! read from the module (track 0 of a module that leaves it out reads 64 KB
+//! past the tracks for a position jump's parameter), instruments and their
+//! play lists are the module's (a jump past an instrument's list reads the
+//! next one), and nothing is clamped or range-checked. Its waveforms
+//! (triangles, sawtooths, squares, noise and their 31 low- and high-pass
+//! filtered copies) are built in guest memory in the original's layout (their
+//! block 0x404 bytes past the module: a filter position of 0 reads before the
+//! low passes), and each voice's 0x280-byte buffer in chip memory is rewritten
+//! from them when its waveform changes, as the original's SetAudio does. Every tick
+//! starts with SetAudio: a new period, then the buffer's copy, then the volume;
+//! the noise's copy starts at an even offset of the noise.
 //!
-//! Not in this replayer (they are in the tracker's): effects E1, E2 (fine
-//! slides) and E4 (vibrato control); EA and EB (fine volume slides, once per
-//! row on the note's volume) are, as the reference's volume writes show. Its new instrument
-//! clears the portamento's speed, not the play list's slide speed; a play
-//! list filter command that takes the 4xx override's position rebuilds the
-//! waveform too; a voice starts with its square limits and sign at 0; the
-//! volume's product is taken in 16 bits, with the envelope's high byte signed;
-//! revision 0 modules ignore the filter commands (track effect 4, play list
-//! command 0 and the parameter of command 4) instead of having them cleared at
-//! load time; the noise generator's seed carries over from subsong to subsong.
-//! Effect 0 sets the jump's high position to its parameter's low nibble, and
-//! B back to the current position or before it and F00, like the wrap at the
-//! song's last position, signal the song's end. A note
-//! below 0 reads the original's code (see `before_periods`). The tick rate is
-//! the module's (CIA timer 14209, 7104, 4736 or 3552), set once at load.
+//! As the tracker's replayer it has the fine slides E1 and E2, the vibrato
+//! control E4 and the fine volume slides EA and EB (after a new instrument's
+//! volume). As AHX's external replayer (and unlike ahx2play) a note cut EC0
+//! does nothing; effect 0 sets the jump's hundreds (B adds its parameter to
+//! it times 100); a new instrument clears the portamento's speed, not the play
+//! list's slide speed; a play list filter command that takes the 4xx
+//! override's position rebuilds the waveform too; revision 0 modules ignore
+//! the filter commands (track effect 4, play list command 0 and the parameter
+//! of command 4), which comes to the same as the tracker clearing them at load
+//! time. The volume's product is taken in 16 bits, with the envelope's high
+//! byte signed; the noise generator's seed carries over from subsong to
+//! subsong. Only the wrap at the song's last position signals the song's end
+//! (not B back nor F00, which the original plays on). A note below 0 reads the
+//! original's code (see `before_periods`).
+//!
+//! The timing is the DeliPlayer's: CIA-A timer A starts at a fixed time with
+//! 14209, the module's tempo (14209, 7104, 4736 or 3552) from its first
+//! underflow on; InitSound sets the voices up (DMA off, each voice's period,
+//! buffer, length and volume 0, DMA on) after it, and the song starts after a
+//! loop over the instruments. An underflow during the start runs at once when
+//! it ends. The writes of a tick are timed in 68000 cycles from its interrupt.
+//! Not modelled: a tick that comes while the previous one still runs (seen
+//! after three subsong changes in a row, where the first tick's interrupt came
+//! during the start), and a subsong change keeps the voices' DMA running in the
+//! original, where the engine turns it off and the port on again.
 
 use super::{be16, Hw, Open, Replayer};
 use crate::bus::Bus;
 use crate::machine::Machine;
-use crate::paula::LINE;
+use m68k::AddressBus;
 
 pub const OPEN: Open = Open { name: "AHX", detect, new };
 
@@ -65,208 +74,75 @@ const BUFFER: u32 = 0x280;
 /// CIA periods of the header's four tempos.
 const TIMERS: [u16; 4] = [14209, 7104, 4736, 3552];
 
-// Colour clocks of the original's code, fitted to the Eagleplayer's logs.
-/// InitSound's four volume pokes, apart.
-const QUIET_GAP: u64 = 19;
-/// From InitSound's last poke to the timer's start.
-const INIT_TO_TIMER: u64 = 10793;
-/// From EndSound's first VOL0 write to InitSound's first.
-const END_TO_INIT: u64 = 10895 - 4 * QUIET_GAP;
-/// From the interrupt to the first SetAudio (its first write comes TO_PERIOD
-/// or TO_VOLUME later).
-const ENTRY: u64 = 74;
-/// The first tick's setup pokes, from the interrupt.
-const SETUP_DMA_OFF: u64 = 113;
-const SETUP_LOC: u64 = 33;
-const SETUP_LOC_NEXT: u64 = 38;
-const SETUP_REG: [u64; 3] = [23, 21, 19];
-const SETUP_DMA_ON: u64 = 34;
-/// From the end of the DMA wait to the first voice's volume.
-const SETUP_TO_VOICE: u64 = 156;
-/// SetAudio: from the previous write to the period, to its volume 0, and from
-/// there to the volume; or to the volume with no period.
-const TO_PERIOD: u64 = 138;
-const PERIOD_TO_ZERO: u64 = 19;
-const ZERO_TO_VOLUME: u64 = 100;
-const TO_VOLUME: u64 = 148;
-/// The buffer's copy: a waveform's, with a cost per pass over it (5 passes
-/// for 128 bytes, 160 for 4), or the noise's.
-const COPY: u64 = 2565;
-const COPY_PASS: u64 = 32;
-const COPY_NOISE: u64 = 2122;
+// The DeliPlayer's start, in colour clocks from the open replayer's start
+// (the host's own work first: the same for every module), fitted to its logs.
+/// To the start of CIA-A timer A (its first period is always 14209).
+const TIMER_START: u64 = 1_421_574 - crate::engine::START_PHASE;
+const FIRST_TIMER: u64 = 14209;
+/// From the timer's start to InitSound's DMA off: a revision 0 module takes
+/// longer (the same time for all).
+const TIMER_TO_DMA_OFF: u64 = 4962;
+const TIMER_TO_DMA_OFF_REV0: u64 = 138_568;
+/// From the DMA off to the first voice's set-up (shorter for revision 0).
+const DMA_OFF_TO_SETUP: u64 = 18150;
+const DMA_OFF_TO_SETUP_REV0: u64 = 18009;
+/// The set-up of a voice: its period, then the address, the length and the
+/// volume, apart; the next voice's period; the DMA on after the last one; the
+/// filter and ADKCON writes after it.
+const SETUP_LOC: u64 = 12;
+const SETUP_LEN: u64 = 8;
+const SETUP_VOL: u64 = 8;
+const SETUP_NEXT: u64 = 25;
+const SETUP_DMA_ON: u64 = 25;
+const SETUP_LED: u64 = 12;
+const SETUP_ADK: u64 = 10;
+/// From the ADKCON write to the song's start: a time per instrument, more
+/// with subsongs, less with track 0 left out of the module and with a tempo
+/// other than 50 Hz.
+const TO_START: u64 = 12727 - SETUP_LED - SETUP_ADK;
+const START_INSTRUMENT: u64 = 34;
+const START_SUBSONGS: u64 = 16;
+const START_NULL_TRACK: u64 = 2;
+const START_TEMPO: u64 = 4;
+/// A subsong change: EndSound's zero volumes, apart, and from the first one
+/// to the new start.
+const END_VOLUME: u64 = 133;
+const END_GAP: u64 = 10;
+const END_TO_START: u64 = 11143;
 
-// The Eagleplayer's start: before InitSound's first write the host runs the
-// player's InitPlayer, which builds the waveforms (the same time for every
-// module) and the module info, whose song-length scan and loops over the
-// instruments and their names take a time that depends on the module. Its
-// 68000 cycles (two a colour clock), counted per code path and checked
-// against the first write of all 483 reference logs.
-/// The cycles that do not depend on the module, with the host's own.
-const START_CYCLES: u64 = 71_475_758 + 9594;
-/// Per instrument (its two loops), per byte of the title and of the names,
-/// with subsongs, with a title, with track 0 in the module.
-const START_INSTRUMENT: u64 = 134;
-const START_BYTE: u64 = 17;
-const START_SUBSONGS: u64 = 36;
-const START_TITLE: u64 = 16;
-const START_TRACK0: u64 = 8;
-/// The song-length scan: its set-up, a position, a voice's track, with track 0
-/// left out of the module, a row (its speed loop a pass, the rest), a voice's
-/// call and move on, the end of a row and the next, after the last, the end.
-const SCAN_SETUP: u64 = 3571;
-const SCAN_POSITION: u64 = 54;
-const SCAN_TRACK: u64 = 209;
-const SCAN_NULL_SUB: u64 = 13;
-const SCAN_NULL_ZERO: u64 = 4;
-const SCAN_ROWS: u64 = 411;
-const SCAN_SPEED: u64 = 27;
-const SCAN_ROW: u64 = 36;
-const SCAN_CALL: u64 = 99;
-const SCAN_NEXT: u64 = 38;
-const SCAN_ROW_END: u64 = 64;
-const SCAN_ROW_NEXT: u64 = 14;
-const SCAN_LAST: u64 = 33;
-const SCAN_EXIT: u64 = 465;
-/// The effect of a row: 0, B (it ends the scan; more with a position other
-/// than the first), D, F (0 ends it), E (with a D0 command), the others.
-const SCAN_E0: u64 = 149;
-const SCAN_EB: u64 = 409;
-const SCAN_EB_MORE: u64 = 95;
-const SCAN_ED: u64 = 241;
-const SCAN_EF: u64 = 139;
-const SCAN_EF_END: u64 = 125;
-const SCAN_EE: u64 = 156;
-const SCAN_EE_D0: u64 = 150;
-const SCAN_EOTHER: u64 = 119;
+// SetAudio, in 68000 cycles from the interrupt (two a colour clock): to the
+// first voice's period or (without one) volume, from a period to its volume,
+// from a volume to the next voice's period or volume; the buffer's copy (a
+// waveform's, with a cost per pass over it: 5 passes for 128 bytes, 160 for
+// 4; or the noise's) comes before the volume.
+const ENTRY_TO_PERIOD: u64 = 472;
+const ENTRY_TO_VOLUME: u64 = 493;
+const PERIOD_TO_VOLUME: u64 = 57;
+const VOLUME_TO_PERIOD: u64 = 132;
+const VOLUME_TO_VOLUME: u64 = 153;
+const COPY: u64 = 5129;
+const COPY_PASS: u64 = 64;
+const COPY_NOISE: u64 = 4243;
 
-/// The colour clocks from the host's start to InitSound's first write, for
-/// a module's bytes (what lies past them reads as 0).
+/// The colour clocks from the ADKCON write to the song's start, for a module's
+/// header.
 fn start_clocks(d: &[u8]) -> u64 {
-    let b = |a: i64| -> i64 {
-        if a >= 0 && (a as usize) < d.len() {
-            d[a as usize] as i64
-        } else {
-            0
-        }
-    };
-    let fl = ((d[6] as i64) << 8) | d[7] as i64;
-    let (ns, len_nr, tl, ni) = (d[13] as i64, fl & 0x3FF, d[10] as i64, d[12] as i64);
-    let null = fl & 0x8000 != 0;
-    let (pos, tracks) = (14 + 2 * ns, 14 + 2 * ns + 8 * len_nr);
-    let mut cyc = START_CYCLES + SCAN_SETUP;
-    if len_nr != 0 {
-        let last = pos + 8 * (len_nr - 1);
-        let (mut a0, mut speed, mut start_row) = (pos - 8, 6i64, 0i64);
-        'scan: loop {
-            a0 += 8;
-            cyc += SCAN_POSITION;
-            let mut ptr = [0i64; 4];
-            for (v, p) in ptr.iter_mut().enumerate() {
-                let mut t = b(a0 + 2 * v as i64);
-                cyc += SCAN_TRACK;
-                if null {
-                    cyc += SCAN_NULL_SUB;
-                    t -= 1;
-                    if t < 0 {
-                        t = 0;
-                        cyc += SCAN_NULL_ZERO;
-                    }
-                }
-                *p = tracks + ((((t * tl) & 0xFFFF) + start_row) & 0xFFFF) * 3;
-            }
-            cyc += SCAN_ROWS;
-            if last < a0 {
-                break;
-            }
-            let mut rows = ((tl - 1 - start_row) & 0xFFFF) + 1;
-            start_row = 0;
-            let mut brk = false;
-            loop {
-                cyc += SCAN_SPEED * speed.max(1) as u64 + SCAN_ROW;
-                for p in ptr.iter_mut() {
-                    let (e, param) = (b(*p + 1) & 0xF, b(*p + 2));
-                    let mut end = false;
-                    cyc += match e {
-                        0 => SCAN_E0,
-                        0xB => {
-                            end = true;
-                            SCAN_EB + if pos != a0 { SCAN_EB_MORE } else { 0 }
-                        }
-                        0xD => {
-                            start_row = ((param >> 4) * 10 + (param & 0xF)) & 0xFF;
-                            brk = true;
-                            SCAN_ED
-                        }
-                        0xF if param == 0 => {
-                            end = true;
-                            SCAN_EF_END
-                        }
-                        0xF => {
-                            speed = param;
-                            SCAN_EF
-                        }
-                        0xE => SCAN_EE + if param & 0xF0 == 0xD0 { SCAN_EE_D0 } else { 0 },
-                        _ => SCAN_EOTHER,
-                    };
-                    cyc += SCAN_CALL;
-                    if end {
-                        break 'scan;
-                    }
-                    cyc += SCAN_NEXT;
-                    *p += 3;
-                }
-                cyc += SCAN_ROW_END;
-                if brk {
-                    break;
-                }
-                cyc += SCAN_ROW_NEXT;
-                rows -= 1;
-                if rows == 0 {
-                    cyc += SCAN_LAST;
-                    if last > a0 {
-                        break;
-                    }
-                    break 'scan;
-                }
-            }
-        }
+    let flags = be16(d, 6);
+    let mut t = TO_START + START_INSTRUMENT * d[12] as u64;
+    if d[13] != 0 {
+        t += START_SUBSONGS;
     }
-    cyc += SCAN_EXIT;
-    // the module info: the instruments (past the tracks, as InitModule's
-    // adda.w takes their size), then the title and the names
-    let sz = ((tl * 3 * (d[11] as i64 + !null as i64)) & 0xFFFF) as u16 as i16 as i64;
-    let mut a = 14 + 2 * ns + 8 * len_nr + sz;
-    for _ in 0..ni {
-        a += 22 + 4 * b(a + 0x15);
+    if flags & 0x8000 != 0 {
+        t -= START_NULL_TRACK;
     }
-    let mut t = a;
-    while b(t) != 0 {
-        t += 1;
+    if flags & 0x6000 != 0 {
+        t -= START_TEMPO;
     }
-    cyc += START_BYTE * (t - a + 1) as u64 + START_INSTRUMENT * ni as u64;
-    if b(a) != 0 {
-        cyc += START_TITLE;
-    }
-    let mut p = t + 1;
-    for _ in 0..ni {
-        let q = p;
-        while b(p) != 0 {
-            p += 1;
-        }
-        cyc += START_BYTE * (p - q + 1) as u64;
-        p += 1;
-    }
-    if ns != 0 {
-        cyc += START_SUBSONGS;
-    }
-    if !null {
-        cyc += START_TRACK0;
-    }
-    cyc / 2
+    t
 }
 
 fn detect(d: &[u8]) -> bool {
-    // the Eagleplayer's check: "THX" and a revision of 0 or 1
+    // "THX" and a revision of 0 or 1 (the THX Eagleplayer's check)
     d.len() >= 14 && d.starts_with(b"THX") && d[3] <= 1
 }
 
@@ -363,7 +239,12 @@ pub struct Ahx {
     block: u32,
     chip: u32,
     voices: [Voice; 4],
-    first_tick: bool,
+    /// The next underflow of the timer (colour clock), the first tick's time
+    /// when it differs (an interrupt that came during the start runs at its
+    /// end), and the song's start.
+    tick_due: u64,
+    first_due: Option<u64>,
+    start: u64,
     step_wait: u16,
     get_new_position: bool,
     tempo: u16,
@@ -440,18 +321,20 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let revision = d[3];
     m.bus.w8(base + 3, 0);
 
-    // the block goes where the reference's lies, 0x400 bytes past the module
-    // in amigaplayer-rs's heap: an empty track's parameter, read 64 KB past the
-    // tracks, can land in it. The voice buffers are in chip memory, at the
-    // heap's top.
+    // the block goes where the reference's lies, 0x404 bytes past the
+    // module in amigaplayer-rs's heap: an empty track's parameter,
+    // read 64 KB past the tracks, or a waveform at filter position 0, which
+    // reads before the low passes, can land in it or in the module. The voice
+    // buffers are in chip memory, at the heap's top.
     let top = std::mem::replace(&mut m.alloc_top, false);
-    let block = m.alloc(BLOCK_SIZE);
+    let block = m.alloc(BLOCK_SIZE + 4);
     m.alloc_top = true;
     let chip = m.alloc(4 * BUFFER);
     m.alloc_top = top;
     if block == 0 || chip == 0 {
         return None;
     }
+    let block = block + 4;
     build_waves(&mut m.bus, block);
 
     let mut p = Ahx {
@@ -470,7 +353,9 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         block,
         chip,
         voices: Default::default(),
-        first_tick: false,
+        tick_due: 0,
+        first_due: None,
+        start: 0,
         step_wait: 0,
         get_new_position: false,
         tempo: 6,
@@ -484,11 +369,39 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         songend: false,
     };
     let mut hw = Hw { bus: &mut m.bus };
+    // the timer starts (at the first period, the module's comes at its first
+    // underflow), then InitSound sets the voices up: DMA off, each voice's
+    // period, buffer, length and volume 0, DMA on
+    let timer_start = hw.bus.clock + TIMER_START;
+    let rev0 = revision == 0;
+    hw.wait(TIMER_START + if rev0 { TIMER_TO_DMA_OFF_REV0 } else { TIMER_TO_DMA_OFF });
+    hw.dmacon(0x000F);
+    hw.wait(if rev0 { DMA_OFF_TO_SETUP_REV0 } else { DMA_OFF_TO_SETUP });
+    for v in 0..4 {
+        if v > 0 {
+            hw.wait(SETUP_NEXT);
+        }
+        hw.per(v, 0x88);
+        hw.wait(SETUP_LOC);
+        hw.loc(v, p.chip + BUFFER * v as u32);
+        hw.wait(SETUP_LEN);
+        hw.len(v, 0x140);
+        hw.wait(SETUP_VOL);
+        hw.vol(v, 0);
+    }
+    hw.wait(SETUP_DMA_ON);
+    hw.dmacon(0x800F);
+    // the LED bit of CIA-A's port set (the filter off), the modulations off
+    hw.wait(SETUP_LED);
+    hw.bus.ciaa.pra |= 2;
+    hw.wait(SETUP_ADK);
+    hw.bus.write_word(0xDFF09E, 0x00FF);
+    p.init_sub_song(0, hw.bus);
     hw.wait(start_clocks(d));
-    p.init_sub_song(0, &mut hw);
-    hw.wait(INIT_TO_TIMER);
-    // the init routine sets the LED bit of CIA-A's port: the filter is off
-    m.bus.ciaa.pra |= 2;
+    p.start = hw.bus.clock;
+    // its underflows come on the E clock (a colour clock in five)
+    p.tick_due = (timer_start + (FIRST_TIMER + 1) * 5) / 5 * 5;
+    p.catch_up();
     Some(Box::new(p))
 }
 
@@ -630,7 +543,19 @@ impl Replayer for Ahx {
     }
 
     fn tick_clocks(&self) -> u64 {
-        (self.timer as u64 + 1) * 5
+        // the engine's first tick comes this long after the song's start
+        match self.first_due {
+            Some(t) => t - self.start,
+            None => self.tick_due - self.start,
+        }
+    }
+
+    fn next_tick_at(&self) -> Option<u64> {
+        Some(self.tick_due)
+    }
+
+    fn subsong_tick_at(&mut self) -> Option<u64> {
+        Some(self.first_due.unwrap_or(self.tick_due))
     }
 
     fn songend(&self) -> bool {
@@ -642,42 +567,34 @@ impl Replayer for Ahx {
     }
 
     fn set_subsong(&mut self, n: u16, hw: &mut Hw) {
-        // a subsong change is EndSound, which silences the voices as
-        // InitSound does, then InitSound
+        // EndSound's zero volumes, then InitSound, which leaves the voices'
+        // set-up and the timer as they are (the engine has turned the DMA
+        // off: it goes on again)
+        hw.dmacon(0x800F);
+        hw.wait(END_VOLUME);
         for v in 0..4 {
+            if v > 0 {
+                hw.wait(END_GAP);
+            }
             hw.vol(v, 0);
-            hw.wait(QUIET_GAP);
         }
-        hw.wait(END_TO_INIT);
-        self.init_sub_song(n, hw);
+        hw.wait(END_TO_START - END_VOLUME - 3 * END_GAP);
+        self.init_sub_song(n, hw.bus);
+        self.start = hw.bus.clock;
+        self.catch_up();
     }
 
     fn tick(&mut self, hw: &mut Hw) {
-        if self.first_tick {
-            // the first interrupt after InitSound sets the voices up
-            self.first_tick = false;
-            hw.wait(SETUP_DMA_OFF);
-            hw.dmacon(0x000F);
-            for v in 0..4 {
-                hw.wait(if v == 0 { SETUP_LOC } else { SETUP_LOC_NEXT });
-                hw.loc(v, self.chip + BUFFER * v as u32);
-                hw.wait(SETUP_REG[0]);
-                hw.len(v, 0x140);
-                hw.wait(SETUP_REG[1]);
-                hw.per(v, 0x88);
-                hw.wait(SETUP_REG[2]);
-                hw.vol(v, 0);
-            }
-            hw.wait(SETUP_DMA_ON);
-            hw.dmacon(0x800F);
-            let now = hw.bus.clock;
-            hw.wait((now / LINE + 10) * LINE - now);
-            hw.wait(SETUP_TO_VOICE - TO_VOLUME);
-        } else {
-            hw.wait(ENTRY);
+        // the interrupt: SetAudio's writes are timed in 68000 cycles from it
+        let t0 = hw.bus.clock;
+        self.first_due = None;
+        let period = (self.timer as u64 + 1) * 5;
+        while self.tick_due <= t0 {
+            self.tick_due += period;
         }
+        let mut cyc = 0;
         for v in 0..4 {
-            self.set_audio(v, hw);
+            self.set_audio(v, hw, t0, &mut cyc);
         }
         let bus = &mut *hw.bus;
         if self.step_wait == 0 {
@@ -730,24 +647,31 @@ impl Replayer for Ahx {
 impl Ahx {
     /// InitSound's InitSubSong: subsong 0 plays from position 0, subsong n
     /// from the n-th entry of the module's table.
-    fn init_sub_song(&mut self, n: u16, hw: &mut Hw) {
+    fn init_sub_song(&mut self, n: u16, bus: &Bus) {
         self.sub = n;
-        self.pos_nr = if n == 0 { 0 } else { hw.bus.r16(self.sub_table + 2 * (n as u32 - 1)) };
+        self.pos_nr = if n == 0 { 0 } else { bus.r16(self.sub_table + 2 * (n as u32 - 1)) };
         self.pos_jump = 0;
         self.tempo = 6;
         self.step_wait = 0;
         self.get_new_position = true;
         self.note_nr = 0;
-        for v in 0..4 {
-            if v > 0 {
-                hw.wait(QUIET_GAP);
-            }
-            hw.vol(v, 0);
-        }
         for v in self.voices.iter_mut() {
             *v = Voice { track_master_volume: 0x40, ..Default::default() };
         }
-        self.first_tick = true;
+    }
+
+    /// The song starts now: a timer underflow that came before (and has not
+    /// run: one that came before a subsong change made at once still waits)
+    /// runs at once, one tick however many there were; the next ones on the
+    /// timer.
+    fn catch_up(&mut self) {
+        let period = (self.timer as u64 + 1) * 5;
+        if self.first_due.is_some() || self.tick_due <= self.start {
+            self.first_due = Some(self.start);
+            while self.tick_due <= self.start {
+                self.tick_due += period;
+            }
+        }
     }
 
     /// The word of a track's row and the address of its parameter byte, read
@@ -768,17 +692,21 @@ impl Ahx {
         Some((bus.r16(a), bus.r8(a + 2)))
     }
 
-    fn set_audio(&mut self, v: usize, hw: &mut Hw) {
+    /// SetAudio: a new period, then a new waveform's copy to the voice's
+    /// buffer, then the volume. `cyc` counts the 68000 cycles since the
+    /// interrupt at `t0`.
+    fn set_audio(&mut self, v: usize, hw: &mut Hw, t0: u64, cyc: &mut u64) {
+        let at = |hw: &mut Hw, c: u64| hw.bus.clock = hw.bus.clock.max(t0 + c / 2);
         let ch = &mut self.voices[v];
+        let first = v == 0;
         if ch.plant_period {
-            hw.wait(TO_PERIOD);
+            *cyc += if first { ENTRY_TO_PERIOD } else { VOLUME_TO_PERIOD };
+            at(hw, *cyc);
             hw.per(v, ch.audio_period);
-            hw.wait(PERIOD_TO_ZERO);
-            hw.vol(v, 0);
             ch.plant_period = false;
-            hw.wait(ZERO_TO_VOLUME);
+            *cyc += PERIOD_TO_VOLUME;
         } else {
-            hw.wait(TO_VOLUME);
+            *cyc += if first { ENTRY_TO_VOLUME } else { VOLUME_TO_VOLUME };
         }
         if ch.new_waveform {
             let dst = self.chip + BUFFER * v as u32;
@@ -788,7 +716,7 @@ impl Ahx {
                 for i in 0..BUFFER {
                     bus.w8(dst + i, bus.r8(src.wrapping_add(i)));
                 }
-                hw.wait(COPY_NOISE);
+                *cyc += COPY_NOISE;
             } else if ch.wavelength <= 5 {
                 let len = 4u32 << ch.wavelength;
                 let passes = 5u32 << (5 - ch.wavelength);
@@ -797,12 +725,13 @@ impl Ahx {
                         bus.w8(dst + p * len + i, bus.r8(src.wrapping_add(i)));
                     }
                 }
-                hw.wait(COPY + COPY_PASS * passes as u64);
+                *cyc += COPY + COPY_PASS * passes as u64;
             }
             // a wavelength past 5 makes the original copy 65536 passes over
             // memory past the buffer; not done here
             ch.new_waveform = false;
         }
+        at(hw, *cyc);
         hw.vol(v, ch.audio_volume);
     }
 
@@ -823,6 +752,7 @@ impl Ahx {
         let cmd = word & 0xF;
         if cmd == 0xE {
             let (e, p) = (param >> 4, param & 0xF);
+            // a note cut of 0 ticks does nothing
             if e == 0xC && (p as i8) < tempo as i8 {
                 ch.note_cut_wait = p;
                 if p != 0 {
@@ -841,14 +771,8 @@ impl Ahx {
                     }
                 }
             }
-            // fine volume slides: once per row, on the note's volume, kept in 0..=0x40
-            if e == 0xA {
-                ch.note_max_volume = (ch.note_max_volume as u16 + p as u16).min(0x40) as u8;
-            }
-            if e == 0xB {
-                ch.note_max_volume = (ch.note_max_volume as i16 - p as i16).max(0) as u8;
-            }
         }
+        // the jump's hundreds (B multiplies it by 100)
         if cmd == 0 && param != 0 && param & 0xF <= 9 {
             self.pos_jump = (param & 0xF) as u16;
         }
@@ -865,16 +789,10 @@ impl Ahx {
             let j = (self.pos_jump as u32 * 100) as u16;
             let j = j.wrapping_add((param & 0xF) as u16).wrapping_add((param >> 4) as u16 * 10);
             self.pos_jump = j;
-            if j as i16 <= self.pos_nr as i16 {
-                self.songend = true;
-            }
             self.pattern_break = true;
         }
         if cmd == 0xF {
             self.tempo = param as u16;
-            if param == 0 {
-                self.songend = true;
-            }
         }
         if cmd == 5 || cmd == 0xA {
             ch.volume_slide_down = param & 0xF;
@@ -992,6 +910,35 @@ impl Ahx {
             ch.period_slide_on = true;
             ch.period_slide_with_limit = false;
         }
+        if cmd == 0xE {
+            let (e, p) = (param >> 4, param & 0xF);
+            // fine slides
+            if e == 1 {
+                ch.period_slide_period = ch.period_slide_period.wrapping_sub(p as i16);
+                ch.plant_period = true;
+            }
+            if e == 2 {
+                ch.period_slide_period = ch.period_slide_period.wrapping_add(p as i16);
+                ch.plant_period = true;
+            }
+            // vibrato control
+            if e == 4 {
+                ch.vibrato_depth = p;
+            }
+            // fine volume slides, on the note's volume, kept in 0..=0x40
+            if e == 0xA {
+                ch.note_max_volume = ch.note_max_volume.wrapping_add(p);
+                if ch.note_max_volume > 0x40 {
+                    ch.note_max_volume = 0x40;
+                }
+            }
+            if e == 0xB {
+                ch.note_max_volume = ch.note_max_volume.wrapping_sub(p);
+                if (ch.note_max_volume as i8) < 0 {
+                    ch.note_max_volume = 0;
+                }
+            }
+        }
         if cmd == 0xC {
             let mut p = param as i16;
             if p <= 0x40 {
@@ -1020,6 +967,7 @@ impl Ahx {
         let ch = &mut self.voices[v];
         match cmd {
             0 if rev != 0 => {
+                // the 4xx override takes the place of the parameter
                 if param != 0 {
                     let mut p = param;
                     if ch.ignore_filter != 0 {
@@ -1358,7 +1306,7 @@ impl Ahx {
             }
             if wf == 3 {
                 let seed = self.wn_random;
-                src = src.wrapping_add(seed & 0x4FF);
+                src = src.wrapping_add(seed & 0x4FE);
                 let seed = seed.wrapping_add(0x222B98).rotate_right(8).wrapping_add(0xBEFF3) ^ 0x4B;
                 self.wn_random = seed.wrapping_sub(0x1A4F);
             }
@@ -1436,12 +1384,17 @@ mod tests {
         e.render(&mut out);
         let log = e.m.bus.write_log.take().unwrap();
         let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
-        // InitSound's first write comes where the Eagleplayer's start (the
-        // waveforms, the song-length scan of this module) ends, from the
-        // engine's start phase
-        assert_eq!(log[0].2, 35_748_331 + 100);
-        // the first tick's setup
+        // InitSound's DMA off comes where the DeliPlayer's (the same for
+        // every revision 1 module), from the engine's start phase; its voice
+        // set-up follows, and the song starts after the instruments' loop
+        assert_eq!(log[0], (0xDFF096, 0x000F, 1_426_536));
         assert_eq!(&reg(0xDFF096)[..2], &[0x000F, 0x800F]);
+        assert_eq!(log.iter().find(|w| w.0 == 0xDFF096 && w.1 == 0x800F).unwrap().2, 1_444_898);
+        // the ticks: the timer's first underflow 14210 E clocks after its
+        // start (at 1_421_574), on the E clock; the note's period goes out in
+        // the second, 236 colour clocks after its interrupt
+        let first_period = log.iter().filter(|w| w.0 == 0xDFF0A6).nth(1).unwrap();
+        assert_eq!(first_period.2, 1_492_620 + 71_050 + 236);
         assert_eq!(reg(0xDFF0A4)[0], 0x140);
         // C-3's period, then the envelope's 64
         assert_eq!(reg(0xDFF0A6)[..2], [0x88, super::PERIODS[24]]);

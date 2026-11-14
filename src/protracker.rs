@@ -22,8 +22,16 @@
 //! delayed rows, the tremolo ramp's vibrato position, portamentos' 12-bit wrap,
 //! arpeggios read past the table, EFx inverts the sample in memory. E8x does
 //! nothing (as in pt2-clone by default and 2.3F).
+//!
+//! A ProWizard conversion is played as its original, UADE's PTK-Prowiz, writes it
+//! (`Build::Ptk`): the period of a voice without an effect in every effects tick too,
+//! the repeats first voice first, the DMA waits on the beam (to 110 colour clocks
+//! into the tenth raster line on, then 100 into the tenth after that), and every
+//! write at the interrupt's start plus half the 68000 cycles of the code paths taken
+//! (`PTK_COSTS`), fitted to the reference's write logs (black box; see README).
 
 use crate::bus::Bus;
+use crate::paula::LINE;
 use m68k::AddressBus;
 use std::collections::HashSet;
 
@@ -92,6 +100,151 @@ const C_ECMD: u64 = 25;
 const C_MORE: u64 = 32;
 /// The voice loop after SetDMA's second wait.
 const C_LOOPS: u64 = 10;
+
+/// PTK-Prowiz's DMA waits are on the beam: on to the tenth start of a raster line, then
+/// this many colour clocks into it (to the DMA on, and to the first repeat pointer).
+const PTK_WAIT_LINES: u64 = 10;
+const PTK_DMA_PHASE: u64 = 110;
+const PTK_LOOP_PHASE: u64 = 100;
+
+/// The code paths of PTK-Prowiz's replay whose 68000 cycles place its writes: indices into
+/// `PTK_COSTS`.
+pub(crate) mod ptk {
+    pub const FXT: usize = 0;
+    pub const ROWT: usize = 1;
+    pub const PDEL: usize = 2;
+    pub const FXV1: usize = 3; // ..5
+    pub const ROWV1: usize = 6; // ..8
+    pub const ROW_END: usize = 9;
+    pub const WAIT2: usize = 10;
+    pub const LOOP_NEXT: usize = 11;
+    pub const LOOP_LEN: usize = 12;
+    pub const ROW_PERNOP: usize = 13;
+    pub const ROW_READ: usize = 14;
+    pub const INS: usize = 15;
+    pub const INS_REP: usize = 16;
+    pub const NONOTE: usize = 17;
+    pub const ROW_E5: usize = 18;
+    pub const ROW_TONE: usize = 19;
+    pub const ROW_9: usize = 20;
+    pub const ROW_NOTE: usize = 21;
+    pub const SCAN: usize = 22;
+    pub const SETPER: usize = 23;
+    pub const SP_ED: usize = 24;
+    pub const SP_DMA: usize = 25;
+    pub const SP_LEN: usize = 26;
+    pub const SP_LC: usize = 27;
+    pub const SP_NULL: usize = 28;
+    pub const SP_PER: usize = 29;
+    pub const CME: usize = 30;
+    pub const CME_9: usize = 31;
+    pub const CME_B: usize = 32;
+    pub const CME_C: usize = 33;
+    pub const CME_D: usize = 34;
+    pub const CME_E: usize = 35;
+    pub const CME_F0: usize = 36;
+    pub const CME_FT: usize = 37;
+    pub const CME_F: usize = 38;
+    pub const CME_PN: usize = 39;
+    pub const CME_PN_VOL: usize = 40;
+    pub const NONE: usize = 41;
+    pub const NONE_VOL: usize = 42;
+    pub const DISP: usize = 43;
+    pub const ARP_VOL: usize = 44;
+    pub const PORTA_VOL: usize = 45;
+    pub const TP_SET: usize = 46;
+    pub const VIB_LO: usize = 47;
+    pub const VIB_HI: usize = 48;
+    pub const FX5: usize = 49;
+    pub const FX6: usize = 50;
+    pub const FX_E: usize = 51;
+    pub const FX_E_VOL: usize = 52;
+    pub const OTHER: usize = 53;
+    pub const OTHER_VOL: usize = 54;
+    pub const FUNK: usize = 55;
+    pub const ARP0: usize = 56;
+    pub const ARP1: usize = 57;
+    pub const ARP2: usize = 58;
+    pub const ARP_W: usize = 59;
+    pub const PORTA: usize = 60;
+    pub const PORTA_CLAMP: usize = 61;
+    pub const TP_DONE: usize = 62;
+    pub const TP_UP: usize = 63;
+    pub const TP_DOWN: usize = 64;
+    pub const TP_REACH: usize = 65;
+    pub const GLISS: usize = 66;
+    pub const TP_VOL: usize = 67;
+    pub const VIB: usize = 68; // ..71 by waveform
+    pub const VIB_NEG: usize = 72;
+    pub const VIB_VOL: usize = 73;
+    pub const TREM: usize = 74; // ..77 by waveform
+    pub const TREM_NEG: usize = 78;
+    pub const TREM_CLAMP: usize = 79;
+    pub const SLIDE_UP: usize = 80;
+    pub const SLIDE_DOWN: usize = 81;
+    pub const SLIDE_CLAMP: usize = 82;
+    pub const E_ROW: usize = 83; // ..98 by E command
+    pub const E_FX: usize = 99; // ..114
+    pub const RT_DMA: usize = 115;
+    pub const RT_LC: usize = 116;
+    pub const RT_LEN: usize = 117;
+    pub const RT_PER: usize = 118;
+    pub const RT_END: usize = 119;
+    pub const RT_BACK: usize = 120;
+    pub const VIB_POS: usize = 121;
+    pub const TREM_POS: usize = 122;
+    pub const INS_NOREP: usize = 123;
+    pub const SLIDE_NOCLAMP: usize = 124;
+    pub const ARP_SCAN: usize = 125;
+    pub const TONE_SCAN: usize = 126;
+    pub const GLISS_SCAN: usize = 127;
+    pub const TONE_FT: usize = 128;
+    pub const TONE_EQ: usize = 129;
+    pub const TONE_GT: usize = 130;
+    pub const TONE_LT: usize = 131;
+    pub const PORTA_DN: usize = 132;
+    pub const FX6_LO: usize = 133;
+    pub const FX6_HI: usize = 134;
+    pub const FX5_LO: usize = 135;
+    pub const FX5_HI: usize = 136;
+    pub const N: usize = 137;
+}
+
+/// 68000 cycles of each of the `ptk` code paths, fitted exactly (integer program) to the
+/// reference write logs of the refcmp ChipTracker, ProWizard, Promizer and ProRunner rows
+/// (the times after a DMA wait counted from the reference's own DMA write). Only the
+/// sums along a path are determined; the terms no measured module takes (the vibrato
+/// and tremolo waveforms 1-3, tremolo, retrigger, most E commands, pattern delay) keep
+/// estimates.
+#[rustfmt::skip]
+const PTK_COSTS: [u32; ptk::N] = [
+    // FXT ROWT PDEL FXV1-3 ROWV1-3 ROW_END WAIT2 LOOP_NEXT LOOP_LEN
+    562, 958, 0, 273, 273, 265, 63, 63, 63, 208, 20, 28, 20,
+    // ROW_PERNOP ROW_READ INS INS_REP NONOTE ROW_E5 ROW_TONE ROW_9 ROW_NOTE SCAN SETPER
+    20, 0, 477, 46, 176, 100, 552, 0, 37, 41, 0,
+    // SP_ED SP_DMA SP_LEN SP_LC SP_NULL SP_PER
+    20, 524, 127, 24, 20, 24,
+    // CME CME_9 CME_B CME_C CME_D CME_E CME_F0 CME_FT CME_F CME_PN CME_PN_VOL
+    335, 71, 0, 78, 100, 88, 14, 497, 102, 9, 44,
+    // NONE NONE_VOL DISP ARP_VOL PORTA_VOL TP_SET VIB_LO VIB_HI FX5 FX6 FX_E FX_E_VOL OTHER OTHER_VOL FUNK
+    0, 73, 116, 73, 73, 28, 82, 12, 0, 0, 0, 142, 0, 111, 40,
+    // ARP0 ARP1 ARP2 ARP_W PORTA PORTA_CLAMP TP_DONE TP_UP TP_DOWN TP_REACH GLISS TP_VOL
+    85, 0, 1, 215, 20, 40, 19, 75, 85, 46, 40, 73,
+    // VIB0-3 VIB_NEG VIB_VOL TREM0-3 TREM_NEG TREM_CLAMP SLIDE_UP SLIDE_DOWN SLIDE_CLAMP
+    187, 300, 300, 300, 0, 118, 300, 300, 300, 300, 10, 10, 236, 244, 16,
+    // E_ROW 0-F
+    12, 100, 100, 0, 100, 100, 100, 100, 100, 100, 85, 69, 100, 100, 100, 100,
+    // E_FX 0-F
+    43, 100, 0, 31, 100, 100, 100, 100, 100, 100, 0, 0, 100, 100, 100, 100,
+    // RT_DMA RT_LC RT_LEN RT_PER RT_END RT_BACK
+    40, 20, 20, 20, 200, 40,
+    // VIB_POS TREM_POS INS_NOREP SLIDE_NOCLAMP ARP_SCAN TONE_SCAN GLISS_SCAN
+    10, 0, 0, 0, 49, 52, 26,
+    // TONE_FT TONE_EQ TONE_GT TONE_LT PORTA_DN
+    17, 7, 16, 0, 39,
+    // FX6_LO FX6_HI FX5_LO FX5_HI
+    0, 0, 0, 0,
+];
 
 #[derive(Clone, Copy, Default)]
 struct Sample {
@@ -173,6 +326,29 @@ pub struct ProTracker {
     starts: Vec<u8>,
     /// The subsong playing, an index into `starts`.
     sub: usize,
+    /// Whose replay code the writes are timed as.
+    pub build: Build,
+    /// The PTK build's clock in 68000 cycles (twice the colour clock).
+    cyc: u64,
+}
+
+/// The build a module converted from the packed format `packed` (ProWizard's name) plays
+/// as: the conversions are PTK-Prowiz's, a plain module ProTracker 2.3D's.
+pub fn build_for(packed: Option<&str>) -> Build {
+    match packed {
+        Some("Mosh Player" | "Titanics Player") | None => Build::Pt23d,
+        Some(_) => Build::Ptk,
+    }
+}
+
+/// Whose replay code the writes of a module are timed as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Build {
+    /// ProTracker 2.3D's (the port's original for plain modules).
+    #[default]
+    Pt23d,
+    /// UADE's PTK-Prowiz ("Protracker and family"), which plays the ProWizard conversions.
+    Ptk,
 }
 
 /// Effect B in the pattern long `l`, and its parameter.
@@ -215,26 +391,50 @@ fn word(d: &[u8], o: usize) -> u16 {
     }
 }
 
-fn spend(bus: &mut Bus, cc: u64) {
-    bus.clock += cc;
-}
-
-fn dmacon(bus: &mut Bus, v: u16) {
-    bus.write_word(0xDFF096, v);
-}
-
-fn reg(bus: &mut Bus, c: usize, r: u32, v: u16) {
-    bus.write_word(0xDFF0A0 + 16 * c as u32 + r, v);
-}
-
-/// A MOVE.L to AUDxLC: the high word, then the low one.
-fn ptr(bus: &mut Bus, c: usize, a: u32) {
-    reg(bus, c, 0, (a >> 16) as u16);
-    spend(bus, C_LONG);
-    reg(bus, c, 2, a as u16);
-}
-
 impl ProTracker {
+    /// PT 2.3D's time between writes (colour clocks); nothing in the PTK build.
+    fn sp(&self, bus: &mut Bus, cc: u64) {
+        if self.build == Build::Pt23d {
+            bus.clock += cc;
+        }
+    }
+
+    /// The PTK build's 68000 cycles of code path `t`; nothing in the 2.3D build.
+    fn k(&mut self, bus: &mut Bus, t: usize) {
+        if self.build == Build::Ptk {
+            self.cyc += PTK_COSTS[t] as u64;
+            bus.clock = self.cyc / 2;
+        }
+    }
+
+    /// The PTK build: the time from now on counts from colour clock `cc`.
+    fn anchor(&mut self, bus: &mut Bus, cc: u64) {
+        if self.build == Build::Ptk {
+            bus.clock = cc;
+            self.cyc = cc * 2;
+        }
+    }
+
+    fn write(&mut self, bus: &mut Bus, a: u32, v: u16) {
+        bus.write_word(a, v);
+    }
+
+    fn dmacon(&mut self, bus: &mut Bus, v: u16) {
+        self.write(bus, 0xDFF096, v);
+    }
+
+    fn reg(&mut self, bus: &mut Bus, c: usize, r: u32, v: u16) {
+        self.write(bus, 0xDFF0A0 + 16 * c as u32 + r, v);
+    }
+
+    /// A MOVE.L to AUDxLC: the high word, then the low one (in the PTK build at one clock,
+    /// as the engine logs a long write).
+    fn ptr(&mut self, bus: &mut Bus, c: usize, a: u32) {
+        self.reg(bus, c, 0, (a >> 16) as u16);
+        self.sp(bus, C_LONG);
+        self.reg(bus, c, 2, a as u16);
+    }
+
     /// Recognises a 31-instrument (M.K. and friends) or 15-instrument module.
     pub fn detect(d: &[u8]) -> Option<&'static str> {
         if d.len() >= 1084 {
@@ -346,6 +546,8 @@ impl ProTracker {
             f00_ends: true,
             starts,
             sub: 0,
+            build: Build::Pt23d,
+            cyc: 0,
         };
         pt.restart_song();
         Some(pt)
@@ -431,12 +633,16 @@ impl ProTracker {
 
     /// One interrupt of the replayer (mt_music).
     pub fn tick(&mut self, bus: &mut Bus) {
+        let t0 = bus.clock;
+        self.anchor(bus, t0);
         self.counter = self.counter.wrapping_add(1);
         if self.counter >= self.speed {
             self.counter = 0;
+            self.k(bus, ptk::ROWT);
             if self.patt_del_time2 == 0 {
                 self.get_new_note(bus);
             } else {
+                self.k(bus, ptk::PDEL);
                 self.no_new_all_channels(bus);
             }
             // mt_dskip
@@ -460,6 +666,7 @@ impl ProTracker {
                 self.next_position();
             }
         } else {
+            self.k(bus, ptk::FXT);
             self.no_new_all_channels(bus);
         }
         if self.pos_jump {
@@ -485,8 +692,18 @@ impl ProTracker {
 
     fn no_new_all_channels(&mut self, bus: &mut Bus) {
         for c in 0..4 {
+            if c > 0 {
+                self.k(bus, ptk::FXV1 + c - 1);
+            }
             self.check_effects(bus, c);
         }
+    }
+
+    /// The PTK build's DMA wait: on to the `lines`-th start of a raster line from now, and
+    /// `phase` colour clocks into that line.
+    fn beam_wait(&mut self, bus: &mut Bus, lines: u64, phase: u64) {
+        let t = (bus.clock / LINE + lines) * LINE + phase;
+        self.anchor(bus, t);
     }
 
     fn get_new_note(&mut self, bus: &mut Bus) {
@@ -499,43 +716,67 @@ impl ProTracker {
         self.dmacon_temp = 0;
         let pat = self.orders[self.song_pos as usize & 127] as usize;
         for c in 0..4 {
+            if c > 0 {
+                self.k(bus, ptk::ROWV1 + c - 1);
+            }
             let l = self.patterns.get((pat * 64 + self.row as usize) * 4 + c).copied().unwrap_or(0);
             self.play_voice(bus, c, l);
             let v = self.ch[c].volume as u16;
-            spend(bus, C_WRITE);
-            reg(bus, c, 8, v);
+            self.sp(bus, C_WRITE);
+            self.reg(bus, c, 8, v);
         }
         // mt_SetDMA
-        spend(bus, DMA_WAIT);
-        dmacon(bus, 0x8000 | self.dmacon_temp);
-        spend(bus, DMA_WAIT);
+        if self.build == Build::Ptk {
+            self.k(bus, ptk::ROW_END);
+            self.beam_wait(bus, PTK_WAIT_LINES, PTK_DMA_PHASE);
+            self.dmacon(bus, 0x8000 | self.dmacon_temp);
+            self.k(bus, ptk::WAIT2);
+            self.beam_wait(bus, PTK_WAIT_LINES, PTK_LOOP_PHASE);
+            for c in 0..4 {
+                if c > 0 {
+                    self.k(bus, ptk::LOOP_NEXT);
+                }
+                let (ls, rl) = (self.ch[c].loopstart, self.ch[c].replen);
+                self.ptr(bus, c, ls);
+                self.k(bus, ptk::LOOP_LEN);
+                self.reg(bus, c, 4, rl);
+            }
+            return;
+        }
+        self.sp(bus, DMA_WAIT);
+        self.dmacon(bus, 0x8000 | self.dmacon_temp);
+        self.sp(bus, DMA_WAIT);
         for c in (0..4).rev() {
-            spend(bus, C_LOOPS);
+            self.sp(bus, C_LOOPS);
             let (ls, rl) = (self.ch[c].loopstart, self.ch[c].replen);
-            ptr(bus, c, ls);
-            spend(bus, C_WRITE);
-            reg(bus, c, 4, rl);
+            self.ptr(bus, c, ls);
+            self.sp(bus, C_WRITE);
+            self.reg(bus, c, 4, rl);
         }
     }
 
     fn per_nop(&mut self, bus: &mut Bus, c: usize) {
-        spend(bus, C_WRITE);
+        self.sp(bus, C_WRITE);
         let p = self.ch[c].period;
-        reg(bus, c, 6, p);
+        self.reg(bus, c, 6, p);
     }
 
     fn play_voice(&mut self, bus: &mut Bus, c: usize, l: u32) {
-        spend(bus, C_ROW_CHAN);
+        self.sp(bus, C_ROW_CHAN);
         if self.ch[c].note == 0 && self.ch[c].cmd == 0 {
+            self.k(bus, ptk::ROW_PERNOP);
             self.per_nop(bus, c);
         }
+        self.k(bus, ptk::ROW_READ);
         let ch = &mut self.ch[c];
         ch.note = (l >> 16) as u16;
         ch.cmd = l as u16;
         let ins = ((ch.note >> 8) & 0xF0) as usize | (ch.cmd >> 12) as usize;
         // (instrument numbers above 31 name no sample: ignored)
         if let (true, Some(&s)) = (ins != 0, self.samples.get(ins)) {
-            spend(bus, C_ROW_INSTR);
+            self.sp(bus, C_ROW_INSTR);
+            self.k(bus, ptk::INS);
+            let ch = &mut self.ch[c];
             ch.start = s.start;
             ch.length = s.length;
             ch.finetune = s.finetune;
@@ -544,46 +785,67 @@ impl ProTracker {
             if s.repeat != 0 {
                 ch.loopstart = s.start + s.repeat as u32 * 2;
                 ch.length = s.repeat.wrapping_add(s.replen);
+                self.k(bus, ptk::INS_REP);
             } else {
                 ch.loopstart = s.start;
+                self.k(bus, ptk::INS_NOREP);
             }
-            ch.wavestart = ch.loopstart;
+            self.ch[c].wavestart = self.ch[c].loopstart;
         }
         // mt_SetRegisters
-        spend(bus, C_ROW_TESTS);
+        self.sp(bus, C_ROW_TESTS);
         let ch = self.ch[c];
         if ch.note & 0xFFF == 0 {
+            self.k(bus, ptk::NONOTE);
             self.check_more_effects(bus, c);
         } else if ch.cmd & 0xFF0 == 0xE50 {
+            self.k(bus, ptk::ROW_E5);
             self.ch[c].finetune = ch.cmdlo() & 0xF;
             self.set_period(bus, c);
         } else {
             match (ch.cmd >> 8) & 0xF {
                 3 | 5 => {
+                    self.k(bus, ptk::ROW_TONE);
                     self.set_tone_porta(bus, c);
                     self.check_more_effects(bus, c);
                 }
                 9 => {
+                    self.k(bus, ptk::ROW_9);
                     self.check_more_effects(bus, c);
                     self.set_period(bus, c);
                 }
-                _ => self.set_period(bus, c),
+                _ => {
+                    self.k(bus, ptk::ROW_NOTE);
+                    self.set_period(bus, c)
+                }
             }
         }
     }
 
+    /// Steps of a period table scan for `p` from table offset `t` (the index found).
+    fn scan(&mut self, bus: &mut Bus, t: usize, p: u16, none: usize, term: usize) -> usize {
+        let i = (0..37).find(|&i| p >= PERIODS[t + i]).unwrap_or(none);
+        for _ in 0..=i {
+            self.k(bus, term);
+        }
+        i
+    }
+
     fn set_period(&mut self, bus: &mut Bus, c: usize) {
         let note = self.ch[c].note & 0xFFF;
-        let i = (0..37).find(|&i| note >= PERIODS[i]).unwrap_or(36);
-        spend(bus, (i as u64 + 1) * C_SCAN);
+        self.k(bus, ptk::SETPER);
+        let i = self.scan(bus, 0, note, 36, ptk::SCAN);
+        self.sp(bus, (i as u64 + 1) * C_SCAN);
         let ch = &mut self.ch[c];
         ch.period = PERIODS[ch.peroffset() + i];
         if ch.cmd & 0xFF0 == 0xED0 {
             // note delay: triggered by the effect
+            self.k(bus, ptk::SP_ED);
             return self.check_more_effects(bus, c);
         }
-        spend(bus, C_WRITE);
-        dmacon(bus, 1 << c);
+        self.sp(bus, C_WRITE);
+        self.k(bus, ptk::SP_DMA);
+        self.dmacon(bus, 1 << c);
         let ch = &mut self.ch[c];
         if ch.wavecontrol & 4 == 0 {
             ch.vibratopos = 0;
@@ -592,28 +854,34 @@ impl ProTracker {
             ch.tremolopos = 0;
         }
         let ch = *ch;
-        spend(bus, C_WRITE + 10);
-        reg(bus, c, 4, ch.length);
-        spend(bus, C_WRITE);
-        ptr(bus, c, ch.start);
+        self.sp(bus, C_WRITE + 10);
+        self.k(bus, ptk::SP_LEN);
+        self.reg(bus, c, 4, ch.length);
+        self.sp(bus, C_WRITE);
+        self.k(bus, ptk::SP_LC);
+        self.ptr(bus, c, ch.start);
         if ch.start == 0 {
             self.ch[c].loopstart = 0;
             self.ch[c].replen = 1;
-            spend(bus, C_WRITE);
-            reg(bus, c, 4, 1);
+            self.sp(bus, C_WRITE);
+            self.k(bus, ptk::SP_NULL);
+            self.reg(bus, c, 4, 1);
         }
-        spend(bus, C_WRITE);
-        reg(bus, c, 6, ch.period);
+        self.sp(bus, C_WRITE);
+        self.k(bus, ptk::SP_PER);
+        self.reg(bus, c, 6, ch.period);
         self.dmacon_temp |= 1 << c;
         self.check_more_effects(bus, c);
     }
 
     /// The row's effects (mt_CheckMoreEffects).
     fn check_more_effects(&mut self, bus: &mut Bus, c: usize) {
-        spend(bus, C_MORE);
+        self.sp(bus, C_MORE);
+        self.k(bus, ptk::CME);
         let lo = self.ch[c].cmdlo();
         match (self.ch[c].cmd >> 8) & 0xF {
             9 => {
+                self.k(bus, ptk::CME_9);
                 // sample offset
                 let ch = &mut self.ch[c];
                 if lo != 0 {
@@ -628,31 +896,46 @@ impl ProTracker {
                 }
             }
             0xB => {
+                self.k(bus, ptk::CME_B);
                 self.song_pos = lo.wrapping_sub(1);
                 self.pbreak_pos = 0;
                 self.pos_jump = true;
             }
-            0xC => self.ch[c].volume = lo.min(64),
+            0xC => {
+                self.k(bus, ptk::CME_C);
+                self.ch[c].volume = lo.min(64)
+            }
             0xD => {
+                self.k(bus, ptk::CME_D);
                 let v = (lo >> 4) * 10 + (lo & 0xF);
                 self.pbreak_pos = if v > 63 { 0 } else { v };
                 self.pos_jump = true;
             }
-            0xE => self.e_commands(bus, c),
+            0xE => {
+                self.k(bus, ptk::CME_E);
+                self.e_commands(bus, c)
+            }
             0xF => {
                 if lo == 0 {
+                    self.k(bus, ptk::CME_F0);
                     // F00 stops ProTracker: the song's end
                     if self.f00_ends {
                         self.songend = true;
                     }
                 } else if lo >= 32 {
+                    self.k(bus, ptk::CME_FT);
                     self.bpm = lo as u32;
                 } else {
+                    self.k(bus, ptk::CME_F);
                     self.counter = 0;
                     self.speed = lo;
                 }
             }
-            _ => self.per_nop(bus, c),
+            _ => {
+                self.k(bus, ptk::CME_PN);
+                self.per_nop(bus, c);
+                self.k(bus, ptk::CME_PN_VOL);
+            }
         }
     }
 
@@ -660,8 +943,8 @@ impl ProTracker {
     fn check_effects(&mut self, bus: &mut Bus, c: usize) {
         if !self.chkefx2(bus, c) {
             let v = self.ch[c].volume as u16;
-            spend(bus, C_WRITE);
-            reg(bus, c, 8, v);
+            self.sp(bus, C_WRITE);
+            self.reg(bus, c, 8, v);
         }
     }
 
@@ -670,16 +953,33 @@ impl ProTracker {
         self.update_funk(bus, c);
         let ch = self.ch[c];
         if ch.cmd & 0xFFF == 0 {
-            spend(bus, C_FX_NONE);
+            self.sp(bus, C_FX_NONE);
+            if self.build == Build::Ptk {
+                // PTK-Prowiz writes the period of a voice without an effect too
+                self.k(bus, ptk::NONE);
+                self.per_nop(bus, c);
+                self.k(bus, ptk::NONE_VOL);
+            }
             return false;
         }
-        spend(bus, C_FX_CHAN);
+        self.sp(bus, C_FX_CHAN);
+        self.k(bus, ptk::DISP);
         match (ch.cmd >> 8) & 0xF {
-            0 => self.arpeggio(bus, c),
-            1 => self.porta_up(bus, c),
-            2 => self.porta_down(bus, c),
+            0 => {
+                self.arpeggio(bus, c);
+                self.k(bus, ptk::ARP_VOL);
+            }
+            1 => {
+                self.porta_up(bus, c);
+                self.k(bus, ptk::PORTA_VOL);
+            }
+            2 => {
+                self.porta_down(bus, c);
+                self.k(bus, ptk::PORTA_VOL);
+            }
             3 => {
                 if ch.cmdlo() != 0 {
+                    self.k(bus, ptk::TP_SET);
                     self.ch[c].toneportspeed = ch.cmdlo();
                     self.ch[c].cmd &= 0xFF00;
                 }
@@ -694,18 +994,43 @@ impl ProTracker {
                 if lo & 0xF0 != 0 {
                     *v = (lo & 0xF0) | (*v & 0x0F);
                 }
+                if lo & 0x0F != 0 {
+                    self.k(bus, ptk::VIB_LO);
+                }
+                if lo & 0xF0 != 0 {
+                    self.k(bus, ptk::VIB_HI);
+                }
                 self.vibrato2(bus, c);
             }
             5 => {
+                self.k(bus, ptk::FX5);
+                if ch.cmdlo() & 0xF != 0 {
+                    self.k(bus, ptk::FX5_LO);
+                }
+                if ch.cmdlo() & 0xF0 != 0 {
+                    self.k(bus, ptk::FX5_HI);
+                }
                 self.tone_port_no_change(bus, c);
                 self.volume_slide(bus, c);
             }
             6 => {
+                self.k(bus, ptk::FX6);
+                if ch.cmdlo() & 0xF != 0 {
+                    self.k(bus, ptk::FX6_LO);
+                }
+                if ch.cmdlo() & 0xF0 != 0 {
+                    self.k(bus, ptk::FX6_HI);
+                }
                 self.vibrato2(bus, c);
                 self.volume_slide(bus, c);
             }
-            0xE => self.e_commands(bus, c),
+            0xE => {
+                self.k(bus, ptk::FX_E);
+                self.e_commands(bus, c);
+                self.k(bus, ptk::FX_E_VOL);
+            }
             cmd => {
+                self.k(bus, ptk::OTHER);
                 self.per_nop(bus, c);
                 if cmd == 7 {
                     self.tremolo(bus, c);
@@ -713,10 +1038,12 @@ impl ProTracker {
                 }
                 if cmd == 0xA {
                     self.volume_slide(bus, c);
+                } else {
+                    self.k(bus, ptk::OTHER_VOL);
                 }
             }
         }
-        spend(bus, C_FX_VOL);
+        self.sp(bus, C_FX_VOL);
         false
     }
 
@@ -726,6 +1053,8 @@ impl ProTracker {
         if speed == 0 {
             return;
         }
+        self.k(bus, ptk::FUNK);
+        let ch = &mut self.ch[c];
         ch.funkoffset = ch.funkoffset.wrapping_add(FUNK[speed as usize]);
         if ch.funkoffset & 0x80 == 0 {
             return;
@@ -746,14 +1075,19 @@ impl ProTracker {
     fn arpeggio(&mut self, bus: &mut Bus, c: usize) {
         let ch = self.ch[c];
         let k = match self.counter % 3 {
-            0 => return self.per_nop(bus, c),
+            0 => {
+                self.k(bus, ptk::ARP0);
+                return self.per_nop(bus, c);
+            }
             1 => ch.cmdlo() >> 4,
             _ => ch.cmdlo() & 0xF,
         } as usize;
         let t = ch.peroffset();
-        let i = (0..37).find(|&i| ch.period >= PERIODS[t + i]).unwrap_or(36);
-        spend(bus, (i as u64 + 1) * C_SCAN + C_WRITE);
-        reg(bus, c, 6, PERIODS[t + i + k]);
+        self.k(bus, if self.counter % 3 == 1 { ptk::ARP1 } else { ptk::ARP2 });
+        let i = self.scan(bus, t, ch.period, 36, ptk::ARP_SCAN);
+        self.sp(bus, (i as u64 + 1) * C_SCAN + C_WRITE);
+        self.k(bus, ptk::ARP_W);
+        self.reg(bus, c, 6, PERIODS[t + i + k]);
     }
 
     fn porta_up(&mut self, bus: &mut Bus, c: usize) {
@@ -761,88 +1095,124 @@ impl ProTracker {
         ch.period = ch.period.wrapping_sub((ch.cmdlo() & self.low_mask) as u16);
         self.low_mask = 0xFF;
         // PT compares the 12 bits only: an underflow is not clamped
-        if ch.period & 0xFFF < 113 {
+        let clamp = ch.period & 0xFFF < 113;
+        if clamp {
             ch.period = (ch.period & 0xF000) | 113;
         }
         let p = ch.period & 0xFFF;
-        spend(bus, C_PORTA);
-        reg(bus, c, 6, p);
+        self.sp(bus, C_PORTA);
+        self.k(bus, ptk::PORTA);
+        if clamp {
+            self.k(bus, ptk::PORTA_CLAMP);
+        }
+        self.reg(bus, c, 6, p);
     }
 
     fn porta_down(&mut self, bus: &mut Bus, c: usize) {
         let ch = &mut self.ch[c];
         ch.period = ch.period.wrapping_add((ch.cmdlo() & self.low_mask) as u16);
         self.low_mask = 0xFF;
-        if ch.period & 0xFFF > 856 {
+        let clamp = ch.period & 0xFFF > 856;
+        if clamp {
             ch.period = (ch.period & 0xF000) | 856;
         }
         let p = ch.period & 0xFFF;
-        spend(bus, C_PORTA);
-        reg(bus, c, 6, p);
+        self.sp(bus, C_PORTA);
+        self.k(bus, ptk::PORTA_DN);
+        if clamp {
+            self.k(bus, ptk::PORTA_CLAMP);
+        }
+        self.reg(bus, c, 6, p);
     }
 
     fn set_tone_porta(&mut self, bus: &mut Bus, c: usize) {
+        let note = self.ch[c].note & 0xFFF;
+        let t = self.ch[c].peroffset();
+        let mut i = self.scan(bus, t, note, 35, ptk::TONE_SCAN);
+        self.sp(bus, (i as u64 + 1) * C_SCAN + C_TONE);
         let ch = &mut self.ch[c];
-        let note = ch.note & 0xFFF;
-        let t = ch.peroffset();
-        let mut i = (0..37).find(|&i| note >= PERIODS[t + i]).unwrap_or(35);
-        spend(bus, (i as u64 + 1) * C_SCAN + C_TONE);
-        if ch.finetune & 8 != 0 && i > 0 {
+        let ft = ch.finetune & 8 != 0 && i > 0;
+        if ft {
             i -= 1;
         }
         ch.wantedperiod = PERIODS[t + i];
         ch.toneportdirec = false;
-        if ch.period == ch.wantedperiod {
+        let term = if ch.period == ch.wantedperiod {
             ch.wantedperiod = 0;
+            ptk::TONE_EQ
         } else if (ch.period as i16) > ch.wantedperiod as i16 {
             ch.toneportdirec = true;
+            ptk::TONE_GT
+        } else {
+            ptk::TONE_LT
+        };
+        if ft {
+            self.k(bus, ptk::TONE_FT);
         }
+        self.k(bus, term);
     }
 
     fn tone_port_no_change(&mut self, bus: &mut Bus, c: usize) {
         let ch = &mut self.ch[c];
         if ch.wantedperiod == 0 {
+            self.k(bus, ptk::TP_DONE);
             return;
         }
         let sp = ch.toneportspeed as u16;
+        let mut reach = false;
         if ch.toneportdirec {
             ch.period = ch.period.wrapping_sub(sp);
             if ch.period as i16 <= ch.wantedperiod as i16 {
                 ch.period = ch.wantedperiod;
                 ch.wantedperiod = 0;
+                reach = true;
             }
         } else {
             ch.period = ch.period.wrapping_add(sp);
             if ch.period as i16 >= ch.wantedperiod as i16 {
                 ch.period = ch.wantedperiod;
                 ch.wantedperiod = 0;
+                reach = true;
             }
         }
         let mut p = ch.period;
-        spend(bus, C_TONE);
-        if ch.glissfunk & 0xF != 0 {
+        let (direc, gliss) = (ch.toneportdirec, ch.glissfunk & 0xF != 0);
+        self.sp(bus, C_TONE);
+        self.k(bus, if direc { ptk::TP_UP } else { ptk::TP_DOWN });
+        if reach {
+            self.k(bus, ptk::TP_REACH);
+        }
+        if gliss {
             // glissando: the note's period at or below
-            let t = ch.peroffset();
-            let i = (0..37).find(|&i| p >= PERIODS[t + i]).unwrap_or(35);
-            spend(bus, (i as u64 + 1) * C_SCAN);
+            let t = self.ch[c].peroffset();
+            self.k(bus, ptk::GLISS);
+            let i = self.scan(bus, t, p, 35, ptk::GLISS_SCAN);
+            self.sp(bus, (i as u64 + 1) * C_SCAN);
             p = PERIODS[t + i];
         }
-        reg(bus, c, 6, p);
+        self.reg(bus, c, 6, p);
+        self.k(bus, ptk::TP_VOL);
     }
 
     fn vibrato2(&mut self, bus: &mut Bus, c: usize) {
         let ch = &mut self.ch[c];
         let pos = (ch.vibratopos >> 2) & 0x1F;
-        let data = match ch.wavecontrol & 3 {
+        let wave = ch.wavecontrol & 3;
+        let data = match wave {
             0 => VIBRATO[pos as usize] as u16,
             1 if ch.vibratopos < 128 => (pos as u16) << 3,
             1 => 255 - ((pos as u16) << 3),
             _ => 255,
         };
+        let ch = &mut self.ch[c];
         let data = (data * (ch.vibratocmd & 0xF) as u16) >> 7;
-        let p = if ch.vibratopos < 128 { ch.period.wrapping_add(data) } else { ch.period.wrapping_sub(data) };
-        spend(bus, C_VIB);
-        reg(bus, c, 6, p);
+        let neg = ch.vibratopos >= 128;
+        let p = if !neg { ch.period.wrapping_add(data) } else { ch.period.wrapping_sub(data) };
+        self.sp(bus, C_VIB);
+        self.k(bus, ptk::VIB + wave as usize);
+        self.k(bus, if neg { ptk::VIB_NEG } else { ptk::VIB_POS });
+        self.reg(bus, c, 6, p);
+        self.k(bus, ptk::VIB_VOL);
         let ch = &mut self.ch[c];
         ch.vibratopos = ch.vibratopos.wrapping_add((ch.vibratocmd >> 2) & 0x3C);
     }
@@ -857,7 +1227,8 @@ impl ProTracker {
             ch.tremolocmd = (lo & 0xF0) | (ch.tremolocmd & 0x0F);
         }
         let pos = (ch.tremolopos >> 2) & 0x1F;
-        let data = match (ch.wavecontrol >> 4) & 3 {
+        let wave = (ch.wavecontrol >> 4) & 3;
+        let data = match wave {
             0 => VIBRATO[pos as usize] as i32,
             // PT tests the vibrato's position here
             1 if ch.vibratopos < 128 => (pos as i32) << 3,
@@ -865,29 +1236,43 @@ impl ProTracker {
             _ => 255,
         };
         let data = (data * (ch.tremolocmd & 0xF) as i32) >> 6;
-        let v = if ch.tremolopos < 128 { ch.volume as i32 + data } else { ch.volume as i32 - data };
-        spend(bus, C_TREM);
-        reg(bus, c, 8, v.clamp(0, 64) as u16);
+        let neg = ch.tremolopos >= 128;
+        let v = if !neg { ch.volume as i32 + data } else { ch.volume as i32 - data };
+        let clamp = !(0..=64).contains(&v);
+        self.sp(bus, C_TREM);
+        self.k(bus, ptk::TREM + wave as usize);
+        self.k(bus, if neg { ptk::TREM_NEG } else { ptk::TREM_POS });
+        if clamp {
+            self.k(bus, ptk::TREM_CLAMP);
+        }
+        self.reg(bus, c, 8, v.clamp(0, 64) as u16);
         let ch = &mut self.ch[c];
         ch.tremolopos = ch.tremolopos.wrapping_add((ch.tremolocmd >> 2) & 0x3C);
     }
 
     fn volume_slide(&mut self, bus: &mut Bus, c: usize) {
-        spend(bus, C_SLIDE);
+        self.sp(bus, C_SLIDE);
         let ch = &mut self.ch[c];
         let lo = ch.cmdlo();
-        if lo >> 4 != 0 {
+        let (t, clamp) = if lo >> 4 != 0 {
+            let clamp = ch.volume + (lo >> 4) >= 64;
             ch.volume = (ch.volume + (lo >> 4)).min(64);
+            (ptk::SLIDE_UP, clamp)
         } else {
+            let clamp = ch.volume < lo & 0xF;
             ch.volume = ch.volume.saturating_sub(lo & 0xF);
-        }
+            (ptk::SLIDE_DOWN, clamp)
+        };
+        self.k(bus, t);
+        self.k(bus, if clamp { ptk::SLIDE_CLAMP } else { ptk::SLIDE_NOCLAMP });
     }
 
     fn e_commands(&mut self, bus: &mut Bus, c: usize) {
-        spend(bus, C_ECMD);
+        self.sp(bus, C_ECMD);
         let lo = self.ch[c].cmdlo();
         let y = lo & 0xF;
         let tick0 = self.counter == 0;
+        self.k(bus, if tick0 { ptk::E_ROW } else { ptk::E_FX } + (lo >> 4) as usize);
         let has_note = self.ch[c].note & 0xFFF != 0;
         let ch = &mut self.ch[c];
         match lo >> 4 {
@@ -950,20 +1335,34 @@ impl ProTracker {
 
     fn do_retrig(&mut self, bus: &mut Bus, c: usize) {
         let ch = self.ch[c];
-        spend(bus, C_WRITE);
-        dmacon(bus, 1 << c);
-        spend(bus, C_WRITE);
-        ptr(bus, c, ch.start);
-        spend(bus, C_WRITE);
-        reg(bus, c, 4, ch.length);
-        spend(bus, C_WRITE);
-        reg(bus, c, 6, ch.period);
-        spend(bus, DMA_WAIT);
-        dmacon(bus, 0x8000 | 1 << c);
-        spend(bus, DMA_WAIT);
-        ptr(bus, c, ch.loopstart);
-        spend(bus, C_WRITE);
-        reg(bus, c, 4, ch.replen);
+        self.sp(bus, C_WRITE);
+        self.k(bus, ptk::RT_DMA);
+        self.dmacon(bus, 1 << c);
+        self.sp(bus, C_WRITE);
+        self.k(bus, ptk::RT_LC);
+        self.ptr(bus, c, ch.start);
+        self.sp(bus, C_WRITE);
+        self.k(bus, ptk::RT_LEN);
+        self.reg(bus, c, 4, ch.length);
+        self.sp(bus, C_WRITE);
+        self.k(bus, ptk::RT_PER);
+        self.reg(bus, c, 6, ch.period);
+        self.sp(bus, DMA_WAIT);
+        if self.build == Build::Ptk {
+            self.k(bus, ptk::RT_END);
+            self.beam_wait(bus, PTK_WAIT_LINES, PTK_DMA_PHASE);
+        }
+        self.dmacon(bus, 0x8000 | 1 << c);
+        self.sp(bus, DMA_WAIT);
+        if self.build == Build::Ptk {
+            self.k(bus, ptk::WAIT2);
+            self.beam_wait(bus, PTK_WAIT_LINES, PTK_LOOP_PHASE);
+        }
+        self.ptr(bus, c, ch.loopstart);
+        self.sp(bus, C_WRITE);
+        self.k(bus, ptk::LOOP_LEN);
+        self.reg(bus, c, 4, ch.replen);
+        self.k(bus, ptk::RT_BACK);
     }
 }
 
@@ -1233,6 +1632,36 @@ mod tests {
         assert_eq!(pt.speed, 6);
         run(&mut pt, &mut bus(), 6);
         assert!(pt.songend);
+    }
+
+    #[test]
+    fn ptk_build_writes_as_ptk_prowiz() {
+        let d = module(100, 10, 20, 0, &[(0, 1, note(1, 428, 0))]);
+        let mut pt = ProTracker::new(&d, BASE).unwrap();
+        pt.build = Build::Ptk;
+        let mut b = bus();
+        let w = run(&mut pt, &mut b, 6);
+        // an effects tick: the period and the volume of every voice
+        assert_eq!(w[0].iter().map(|x| x.0).collect::<Vec<_>>(), [0xDFF0A6, 0xDFF0A8, 0xDFF0B6, 0xDFF0B8, 0xDFF0C6, 0xDFF0C8, 0xDFF0D6, 0xDFF0D8]);
+        // the row: the repeats first voice first, after the DMA on
+        let on = w[5].iter().position(|x| *x == (0xDFF096, 0x8002)).unwrap();
+        assert_eq!(w[5][on + 1..].iter().step_by(3).map(|x| x.0).collect::<Vec<_>>(), [0xDFF0A0, 0xDFF0B0, 0xDFF0C0, 0xDFF0D0]);
+        // the DMA waits end on the beam: 110 and 100 colour clocks into a line
+        b.write_log.as_mut().unwrap().clear();
+        b.clock = 12_345 * LINE + 17;
+        for _ in 0..6 {
+            pt.tick(&mut b);
+            b.clock += pt.tick_clocks();
+        }
+        let l = b.write_log.clone().unwrap();
+        let on = l.iter().find(|w| w.0 == 0xDFF096 && w.1 & 0x8000 != 0).unwrap().2;
+        let rep = l.iter().find(|w| w.0 == 0xDFF0A0 && w.2 > on).unwrap().2;
+        assert_eq!((on % LINE, rep % LINE, (rep - on) / LINE), (PTK_DMA_PHASE, PTK_LOOP_PHASE, 9));
+        // and the first write of an effects tick comes 281 colour clocks into it
+        b.write_log.as_mut().unwrap().clear();
+        let t = b.clock;
+        pt.tick(&mut b);
+        assert_eq!(b.write_log.as_ref().unwrap()[0].2 - t, 281);
     }
 
     #[test]

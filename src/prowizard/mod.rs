@@ -155,15 +155,15 @@ pub fn convert(data: Vec<u8>, path: &Path) -> Vec<u8> {
     convert_tagged(data, path).0
 }
 
-/// `convert`, and whether the module was converted (one of the packed formats).
-pub fn convert_tagged(data: Vec<u8>, path: &Path) -> (Vec<u8>, bool) {
+/// `convert`, and the packed format the module was converted from, if it was one.
+pub fn convert_tagged(data: Vec<u8>, path: &Path) -> (Vec<u8>, Option<&'static str>) {
     let files = core::FsLoader { path: path.to_path_buf() };
     match identify_convert(&data, &files) {
         Some((name, m)) => {
             log::info!("ProWizard: {name}, {} -> {} bytes", data.len(), m.len());
-            (m, true)
+            (m, Some(name))
         }
-        None => (data, false),
+        None => (data, None),
     }
 }
 

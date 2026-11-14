@@ -948,6 +948,17 @@ plain modules, as Devils Replay and HCD Protector keep the `M.K.` mark.
   identical; the other 4 differ only by PTK-Prowiz's late portamentos). The
   reference refuses Magnetic Fields Packer, NovoTrade Packer, Devils Replay and
   HCD Protector, so their playback is unchecked.
+* Write timing: a conversion (other than Mosh and Titanics Player) plays as
+  PTK-Prowiz writes, at its colour clock: the tick's start plus the 68000
+  cycles of the code paths taken (a cost per path, fitted to the write logs of
+  the ChipTracker rows), the period and volume of every voice in each effects
+  tick, and the DMA waits on the beam (DMA on at colour clock 110 of the raster
+  line 10 lines after the last volume write's, the repeats 10 lines later at
+  100). With the reference's song-start phase given, 7 of the 10 ChipTracker
+  rows match every write. The reference's song start is not modelled: it is
+  PTK-Prowiz's identification and conversion time (0.3 to 6 million colour
+  clocks, from the file's data), so the beam waits fall on other lines and
+  refcmp's rows stay SIMILAR (up from about 1% to 3-98%).
 
 ## Using as a library
 

@@ -173,6 +173,7 @@ impl Paula {
     }
 
     /// The channel's current output, -1..1, for scopes.
+    #[inline]
     pub fn output(&self, i: usize) -> f32 {
         let c = &self.ch[i];
         ((c.current_sample * c.vol as i32) & c.adk_mask) as f32 / (128.0 * 64.0)

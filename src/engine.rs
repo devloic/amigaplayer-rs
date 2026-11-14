@@ -1822,7 +1822,7 @@ impl Engine {
                 p.frames += 1;
             }
             let paula = &self.m.bus.paula;
-            self.push_scopes([0, 1, 2, 3].map(|i| paula.output(i)));
+            self.push_scopes([paula.output(0), paula.output(1), paula.output(2), paula.output(3)]);
         }
         self.skip_empty_subsong();
     }
@@ -1898,6 +1898,7 @@ impl Engine {
         }
     }
 
+    #[inline]
     fn push_scopes(&mut self, paula: [f32; 4]) {
         let nv = if self.m.deli.voices.in_use { self.m.deli.voices.voices.len() } else { 0 };
         let n = 4 + nv;

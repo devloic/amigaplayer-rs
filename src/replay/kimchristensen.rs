@@ -29,12 +29,15 @@ const TICK: u64 = 70940;
 /// first signature word and between the last two, and the cost of each further sample entry. The
 /// phase of this clock in the raster line decides the waits of spec 4.4, so it is modelled from
 /// the reference's runs (it is a property of the host, not of the format); the sample term is
-/// measured for 1 to 5 entries and continued at the last step beyond.
-fn first_tick_at(searched: u64, nsmp: u64) -> u64 {
-    const BASE: [u64; 6] = [74052, 74052, 74080, 74115, 74149, 74184];
+/// measured for 1 to 5 entries and continued at the last step beyond. The count runs in 68000
+/// cycles, 52 a word searched, one less over an odd number of words between the last two
+/// signature words: with such a gap the clock lands a colour clock earlier (the bases are for an
+/// even one; the files of 1, 3 and 4 entries measured all have a gap of 1 word).
+fn first_tick_at(searched: u64, gap_odd: bool, nsmp: u64) -> u64 {
+    const BASE: [u64; 6] = [74053, 74053, 74080, 74116, 74150, 74184];
     let n = nsmp.min(1000) as usize;
     let b = if n < BASE.len() { BASE[n] } else { BASE[5] + 34 * (n as u64 - 5) };
-    b + 26 * searched
+    b + 26 * searched - gap_odd as u64
 }
 
 const PERIODS: [u16; 43] = [
@@ -111,6 +114,8 @@ struct Layout {
     smp: usize,
     /// Words searched before the first signature word and between the last two.
     searched: u64,
+    /// Whether the words searched between the last two signature words are an odd number.
+    gap_odd: bool,
     nsmp: u64,
 }
 
@@ -131,7 +136,7 @@ fn layout(d: &[u8]) -> Option<Layout> {
     let t = o.checked_sub(2)?;
     let origin = a_per.wrapping_sub(t as u32);
     let off = |a: u32| a.wrapping_sub(origin) as usize;
-    let mut l = Layout { origin, pos: off(a_pos), pat: off(a_pat), ins: off(a_ins), smp: off(a_smp), searched: (first_sig / 2 + (o - after_smp) / 2) as u64, nsmp: 0 };
+    let mut l = Layout { origin, pos: off(a_pos), pat: off(a_pat), ins: off(a_ins), smp: off(a_smp), searched: (first_sig / 2 + (o - after_smp) / 2) as u64, gap_odd: (o - after_smp) / 2 % 2 == 1, nsmp: 0 };
     // the sample list check
     let first = long(d, l.smp);
     if first == 0 || first & 0x8000_0000 != 0 {
@@ -510,7 +515,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     // aligned start; its timer starts one period before the first tick, and the song's audio
     // counts from that moment, so the clock is left there
     let origin = m.bus.clock.saturating_sub(crate::engine::START_PHASE);
-    let e0 = first_tick_at(r.l.searched, r.l.nsmp);
+    let e0 = first_tick_at(r.l.searched, r.l.gap_odd, r.l.nsmp);
     m.bus.clock = (origin + e0 - TICK).max(m.bus.clock);
     Some(Box::new(r))
 }

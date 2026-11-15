@@ -1,0 +1,543 @@
+# player (relative to ~/.config/deliplayer)	probe file: extra files run only on that player
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Demo/Brimble_Allister/Hubbard_Music_2/Hubbard_Music_2/smus.DELTA
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Demo/Brimble_Allister/Sonix_Jukebox_14/Sonix_Jukebox_14/smus.LastNinja
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Demo/Brimble_Allister/Sonix_Jukebox_14/Sonix_Jukebox_14/smus.Saboteur2
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Demo/Brimble_Allister/Sonix_Jukebox_17/Sonix_Jukebox_17/smus.9
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Demo/Brimble_Allister/Very_Best_of_Rob_Hubbard/Very_Best_of_Rob_Hubbard/smus.MASTEROFMAGIC
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Demo/Radio_Poland/Technotronic/Technotronic/smus.11
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Barker_Chris/Spirit_of_Excalibur/Spirit_of_Excalibur/smus.Camelot
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Barker_Chris/Spirit_of_Excalibur/Spirit_of_Excalibur/smus.GoodCstl
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Gilbertson_Gary/Alternate_Reality/Alternate_Reality/smus.Thor2
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Gilbertson_Gary/Alternate_Reality/Alternate_Reality/smus.bade
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/sonix/mods/It_Came_From_The_Desert/Demo_Version/smus.ELMER
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/sonix/mods/It_Came_From_The_Desert/Demo_Version/smus.GENERIC0
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/sonix/mods/It_Came_From_The_Desert/Demo_Version/smus.GENERIC1
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/sonix/mods/It_Came_From_The_Desert/Demo_Version/smus.IDA
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/sonix/mods/It_Came_From_The_Desert/Demo_Version/smus.MAINTITLE
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/sonix/mods/It_Came_From_The_Desert/Demo_Version/smus.MAP
+DeliPlayers/IFF-SMUS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/sonix/mods/It_Came_From_The_Desert/Demo_Version/smus.MILITARY
+DeliPlayers/JamCracker_note	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/3155bf275acaa728715f30b3a6515d82d31fa242/jeff.jam
+DeliPlayers/PlayerStore/AMComposer	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/amc/amc.hiscore
+DeliPlayers/PlayerStore/AMComposer	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/amc/amc.title
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/a sporting chance.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/galaxy man.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/perception.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/robocop3.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/stormlord.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/synthtest.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/more/perception test(amiga).ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/more/softsynthtest.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/more/stormlord-synth.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/more/tropical islands.ems
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/ems/ems.end
+DeliPlayers/PlayerStore/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/ems/ems.hiscore
+DeliPlayers/PlayerStore/EarAche	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.basic_bra
+DeliPlayers/PlayerStore/EarAche	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.fuzz08
+DeliPlayers/PlayerStore/EarAche	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.fuzz24
+DeliPlayers/PlayerStore/EarAche	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.hold08
+DeliPlayers/PlayerStore/EarAche	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.hold11
+DeliPlayers/PlayerStore/EarAche	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.hold12
+DeliPlayers/PlayerStore/EarAche	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/earache/modules/EA.chain03
+DeliPlayers/PlayerStore/EarAche	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/earache/modules/EA.chain17
+DeliPlayers/PlayerStore/Hippel-ST_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/hst/fuzz/hst.f41
+DeliPlayers/PlayerStore/Hippel-ST_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/hst/fuzz/hst.f59
+DeliPlayers/PlayerStore/Hippel-ST_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/hst/fuzz/hst.f74
+DeliPlayers/PlayerStore/Hippel-ST_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/jochenhippelst/_private/syn/hst.syn2018
+DeliPlayers/PlayerStore/Hippel-ST_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/jochenhippelst/_private/syn/hst.syn2052
+DeliPlayers/PlayerStore/Hippel-ST_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/jochenhippelst/_private/syn/hst.syn225
+DeliPlayers/PlayerStore/Hippel-ST_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/jochenhippelst/_private/syn/hst.syn285
+DeliPlayers/PlayerStore/Hippel-ST_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/ym2149/_private/dl/x/MYST_Data_2/YM2149/Hippel/AmberStar/YM.AmberStar14
+DeliPlayers/PlayerStore/Impulse	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/it/IT.- PacMania -
+DeliPlayers/PlayerStore/Impulse	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/it/IT.this is your brain on bktr
+DeliPlayers/PlayerStore/Impulse	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/it2/000001.it
+DeliPlayers/PlayerStore/Impulse	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/it2/32k Love.it
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/jpn/jpn.Empire_Soccer_94
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/jpn/jpn.xmas_demo
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Empire_Soccer_94/jpn.Empire_Soccer_94
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Fire_and_Ice/jpn.1
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Fire_and_Ice/jpn.3
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Fire_and_Ice/jpn.5
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Fire_and_Ice/jpn.6
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Fire_and_Ice_CD32/jpn.game_over_&_hiscore
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Fire_and_Ice_CD32/jpn.title
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Realms/jpn.intro_and_title
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Uridium_2/jpn.MUSIC
+DeliPlayers/PlayerStore/JasonPage_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch8/mods/jpn/Xmas_Demo/jpn.xmas_demo
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Georg_Glaxo/jo.ingame
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.game_complete
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_01
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_04
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_06
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_09
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_11
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_13
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_16
+DeliPlayers/PlayerStore/JesperOlsen_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_18
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hales_Steve/Contraption_Zack/Contraption_Zack/mxtx.BlueJam
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hales_Steve/Contraption_Zack/Contraption_Zack/mxtx.march
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hendrix_Tod/Might_and_Magic_3/Might_and_Magic_3/mxtx.bank.mx
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hendrix_Tod/Might_and_Magic_3/Might_and_Magic_3/mxtx.cyber2.mx
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Nathan_Matthew/A-Train/A-Train/mxtx.SilentNight
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Nathan_Matthew/A-Train/A-Train/mxtx.TitleScreen
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Nathan_Matthew/A-Train/A-Train/mxtx.YouLose
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Nathan_Matthew/Darkseed/Darkseed/mxtx.MX06
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/mxtx/mxtx.Agro
+DeliPlayers/PlayerStore/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/mxtx/mxtx.BlueJam
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.BREAK
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.Buergermeister
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.CLASSIC
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DANCE
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DERB
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DRAGON!
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DREAMA
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.Deepslide
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.HOUSE
+DeliPlayers/PlayerStore/MusicMaker_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.HOUSEII
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Ivanhoe/pap.bonus
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Ivanhoe/pap.level_1_(forest)
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Ivanhoe/pap.level_3_(horse)
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Ivanhoe/pap.level_5_(castle)
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_02
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_05
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_07
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_09
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_11
+DeliPlayers/PlayerStore/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_13
+DeliPlayers/PlayerStore/ProRunner21	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/prorunner2/5th Generation - Course Of Techno - Dreaming.pr2
+DeliPlayers/PlayerStore/ProRunner21	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/prorunner2/5th Generation - Course Of Techno - Fanzine.pr2
+DeliPlayers/PlayerStore/PumaTracker	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/puma/Anal.puma
+DeliPlayers/PlayerStore/PumaTracker	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/puma/Cyf 3 Final 2.puma
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartet/logs/rnd/mods/QPA.r05
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartet/logs/rnd/mods/QPA.r17
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartet/logs/rnd/mods/qpa.r03
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartet/logs/rnd/mods/qpa.r09
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartet/logs/rnd/mods/qpa.r15
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.h1
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.h2
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.h3
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.h4
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.h6
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.h7
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.n1
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.r1
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.s1
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/quartetpsg/logs/modules/SQT.u1
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/quartet-w/rcc/lstage/stage/45a9d4a5fab97235/QPA.tempo30
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/quartet-w/rcc/lstage/stage/4d88315fd3c6b748/qpa.r18
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/quartet-w/rcc/lstage/stage/4fb07b13eecd355f/QPA.r02
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/quartet-w/rcc/lstage/stage/5ccd07d9c8fe0bae/QPA.r20
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/quartet-w/rcc/lstage/stage/ac81b92cd8cbb032/QPA.r04
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/quartet-w/rcc/lstage/stage/d9876f2794cab725/QPA.r07
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/quartet-w/rcc/lstage/stage/d9876f2794cab725/QPA.r28
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/quartet-w/rcc/lstage/stage/fa6c15e53fe21393/qpa.r12
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/quartetst/logs/mods/QTS.unknown
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/quartetst/logs/rnd/mods/QTS.r11
+DeliPlayers/PlayerStore/Quartet	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/quartetst/logs/rnd/mods/qts.r05
+DeliPlayers/PlayerStore/SoundImages	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/2d2736c4b20c9ffc436fb2b3127f8c79449e8adc/nitro.tw
+DeliPlayers/PlayerStore/SoundImages	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/70d1fa54b870596b7633e8b437285257ba8b97f2/future basketball-1.tw
+DeliPlayers/PlayerStore/SoundImages	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/cbaeb949e4894ac7bf7b078f5ebf2be4293fbe50/teenage mutant turtles.tw
+DeliPlayers/PlayerStore/SoundImages	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/e552ec854cff36955c55d81fc96a8189275066f1/nevermind title.tw
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/tw/tw.Chuckie_Egg_II
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/tw/tw.ingame
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Chuckie_Egg_2/tw.Chuckie_Egg_II
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.ingame
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.sfx
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.title
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.jingles
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.speech
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.title
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Judge_Dredd/tw.Judge_Dredd
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/MoonFall/tw.MoonFall
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/MoonFall/tw.MoonFallFx
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Narc/tw.ingame_1
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Narc/tw.ingame_2
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Never_Mind/tw.ingame
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Never_Mind/tw.title
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Nitro/tw.Nitro
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Sharkeys_Moll/tw.Sharkey's_Moll
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Sharkeys_Moll/tw.sfx
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Shinobi/tw.Shinobi
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Smash_TV/tw.Smash_TV
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Super_Monaco_GP/tw.ingame
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Super_Monaco_GP/tw.sfx
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Teenage_Mutant_H_T_90/tw.Teenage_Mutant_Hero_Turtles
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.beach
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.bonus
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.building_site
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.country
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.disco
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.title
+DeliPlayers/PlayerStore/SoundImages	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.town
+DeliPlayers/PlayerStore/TME	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/tme/tme.Labyrinth.msx
+DeliPlayers/Sidmon2.0_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Franck_Hans-Hermann/Cobra/Cobra/sid2.game_end
+DeliPlayers/SoundMon22_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Blaha_Christian/Real_Popeye/Real_Popeye/bp.popeye-level4b
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/0278c4b415fcc846d626a51bafa0b548/rjp.ingame_1
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/053c34f2af847082156cd71edab828d0/rjp.LOCKER
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/06228383fca43effa1ea9cfacdaa2cd2/rjp.The_Aquatic_Games
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/06835cb7e315fa5151b8f0de9482a7bd/rjp.ingame_2
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/08c0a5d55ed9e1e3a07f7c6a89810098/rjp.ingame_04
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/105fdfbc20e9f6008cc09e0c2a6ec438/rjp.SFX
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/21913eac0aeb1a54c3fae0955e495060/rjp.MENU
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/24ddb545358262ecbc22c5a044efccd6/rjp.ingame_2
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/2ba7ce59b0e44e2a5a575c3a1c33bb21/rjp.ingame_5
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/3586ae65553650056059b3c6eda35ffd/rjp.JUNBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/36c2814b167e8c111addbd69ded9c43a/rjp.HERO
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/3911c1555670f72e725fdad9a3b88d22/rjp.KILLER
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/39b4513ea2b2b18c8916be33e83d114b/rjp.menu
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/3b737db4915766960aa18aadaab020f1/rjp.world_1
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/3c79856cd190a810396e11c03d4f6155/rjp.MENU
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/3d025c91ab4952b83b60b6891bfd454e/rjp.loader
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/3f862754641c04a4711b8bcee2f55b3c/rjp.ICEBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/4049fc6b00b1e171b906f58c5816ea31/rjp.MORBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/444d1496fbf08d8c85705858207ffe40/rjp.title
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/45bef2154c1147df68caad13b4e084e5/rjp.GOLFMUS
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/4ec27fd7d662a7b1325a33675f9a6bd6/rjp.ingame_4
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/4f41a16b98462efb7ac7d512864fc33d/rjp.ingame
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/5076affc209f7fe7fdf0bfe34830fd17/rjp.ingame_4
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/521e9ab930cb8dfbcd042c0225a6374c/rjp.ingame_1
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/535faad9fb414f96e6d53777d85073fc/rjp.INTBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/5ad7c00e595f21bb68b4985835727a3b/rjp.ingame_2
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/5b5373f499401a1a09f53d9833aae6de/rjp.ingame_09
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/5caf1c667eecd54ea3da1b284cd73ba6/rjp.Chaos_Engine_Demo
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/5cff3c5e70e093402d22d12c8491e235/rjp.ingame_1
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/5e1440cdf926e318e547c7a052e49b17/rjp.world_2
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/5f7de8bcf73d44e572f620f4ecc82af5/rjp.TITLE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/5fd4c2b555720dc161b7eec021f5efeb/rjp.title
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/62a2a3d43b5f6a4e98b7d3fbbbafa757/rjp.ingame_2
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/67acd5649b4be26461d39f4761239072/rjp.intro_and_title
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/6e2291f2d10f3e55830bb48a82e5d437/rjp.ingame_4
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/6fc049397fb3f3ae491572fd1ec1e533/rjp.ingame_01
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/70e85ff3cf50ca70021543e7f9622b25/rjp.INGAME
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/77b8b30a2a1406cb74126357a2773db6/rjp.SHOP_S
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/79b8efa013413ee8cf4562cc7b2c97eb/rjp.ingame_1
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/806dc929626ae402773061914f80176f/rjp.ingame_5
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/815ce1a17190323beacd195ff24a0bab/rjp.ingame_6
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/873af78c8a10c724f5ddee355b92d816/rjp.game_end
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/876c727ee3a81fbdc7f585e2ecf70b1d/rjp.JUNBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/897ce09b0ecad4b2297a9d37e9219600/rjp.ingame_07
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/898933c01b22d4a958ef54db756a7ae1/rjp.game_end
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/8aef4a310f31ce866f9e875306eada91/rjp.dig
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/8c27f5acde79f09238976ee01cba2cf2/rjp.RoboCod
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/8cc7354fa6aa26725d924f981216a01f/rjp.DESBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/8d8c84d83b451e513c78f9afcf1ace02/rjp.JUNBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/8dfc82bc0ca9b66911a7eeffb6844c6d/rjp.ingame_08
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/91bfc0e99f4afd0aea7845670fa24c7a/rjp.ingame_4
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/9634daa521ce59dd148438609387ad80/rjp.ingame_4
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/96a574f6d9bbc1ab1dff7b504ed074fa/rjp.ingame_02
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/9dbf45ec7b27fc81feca6e336bdb1240/rjp.ingame_3
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/9e996cc54c02c1150fbccd57955be247/rjp.ingame_10
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/a109808634f305920aa14effd1749529/rjp.world_4
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/ac4bf799930e0e24f7d71d44f0f7802a/rjp.menu
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/af7db180c579cd3f323c52a6c55c0cfa/rjp.ingame_6
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/b10ee0b19fa63f57de6d65a2aaa79f96/rjp.ingame_1
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/b3aac35da6cbb0840a3be318f4e0fa75/rjp.MORBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/b4464307eaa4edc42efa3ccbf824c247/rjp.WARX4
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/b5ab3fbc00efbe9fdb09c0029678cac6/rjp.ingame_11
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/ba6cf3befea91c44d148ecb77c6b9e31/rjp.ingame_5
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/baaa61e05937bd77355ad27770d3e4cc/rjp.game_complete
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/bfc665f18d72f03212ed3894891e0588/rjp.MMUS
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/c05cf269d759c30802fac8c525393c34/rjp.ingame_06
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/c30a54a70a267a44439a4c15e3ed5e8b/rjp.title
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/cb4782f8f831d624f0d20cdc704dd02c/rjp.DESBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/cbdf20b449f5d9ba58f57beb0f644bcf/rjp.world_3
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/cce553202d51600b3c367c3cbce73fe9/rjp.ingame_3
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/ce9eb2645ceef3fc78d1503c8b07a069/rjp.ingame_05
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/d2343838ec51c5becc3337415c26e0f6/rjp.JON
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/d2dc21cdf590d19818ec6d3f8925a380/rjp.dig
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/d81be864fba2376a818b856810ebf021/rjp.ingame_12
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/d923e5d53753f47c926b44ab756ee97f/rjp.ingame_5
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/da554481cb78de0bd84edd4bfd6e9d53/rjp.INTBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/e8d75e99d00e3b8c45e553849040c68a/rjp.ingame_03
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/e9707112e3dcc2fdfbd34dbc61b95b57/rjp.ICEBASE
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/edd7e73af111963649a23175c88f917f/rjp.menu
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/ee78e11420b219f4f37c5d1476a60594/rjp.ingame_3
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/eecefb51986af8a29e48d51f78df34e2/rjp.ingame_3
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/f1478dbbb63d971931e0fb032c980493/rjp.ingame_2
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/f15c8d5e7529450830b73ab249da0a1a/rjp.ingame_3
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/fddb89fd99a58b230fc7bdd5afaad41f/rjp.James_Pond_3
+DeliPlayers/VectorDean_note	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/rjp/mods/ffe8031ff503fbaad8447047574d7902/rjp.JON
+Eagleplayers/A.M.Composer 1.2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/amc/amc.hiscore
+Eagleplayers/A.M.Composer 1.2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/amc/amc.title
+Eagleplayers/Art of Noise	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/1d53b28ed955c6d6292de63d0f07403b6e2ff4ff/NEW_IDEE.AON
+Eagleplayers/Art of Noise	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/4be57c634df7af0d2251404e270d8ff952f43ec4/inner voyage.aon
+Eagleplayers/Art of Noise	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/adfd461c66d379279dfd779ad738b609616605d0/EINFACH.AON
+Eagleplayers/Art of Noise	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/fe640cad406e1fcd9e8880c6d8a9a49ed5d86c6b/dawn.final.aon
+Eagleplayers/Art of Noise	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/D/DF0 BAD/AON.5uujr
+Eagleplayers/Art of Noise	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Slaxx/AON.dream01-slx
+Eagleplayers/Art of Noise	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/T/Tommy(D)/AON.AI2exp-part1
+Eagleplayers/Art of Noise	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/T/Tommy(D)/AON.trancemission 2
+Eagleplayers/Art of Noise	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/T/Toodeloo(Sweden)/AON.the hills have eyes
+Eagleplayers/Art of Noise	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/T/Twice(D)/AON.lastninja2-end.2
+Eagleplayers/Chiptracker	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/kris/mod.DOJOLEV1
+Eagleplayers/Chiptracker	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/kris/mod.ORIENTAL.CHIP
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/a sporting chance.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/galaxy man.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/perception.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/robocop3.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/stormlord.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/files/synthtest.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/more/perception test(amiga).ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/more/softsynthtest.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/more/stormlord-synth.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/dl-modules/EMS_v6/more/tropical islands.ems
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/ems/ems.end
+Eagleplayers/EMS	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/ems/ems.hiscore
+Eagleplayers/GlueMaster	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/hismastersnoise/Aase's Death.mod
+Eagleplayers/GlueMaster	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/hismastersnoise/Abridge.mod
+Eagleplayers/GlueMaster	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/gluemon/modules/gm4voice
+Eagleplayers/GlueMaster	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/gluemon/modules/gmdrums
+Eagleplayers/GlueMaster	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/gluemon/modules/gmfast
+Eagleplayers/GlueMaster	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/gluemon/modules/gmstart
+Eagleplayers/GlueMaster	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/gluemon/modules/gmwrap
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hippel_Jochen/Amberstar/Amberstar/s7g.intro
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hippel_Jochen/Amberstar/Amberstar/s7g.outro
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hippel_Jochen/Ghost_Battle/Ghost_Battle/s7g.game_over
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hippel_Jochen/Lethal_Xcess/Lethal_Xcess/Older_hip7_hipc_versions/hip7.game_end
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hippel_Jochen/Lethal_Xcess/Lethal_Xcess/Older_hip7_hipc_versions/hip7.intro_credits
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/nostalgicplayer/format/hippel7voices/Amberstar - Ending (COSO).hip7.xz
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/nostalgicplayer/format/hippel7voices/Amberstar - Ending.hip7.xz
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/nostalgicplayer/format/hippel7voices/Amberstar - Intro (COSO).hip7.xz
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/nostalgicplayer/format/hippel7voices/Amberstar - Intro.hip7.xz
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/nostalgicplayer/format/hippel7voices/Australian Pioneers - Intro (COSO).hip7.xz
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Amberstar - Ending (COSO).hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Amberstar - Ending.hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Amberstar - Intro (COSO).hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Amberstar - Intro.hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Australian Pioneers - Intro.hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Ghost Battle - Game Over (COSO).hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Ghost Battle - Game Over.hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Lethal Xcess - Intro (COSO).hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/Lethal Xcess - Intro.hip7
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/hip7.game_end
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/s7g.game_over
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/s7g.intro
+Eagleplayers/Hippel_7V	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/b12-hip7/mods/s7g.outro
+Eagleplayers/In Stereo 2.0	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/instereo20/Classic Concert.is
+Eagleplayers/In Stereo 2.0	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/instereo20/Firefox II.is
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-consolidated/demozoo-mods/full2/2bc3cf18e9d33e1557fa91c48cac7bdbb8c41b9a/space harrier.jb
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.1943_-_The_Battle_of_Midway__1943_-_The_Battle_of_Midway__1943
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Feud__Feud__Feud_NTSC
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Harley-Davidson__Harley-Davidson__ingame
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Hellfire_Attack__Hellfire_Attack__Hellfire_Attack
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Out_Run__Out_Run__Unused__out_run
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Pac-Land__Pac-Land__Pac-Land
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Rockford__Rockford__Rockford
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Space_Harrier__Space_Harrier__Alternate_Version__Space_Harrier
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Thunder_Blade__Thunder_Blade__ingame
+Eagleplayers/J.C.Brooke	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch10/mods/jcb/jcb.Vixen__Vixen__Vixen
+Eagleplayers/JamCracker	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/3155bf275acaa728715f30b3a6515d82d31fa242/jeff.jam
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Georg_Glaxo/jo.ingame
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.game_complete
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_01
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_04
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_06
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_09
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_11
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_13
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_16
+Eagleplayers/Jesper Olsen	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/jo/mods/Lollypop/jo.ingame_18
+Eagleplayers/M. Grouleff	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.basic_bra
+Eagleplayers/M. Grouleff	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.fuzz08
+Eagleplayers/M. Grouleff	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.fuzz24
+Eagleplayers/M. Grouleff	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.hold08
+Eagleplayers/M. Grouleff	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.hold11
+Eagleplayers/M. Grouleff	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/earache/modules/EA.hold12
+Eagleplayers/M. Grouleff	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/earache/modules/EA.chain03
+Eagleplayers/M. Grouleff	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/vm-out/out/spec/earache/modules/EA.chain17
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Cooksey_Mark/Aquablast/Aquablast/mcr.Aquablast
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Cooksey_Mark/Commando/Commando/mc.Commando
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Cooksey_Mark/Ghosts_n_Goblins/Ghosts_n_Goblins/mc.Ghosts_n_Goblins
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Cooksey_Mark/Grand_National/Grand_National/mc.title
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Cooksey_Mark/Gremlins_2_-_The_New_Batch/Gremlins_2_-_The_New_Batch/mc.Gremins_2_-_The_New_Batch
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Cooksey_Mark/Overlander/Overlander/mcr.Overlander
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Cooksey_Mark/Paperboy/Paperboy/mc.Paperboy
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Cooksey_Mark/World_Championship_Soccer/World_Championship_Soccer/mc.World_Championship_Soccer
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/mc/mc.Commando
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/mc/mc.Ghosts_n_Goblins
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/mcoold/mods/mco.A_Question_of_Sport
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/mcoold/mods/mco.Aquablast
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/mcoold/mods/mco.Mike_Reads_Comp_Pop_Quiz
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/mcoold/mods/mco.Overlander
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/mcoold/mods/mco.syn1
+Eagleplayers/Mark Cooksey	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/mcoold/mods/mco.syn2
+Eagleplayers/Mark II Old	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Zendeh_Darius/Crash_and_Burn/Crash_and_Burn/dz.Crash_and_Burn
+Eagleplayers/Mark II Old	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/dz/A.dz
+Eagleplayers/Mark II Old	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/dz/C.dz
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hales_Steve/Contraption_Zack/Contraption_Zack/mxtx.BlueJam
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hales_Steve/Contraption_Zack/Contraption_Zack/mxtx.march
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hendrix_Tod/Might_and_Magic_3/Might_and_Magic_3/mxtx.bank.mx
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Hendrix_Tod/Might_and_Magic_3/Might_and_Magic_3/mxtx.cyber2.mx
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Nathan_Matthew/A-Train/A-Train/mxtx.SilentNight
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Nathan_Matthew/A-Train/A-Train/mxtx.TitleScreen
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Nathan_Matthew/A-Train/A-Train/mxtx.YouLose
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Nathan_Matthew/Darkseed/Darkseed/mxtx.MX06
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/mxtx/mxtx.Agro
+Eagleplayers/MaxTrax	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/mxtx/mxtx.BlueJam
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.BREAK
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.Buergermeister
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.CLASSIC
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DANCE
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DERB
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DRAGON!
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DREAMA
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.Deepslide
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.HOUSE
+Eagleplayers/MusicMaker4	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.HOUSEII
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.BREAK
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.Buergermeister
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.CLASSIC
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DANCE
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DERB
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DRAGON!
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.DREAMA
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.Deepslide
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.HOUSE
+Eagleplayers/MusicMaker8	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/amp/S/Selectanovel/MM8.HOUSEII
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Ivanhoe/pap.bonus
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Ivanhoe/pap.level_1_(forest)
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Ivanhoe/pap.level_3_(horse)
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Ivanhoe/pap.level_5_(castle)
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_02
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_05
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_07
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_09
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_11
+Eagleplayers/PierreAdane	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/packers/mods/pap/Pang/pap.ingame_13
+Eagleplayers/Pumatracker 1.0	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/puma/Anal.puma
+Eagleplayers/Pumatracker 1.0	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/puma/Cyf 3 Final 2.puma
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/blood/rh2.blood.dum
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/bobo/rh2.bobodors.dum
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/bobo/rh2.bobofil.dum
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/bobo/rh2.bobolav3.dum
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/bobo/rh2.bobomang3.dum
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/bobo/rh2.bobopat3.dum
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/bobo/rh2.bobotram.dum
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/bobo/rh2.interlude.dum
+Eagleplayers/Rob Hubbard 2	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/port-rh2/m/p/bobo/rh2.scores.dum
+Eagleplayers/SIDMon 2.0	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Franck_Hans-Hermann/Cobra/Cobra/sid2.game_end
+Eagleplayers/SUNtronic Custom	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/suntronic/_private/mods/msx-cracktro 2.sun
+Eagleplayers/SUNtronic Custom	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/suntronic/_private/mods/shades.sun
+Eagleplayers/SUNtronic Custom	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/suntronic/_private/syn/a001.sun
+Eagleplayers/SUNtronic Custom	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/suntronic/_private/syn/a003.sun
+Eagleplayers/SUNtronic Custom	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/suntronic/_private/syn/a006.sun
+Eagleplayers/SUNtronic Custom	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/suntronic/modules/a004.sun
+Eagleplayers/SUNtronic Custom	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/suntronic/modules/b001.sun
+Eagleplayers/SUNtronic Custom	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/suntronic/modules/b003.sun
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.Defenders_of_the_Earth
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.Hong_Kong_Phooey
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.Infestation
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.Ruff_and_Reddy
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.Top_Cat
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.Wacky_Races
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.Yogi_Bear_and_Friends
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.jingles
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.jingles_2
+Eagleplayers/Sean Conran	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/batch9/mods/scr/scr.title
+Eagleplayers/Sound Images	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/2d2736c4b20c9ffc436fb2b3127f8c79449e8adc/nitro.tw
+Eagleplayers/Sound Images	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/70d1fa54b870596b7633e8b437285257ba8b97f2/future basketball-1.tw
+Eagleplayers/Sound Images	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/cbaeb949e4894ac7bf7b078f5ebf2be4293fbe50/teenage mutant turtles.tw
+Eagleplayers/Sound Images	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/e552ec854cff36955c55d81fc96a8189275066f1/nevermind title.tw
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/tw/tw.Chuckie_Egg_II
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/tw/tw.ingame
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Chuckie_Egg_2/tw.Chuckie_Egg_II
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.ingame
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.sfx
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.title
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.jingles
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.speech
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.title
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Judge_Dredd/tw.Judge_Dredd
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/MoonFall/tw.MoonFall
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/MoonFall/tw.MoonFallFx
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Narc/tw.ingame_1
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Narc/tw.ingame_2
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Never_Mind/tw.ingame
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Never_Mind/tw.title
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Nitro/tw.Nitro
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Sharkeys_Moll/tw.Sharkey's_Moll
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Sharkeys_Moll/tw.sfx
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Shinobi/tw.Shinobi
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Smash_TV/tw.Smash_TV
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Super_Monaco_GP/tw.ingame
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Super_Monaco_GP/tw.sfx
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Teenage_Mutant_H_T_90/tw.Teenage_Mutant_Hero_Turtles
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.beach
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.bonus
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.building_site
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.country
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.disco
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.title
+Eagleplayers/Sound Images	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.town
+Eagleplayers/Stonetracker	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/gate-hosting/m/stonetracker/SPM.antarctica
+Eagleplayers/Stonetracker	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/gate-hosting/m/stonetracker/SPM.teinteremix22
+Eagleplayers/Symphonie Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/symmod/303 emulator.symmod
+Eagleplayers/Symphonie Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/symmod/acoustic modeling demo.symmod
+Eagleplayers/Symphonie Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/symmod/altered states 2.symmod
+Eagleplayers/Symphonie Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/symmod/trancendental.symmod
+Eagleplayers/TFMX_1.5	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Rock_n_Roll/Rock_n_Roll/mdat.mouse_control
+Eagleplayers/TFMX_1.5	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Rock_n_Roll/Rock_n_Roll/mdat.rockomotion
+Eagleplayers/TFMX_1.5	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Magerkord_Dirk/Einmal_Kanzler_sein/Einmal_Kanzler_sein/mdat.ingame_01
+Eagleplayers/TFMX_1.5	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Magerkord_Dirk/Einmal_Kanzler_sein/Einmal_Kanzler_sein/mdat.ingame_11
+Eagleplayers/TFMX_1.5	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Magerkord_Dirk/Einmal_Kanzler_sein/Einmal_Kanzler_sein/mdat.ingame_29
+Eagleplayers/TFMX_1.5	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/spec/tfhd/_private/mods/tfhd1.5.rocknroll
+Eagleplayers/TFMX_1.5	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/tfhdimpl/mods/1502_magnetic.t1.tfhd
+Eagleplayers/TFMX_1.5	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/tfhdimpl/mods/1507_mouse.t1.tfhd
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Dragon_George/Abandoned_Places/Abandoned_Places/mdat.city_1
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Dragon_George/Abandoned_Places/Abandoned_Places/mdat.part_1.1
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Dragon_George/Abandoned_Places/Abandoned_Places/mdat.sfx
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Apidya/Apidya/mdat.ingame_2
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Apprentice/Apprentice/mdat.title
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Battle_Isle/Battle_Isle/mdat.intro
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Bug_Bomber/Bug_Bomber/mdat.bug bomber
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Caribbean_Disaster/Caribbean_Disaster/mdat.Poli
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Circus_Attractions/Circus_Attractions/mdat.ingame
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Gem_X/Gem_X/mdat.title
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Jim_Power/Jim_Power/mdat.boss
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Masterblazer/Masterblazer/Unfixed_Lucasfilm_Logo/mdat.lucasfilm_games_logo
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Masterblazer/Masterblazer/mdat.loader
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Turrican_3/Turrican_3/mdat.world_4
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/Turrican_3/Turrican_3/mdat.world_5
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Huelsbeck_Chris/X-Out/X-Out/mdat.title
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/corpus-seagate/amiga-archive/exotica/UnExoticA/Game/Stember_Rudolf/Patrician/Patrician/mdat.ingame
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/tfhdimpl/mods/pro01_logical.t2.tfhd
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/tfhdimpl/mods/pro02_gms.t2.tfhd
+Eagleplayers/TFMX_Pro	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/tfhdimpl/mods/pro06loop2.t2.tfhd
+Eagleplayers/THX	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/hvl/04afab6aacf8e8445b81848afd3614b3.hvl
+Eagleplayers/THX	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/hvl/0af72bfefc975982c8b8d03c7e1127ab.hvl
+Eagleplayers/THX	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/hvl/0d20ebf4839837644e0827bef365ee7a.hvl
+Eagleplayers/TME	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/tme/tme.Labyrinth.msx
+Eagleplayers/Tiny Williams	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/2d2736c4b20c9ffc436fb2b3127f8c79449e8adc/nitro.tw
+Eagleplayers/Tiny Williams	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/70d1fa54b870596b7633e8b437285257ba8b97f2/future basketball-1.tw
+Eagleplayers/Tiny Williams	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/cbaeb949e4894ac7bf7b078f5ebf2be4293fbe50/teenage mutant turtles.tw
+Eagleplayers/Tiny Williams	/home/lolo/docker_apps/scrapydweb/demozoo/mods/full2/e552ec854cff36955c55d81fc96a8189275066f1/nevermind title.tw
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/tw/tw.Chuckie_Egg_II
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/cov-deli/work/extra/tw/tw.ingame
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Chuckie_Egg_2/tw.Chuckie_Egg_II
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.ingame
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.sfx
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Future_Basketball/tw.title
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.jingles
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.speech
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/International_Ice_Hockey/tw.title
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Judge_Dredd/tw.Judge_Dredd
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/MoonFall/tw.MoonFall
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/MoonFall/tw.MoonFallFx
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Narc/tw.ingame_1
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Narc/tw.ingame_2
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Never_Mind/tw.ingame
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Never_Mind/tw.title
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Nitro/tw.Nitro
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Sharkeys_Moll/tw.Sharkey's_Moll
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Sharkeys_Moll/tw.sfx
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Shinobi/tw.Shinobi
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Smash_TV/tw.Smash_TV
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Super_Monaco_GP/tw.ingame
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Super_Monaco_GP/tw.sfx
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Teenage_Mutant_H_T_90/tw.Teenage_Mutant_Hero_Turtles
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.beach
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.bonus
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.building_site
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.country
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.disco
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.title
+Eagleplayers/Tiny Williams	/media/lolo/kingston2tb/claude-scratch/deliplayerrust/ports/tw/mods/Viz_-_The_Game/tw.town

@@ -309,6 +309,16 @@ fn load_executable(m: &mut Machine) {
 /// Each place in the code where a table entry's code is found is replaced by a
 /// `JSR` to the entry's patch (which runs the replaced code and returns),
 /// padded with NOPs.
+///
+/// Wildcards: when an entry's code holds $FFFF words and the table leaves one
+/// long per such word between the code and its patch, each $FFFF word matches
+/// any word, and the long after the code for the k-th of them receives the
+/// address that word resolves to as a 68000 PC-relative displacement (the
+/// address of the word plus the word, sign-extended). The Eagleplayer 2.06
+/// Hippel player's table is written that way: its patches load these longs
+/// (`MOVEA.L slot(PC),An` for a `LEA d16(PC)` or `BSR.W` target, or the long
+/// minus the `JSR`'s return address for the displacement of a `MOVE.L Dn,d16(A0)`).
+/// An entry without that room matches its $FFFF words as they are.
 fn module_change(m: &mut Machine) {
     let g = m.deli.eagle.globals;
     let (start, len, table) = (m.bus.r32(g + epg::ARG1), m.bus.r32(g + epg::ARG2), m.bus.r32(g + epg::ARG3));
@@ -330,14 +340,21 @@ fn module_change(m: &mut Machine) {
         if n < 6 || len < n {
             continue;
         }
+        let wild: Vec<u32> = (0..words).filter(|&i| m.bus.r16(code + 2 * i) == 0xFFFF).collect();
+        let wild = if !wild.is_empty() && patch.wrapping_sub(code + n) == 4 * wild.len() as u32 { wild } else { vec![] };
         let mut a = start;
         while a + n <= start + len {
-            if (0..words).all(|i| m.bus.r16(a + 2 * i) == m.bus.r16(code + 2 * i)) {
+            if (0..words).all(|i| wild.contains(&i) || m.bus.r16(a + 2 * i) == m.bus.r16(code + 2 * i)) {
+                for (k, &i) in wild.iter().enumerate() {
+                    let w = a + 2 * i;
+                    m.bus.w32(code + n + 4 * k as u32, w.wrapping_add(m.bus.r16(w) as i16 as i32 as u32));
+                }
                 m.bus.w16(a, 0x4EB9);
                 m.bus.w32(a + 2, patch);
                 for i in 3..words {
                     m.bus.w16(a + 2 * i, 0x4E71);
                 }
+                log::debug!("ENPP_ModuleChange: code +{:#x} patched at {:#x} (+{:#x}) by table +{:#x}", code - table, a, a - start, patch - table);
                 hits += 1;
                 a += n;
             } else {

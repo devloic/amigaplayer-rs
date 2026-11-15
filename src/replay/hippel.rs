@@ -14,13 +14,16 @@
 //!   module in guest memory, as this port does, and writes Paula through the
 //!   host's ENPP_ calls.
 //! * "Hippel" (the Eagleplayer, 2.06) calls the replayer a "TFMX" module carries
-//!   itself, one of the 16 builds of it listed in `BUILDS` and `A94` (told apart
+//!   itself, one of the 17 builds of it listed in `BUILDS` and `A94` (told apart
 //!   by a hash of their code). They share the song data and differ in the effects
 //!   their code has, as NostalgicPlayer reads them from it, and in how they order
-//!   their Paula writes (see `Build`). The port is checked against the
-//!   Eagleplayer's register writes tick by tick; the builds' timing (the cost of
-//!   each code path, between `GENERATED-COSTS` markers) was fitted to those logs
-//!   by non-negative least squares, the line-poll constants by a search.
+//!   their Paula writes (see `Build`). The Eagleplayer patches the replayer
+//!   before it plays (ENPP_ModuleChange, see `Tfmx::ep`). The port is checked
+//!   against the Eagleplayer's register writes tick by tick; the builds' timing
+//!   (the cost of each code path, between `GENERATED-EP-COSTS` markers with the
+//!   patches, `GENERATED-COSTS` without, as UADE's player runs the modules saved
+//!   with a song playing) was fitted to those logs by non-negative least
+//!   squares, the line-poll constants by a search.
 //!
 //! Where the original's register writes differ from what NostalgicPlayer asks of
 //! its mixer, the port follows the original (see `Coso`).
@@ -1296,6 +1299,12 @@ struct Build {
     /// the third $A2C version) while the port's table read would see the
     /// module's saved word.
     dma_var: Option<u32>,
+    /// What the Eagleplayer's patches (`Tfmx::ep`) leave of the code: its DMA on
+    /// goes through ENPP_DMAMask (which waits to the tenth line on), its LED
+    /// write stays, its song's wrap is a song end.
+    ep_dma: bool,
+    ep_led: bool,
+    ep_end: bool,
 }
 
 /// The replayers with the song data at $A94 (Leaving Teramis, Wings of
@@ -1340,6 +1349,9 @@ const A94: Build = Build {
     init_per: 0,
     init_vol: 0,
     dma_var: None,
+    ep_dma: true,
+    ep_led: true,
+    ep_end: false,
 };
 
 /// Where the early and middle builds keep the voices' fields InitSound leaves
@@ -1409,6 +1421,9 @@ const EARLY: Build = Build {
     init_per: 0,
     init_vol: 0,
     dma_var: None,
+    ep_dma: true,
+    ep_led: false,
+    ep_end: true,
 };
 
 /// The middle builds ($A2C to $B02): no mute, E5 plays a sample from an offset,
@@ -1451,6 +1466,9 @@ const MIDDLE: Build = Build {
     init_per: 0,
     init_vol: 0,
     dma_var: None,
+    ep_dma: true,
+    ep_led: false,
+    ep_end: true,
 };
 
 /// The third version of the $A2C build: the first one's timing (a refit was no
@@ -1472,8 +1490,10 @@ const BUILDS: &[(u32, Build)] = &[
     // $A4C, $A50
     (0x0e4a_0a89, Build { timing: Timing::Ea4c, init_at: 56909, led_gap: 346, init_stop: true, init_k: 8303, ..EARLY }),
     (0xa3a1_0c0a, Build { timing: Timing::Ea50, init_at: 56975, led_gap: 346, init_stop: true, init_k: 8303, voices: 3, silent_last: true, ..EARLY }),
-    // $A2C (two versions); the $A3A build, whose volumes differ, is not played
+    // $A2C (two versions); $A3A (`hip.boot_loader`), the second with a volume
+    // less a byte (see `vol_sub_at`)
     (0x688a_532a, MIDDLE),
+    (0x9140_ea28, Build { timing: Timing::Ma2cb, init_at: 55872, waits: 2, poll_from: 195, poll_to: 13, ..MIDDLE }),
     (0x7d97_d238, Build { timing: Timing::Ma2cb, init_at: 55872, waits: 2, poll_from: 195, poll_to: 13, ..MIDDLE }),
     // $B02: three voices
     (0xaf7d_cbe8, Build { timing: Timing::Mb02, init_at: 60566, led_gap: 345, init_stop: true, init_k: 8298, voices: 3, waits: 3, waits_after: 3, poll_from: 273, poll_to: -1, ..MIDDLE }),
@@ -1487,7 +1507,7 @@ const BUILDS: &[(u32, Build)] = &[
     // $A2C, a third version (Crazy Comets, Jambala, Quartex, Rings of Medusa)
     (0x33d3_ae54, A2C3),
     // $A58
-    (0x91ba_7e51, Build { timing: Timing::Ma58, init_at: 56454, led_gap: 348, init_stop: true, init_k: 8291, dma_always: false, waits: 3, waits_after: 3, poll_from: 144, poll_to: 40, init_loc: Some(0), init_per: 0xc0, init_vol: 0x40, ..MIDDLE }),
+    (0x91ba_7e51, Build { timing: Timing::Ma58, init_at: 56454, led_gap: 348, init_stop: true, init_k: 8291, dma_always: false, waits: 3, waits_after: 3, poll_from: 144, poll_to: 40, init_loc: Some(0), init_per: 0xc0, init_vol: 0x40, ep_dma: false, ..MIDDLE }),
 ];
 
 /// The build of the module's replayer, and where the song data starts.
@@ -1634,6 +1654,619 @@ enum Tp {
 }
 
 impl Tp {
+    /// The costs with the Eagleplayer's patches (see `Tfmx::ep`), fitted to its
+    /// run of the modules.
+    fn cost_ep(self, t: Timing) -> u64 {
+        // GENERATED-EP-COSTS-BEGIN
+        use Tp::*;
+        match t {
+            Timing::A94 => match self {
+                E2End => 7,
+                E2Len => 30,
+                E2Loc => 115,
+                E2Off => 141,
+                E3 => 42,
+                E4End => 0,
+                E4Len => 30,
+                E4Loc => 110,
+                E5End => 199,
+                E5Off => 133,
+                E7End => 12,
+                E7Len => 30,
+                E7Loc => 99,
+                E7Off => 147,
+                E7Same => 63,
+                E8 => 52,
+                EnvHold => 51,
+                EnvRead => 54,
+                EnvStop => 11,
+                EnvSustain => 3,
+                EnvVol => 0,
+                EnvWait => 0,
+                FreqLoop => 42,
+                FreqNote => 0,
+                FreqRead => 24,
+                FreqStop => 6,
+                FreqWait => 0,
+                Fx => 66,
+                LineOn => 127,
+                Loops => 186,
+                OnLen => 100,
+                OnLoc => 134,
+                Period => 228,
+                Porta => 0,
+                PortaDown => 52,
+                PortaUp => 55,
+                Row => 98,
+                RowAlt => 5,
+                RowEmpty => 0,
+                RowEnd => 0,
+                RowEnv => 165,
+                RowNext => 136,
+                RowNote => 52,
+                RowTrack => 0,
+                Rows => 0,
+                SlideDone => 12,
+                SlideFirst => 0,
+                SlideLen => 99,
+                SlideLoc => 302,
+                SlideOff => 0,
+                SlideStep => 0,
+                VibDelay => 0,
+                VibDown => 65,
+                VibDownTurn => 78,
+                VibSkip => 60,
+                VibUp => 67,
+                VibUpTurn => 76,
+                Write => 0,
+                WriteVol => 83,
+                _ => self.cost(t),
+            },
+            Timing::E962 => match self {
+                E2End => 0,
+                E2Len => 111,
+                E2Loc => 199,
+                E2Off => 184,
+                E3 => 21,
+                EnvRead => 0,
+                EnvStop => 56,
+                EnvVol => 77,
+                EnvWait => 0,
+                FreqLoop => 0,
+                FreqNote => 193,
+                FreqRead => 31,
+                FreqStop => 90,
+                Fx => 75,
+                LineOn => 11,
+                Loops => 362,
+                OnLen => 99,
+                OnLoc => 188,
+                PerStart => 61,
+                PerStart0 => 95,
+                Period => 0,
+                Porta => 0,
+                Row => 0,
+                RowEmpty => 0,
+                RowEnd => 104,
+                RowEnv => 0,
+                RowNext => 189,
+                RowNote => 356,
+                RowTrack => 0,
+                Rows => 10,
+                SlideOff => 0,
+                VibDelay => 0,
+                VibDown => 85,
+                VibDownTurn => 99,
+                VibUp => 84,
+                VibUpTurn => 93,
+                Write => 119,
+                WriteVol => 85,
+                _ => self.cost(t),
+            },
+            Timing::E98e => match self {
+                E2End => 13,
+                E2Len => 111,
+                E2Loc => 199,
+                E2Off => 169,
+                E3 => 37,
+                E4End => 0,
+                E4Len => 111,
+                E4Loc => 249,
+                E8 => 91,
+                EnvLoop => 0,
+                EnvRead => 75,
+                EnvStop => 0,
+                EnvVol => 25,
+                EnvWait => 26,
+                FreqLoop => 0,
+                FreqNote => 105,
+                FreqRead => 31,
+                FreqStop => 0,
+                FreqWait => 23,
+                Fx => 104,
+                LineOn => 9,
+                Loops => 377,
+                OnLen => 99,
+                OnLoc => 192,
+                PerStart => 65,
+                PerStart0 => 97,
+                Period => 0,
+                Porta => 0,
+                PortaUp => 42,
+                Row => 0,
+                RowEmpty => 0,
+                RowEnd => 103,
+                RowEnv => 315,
+                RowNext => 187,
+                RowNote => 37,
+                RowTrack => 0,
+                Rows => 15,
+                SlideOff => 36,
+                VibDelay => 0,
+                VibDown => 74,
+                VibDownTurn => 97,
+                VibUp => 81,
+                VibUpTurn => 91,
+                Write => 119,
+                WriteVol => 85,
+                _ => self.cost(t),
+            },
+            Timing::E9a6 => match self {
+                E2End => 185,
+                E2Len => 111,
+                E2Loc => 199,
+                E2Off => 0,
+                E4End => 140,
+                E4Len => 111,
+                E4Loc => 108,
+                E8 => 0,
+                EnvRead => 0,
+                EnvStop => 0,
+                EnvVol => 20,
+                FreqNote => 0,
+                FreqRead => 106,
+                Fx => 194,
+                LineOn => 3,
+                Loops => 360,
+                OnLen => 99,
+                OnLoc => 188,
+                PerStart => 42,
+                PerStart0 => 103,
+                Period => 0,
+                Porta => 66,
+                Row => 0,
+                RowEmpty => 0,
+                RowEnd => 98,
+                RowEnv => 365,
+                RowNext => 186,
+                RowNote => 0,
+                RowTrack => 0,
+                Rows => 35,
+                SlideOff => 0,
+                VibDelay => 0,
+                VibDown => 76,
+                VibDownTurn => 92,
+                VibUp => 78,
+                VibUpTurn => 86,
+                Write => 119,
+                WriteVol => 85,
+                _ => self.cost(t),
+            },
+            Timing::E8d6 => match self {
+                E2End => 19,
+                E2Len => 111,
+                E2Loc => 199,
+                E2Off => 153,
+                E4End => 0,
+                E4Len => 111,
+                E4Loc => 233,
+                EnvRead => 50,
+                EnvStop => 0,
+                EnvVol => 26,
+                EnvWait => 0,
+                FreqLoop => 0,
+                FreqNote => 117,
+                FreqRead => 37,
+                FreqStop => 0,
+                Fx => 106,
+                LineOn => 3,
+                Loops => 879,
+                OnLen => 100,
+                OnLoc => 172,
+                PerStart => 98,
+                PerStart0 => 113,
+                Period => 38,
+                Porta => 0,
+                Row => 0,
+                RowEmpty => 0,
+                RowEnd => 104,
+                RowEnv => 0,
+                RowNext => 186,
+                RowNote => 355,
+                RowTrack => 0,
+                Rows => 10,
+                SlideOff => 0,
+                VibDelay => 0,
+                VibDown => 97,
+                VibDownTurn => 112,
+                VibUp => 97,
+                VibUpTurn => 106,
+                Write => 93,
+                WriteVol => 85,
+                _ => self.cost(t),
+            },
+            Timing::E8e6 => match self {
+                E2End => 16,
+                E2Len => 111,
+                E2Loc => 199,
+                E2Off => 164,
+                E4End => 0,
+                E4Len => 111,
+                E4Loc => 249,
+                EnvRead => 0,
+                EnvStop => 103,
+                EnvVol => 142,
+                FreqLoop => 0,
+                FreqNote => 107,
+                FreqRead => 41,
+                FreqStop => 0,
+                Fx => 87,
+                LineOn => 5,
+                Loops => 311,
+                OnLen => 100,
+                OnLoc => 188,
+                PerStart => 71,
+                PerStart0 => 96,
+                Period => 0,
+                Porta => 0,
+                Row => 0,
+                RowEmpty => 0,
+                RowEnd => 104,
+                RowEnv => 0,
+                RowNext => 190,
+                RowNote => 356,
+                RowTrack => 0,
+                Rows => 11,
+                SlideOff => 0,
+                VibDelay => 0,
+                VibDown => 70,
+                VibDownTurn => 84,
+                VibUp => 78,
+                VibUpTurn => 86,
+                Write => 8,
+                WriteVol => 8,
+                _ => self.cost(t),
+            },
+            Timing::Ea4c => match self {
+                E2End => 11,
+                E2Len => 111,
+                E2Loc => 199,
+                E2Off => 161,
+                E4End => 0,
+                E4Len => 111,
+                E4Loc => 257,
+                EnvRead => 147,
+                EnvStop => 0,
+                EnvVol => 25,
+                EnvWait => 104,
+                FreqLoop => 0,
+                FreqNote => 119,
+                FreqRead => 45,
+                FreqStop => 0,
+                Fx => 48,
+                LineOn => 3,
+                Loops => 398,
+                OnLen => 99,
+                OnLoc => 189,
+                PerStart => 66,
+                PerStart0 => 103,
+                Period => 0,
+                Porta => 0,
+                PortaUp => 60,
+                Row => 0,
+                RowEmpty => 0,
+                RowEnd => 77,
+                RowEnv => 341,
+                RowNext => 150,
+                RowNote => 53,
+                RowTrack => 0,
+                Rows => 0,
+                SlideOff => 0,
+                VibDelay => 0,
+                VibDown => 83,
+                VibDownTurn => 88,
+                VibUp => 76,
+                VibUpTurn => 90,
+                Write => 119,
+                WriteVol => 85,
+                _ => self.cost(t),
+            },
+            Timing::Ea50 => match self {
+                E2End => 0,
+                E2Len => 111,
+                E2Loc => 199,
+                E2Off => 173,
+                EnvRead => 67,
+                EnvStop => 0,
+                EnvVol => 13,
+                EnvWait => 0,
+                FreqNote => 115,
+                FreqRead => 146,
+                FreqStop => 0,
+                Fx => 0,
+                LineOn => 3,
+                Loops => 422,
+                OnLen => 100,
+                OnLoc => 188,
+                PerStart => 86,
+                PerStart0 => 103,
+                Period => 0,
+                Porta => 0,
+                Row => 0,
+                RowEmpty => 0,
+                RowEnd => 105,
+                RowEnv => 0,
+                RowNext => 187,
+                RowNote => 354,
+                RowTrack => 0,
+                Rows => 3,
+                SlideOff => 39,
+                VibDelay => 0,
+                VibDown => 79,
+                VibDownTurn => 92,
+                VibUp => 77,
+                VibUpTurn => 86,
+                Write => 119,
+                WriteVol => 85,
+                _ => self.cost(t),
+            },
+            Timing::E93e => match self {
+                E2End => 44,
+                E2Len => 111,
+                E2Loc => 199,
+                E2Off => 152,
+                E4End => 22,
+                E4Len => 111,
+                E4Loc => 229,
+                E8 => 81,
+                EnvRead => 64,
+                EnvStop => 0,
+                EnvVol => 30,
+                EnvWait => 0,
+                FreqLoop => 0,
+                FreqNote => 91,
+                FreqRead => 24,
+                FreqStop => 0,
+                Fx => 154,
+                LineOn => 26,
+                Loops => 425,
+                OnLen => 99,
+                OnLoc => 193,
+                PerStart => 49,
+                PerStart0 => 76,
+                Period => 0,
+                Porta => 0,
+                Row => 0,
+                RowEmpty => 0,
+                RowEnd => 97,
+                RowEnv => 0,
+                RowNext => 187,
+                RowNote => 361,
+                RowTrack => 0,
+                Rows => 0,
+                SlideOff => 0,
+                VibDelay => 0,
+                VibDown => 78,
+                VibDownTurn => 93,
+                VibUp => 78,
+                VibUpTurn => 85,
+                Write => 119,
+                WriteVol => 85,
+                _ => self.cost(t),
+            },
+            Timing::Middle => match self {
+                E2End => 10,
+                E2Len => 30,
+                E2Loc => 117,
+                E2Off => 64,
+                E4End => 0,
+                E4Len => 30,
+                E4Loc => 60,
+                E7End => 21,
+                E7Len => 30,
+                E7Loc => 99,
+                E7Off => 116,
+                E7Same => 37,
+                E8 => 101,
+                EnvLoop => 20,
+                EnvRead => 52,
+                EnvStop => 0,
+                EnvVol => 23,
+                EnvWait => 0,
+                FreqLoop => 0,
+                FreqNote => 109,
+                FreqRead => 36,
+                FreqStop => 0,
+                FreqWait => 7,
+                Fx => 112,
+                LineOn => 123,
+                Loops => 188,
+                OnLen => 100,
+                OnLoc => 134,
+                Period => 0,
+                Porta => 0,
+                PortaUp => 53,
+                Row => 99,
+                RowAlt => 13,
+                RowEmpty => 0,
+                RowEnd => 0,
+                RowEnv => 175,
+                RowNext => 0,
+                RowNote => 53,
+                RowTrack => 169,
+                Rows => 0,
+                SlideOff => 170,
+                VibDelay => 0,
+                VibDown => 73,
+                VibDownTurn => 92,
+                VibUp => 79,
+                VibUpTurn => 87,
+                Write => 0,
+                WriteVol => 83,
+                _ => self.cost(t),
+            },
+            Timing::Ma2cb => match self {
+                E2End => 13,
+                E2Len => 30,
+                E2Loc => 117,
+                E2Off => 62,
+                E4End => 0,
+                E4Len => 30,
+                E4Loc => 58,
+                E7End => 18,
+                E7Len => 30,
+                E7Loc => 99,
+                E7Off => 113,
+                E7Same => 33,
+                E9End => 55,
+                E9Len => 99,
+                E9Loc => 330,
+                E9Off => 73,
+                EnvLoop => 0,
+                EnvRead => 72,
+                EnvStop => 0,
+                EnvVol => 22,
+                EnvWait => 20,
+                FreqLoop => 0,
+                FreqNote => 118,
+                FreqRead => 26,
+                FreqStop => 0,
+                Fx => 125,
+                LineOn => 123,
+                Loops => 227,
+                OnLen => 100,
+                OnLoc => 134,
+                Period => 0,
+                Porta => 0,
+                Row => 100,
+                RowAlt => 4,
+                RowEmpty => 0,
+                RowEnd => 0,
+                RowEnv => 171,
+                RowNext => 170,
+                RowNote => 52,
+                RowTrack => 0,
+                Rows => 0,
+                SlideOff => 145,
+                VibDelay => 0,
+                VibDown => 77,
+                VibDownTurn => 94,
+                VibUp => 79,
+                VibUpTurn => 88,
+                Write => 0,
+                WriteVol => 83,
+                _ => self.cost(t),
+            },
+            Timing::Ma58 => match self {
+                E2End => 8,
+                E2Len => 30,
+                E2Loc => 117,
+                E2Off => 65,
+                E4End => 0,
+                E4Len => 30,
+                E4Loc => 61,
+                E7End => 25,
+                E7Len => 30,
+                E7Loc => 99,
+                E7Off => 117,
+                E7Same => 35,
+                EnvLoop => 16,
+                EnvRead => 56,
+                EnvStop => 0,
+                EnvVol => 19,
+                EnvWait => 0,
+                FreqLoop => 0,
+                FreqNote => 292,
+                FreqRead => 38,
+                FreqStop => 178,
+                Fx => 109,
+                LineOn => 190,
+                Loops => 247,
+                OnLen => 100,
+                OnLoc => 134,
+                Period => 0,
+                Porta => 0,
+                PortaUp => 54,
+                Row => 99,
+                RowAlt => 8,
+                RowEmpty => 0,
+                RowEnd => 0,
+                RowEnv => 177,
+                RowNext => 171,
+                RowNote => 51,
+                RowTrack => 0,
+                Rows => 0,
+                SlideOff => 0,
+                VibDelay => 0,
+                VibDown => 71,
+                VibDownTurn => 93,
+                VibUp => 77,
+                VibUpTurn => 87,
+                Write => 0,
+                WriteVol => 83,
+                _ => self.cost(t),
+            },
+            Timing::Mb02 => match self {
+                E2End => 90,
+                E2Len => 30,
+                E2Loc => 117,
+                E2Off => 0,
+                E7End => 94,
+                E7Len => 30,
+                E7Loc => 99,
+                E7Off => 44,
+                E7Same => 41,
+                E9End => 142,
+                E9Len => 99,
+                E9Loc => 330,
+                E9Off => 14,
+                EnvRead => 0,
+                EnvStop => 0,
+                EnvVol => 16,
+                FreqLoop => 0,
+                FreqNote => 106,
+                FreqRead => 37,
+                FreqStop => 0,
+                Fx => 183,
+                LineOn => 205,
+                Loops => 201,
+                OnLen => 100,
+                OnLoc => 134,
+                Period => 0,
+                Porta => 0,
+                Row => 101,
+                RowAlt => 6,
+                RowEmpty => 0,
+                RowEnd => 0,
+                RowEnv => 226,
+                RowNext => 171,
+                RowNote => 0,
+                RowTrack => 0,
+                Rows => 0,
+                SlideOff => 159,
+                VibDelay => 0,
+                VibDown => 76,
+                VibDownTurn => 85,
+                VibUp => 72,
+                VibUpTurn => 78,
+                Write => 0,
+                WriteVol => 83,
+                _ => self.cost(t),
+            },
+        }
+        // GENERATED-EP-COSTS-END
+    }
+
     fn cost(self, t: Timing) -> u64 {
         match t {
             Timing::A94 => self.cost_a94(),
@@ -2378,7 +3011,8 @@ struct TVoice {
 /// * the voices' InitSound writes point each voice at its own register, with a
 ///   length of 1 word;
 /// * position byte 3 of $80 stops the player (DMA off and volume 0 every tick);
-///   the positions wrap with no song end (the original has none);
+///   the replayer has no song end, but the players patch the positions' wrap
+///   (all builds but $A94) into one (see `ep`), and UADE's player its stop too;
 /// * frequency table commands past E9, and envelope commands past E8, jump
 ///   through data in the original; the port stops the table there.
 pub struct Tfmx {
@@ -2390,6 +3024,16 @@ pub struct Tfmx {
     /// UADE's player plays it, the song started as for any module, without the
     /// Eagleplayer's first stop, and a subsong change silencing the four voices.
     dead: bool,
+    /// Played as the Eagleplayer plays it (any module but a `dead` one): its
+    /// Hippel player patches the replayer first (ENPP_ModuleChange), so the
+    /// replayer writes Paula through the Eagleplayer's ENPP_Poke and
+    /// ENPP_DMAMask calls, its line waits return at once, and the song's wrap
+    /// signals the song end. The costs are those of `Tp::cost_ep`.
+    ep: bool,
+    songend: bool,
+    /// The byte the replayer subtracts from each voice's volume (see
+    /// `vol_sub_at`), where its code has that.
+    vol_sub: Option<u32>,
     periods: u32,
     empty: u32,
     freqs: u32,
@@ -2421,6 +3065,7 @@ struct TTrace {
     out: Option<std::io::BufWriter<std::fs::File>>,
     pend: Vec<Tp>,
     timing: Option<Timing>,
+    ep: bool,
 }
 
 impl TTrace {
@@ -2428,11 +3073,12 @@ impl TTrace {
         let out = std::env::var_os("HIPPEL_TRACE")
             .and_then(|p| std::fs::File::create(p).ok())
             .map(std::io::BufWriter::new);
-        TTrace { out, pend: Vec::new(), timing: None }
+        TTrace { out, pend: Vec::new(), timing: None, ep: false }
     }
 
     fn at(&mut self, hw: &mut Hw, e: Tp) {
-        hw.wait(e.cost(self.timing.unwrap_or(Timing::A94)));
+        let t = self.timing.unwrap_or(Timing::A94);
+        hw.wait(if self.ep { e.cost_ep(t) } else { e.cost(t) });
         if self.out.is_some() {
             self.pend.push(e);
         }
@@ -2467,8 +3113,57 @@ fn poll_line(first: u64) -> u64 {
 /// write. Fitted to the reference's writes: in the $A94 build 74% of 2603 DMA
 /// ons come at the same colour clock, 23% one later.
 const POLL_AGAIN: u64 = 52;
+
+/// UADE's player (Wanted Team's Jochen Hippel, which plays the `dead`
+/// modules) patches the replayer too: its DMA on waits for 9 line changes
+/// before and after (polling VHPOSR's line byte every `WT_POLL` CPU cycles,
+/// a new poll `WT_AGAIN` cycles after a change), and its length write of a
+/// sample notes the sample first. In CPU cycles from the replayer's DMA on to
+/// the first wait's first read, from the DMA on write to the second's; in
+/// colour clocks from a wait's end to the DMA on and to the next write. Fitted
+/// to that player's writes (85% of the DMA ons at the same colour clock).
+const WT_POLL: u64 = 25;
+const WT_AGAIN: u64 = 31;
+const WT_BEFORE: u64 = 88;
+const WT_TO_DMA: u64 = 44;
+const WT_AFTER: u64 = 222;
+const WT_TO_NEXT: u64 = 39;
+const WT_SAMPLE: u64 = 120;
+const WT_SAMPLE_VOICE: u64 = 20;
+const WT_SAMPLE_AFTER: u64 = 12;
+
+/// UADE's player's DMA wait (see `WT_POLL`): from `from` CPU cycles on, 9 line
+/// changes, then `to` colour clocks.
+fn wt_dma_wait(hw: &mut Hw, from: u64, to: u64) {
+    let c = hw.bus.clock;
+    let mut r = 2 * c + from;
+    for i in 0..9 {
+        let b = (r / (2 * LINE) + 1) * 2 * LINE;
+        r += (b - r).div_ceil(WT_POLL) * WT_POLL;
+        if i < 8 {
+            r += WT_AGAIN;
+        }
+    }
+    hw.wait(r / 2 + to - c);
+}
 const POLL_FROM_DMA: u64 = 44;
 const POLL_TO_LOOP: u64 = 20;
+
+/// Some builds ($A58, $A3A) subtract a byte from each voice's volume before
+/// writing it, 0 where the result is negative (`MOVE.B $2D(A0),D0` then
+/// `SUB.B d16(PC),D0`): where that byte is, as an offset from the module's
+/// start. In the $A58 modules it is in the replayer's variables (0). The $A3A
+/// replayer (`hip.boot_loader`, saved from the game's loader) reads it $136F
+/// bytes before the module's start, outside the file: a variable of the
+/// loader's that the file lacks. What is there is the host's: in this host the
+/// low byte of an RTS of its library-call stubs ($75), larger than any volume,
+/// so the Eagleplayer and UADE's player run here write every volume 0 (and so
+/// does the port, which reads the same guest byte); uade123 has a byte there
+/// that leaves the volumes audible.
+fn vol_sub_at(d: &[u8], t: usize) -> Option<i64> {
+    let i = (0..t.saturating_sub(8)).step_by(2).find(|&i| d[i..i + 6] == [0x10, 0x28, 0x00, 0x2d, 0x90, 0x3a])?;
+    Some(i as i64 + 6 + be16(d, i + 6) as i16 as i64)
+}
 
 fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let (ver, t) = tfmx_version(d)?;
@@ -2490,6 +3185,9 @@ fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         subsongs_n: h(0x10) as u64 + 1,
         samples_n: h(0x12) as u64,
         dead: ver.song_var && be16(d, t - 6) != 0,
+        ep: !(ver.song_var && be16(d, t - 6) != 0),
+        songend: false,
+        vol_sub: vol_sub_at(d, t).map(|o| base.wrapping_add(o as u32)),
         periods,
         empty,
         freqs,
@@ -2539,6 +3237,7 @@ fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         }
     }
     p.trace.timing = Some(ver.timing);
+    p.trace.ep = p.ep;
     let mut hw = Hw { bus: &mut m.bus };
     hw.wait(ver.init_at);
     p.init(1, &mut hw);
@@ -2556,7 +3255,7 @@ impl Replayer for Tfmx {
     }
 
     fn songend(&self) -> bool {
-        false
+        self.songend
     }
 
     fn subsongs(&self) -> (u16, u16, u16) {
@@ -2593,6 +3292,13 @@ impl Replayer for Tfmx {
             self.trace.at(hw, Tp::Stopped);
             self.trace.write(hw, "dma");
             hw.dmacon(0x000f);
+            if self.dead {
+                // UADE's player's patch of this DMA off signals the song end
+                // and starts the song again (its InitSound), before the
+                // replayer's writes of the stop go on
+                self.songend = true;
+                self.init(self.sub, hw);
+            }
             for ch in 0..self.ver.voices {
                 self.trace.at(hw, Tp::Write);
                 self.trace.write(hw, "per");
@@ -2642,6 +3348,7 @@ impl Replayer for Tfmx {
             self.trace.at(hw, Tp::Write);
             self.trace.write(hw, "per");
             hw.per(ch, per);
+            self.trace.at(hw, Tp::WriteVol);
             self.trace.write(hw, "vol");
             hw.vol(ch, vol);
         }
@@ -2652,6 +3359,35 @@ impl Replayer for Tfmx {
         }
         // the loops into registers, three line waits, the DMA on, one more
         self.trace.at(hw, Tp::Loops);
+        if self.ep || self.dead {
+            // the Eagleplayer's patches: its line waits return at once, its
+            // DMA on waits after (UADE's player's: its line waits return at
+            // once, its DMA on waits before and after)
+            if self.dead {
+                wt_dma_wait(hw, WT_BEFORE, WT_TO_DMA);
+            }
+            self.trace.write(hw, "dma");
+            hw.dmacon(0x8000 | self.dma_acc);
+            if self.dead {
+                wt_dma_wait(hw, WT_AFTER, WT_TO_NEXT);
+            } else {
+                self.ep_dma_wait(hw);
+            }
+            self.trace.at(hw, Tp::LineOn);
+            for ch in 0..self.ver.loop_voices {
+                let v = self.voices[ch];
+                if ch > 0 {
+                    self.trace.at(hw, Tp::OnLoc);
+                }
+                self.trace.write(hw, "adr");
+                hw.loc(ch, v.loop_addr);
+                self.trace.at(hw, Tp::OnLen);
+                self.trace.write(hw, "len");
+                hw.len(ch, v.loop_len);
+            }
+            self.trace.write(hw, "end");
+            return;
+        }
         let c = hw.bus.clock;
         let mut t = poll_line(2 * c + self.ver.poll_from);
         for _ in 1..self.ver.waits {
@@ -2683,6 +3419,15 @@ impl Replayer for Tfmx {
 }
 
 impl Tfmx {
+    /// The Eagleplayer's DMA on (ENPP_DMAMask) waits to the tenth line on, as
+    /// the host's dtg_WaitAudioDMA does.
+    fn ep_dma_wait(&mut self, hw: &mut Hw) {
+        if self.ver.ep_dma {
+            let now = hw.bus.clock;
+            hw.wait((now / LINE + 10) * LINE - now);
+        }
+    }
+
     /// A tick of the builds that write the DMA on and the loops after all the
     /// voices' effects, and the periods and volumes after those.
     fn tick_split(&mut self, hw: &mut Hw) {
@@ -2692,8 +3437,16 @@ impl Tfmx {
             self.out[ch] = (per, vol);
         }
         self.trace.at(hw, Tp::Loops);
+        if self.dead {
+            wt_dma_wait(hw, WT_BEFORE, WT_TO_DMA);
+        }
         self.trace.write(hw, "dma");
         hw.dmacon(0x8000 | self.dma_acc);
+        if self.ep {
+            self.ep_dma_wait(hw);
+        } else if self.dead {
+            wt_dma_wait(hw, WT_AFTER, WT_TO_NEXT);
+        }
         self.trace.at(hw, Tp::LineOn);
         let mut looped = false;
         for ch in 0..n {
@@ -2742,8 +3495,10 @@ impl Tfmx {
         if !self.led_done {
             self.led_done = true;
             use m68k::AddressBus;
-            let v = hw.bus.read_byte(0xbfe001);
-            hw.bus.write_byte(0xbfe001, v | 2);
+            if !self.ep || self.ver.ep_led {
+                let v = hw.bus.read_byte(0xbfe001);
+                hw.bus.write_byte(0xbfe001, v | 2);
+            }
             if self.ver.init_k == 0 {
                 hw.wait(self.ver.led_gap);
             } else {
@@ -2774,7 +3529,10 @@ impl Tfmx {
         self.trace.write(hw, "dma");
         hw.dmacon(0x000f);
         hw.wait(8);
-        hw.bus.write_word(0xdff09a, 0x0780);
+        if !self.ep {
+            // the Eagleplayer's patch writes the DMA off alone
+            hw.bus.write_word(0xdff09a, 0x0780);
+        }
         hw.wait(377);
         for ch in 0..self.ver.init_voices {
             let v = &mut self.voices[ch];
@@ -2801,6 +3559,11 @@ impl Tfmx {
             if self.ver.early_vars.is_none() {
                 v.loop_len = 0;
             }
+            if matches!(self.ver.early_vars, Some(Kept { note: None, .. })) {
+                // the early builds' InitSound clears the note (seen when UADE's
+                // player starts the song again at its stop)
+                v.note = 0;
+            }
             v.dma = 1 << ch;
             let col = 3 * ch as u32;
             v.pos = self.positions + start * 12 + col;
@@ -2810,6 +3573,9 @@ impl Tfmx {
             // each voice at its own register, 1 word, or at the empty table
             let (r, l) = match self.ver.init_loc {
                 Some(o) => (self.empty + o, self.ver.init_len),
+                // through the Eagleplayer's patch (its ENPP_PokeAdr and
+                // ENPP_PokeLen) the voice's own register and 1 word read as 0
+                None if self.ep => (0, 0),
                 None => (0xdff0a0 + 16 * ch as u32, self.ver.init_len),
             };
             hw.loc(ch, r);
@@ -2855,6 +3621,9 @@ impl Tfmx {
             if p == v.pos_end {
                 v.pos_off = 0;
                 p = v.pos;
+                // the Eagleplayer's patch (and UADE's player's) of the wrap
+                // signals the song end
+                self.songend |= self.ver.ep_end;
             }
             let bus = &*hw.bus;
             let (t, tt, et) = (bus.r8(p), bus.r8(p + 1), bus.r8(p + 2));
@@ -2947,7 +3716,13 @@ impl Tfmx {
         }
         self.envelope(ch, hw);
         let per = self.period(ch, hw);
-        (per, self.voices[ch].volume as u16)
+        let mut vol = self.voices[ch].volume;
+        if let Some(a) = self.vol_sub {
+            // the volume less the byte at `vol_sub`, 0 where that is negative
+            let r = vol.wrapping_sub(hw.bus.r8(a));
+            vol = if (r as i8) < 0 { 0 } else { r };
+        }
+        (per, vol as u16)
     }
 
     /// A sample's info (30 bytes: the sample's offset, length in words, loop
@@ -2966,8 +3741,16 @@ impl Tfmx {
         self.trace.write(hw, "adr");
         hw.loc(ch, s);
         self.trace.at(hw, at[1]);
+        if self.dead {
+            // UADE's player's patch of the length write first notes the
+            // sample for its voice (a compare more per voice)
+            hw.wait(WT_SAMPLE + WT_SAMPLE_VOICE * ch as u64);
+        }
         self.trace.write(hw, "len");
         hw.len(ch, len);
+        if self.dead {
+            hw.wait(WT_SAMPLE_AFTER);
+        }
         let v = &mut self.voices[ch];
         v.loop_addr = s.wrapping_add(ls as u32);
         v.loop_len = ll;
@@ -5500,9 +6283,10 @@ mod tests {
         e.render(&mut out);
         let log = e.m.bus.write_log.take().unwrap();
         let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
-        // InitSound: DMA off, every voice at its own register, 1 word
+        // InitSound: DMA off, every voice at its own register, 1 word, which
+        // through the Eagleplayer's ENPP_Poke calls reads as location 0, length 0
         assert_eq!(reg(0xDFF096)[0], 0x000F);
-        assert_eq!(reg(0xDFF0A2)[0], 0xF0A0);
+        assert_eq!((reg(0xDFF0A2)[0], reg(0xDFF0A4)[0]), (0, 0));
         // the note: the sample's start and length, the note's period, the
         // envelope's volume, the DMA on, the loop
         assert!(reg(0xDFF0A2).contains(&((base + TSAMPLES as u32) as u16)));

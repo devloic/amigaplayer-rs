@@ -10,6 +10,12 @@ in emulated memory, recaptured for this work. Without those bytes the decoder fi
 the end with zeros. It then gets 10 of 23 files exactly right, and the other 13 differ
 only in their last 3 to 4248 bytes.
 
+The tool's own DeCrunch does no better on as-saved files (see "What the tool's own
+DeCrunch does"). It reads whatever memory follows its load buffer. Under AROS it
+matches `decode(saved + DB DB ...)` on the 11 files it unpacks and crashes on 11 others.
+The lost tail cannot be rebuilt from the file: at least 13 bits stay free in each
+of the 13 pairs.
+
 ## Method
 
 Clean-room, black-box only, as in `docs/specs/modcrusher/SPEC.md`. No 68k code of the
@@ -170,8 +176,142 @@ Consequences:
   and fills the rest with zeros.
 * `stcdec.decode(data, strict=True)` raises `EOFError` instead.
 
-Whether the tool's own DeCrunch, or a replayer's depacker, reads past the saved end
-was not tested.
+What the tool's own DeCrunch does with such a file is in the next section.
+
+### What the tool's own DeCrunch does with an as-saved file
+
+Observed in the emulator only (OS-call breakpoints and memory dumps; no program code
+read). Work dir: `/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/stc-tail/`,
+rig copy in `rig/` (Xvfb `:117`). Each as-saved `.stc` was loaded into the tool
+(Project/Load), then Crunch/DeCrunch was run ("START DECRUNCHING" alert answered TRUE
+as for Crunch), then Project/Save. The Save `Write` was captured as for crunching.
+One fresh boot per file.
+
+**Load.** The tool opens the file, `Lock`s and `Examine`s it for its size, then calls
+`AllocMem(file size + 1000, 0)`. The flags are 0 (MEMF_ANY), so the block is not
+cleared. It reads `STC\0` to block + 1000 and the rest of the file right after it,
+so the file data ends exactly at the end of the block. DeCrunch writes to another
+block, and Save writes that block with the original length.
+
+**DeCrunch reads past the end of the load block.** It does not stop at the end of
+the file. It goes on reading the bits that follow in memory until its last token is
+complete. Under this AROS ROM the block is followed by 32 bytes of mungwall fill
+`DB`, then other blocks and free memory. Two tests show it:
+
+* p02 (decrunched as saved): output equals `stcdec.decode(saved + DB DB ...)`, not
+  the zero-fill output, not the original. Its last 8 bytes are
+  `f8 f5 f2 f1 f4 f7 f5 f3`. The original is `f8 f9 fa fb fc fd fe ff` and zero fill
+  gives `00 00 ...`.
+* p05 with `01 23 45 67 89 AB CD EF` poked into memory right after the load block,
+  before DeCrunch: output equals `decode(saved + 0123456789ABCDEF)`. The output follows
+  whatever lies after the block.
+
+**Output length.** In byte delta runs the tool stops at the original length. p02,
+p04 and p06 end inside a delta run that the `DB` bits never stop, and the mungwall
+after the output block was still intact at Save. The literal, repeat and zero-run
+counts are not clamped. When the bits past the end give a count larger than what is
+left, the tool writes past its output block. Under AROS, mungwall then raises an
+alert and the machine reboots (`ColdReboot` caught by the rig).
+
+Per as-saved file (all 23; `check.py`, `memsim.py`):
+
+| pair | as-saved file + `DB` fill, decoded by the format | tool DeCrunch under AROS |
+|---|---|---|
+| p01 | zero run, count from `DB` bits = 3082270648 | crash (reboot) |
+| p02 | reads 3 bytes past end, ok | output = `DB`-fill decode (last 7 differ from original) |
+| p03 | reads 4 bytes, ok | = `DB`-fill decode (last 4 differ) |
+| p04 | reads 30 bytes, ok | = `DB`-fill decode (last 38 differ) |
+| p05 | reads 3 bytes, ok | = `DB`-fill decode (last 3 differ) |
+| p06 | reads 2 bytes, ok | = `DB`-fill decode (last 4 differ) |
+| q0, q1 | byte delta run reads 896 bytes, past the 32-byte wall | crash |
+| q2 | zero run of 57055, 56031 too many | crash |
+| q3 | zero run of 3082270648 | crash |
+| r1 | delta run reads 458 bytes, past the wall | crash |
+| r2 | count code 61 (56-63, never seen) | crash |
+| r3 | delta run reads hundreds of bytes, past the wall | crash |
+| t1 | reads 3 bytes, ok | = `DB`-fill decode (last 4 differ) |
+| t2 | reads 5 bytes, ok | = `DB`-fill decode (last 8 differ) |
+| t3 | delta run reads 2049 bytes, past the wall | no crash, but bytes 1084-5179 (the whole pattern and sample) are garbage. It matches the `DB`-fill decode for 63 bytes (= 32 bytes of 4-bit deltas), then follows other memory |
+| t4 | reads 4 bytes, ok | = `DB`-fill decode (last 4 differ) |
+| t5 | count code 61 | crash |
+| t6 | reads 4 bytes, ok | = `DB`-fill decode (last 4 differ) |
+| t7 | reads 3 bytes, ok | = `DB`-fill decode (last 6 differ) |
+| c1 | repeat run of 7036, 2788 too many | crash |
+| c2 | zero run of 63223, 62504 too many | crash. With the 4 real tail bytes `FB D6 70 D0` poked after the load block, no crash and output = original module |
+| c3 | reads 3 bytes, ok | = `DB`-fill decode (last 3 differ) |
+
+The 10 files that zero fill rebuilds exactly (p01, q0-q3, r1-r3, t3, t5) are the
+ones the tool's own DeCrunch cannot unpack under AROS. It crashes on 9 of them and
+writes garbage for t3. Their lost bits hold a zero run (or the start of one), and the
+`DB` bits put a different token there.
+
+Rule (AROS rig only): **the tool's DeCrunch output equals `stcdec.decode` of the
+saved stream followed by `DB` bytes, as long as the decode reads at most 32 bytes past
+the end and the last count does not overrun.** All files that DeCrunch put out match it
+(`stc-tail/stcdec.py --past-end db`, `decode(..., past_end=b'\xdb')`). Those are 11 of
+11: p02-p06, t1, t2, t4, t6, t7, c3, all byte for byte. The rule also predicts what
+goes wrong with the other 12. All 5 overrunning counts and both count codes 56-63
+crash. Of the 5 files that read beyond the wall, 4 crash and t3 puts out garbage that
+follows the rule only for as long as the wall lasts. Beyond the wall the bytes depend
+on the other blocks at DeCrunch time, so no file-only rule can give them. With the
+default zero fill, `stc-tail/stcdec.py` is unchanged (same output as `stc-spec2` on
+all 23 files).
+
+**Not deterministic on a real Amiga.** `AllocMem` gets flags 0, not MEMF_CLEAR. Exec
+rounds the block up to 8 bytes, so after the file there are 0-7 bytes of uncleared
+slack (`(8 - (size + 1000) % 8) % 8`). After that comes whatever is next: a free-list
+chunk header or someone else's block. The bytes the last token needs (2-4, more when
+the lost token is a long delta run) therefore depend on earlier memory use. The tail
+of the tool's own output is not defined. A large count can overwrite memory after the
+output block (no mungwall to catch it on Kickstart). This was not run under a real
+Kickstart.
+
+### Other depack paths
+
+The package as we have it holds only the crunched `STC` executable: no text docs and
+no replay or depacker. The About box says "Read documents for information", but no
+documents are in this copy. The GUI's "Type of file: Execute" makes a
+self-extracting file. That was not tested here, and it would carry the same Save
+length. Outside the package, DeliTracker's GenieStore has `ST-Cruncher 0.40`, which
+"decrunches modules packed with SoundTracker-Cruncher (OTT Design)" (see
+`docs/specs/COVERAGE-DELI.md`). It was not run here.
+
+### Can the lost tail be rebuilt from the file?
+
+No. `stc-tail/recover.py` counts every completion of the cut stream that fits all
+known constraints:
+* the token grammar, with count codes 56-63 excluded;
+* the last token ends exactly at the original length;
+* 0-bit padding to the byte;
+* the real end lies 0-4 bytes past the saved end (2-4 gives the same counts).
+
+Literal and delta values do not affect validity and are counted by multiplicity. The
+module structure adds nothing. The sample length fields only fix the total length,
+which the header already gives. The lost bytes are sample PCM in 9 pairs and pattern
+data in 4 (p02, p05, c1, c2, whose patterns are synthetic bytes):
+
+| pair | lost stream bits | consistent completions | free bits (log2) | tokens hit by the cut |
+|---|---|---|---|---|
+| c1 | 30 | 14545 | 13.8 | rep 3996, zero 252 |
+| c2 | 21 | 8928 | 13.1 | end of lit 2000, zero 719 |
+| c3 | 23 | 2^23 | 23.0 | lit 4 |
+| p02 | 25 | 14049022 | 23.7 | delta w3 run |
+| p03 | 28 | 2^28 | 28.0 | lit 4096 |
+| p04 | 24 | 2179072 | 21.1 | lit 3, zero 36 |
+| p05 | 22 | 2^22 | 22.0 | lit 1028 |
+| p06 | 16 | 1961548 | 20.9 | delta w3 run |
+| t1 | 27 | 2470888 | 21.2 | delta w6 run |
+| t2 | 27 | 1180067 | 20.2 | rep 7, lit 1, rep 7 |
+| t4 | 28 | 2^28 | 28.0 | lit 4096 |
+| t6 | 27 | 2^27 | 27.0 | lit 3000 |
+| t7 | 20 | 5119752 | 22.3 | delta w3 run |
+
+At least 13 bits stay free in every pair. Where the stream bits are all literal
+data, every missing bit is free. Where the cut falls in a delta run, there can be
+more completions than 2^(lost bits), because the run may end later within the 4-byte
+window. So the as-saved file does not hold the lost tail. Zero fill (what `stcdec`
+does) is a choice, as is any other fill. The tool's own DeCrunch output is not a
+better reference, since it depends on memory.
 
 ## Decoder and verification
 
@@ -225,5 +365,8 @@ New probes (`mkprobes2.py`, own synthetic data):
 * Count codes 56-63; a width other than 8 and 16 in longword runs.
 * Crunching power other than High, Fast mode, Execute type, and the DeCrunching
   styles. Any of these may change the format, and Execute surely adds a stub.
-* The rule behind the 2-4 byte shortfall of the saved length; whether the original
-  DeCrunch reproduces the end of such files.
+* The rule behind the 2-4 byte shortfall of the saved length.
+* The tool's DeCrunch on a real Kickstart (only AROS was run). The Execute
+  (self-extracting) output and DeliTracker's ST-Cruncher genie were not tried on
+  as-saved files.
+* What exactly the tool does with count codes 56-63 (r2, t5: it crashes under AROS).

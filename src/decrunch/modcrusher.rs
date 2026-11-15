@@ -3,9 +3,9 @@
 //! from the tool's input/output behaviour alone: an LZ77 + adaptive-Huffman stream (317 symbols)
 //! and, for `OkmC`, a 4-bit Fibonacci-delta sample section.
 //!
-//! Known limit: what the tool does to its Huffman model once the root weight reaches 0x8000
-//! (after 32451 coded symbols) is not known, so a stream that needs more symbols than that is
-//! refused ([`Error::ModelLimit`]) rather than decoded wrongly.
+//! Once the root weight reaches 0x8000 (after 32451 coded symbols) the tool freezes its
+//! Huffman model: no weight changes, no exchanges, no rescaling, to the end of the stream
+//! (found by observing the tool's memory; see the spec).
 
 use super::MAX_RAW_OUT;
 
@@ -19,8 +19,6 @@ const LIMIT: u32 = 0x8000;
 pub(crate) enum Error {
     /// Header or stream is damaged or truncated.
     Corrupt,
-    /// The adaptive model reached root weight 0x8000, whose behaviour is not specified.
-    ModelLimit,
 }
 
 fn be32(d: &[u8], o: usize) -> Option<u32> {
@@ -107,7 +105,7 @@ impl Tree {
 
     fn update(&mut self, s: usize) -> Result<(), Error> {
         if self.f[ROOT] >= LIMIT {
-            return Err(Error::ModelLimit);
+            return Ok(()); // the model is frozen from here on
         }
         let mut n = self.up[s + TREE];
         loop {

@@ -1,10 +1,9 @@
 # modCRUSHER V2.0 packed module format ("Okm0" / "OkmC")
 
 Status: lossless stage and all four lossy sample modes established and verified
-byte-exactly against the tool's own unpack output. **One open point:** what the
-tool does to its adaptive Huffman model once the root frequency reaches 0x8000,
-i.e. after 32451 coded symbols (section 7). Files that need more symbols than that
-cannot be decoded yet.
+byte-exactly against the tool's own unpack output, including the point where the
+root frequency of the adaptive Huffman model reaches 0x8000 after 32451 coded
+symbols: from there on the model is frozen (section 7).
 
 ## 1. Method (clean room)
 
@@ -145,7 +144,7 @@ update(s):
 ```
 
 The tool does this rescale-free for the first **32451** symbols, until the root weight
-reaches 0x8000 = 317 + 32451. What happens there is open (section 7).
+reaches 0x8000 = 317 + 32451. From then on it skips the update entirely (section 7).
 
 ## 5. Sample section of `OkmC` files (modes 1-4)
 
@@ -204,50 +203,30 @@ bytes. Mode 0 is lossless for any input. The packer accepts any file, but the to
 own *unpack* of non-module files (where `smp_off > total`) produced corrupted output
 or crashed in vamos. All verification therefore uses module-shaped inputs.
 
-## 7. Open question: model behaviour at root weight 0x8000
+## 7. Model behaviour at root weight 0x8000: the model freezes
 
-Every file whose LZ stream needs more than **32451 symbols** diverges from the rules
-above shortly after symbol 32451, when the root weight is 0x8000 just before that
-symbol's update. The reference decoder stops there and raises `Unsupported`. 23 of
-the 95 corpus triples are affected (all modes; typically modules above ~45 KB in
-mode 0).
+**Rule.** Before each update, if the root weight is already 0x8000 or more, the update
+is skipped: no weight changes, no exchanges, no rescaling. The root reaches 0x8000 with
+the update of symbol 32451, so symbol 32452 and every later symbol is coded and decoded
+on the tree as it stood then, to the end of the stream. No later rebuild or reset was
+seen in streams of up to 119,351 symbols.
 
-What was established:
+**How it was established** (behaviour observation only; no program code was read or
+copied). The tool was run in vamos with the emulated RAM saved just before exit. The
+tree arrays sit in that dump as 633 rising 16-bit weights, a 0xFFFF guard word and the
+parent/child tables.
 
-* With **no** change at that point (weights grow past 0x8000), decoding stays correct
-  for a further 10-35 symbols, then diverges. Examples: c03 mode 0 at symbol 32483,
-  output offset 44514; c11 mode 0 at symbol 32473, offset 54384; c12 mode 0 at symbol
-  32461, offset 62230; random 40 KB file at symbol 32466. The true symbol occupies a
-  tree position of the same depth as the symbol the model predicts, so the true tree
-  has the same frequency profile but differs in which of several equal-weight nodes
-  sits where.
-* **Probe experiment.** 1 literal 0, then 32450 matches of length 60 distance 1, then 10
-  more, then one literal (63 separate files). The code of that first literal after the
-  trigger equals the no-change model's code for every literal tested (5, 9, ..., 253).
-  So the tree **shape is unchanged** at the trigger. With the literals 1, 2, 3, ...
-  coded in order, the no-change model is right for 68 literals. The 69th literal
-  (symbol 69) arrives with the code that the no-change model gives to symbol 133. In
-  the model, the update before it had cascaded exchanges up to an equal-weight (64)
-  internal node. So the true tree takes a different equal-weight node as the exchange
-  partner after the trigger.
-* **Rejected hypotheses** (each breaks within a few symbols, or is no better than no
-  change):
-  * textbook LZHUF rebuild: halve leaves as (w+1)/2 or w/2, collect leaves, re-pair
-    bottom-up, insert internal nodes after (or before) equal weights, ties kept or
-    reversed, leaf order rotated, the 32-bit "(j-k)*2 bytes" move bug;
-  * trigger at 0x7FFF..0x8030 or at any symbol 32440..32534, checked before or after
-    the increment;
-  * in-place halving of all nodes, of leaves only, of internal nodes only, or of
-    leaves with recomputed sums (ceil/floor, root treated separately);
-  * 16-bit signed weight comparisons, sentinel 0x7FFF;
-  * an explicit equal-weight *block/leader* model (in the style of LHA's dynamic
-    Huffman), both with its own bottom-up rebuild and with in-place halving using
-    stale or recomputed block leaders. Without a rescale it behaves exactly like
-    section 4 (c02 decodes fully).
-* Suggested next step: extend the probe method. Use the 1.9 MB zero prefix plus
-  single-literal probes *after* a controlled number of promotions, to read the
-  true tree's exchange partner directly at each step. One probe file packs in about
-  7 s.
+* A probe of 1 literal and 60 × 32455 zero bytes ends with root weight exactly 0x8000
+  and the copy symbol's leaf at 32451: nothing grew and nothing was halved.
+* Decoding with the frozen model, plus the one junk token the packer writes past the
+  end, gives the same 633 weights and the same child links as the dump: checked on that
+  probe, on a 96 KB random file (98,894 symbols) and on a corpus module (83,972 symbols).
+* It also explains the earlier observations: a model that keeps updating agrees with a
+  frozen one until the first update that would exchange nodes (10-35 symbols after the
+  trigger, or the 69th literal in the literal probe), and every rescale variant tried
+  changes the tree at the trigger, so each one failed.
+
+Notes on the analysis: `fixround/crunch-rebuild/REBUILD.md` (scratch).
 
 ## 8. Decoder summary (pseudocode)
 
@@ -262,7 +241,7 @@ decrunch(file):
     return raw[0:smp_off] + fib_unpack(raw[smp_off+2 :], smp_len, unit)
 
 lz_decode(bits, n):
-    tree = initial_tree(); out = []
+    tree = initial_tree(); out = []               # tree.update is a no-op once root >= 0x8000
     while len(out) < n:
         s = tree.decode_symbol()                  # section 4 (update included)
         if s < 256: out.append(s)
@@ -281,12 +260,14 @@ Checker: `.../fixround/crunch-spec/verify.py pk un [pk un ...]`.
 Triples (input → tool pack → tool unpack); the decoder output was compared with the
 tool's unpack output:
 
-| set | triples | identical | unsupported (>32451 symbols) | mismatched |
-|-----|--------:|----------:|-----------------------------:|-----------:|
-| 19 corpus M.K. modules × modes 0-4 | 95 | 72 | 23 | 0 |
-| synthetic samples (square, noise, sine, zeros) on a corpus header × modes 0-4 | 20 | 20 | 0 | 0 |
-| edited modules (odd tail, truncated, order entry past last pattern, sample length +2) | 6 | 6 | 0 | 0 |
-| **total** | **121** | **98** | **23** | **0** |
+| set | triples | identical | mismatched |
+|-----|--------:|----------:|-----------:|
+| 19 corpus M.K. modules × modes 0-4 | 95 | 72 (the other 23 stopped at 32451 symbols before the freeze rule and were not rerun as a set; `corpus_c11_m0` among them is in the vectors) | 0 |
+| synthetic samples (square, noise, sine, zeros) on a corpus header × modes 0-4 | 20 | 20 | 0 |
+| edited modules (odd tail, truncated, order entry past last pattern, sample length +2) | 6 | 6 | 0 |
+| large files past 32451 symbols (5 corpus mode 0, 3 corpus lossy, 6 synthetic) | 14 | 14 | 0 |
+
+With the freeze rule all 43 vectors below and the 14 large ones decode identically.
 
 The tool's mode-0 unpack matched the original input for all 19 corpus modules
 (lossless).
@@ -296,4 +277,6 @@ Vectors: `/media/lolo/kingston2tb/claude-scratch/deliplayerrust/fixround/crunch-
 `.expected`, the original `.input`, mode, sizes, hashes, origin). It covers three small
 corpus modules in all modes, the synthetic-sample set in all modes, the edited
 modules, and `corpus_c11_m0/m1`. `corpus_c11_m0` crosses the 32451-symbol point and
-is the regression vector for section 7. The others decode identically.
+is a regression vector for section 7. The 14 large vectors are in
+`.../fixround/crunch-rebuild/vectors/`. The repo test fixture `synth_freeze_m0.okm`
+(fully synthetic, 37,072 symbols) checks the freeze in the Rust decoder.

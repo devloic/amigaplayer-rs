@@ -1,7 +1,7 @@
 //! Tests of the modCRUSHER decruncher: small vectors made with the tool itself (module-shaped
 //! files, synthetic samples on a corpus header, all five modes; `fixtures/modcrusher/*.okm` is
 //! the tool's packed file, `.expected` its own unpack output), and a stream built here that
-//! runs past the 32451-symbol limit of the adaptive model.
+//! runs past the 32451-symbol point where the tool freezes its adaptive model.
 
 use super::modcrusher::{decode, Error, Tree};
 use super::{decrunch, unpack_identified, Kind};
@@ -72,7 +72,7 @@ fn run_stream(n: usize, total: usize) -> Vec<u8> {
     let mut t = Tree::new();
     let mut bits: Vec<bool> = Vec::new();
     for sym in std::iter::once(0usize).chain(std::iter::repeat_n(255 + 60, n)) {
-        bits.extend(t.encode(sym).expect("encoder reached the limit early"));
+        bits.extend(t.encode(sym).expect("encoder"));
         if sym > 255 {
             bits.extend([false, false, false, false, false, false, false, false, true]);
         }
@@ -99,12 +99,56 @@ fn stream_within_the_limit_decodes() {
 }
 
 #[test]
-fn stream_past_the_limit_is_a_clean_error() {
-    // needs 32452 symbols to reach the claimed length; the encoder only emits 32451
+fn stream_past_the_limit_decodes_with_the_model_frozen() {
+    // 32451 matches + the literal = 32452 symbols: the last one is coded on the frozen tree
     let total = 1 + 60 * 32451;
-    let f = run_stream(32450, total);
-    assert_eq!(decode(&f), Err(Error::ModelLimit));
-    // and through the file-level API: reported as corrupt, the data is used as it is
-    assert_eq!(unpack_identified(&f).map(|(k, o)| (k, o.is_none())), Some((Kind::ModCrusher, true)));
-    assert_eq!(decrunch(f.clone()), f);
+    let f = run_stream(32451, total);
+    let out = decode(&f).unwrap();
+    assert_eq!(out.len(), total);
+    assert!(out.iter().all(|&b| b == 0));
+}
+
+/// The module `synth_freeze_m0.okm` was made from: a synthetic M.K. header and pattern
+/// (no third-party data), a 1984000-byte sample of 1980000 zero bytes, then 4000 bytes of
+/// xorshift32 (seed 0x12345678, top byte of each step).
+fn synth_freeze_module() -> Vec<u8> {
+    const Z: usize = 1_980_000;
+    const T: usize = 4000;
+    let n = Z + T;
+    let mut h = vec![0u8; 1084];
+    h[0..11].copy_from_slice(b"freeze test");
+    h[20..26].copy_from_slice(b"sample");
+    h[42..44].copy_from_slice(&(((n / 2) & 0xFFFF) as u16).to_be_bytes());
+    h[45] = 64;
+    h[48..50].copy_from_slice(&1u16.to_be_bytes());
+    for i in 1..31 {
+        let o = 20 + 30 * i + 28;
+        h[o..o + 2].copy_from_slice(&1u16.to_be_bytes());
+    }
+    h[950] = 1;
+    h[951] = 127;
+    h[1080..1084].copy_from_slice(b"M.K.");
+    let mut pat = vec![0u8; 1024];
+    pat[0..4].copy_from_slice(&[0x01, 0xAC, 0x10, 0x00]);
+    h.extend_from_slice(&pat);
+    h.resize(h.len() + Z, 0);
+    let mut x: u32 = 0x1234_5678;
+    for _ in 0..T {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        h.push((x >> 24) as u8);
+    }
+    h
+}
+
+#[test]
+fn tool_stream_past_the_limit_is_byte_identical() {
+    // packed by the tool itself (mode 0): 37072 coded symbols, the last 4621 on the
+    // frozen tree, among them the 4000 xorshift literals
+    let packed = include_bytes!("fixtures/modcrusher/synth_freeze_m0.okm");
+    let want = synth_freeze_module();
+    let got = decode(packed).unwrap();
+    assert!(got == want, "output differs from the module the tool packed");
+    assert!(decrunch(packed.to_vec()) == want);
 }

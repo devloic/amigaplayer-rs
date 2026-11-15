@@ -3,8 +3,10 @@
 The open replayers of amigaplayer-rs for the browser (or Node, Deno, any WebAssembly host):
 Amiga modules and the PC tracker formats in, 16-bit stereo PCM out, behind a small C-style ABI
 (`dp_*`, "decode and play") that a few lines of JavaScript can drive. No imports are needed
-(an empty import object), no threads, no SDL, none of the 68k player hosting: the module is the
-library of the repository's root built with `default-features = false`.
+(an empty import object), no threads, no SDL, none of the 68k player files: the module is the
+library of the repository's root built with `default-features = false` plus `archives` and
+`custom-modules`. Custom modules (`cust.*`, a hunk executable carrying the module's own 68k replay
+code) run in the engine's 68k host, as natively; no player of anyone else's is in the `.wasm`.
 
 Licence: GPL-2.0-or-later (see `../../LICENSE` and the `LICENSE-*` files). A page that ships
 this `.wasm` ships a GPL-2.0-or-later combined work: offer the source.
@@ -36,7 +38,7 @@ The PCM is interleaved stereo signed 16-bit little-endian at the rate given to `
 |--------|---------|
 | `dp_alloc(n) -> ptr` | `n` bytes of module memory to copy a file into |
 | `dp_free(ptr, n)` | free a block from `dp_alloc` |
-| `dp_detect(ptr, n) -> 0/1` | 1 if an open replayer claims the module |
+| `dp_detect(ptr, n) -> 0/1` | 1 if an open replayer claims the module, or it is a custom module |
 | `dp_add_file(path_ptr, path_len, ptr, n)` | a companion file for the next `dp_open`, at `path` relative to the module (`smpl.tune` for TFMX, `Instruments/Piano` for IFF-SMUS); `..` components are dropped. Consumed by `dp_open` |
 | `dp_open(name_ptr, name_len, ptr, n, rate, max_bytes, subsong) -> i32` | decodes the module (`name` is its file name, UTF-8; `/` and `\` in it become `_`) at `rate` Hz, at most `max_bytes` of PCM, from `subsong` (-1: the first). Returns **0** ok, **-2** not claimed by any open replayer (the page should use another player), **-1** failed (the reason is in the info string) |
 | `dp_info_ptr() / dp_info_len()` | UTF-8 string `title\tformat\tsubsong\tfirst\tlast` after a successful open; after -1 the failure reason |

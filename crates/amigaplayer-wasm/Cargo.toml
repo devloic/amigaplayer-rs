@@ -11,8 +11,9 @@ crate-type = ["cdylib"]
 [dependencies]
 # No SDL window, and none of the players recompiled from the user's own files.
 # `archives`: gzip / xz wrappers undone by the decrunchers (pure Rust), and the archive
-# readers compiled for wasm32 (lib-check builds them here).
-amigaplayer-rs = { path = "../..", default-features = false, features = ["archives"] }
+# readers compiled for wasm32 (lib-check builds them here). `custom-modules`: custom modules
+# (`cust.*`, the module's own 68k code) run in the engine's 68k host, as natively.
+amigaplayer-rs = { path = "../..", default-features = false, features = ["archives", "custom-modules"] }
 
 [profile.release]
 opt-level = 3

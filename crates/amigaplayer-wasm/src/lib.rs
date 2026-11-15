@@ -15,7 +15,7 @@
 //! The PCM is interleaved stereo s16le. A tune ends where its replayer says, after
 //! 10 s of silence, or at `max_bytes` (truncated): many Amiga players loop for ever.
 
-use amigaplayer_rs::{Error, Song};
+use amigaplayer_rs::{Error, Options, Song};
 use std::path::PathBuf;
 
 const SILENCE_S: u32 = 10;
@@ -62,7 +62,9 @@ pub unsafe extern "C" fn dp_free(p: *mut u8, n: usize) {
 pub unsafe extern "C" fn dp_detect(p: *const u8, n: usize) -> i32 {
     // (a panic aborts under panic = "abort"; the guard is for builds without it)
     let d = unsafe { bytes(p, n) };
-    std::panic::catch_unwind(|| amigaplayer_rs::detect(d).is_some() as i32).unwrap_or(0)
+    // a custom module too (the module's own 68k code, which `dp_open` plays)
+    std::panic::catch_unwind(|| (amigaplayer_rs::detect(d).is_some() || amigaplayer_rs::detect_custom(d)) as i32)
+        .unwrap_or(0)
 }
 
 /// A companion file for the next `dp_open`, at `path` relative to the module.
@@ -99,7 +101,7 @@ pub unsafe extern "C" fn dp_open(
     let data = unsafe { bytes(p, n) };
     let name = String::from_utf8_lossy(unsafe { bytes(name, name_len) }).replace(['/', '\\'], "_");
     let companions: Vec<(&str, &[u8])> = files.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
-    let mut song = match Song::open_with(&name, data, &companions, rate) {
+    let mut song = match Song::open_opts(&name, data, &companions, rate, &Options::new().allow_custom(true)) {
         Ok(song) => song,
         Err(Error::NotRecognised) => return -2,
         Err(e) => {

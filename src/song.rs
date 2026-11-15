@@ -508,7 +508,8 @@ impl Song {
         }
     }
 
-    /// As [`Song::render_f32`], converted to signed 16 bit (rounded, clipped).
+    /// As [`Song::render_f32`], converted to signed 16 bit (rounded, clipped). Returns the
+    /// number of stereo *frames* written, so `2 * n` samples of `out` are filled.
     pub fn render_i16(&mut self, out: &mut [i16]) -> usize {
         let n = out.len() & !1;
         let mut buf = [0f32; 2048];

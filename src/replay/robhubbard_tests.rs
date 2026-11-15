@@ -330,3 +330,97 @@ fn song_end_fires_when_all_voices_wrapped_and_play_continues() {
     let (_, _, early) = run_ticks(&d, 3);
     assert!(!early);
 }
+
+// --- generation D (early driver: 16-byte instrument records, no synth, vibrato or modulation)
+
+const BANK_D: usize = 0x800;
+
+/// A small generation-D module: the code shapes the locator reads, one bank sample, four streams.
+fn module_d() -> Vec<u8> {
+    let mut d = vec![0u8; BANK_D + 6 + 16 + 2];
+    put_w(&mut d, 0, 0x6000);
+    put_w(&mut d, 2, 0x3E);
+    put_w(&mut d, 4, 0x6000);
+    put_w(&mut d, 6, 0x5A);
+    for o in [8usize, 12, 16] {
+        put_w(&mut d, o, 0x6000);
+        put_w(&mut d, o + 2, (0x40 - (o + 2)) as u16);
+    }
+    pc(&mut d, 20, 0x41FA, 0x40);
+    put_w(&mut d, 28, 0x4E75);
+    pc(&mut d, 30, 0x41FA, 0x40);
+    // play: the period table load
+    pc(&mut d, 0x40, 0x45FA, PER);
+    put_w(&mut d, 0x44, 0x4E75);
+    // init: bank, instrument table and count, then the base-relative loads
+    let mut o = 0x60;
+    put_w(&mut d, o, 0x1741);
+    put_w(&mut d, o + 2, 0x2F0);
+    o += 4;
+    pc(&mut d, o, 0x41FA, BANK_D);
+    o += 4;
+    pc(&mut d, o, 0x4BFA, INS);
+    o += 4;
+    put_w(&mut d, o, 0x7200);
+    o += 2;
+    put_w(&mut d, o, 0x43EB);
+    put_w(&mut d, o + 2, 0x300);
+    o += 4;
+    put_w(&mut d, o, 0x41EB);
+    put_w(&mut d, o + 2, SONG as u16);
+    o += 4;
+    put_w(&mut d, o, 0x45EB);
+    put_w(&mut d, o + 2, SILENT as u16);
+    o += 4;
+    put_w(&mut d, o, 0x43E9);
+    put_w(&mut d, o + 2, 0x1C);
+    o += 4;
+    put_w(&mut d, o, 0x4E75);
+    for i in 0..49 {
+        put_w(&mut d, PER + 2 * i, (4096.0 / 2f64.powf(i as f64 / 12.0)) as u16);
+    }
+    // instrument 0: loop offset 4, volume 64
+    put_l(&mut d, INS + 4, 4);
+    put_w(&mut d, INS + 0xE, 64);
+    let lists = [0x570usize, 0x578, 0x580, 0x588];
+    d[SONG + 1] = 2;
+    for (v, l) in lists.iter().enumerate() {
+        put_l(&mut d, SONG + 2 + 4 * v, *l as u32);
+    }
+    let streams = [0x5A0usize, 0x5B0, 0x5C0, 0x5D0];
+    for (l, s) in lists.iter().zip(streams) {
+        put_l(&mut d, *l, s as u32);
+    }
+    d[0x5A0..0x5A9].copy_from_slice(&[0x80, 0, 0x81, 0xFE, 3, 10, 0x82, 2, 0x84]);
+    d[0x5B0..0x5B3].copy_from_slice(&[0x82, 3, 0x84]);
+    d[0x5C0..0x5C3].copy_from_slice(&[0x82, 3, 0x84]);
+    d[0x5D0..0x5D3].copy_from_slice(&[0x82, 3, 0x84]);
+    put_l(&mut d, BANK_D, 16);
+    put_w(&mut d, BANK_D + 4, 8363);
+    let n = d.len();
+    put_w(&mut d, n - 2, 0x4E71);
+    d
+}
+
+#[test]
+fn generation_d_is_located_and_detected() {
+    let d = module_d();
+    let l = locate(&d).unwrap();
+    assert_eq!(l.kind, Gen::D);
+    assert_eq!((l.nsm, l.bank, l.silent, l.ins, l.per, l.song, l.stride), (1, BANK_D, SILENT, INS, PER, SONG, 16));
+    assert!(detect(&d));
+}
+
+#[test]
+fn generation_d_plays_with_slide_and_no_instrument_start() {
+    let (_, t, _) = run_ticks(&module_d(), 6);
+    // before any instrument select the voice reads the host's memory at address 0: the loop
+    // offset is the ExecBase pointer of the reference (0x2348), the length 0 minus half of it
+    let first: Vec<_> = t[0].iter().filter(|w| (0xDFF0A0..0xDFF0B0).contains(&w.0)).map(|w| (w.0, w.1)).collect();
+    assert_eq!(first[..3], [(0xDFF0A0, 0), (0xDFF0A2, 0x2348), (0xDFF0A4, 0xEE5C)]);
+    // the note, then its loop part one tick later (instrument loop offset 4), then the slide
+    assert!(t[0].iter().any(|w| (w.0, w.1) == (0xDFF096, 0x8201)));
+    let p = base_period();
+    assert_eq!(per_writes(&t, 0xDFF0A6)[..3], [p, p - 2, p - 4]);
+    assert!(t[1].iter().any(|w| w.0 == 0xDFF0A4 && w.1 == 6));
+}

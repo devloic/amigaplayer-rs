@@ -158,6 +158,33 @@ the corpus, README). They share everything above and section 3 to 5; differences
 | volume written | instrument volume | instrument volume | override if non-zero, else instrument volume |
 | bank | `silent + 0x40` | `bank` | `silent + 0x40` |
 
+### 1.8 Generation D (Sanxion demo, `sanxion-demo.rh`)
+
+An earlier driver with the same song table, track lists, note streams and sample bank, and with the layout of
+generation B (512 zero bytes at `silent` found through a base-relative load, `bank` = the single position-independent
+load of init, no `0x4E71`-preceded skip), but:
+
+- the instrument table is loaded once and its records are 16 bytes (the same field offsets as 1.5: wave 0x00, loop
+  offset 0x04, length 0x08, period scale 0x0C, volume 0x0E; the fields from 0x10 on do not exist). There are no synth
+  records, no synth-offset table (`syn`), no vibrato table (`vib`) and no waveform modulation, so only the slide
+  effect of section 6 exists;
+- the voice record is 0x1C bytes (stride added at the end of the init loop); the layout of 3 is kept up to `ins`;
+- stream commands: 80 81 82 83 84 (the ones of B); the 0x85 to 0x84 rewrite of 7.1 is applied as for the others;
+- period table: 48 words (4096 down to 271) then zeros; the bank walk, `nsm`, the loop set-up (4.1), the note start (4.3)
+  and the rest (4.4) are as in B (silent length 0x100 words);
+- a note before any instrument select (7.3) does not read the 8-byte zero block: the voice's instrument pointer is 0 and
+  the loop set-up of the first tick reads the long at address 0 (0, wave) and at address 4 (0x2348, the reference
+  machine's ExecBase pointer, so the "loop offset") and the word at address 8 (0, length): AUDxLC = 0x2348 and
+  AUDxLEN = 0 - 0x11A4 = 0xEE5C for each voice. A host property, reproduced as constants.
+
+Timing is not the cycle model of section 8: the code is another one. The slot times were measured, not derived (see
+`src/replay/robhubbard_dtab.rs`): a voice slot is a sequence of paths (loop set-up pair or silent pair, DMA-off,
+effects, fetch with the commands met and the note or rest); each path has a duration and its writes have offsets,
+fitted from 25 000 logged writes by least squares and rounded. Tick-relative stamps equal the reference's within one
+colour clock for 93% of the writes (the rest are off by one; the three song-end wrap slots by up to 6). The reference's
+log stamps lie 4020 colour clocks after the audio they produce; the port's first tick is placed for the audio.
+Corpus: one module (1 subsong, 10 samples, 290 s to the song end); 97.8% of its frames equal the reference's.
+
 ## 2. Initialisation
 
 Init is called once per (re)start with the subsong in d0. In order:

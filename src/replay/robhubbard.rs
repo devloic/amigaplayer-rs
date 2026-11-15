@@ -12,8 +12,9 @@
 //! byte-pattern scan of the image's own init and play code (the address loads it makes),
 //! and the driver is written here from its behaviour: four voices, one Paula channel
 //! each, 50 Hz, a note stream with instrument select, slide, rest and next-pattern
-//! commands, vibrato and waveform modulation. Three code generations are written
-//! (A, B and C).
+//! commands, vibrato and waveform modulation. Four code generations are written
+//! (A, B and C, and the early D of the Sanxion demo, whose slot timing is a fit to the reference's
+//! logs, `robhubbard_dtab.rs`).
 
 use super::m68kdec::{decode, Ea, K};
 use super::{Hw, Open, Replayer};
@@ -27,6 +28,9 @@ enum Gen {
     A,
     B,
     C,
+    /// The early driver (Sanxion demo): 16-byte instrument records, no synth waveforms, vibrato or
+    /// waveform modulation, 0x1C-byte voice records.
+    D,
 }
 
 /// The layout parameters of a module (offsets in the image).
@@ -42,6 +46,8 @@ struct Lay {
     per: usize,
     vib: usize,
     song: usize,
+    /// The instrument record size: 32, 16 in generation D.
+    stride: usize,
 }
 
 fn rb(d: &[u8], o: usize) -> u8 {
@@ -139,22 +145,28 @@ fn locate(d: &[u8]) -> Option<Lay> {
     // instruments, synth waveforms
     let (kins, ins) = *pc_load(5).first()?;
     let nsm = code[kins + 1..].iter().take(4).find_map(|i| (i.k == K::Moveq).then(|| (i.data & 0xFF) as usize + 1))?;
-    let synins = pc_load(5).get(1).map(|e| e.1)?;
-    let syn = *pc_load(2).first().map(|e| &e.1)?;
     let voices = base_load(1)?;
     let song = base_load(0)?;
     // the record size: the immediate added to a1 after the voices are loaded
     let mut rec = 0x26usize;
     for i in &code {
         match (i.k, i.src, i.dst) {
-            (K::Adda, Ea::Imm { val, .. }, Ea::A(1)) if val == 0x26 || val == 0x28 => rec = val as usize,
-            (K::Lea, Ea::Disp(1, dd), Ea::A(1)) if dd == 0x26 || dd == 0x28 => rec = dd as usize,
+            (K::Adda, Ea::Imm { val, .. }, Ea::A(1)) if val == 0x26 || val == 0x28 || val == 0x1C => rec = val as usize,
+            (K::Lea, Ea::Disp(1, dd), Ea::A(1)) if dd == 0x26 || dd == 0x28 || dd == 0x1C => rec = dd as usize,
             _ => {}
         }
     }
+    // the early driver has no synth records: the instrument table is loaded once
+    let (synins, syn) = if rec == 0x1C {
+        (0, 0)
+    } else {
+        (pc_load(5).get(1).map(|e| e.1)?, *pc_load(2).first().map(|e| &e.1)?)
+    };
     // generation A keeps a default instrument: a byte copied from d1 at the very start
     let defins = code.iter().take(4).any(|i| i.k == K::Move && i.size == 1 && i.src == Ea::D(1));
-    let kind = if rec == 0x28 {
+    let kind = if rec == 0x1C {
+        Gen::D
+    } else if rec == 0x28 {
         Gen::C
     } else if defins {
         Gen::A
@@ -187,7 +199,12 @@ fn locate(d: &[u8]) -> Option<Lay> {
         o += 2;
     }
     let per = per?;
-    let vib = vibs.iter().copied().find(|&t| t >= per + 98 && t < song).or_else(|| vibs.first().copied())?;
+    let vib = if kind == Gen::D {
+        0
+    } else {
+        vibs.iter().copied().find(|&t| t >= per + 98 && t < song).or_else(|| vibs.first().copied())?
+    };
+    let stride = if kind == Gen::D { 16 } else { 32 };
     let (silent, bank) = if add40 {
         (t0, t0 + 0x40)
     } else {
@@ -196,11 +213,11 @@ fn locate(d: &[u8]) -> Option<Lay> {
         })?;
         (s, t0)
     };
-    if bank >= d.len() || song + 18 > d.len() || ins + 32 * (nsm + 3) > d.len() {
+    if bank >= d.len() || song + 18 > d.len() || ins + stride * (nsm + if kind == Gen::D { 0 } else { 3 }) > d.len() {
         return None;
     }
     walk_bank(d, bank, nsm)?;
-    Some(Lay { kind, nsm, bank, silent, ins, syn, synins, per, vib, song })
+    Some(Lay { kind, nsm, bank, silent, ins, syn, synins, per, vib, song, stride })
 }
 
 fn detect(d: &[u8]) -> bool {
@@ -294,19 +311,20 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
             *b = 0x84;
         }
     }
-    let mut recs = Vec::with_capacity(l.nsm + 3);
-    for k in 0..l.nsm + 3 {
-        let o = if k < l.nsm { l.ins + 32 * k } else { l.synins + 32 * (k - l.nsm) };
+    let nrec = if l.kind == Gen::D { l.nsm } else { l.nsm + 3 };
+    let mut recs = Vec::with_capacity(nrec);
+    for k in 0..nrec {
+        let o = if k < l.nsm { l.ins + l.stride * k } else { l.synins + 32 * (k - l.nsm) };
         let mut r = Ins {
             wave: 0,
             loopoff: rl(d, o + 4) as i32,
             len: rw(d, o + 8),
             scale: rw(d, o + 0xC),
             vol: rw(d, o + 0xE),
-            vdiv: rw(d, o + 0x10),
-            vseq: rw(d, o + 0x12) as i16,
-            mlim: rw(d, o + 0x14),
-            mstart: rw(d, o + 0x16),
+            vdiv: if l.kind == Gen::D { 0 } else { rw(d, o + 0x10) },
+            vseq: if l.kind == Gen::D { 0 } else { rw(d, o + 0x12) as i16 },
+            mlim: if l.kind == Gen::D { 0 } else { rw(d, o + 0x14) },
+            mstart: if l.kind == Gen::D { 0 } else { rw(d, o + 0x16) },
         };
         if k < l.nsm {
             let (off, len, rate) = bank[k];
@@ -393,13 +411,16 @@ impl RobHubbard {
     fn rec(&self, i: Option<usize>) -> Ins {
         match i {
             Some(k) => self.recs.get(k).copied().unwrap_or_else(|| self.raw_rec(k)),
+            // the early driver has no instrument before the first select: the reference reads
+            // the host's memory at address 0 (wave 0, loop offset = the ExecBase pointer 0x2348)
+            None if self.l.kind == Gen::D => Ins { loopoff: 0x2348, ..Ins::default() },
             None => Ins::default(),
         }
     }
 
     /// An instrument number past the bank and the synth records: whatever the image holds there.
     fn raw_rec(&self, k: usize) -> Ins {
-        let o = self.l.ins + 32 * k;
+        let o = self.l.ins + self.l.stride * k;
         let d = &self.img;
         Ins {
             wave: self.base.wrapping_add(rl(d, o)),
@@ -407,10 +428,10 @@ impl RobHubbard {
             len: rw(d, o + 8),
             scale: rw(d, o + 0xC),
             vol: rw(d, o + 0xE),
-            vdiv: rw(d, o + 0x10),
-            vseq: rw(d, o + 0x12) as i16,
-            mlim: rw(d, o + 0x14),
-            mstart: rw(d, o + 0x16),
+            vdiv: if self.l.kind == Gen::D { 0 } else { rw(d, o + 0x10) },
+            vseq: if self.l.kind == Gen::D { 0 } else { rw(d, o + 0x12) as i16 },
+            mlim: if self.l.kind == Gen::D { 0 } else { rw(d, o + 0x14) },
+            mstart: if self.l.kind == Gen::D { 0 } else { rw(d, o + 0x16) },
         }
     }
 
@@ -446,7 +467,7 @@ impl RobHubbard {
     }
 
     fn silent_len(&self) -> u16 {
-        if self.l.kind == Gen::B {
+        if self.l.kind == Gen::B || self.l.kind == Gen::D {
             0x100
         } else {
             0x20
@@ -460,6 +481,10 @@ impl RobHubbard {
         self.tref = 0;
         self.t = 256;
         if !self.playing {
+            return;
+        }
+        if self.l.kind == Gen::D {
+            self.tick_d(hw);
             return;
         }
         self.t += 33;
@@ -590,7 +615,7 @@ impl RobHubbard {
         self.t += 12;
         let order: &[(u8, u64)] = match kind {
             Gen::C => &[(0x86, 19), (0x84, 19), (0x80, 17), (0x81, 17), (0x82, 17), (0x83, 17), (0x85, 17), (0x87, 19)],
-            Gen::B => &[(0x84, 17), (0x80, 17), (0x81, 17), (0x82, 17), (0x83, 17)],
+            Gen::B | Gen::D => &[(0x84, 17), (0x80, 17), (0x81, 17), (0x82, 17), (0x83, 17)],
             Gen::A => &[(0x84, 19), (0x80, 17), (0x81, 17), (0x82, 17), (0x83, 17), (0x85, 17)],
         };
         let mut guard = 0;
@@ -747,6 +772,140 @@ impl RobHubbard {
         self.vs[v].counter = dur;
     }
 }
+
+/// One Paula write of a generation D slot.
+#[derive(Clone, Copy)]
+enum Wr {
+    Loc(u32),
+    Len(u16),
+    Vol(u16),
+    Per(u16),
+    Dma(u16),
+}
+
+impl RobHubbard {
+    /// A generation D tick: each voice slot is run as a whole, its path summarised as a key, and the
+    /// writes are stamped from the key's measured offsets (`robhubbard_dtab.rs`).
+    fn tick_d(&mut self, hw: &mut Hw) {
+        let mut t = dtab::START;
+        for v in (0..4).rev() {
+            let mut key = String::new();
+            let mut w: Vec<Wr> = Vec::new();
+            let ok = self.slot_d(v, &mut key, &mut w);
+            let (offs, dur) = dtab::lookup(v, &key, w.len());
+            for (i, wr) in w.iter().enumerate() {
+                self.t = 2 * (t + offs[i.min(offs.len().saturating_sub(1))] as i64) as u64;
+                match *wr {
+                    Wr::Loc(a) => self.w_loc(hw, v, a),
+                    Wr::Len(n) => self.w_len(hw, v, n),
+                    Wr::Vol(n) => self.w_vol(hw, v, n),
+                    Wr::Per(n) => self.w_per(hw, v, n),
+                    Wr::Dma(n) => self.w_dma(hw, n),
+                }
+            }
+            t += dur as i64;
+            if !ok {
+                return;
+            }
+        }
+    }
+
+    /// One slot of a generation D voice: the writes it makes and a key naming the path taken.
+    fn slot_d(&mut self, v: usize, key: &mut String, w: &mut Vec<Wr>) -> bool {
+        let r = self.rec(self.vs[v].ins);
+        let silent = self.base + self.l.silent as u32;
+        if !self.vs[v].started {
+            self.vs[v].started = true;
+            if r.loopoff == 0 {
+                key.push_str("Ls ");
+                w.push(Wr::Loc(silent));
+                w.push(Wr::Len(0x100));
+            } else {
+                key.push_str("Lp ");
+                let lo = r.loopoff;
+                w.push(Wr::Loc(r.wave.wrapping_add(lo as u32)));
+                w.push(Wr::Len(r.len.wrapping_sub((lo as u16) >> 1)));
+            }
+        }
+        let c = self.vs[v].counter.wrapping_sub(1);
+        self.vs[v].counter = c;
+        if c != 0 {
+            if c == 1 {
+                key.push_str("O ");
+                w.push(Wr::Dma(1 << v));
+            } else {
+                key.push_str("D ");
+            }
+            if self.vs[v].flags & 2 != 0 {
+                key.push_str("S ");
+                let p = self.vs[v].period.wrapping_add(self.vs[v].slide as i16 as u16);
+                self.vs[v].period = p;
+                w.push(Wr::Per(p));
+            }
+            return true;
+        }
+        key.push_str("F ");
+        self.vs[v].flags = 0;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            if guard > 5000 {
+                return true;
+            }
+            let b = rb(&self.img, self.vs[v].stream as usize);
+            self.vs[v].stream += 1;
+            if b < 0x80 {
+                let dur = (b as u16).wrapping_mul(self.tempo as u16);
+                let note = rb(&self.img, self.vs[v].stream as usize);
+                self.vs[v].stream += 1;
+                self.vs[v].note = note;
+                let r = self.rec(self.vs[v].ins);
+                key.push('N');
+                w.push(Wr::Loc(r.wave));
+                w.push(Wr::Len(r.len));
+                w.push(Wr::Vol(r.vol));
+                let per = ((rw(&self.img, self.l.per + 2 * note as usize) as u32).wrapping_mul(r.scale as u32) >> 10) as u16;
+                self.vs[v].period = per;
+                w.push(Wr::Per(per));
+                w.push(Wr::Dma(0x8200 | (1 << v)));
+                self.vs[v].started = false;
+                self.vs[v].counter = dur;
+                return true;
+            }
+            match b {
+                0x80 => {
+                    let n = rb(&self.img, self.vs[v].stream as usize) as usize;
+                    self.vs[v].stream += 1;
+                    self.vs[v].ins = Some(n);
+                    key.push_str("i ");
+                }
+                0x81 => {
+                    self.vs[v].slide = rb(&self.img, self.vs[v].stream as usize) as i8;
+                    self.vs[v].stream += 1;
+                    self.vs[v].flags |= 2;
+                    key.push_str("s ");
+                }
+                0x82 => {
+                    let n = rb(&self.img, self.vs[v].stream as usize) as u16;
+                    self.vs[v].stream += 1;
+                    self.vs[v].counter = n.wrapping_mul(self.tempo as u16);
+                    w.push(Wr::Loc(silent));
+                    w.push(Wr::Len(0x100));
+                    key.push('R');
+                    return true;
+                }
+                0x84 => {
+                    self.next_pattern(v);
+                    key.push_str(if self.live[v] { "p " } else { "pw " });
+                }
+                _ => key.push_str("u "),
+            }
+        }
+    }
+}
+
+#[path = "robhubbard_dtab.rs"]
+mod dtab;
 
 impl Replayer for RobHubbard {
     fn format(&self) -> &'static str {

@@ -83,6 +83,32 @@ pub fn filter_setup(srate: i32, cutoff: i32, res: i32) -> (i32, i32, i32) {
     ((fg * scale) as i32, (fb0 * scale) as i32, (fb1 * scale) as i32)
 }
 
+/// Not libxmp: the filter OpenMPT gives a module with the extended filter range
+/// (`SONG_EXFILTERRANGE`, MadTracker 2), from libopenmpt 0.8.7's `CutOffToFrequency`
+/// and `SetupChannelFilter` without `kITFilterBehaviour` (BSD-3-Clause, see
+/// LICENSE-openmpt): 110 * 2^(0.25 + x / 20) Hz for OpenMPT cutoff x (here
+/// `cutoff` = 2x, as in [`filter_setup`]), 120 Hz-20 kHz, and twice the damping of
+/// IT's filter at a resonance. Coefficients as [`filter_setup`]'s.
+pub fn filter_setup_ext(srate: i32, cutoff: i32, res: i32) -> (i32, i32, i32) {
+    let fs = srate as f32;
+    let cutoff = cutoff.clamp(0, 255);
+    let res = res.clamp(0, 255) >> 1;
+
+    let dmpfac = 10.0f32.powf(-(res as f32) * ((24.0 / 128.0) / 20.0));
+    let fc = (110.0f32 * 2.0f32.powf(0.25 + cutoff as f32 / 40.0)).clamp(120.0, 20000.0).min(fs * 0.5);
+    let r = fc * (2.0 * std::f32::consts::PI) / fs;
+    let d = ((1.0 - 2.0 * dmpfac) * r).min(2.0);
+    let d = (2.0 * dmpfac - d) / r;
+    let e = 1.0 / (r * r);
+
+    let fg = 1.0 / (1.0 + d + e);
+    let fb0 = (d + e + e) / (1.0 + d + e);
+    let fb1 = -e / (1.0 + d + e);
+
+    let scale = (1i32 << FILTER_SHIFT) as f32;
+    ((fg * scale) as i32, (fb0 * scale) as i32, (fb1 * scale) as i32)
+}
+
 /// glibc `powf(2.0f, cutoff * FREQ_PARAM_MULT + 0.25f)` for cutoff 0-255, as f32 bits
 /// (libxmp's expression, see `filter_setup`).
 #[rustfmt::skip]
@@ -141,5 +167,23 @@ mod tests {
         assert_eq!(filter_setup(48000, 100, 200), (21889, 8329355, -4156941));
         assert_eq!(filter_setup(44100, 0, 255), (1455, 8382025, -4189176));
         assert_eq!(filter_setup(8000, 254, 17), (3464818, 1080544, -351059));
+    }
+
+    #[test]
+    fn ext_filter_is_openmpts() {
+        // unity gain at DC; at resonance 0 real poles (b0^2 + 4 b1 > 0: no peak), where IT's
+        // filter has complex ones
+        for (srate, cutoff, res) in [(48000, 100, 0), (44100, 200, 0), (48000, 60, 236)] {
+            let (a0, b0, b1) = filter_setup_ext(srate, cutoff, res);
+            let s = (1i32 << FILTER_SHIFT) as f64;
+            let (a0, b0, b1) = (a0 as f64 / s, b0 as f64 / s, b1 as f64 / s);
+            assert!((a0 / (1.0 - b0 - b1) - 1.0).abs() < 1e-3, "{srate} {cutoff} {res}");
+            if res == 0 {
+                assert!(b0 * b0 + 4.0 * b1 > 1e-6, "{srate} {cutoff}");
+            }
+        }
+        let (_, b0, b1) = filter_setup(48000, 100, 0);
+        let s = (1i32 << FILTER_SHIFT) as f64;
+        assert!((b0 as f64 / s).powi(2) + 4.0 * b1 as f64 / s < -1e-3);
     }
 }

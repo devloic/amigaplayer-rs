@@ -627,6 +627,9 @@ pub struct ModuleData {
     pub scan_cnt: Vec<Vec<u8>>,
     /// The IT MIDI macros (`m->midi`), when the module has its own.
     pub midi: Option<Box<MidiMacroData>>,
+    /// Not libxmp: the filter has OpenMPT's extended range and damping
+    /// (`filter::filter_setup_ext`), for MadTracker 2 modules converted by `mptconv`.
+    pub mpt_ext_filter: bool,
 }
 
 impl Default for ModuleData {
@@ -660,6 +663,7 @@ impl Default for ModuleData {
             basename: String::new(),
             scan_cnt: Vec::new(),
             midi: None,
+            mpt_ext_filter: false,
         };
         for i in 0..XMP_MAX_CHANNELS {
             let pan = (((i as i32 + 1) / 2) % 2) * 0xff;

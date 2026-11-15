@@ -496,12 +496,18 @@ pub fn read(file: &[u8]) -> Option<(Module, Vec<(usize, usize, usize, u8, u8)>)>
         ins.resonance = 0x80;
         if iflags != 0 {
             let (sd, _) = chunk.struct_or_zero(32);
-            if iflags & 2 != 0 {
+            // (effect 1, OpenMPT's high-pass filter mode, which the libxmp port has not: the
+            // note plays unfiltered rather than low-passed at that cutoff)
+            if iflags & 2 != 0 && sd[1] != 1 {
                 let cutoff = u16::from_le_bytes([sd[2], sd[3]]) as f64;
                 // FrequencyToCutOff with SONG_EXFILTERRANGE
                 let c = ((cutoff.max(1e-9).ln() - 4.8737671609324025) * (20.0 / std::f64::consts::LN_2)).clamp(0.0, 127.0).round() as u8;
-                ins.cutoff = c.min(0x7F) | 0x80;
-                ins.resonance = sd[4].min(0x7F) | 0x80;
+                // (OpenMPT filters an MT2 note only below cutoff 127; the extended range
+                // and its damping are the player's, `Fixups::ext_filter`)
+                if c < 0x7F {
+                    ins.cutoff = c | 0x80;
+                    ins.resonance = sd[4].min(0x7F) | 0x80;
+                }
             }
             if iflags & 4 != 0 {
                 // a VSTi / MIDI instrument: plays nothing here (nMixPlug = device + 1)
@@ -610,7 +616,8 @@ pub fn read(file: &[u8]) -> Option<(Module, Vec<(usize, usize, usize, u8, u8)>)>
             }
             let Some(group) = groups.get(g) else { continue };
             let sample = group[0] as usize + 1;
-            ins.keyboard[note + 11].1 = sample as u16;
+            // `Keyboard[note + 11 + NOTE_MIN]`: OpenMPT's keyboard starts at NOTE_MIN, this one at 0
+            ins.keyboard[note + 12].1 = sample as u16;
             if sample <= num_samples {
                 let s = &mut samples[sample - 1];
                 s.vib_type = vib_type & 3;
@@ -620,7 +627,7 @@ pub fn read(file: &[u8]) -> Option<(Module, Vec<(usize, usize, usize, u8, u8)>)>
                 s.global_vol = (group[1] as u16 * 2).min(64) as u8;
                 finetune[sample - 1] = group[2] as i8 as i32;
                 if synced[sample - 1] {
-                    ins.keyboard[note + 11].0 = NOTE_MIDDLEC - 1;
+                    ins.keyboard[note + 12].0 = NOTE_MIDDLEC - 1;
                 }
             }
         }
@@ -715,6 +722,7 @@ pub fn to_native(file: &[u8]) -> Option<(Vec<u8>, Fixups)> {
     let (md, extras) = read(file)?;
     let (native, mut fix) = build(&md, Kind::It)?;
     fix.extras.extend(remap_extras(&md, extras));
+    fix.ext_filter = true;
     Some((native, fix))
 }
 

@@ -7,7 +7,7 @@
 //! and order of operations (the float arithmetic included), so the output can be
 //! compared with libxmp's sample for sample.
 
-use super::filter::filter_setup;
+use super::filter::{filter_setup, filter_setup_ext};
 use super::mixer::{
     DSP_EFFECT_CUTOFF, DSP_EFFECT_FILTER_A0, DSP_EFFECT_FILTER_B0, DSP_EFFECT_FILTER_B1, DSP_EFFECT_RESONANCE, MixerData, MixerVoice,
     PAN_SURROUND,
@@ -1269,7 +1269,8 @@ impl Context {
         // combinations take effect immediately. See OpenMPT filter-reset.it,
         // filter-reset-carry.it
         if cutoff < 0xfe || resonance > 0 || self.p.xc_data[chn].filter.can_disable != 0 {
-            let (a0, b0, b1) = filter_setup(self.s.freq, cutoff, resonance);
+            let setup = if self.m.mpt_ext_filter { filter_setup_ext } else { filter_setup };
+            let (a0, b0, b1) = setup(self.s.freq, cutoff, resonance);
             self.virt_seteffect(chn as i32, DSP_EFFECT_FILTER_A0, a0);
             self.virt_seteffect(chn as i32, DSP_EFFECT_FILTER_B0, b0);
             self.virt_seteffect(chn as i32, DSP_EFFECT_FILTER_B1, b1);

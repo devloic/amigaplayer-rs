@@ -785,19 +785,18 @@ type Extra = (usize, usize, usize, u8, u8);
 #[derive(Default)]
 pub struct Fixups {
     /// The initial tempo in classic BPM when it is not a whole number in 32..255: the module's
-    /// bpm and time factor are set so that the ticks last what this tempo gives.
+    /// bpm and time factor are set so that the ticks last what this tempo gives, and the tempo
+    /// commands are scaled against the time factor.
     pub tempo: Option<f64>,
     pub extras: Vec<Extra>,
+    /// The filter cutoffs and resonances are OpenMPT's of the extended range (MT2): the module
+    /// is played with that filter (`ModuleData::mpt_ext_filter`).
+    pub ext_filter: bool,
 }
 
 impl Fixups {
     pub fn apply(&self, m: &mut ModuleData) {
-        if let Some(t) = self.tempo.filter(|t| t.is_finite() && *t > 0.0) {
-            // Only without tempo commands (see `build`): the ticks last what `t` gives.
-            let b = t.round().clamp(1.0, 1000.0);
-            m.module.bpm = b as i32;
-            m.time_factor = xm::DEFAULT_TIME_FACTOR * b / t;
-        }
+        m.mpt_ext_filter = self.ext_filter;
         for &(pat, row, ch, fxt, fxp) in &self.extras {
             if pat >= m.module.xxp.len() || ch >= m.module.chn || row >= m.module.xxp[pat].rows {
                 continue;
@@ -809,6 +808,23 @@ impl Fixups {
             } else if e.fxt == 0 {
                 e.fxt = fxt;
                 e.fxp = fxp;
+            }
+        }
+        if let Some(t) = self.tempo.filter(|t| t.is_finite() && *t > 0.0) {
+            // the ticks last what `t` gives; the time factor scales every tempo, so a tempo
+            // command T is written as the T that plays T with it (one equal to the initial tempo
+            // plays exactly that)
+            let b = t.round().clamp(1.0, 1000.0);
+            m.module.bpm = b as i32;
+            m.time_factor = xm::DEFAULT_TIME_FACTOR * b / t;
+            for track in m.module.xxt.iter_mut() {
+                for e in track.event.iter_mut() {
+                    for (fxt, fxp) in [(e.fxt, &mut e.fxp), (e.f2t, &mut e.f2p)] {
+                        if (fxt == xm::FX_IT_BPM || fxt == xm::FX_S3M_BPM) && *fxp >= 0x20 {
+                            *fxp = (*fxp as f64 * b / t).round().clamp(32.0, 255.0) as u8;
+                        }
+                    }
+                }
             }
         }
     }
@@ -913,7 +929,9 @@ fn save_effect(c: &Cell, to_it: bool, rules: Rules) -> (Option<(u8, u8)>, Option
         }
         KeyOff => return (Option::None, Some((xm::FX_KEYOFF, param))),
         SetEnvPosition => return (Option::None, Some((xm::FX_ENVPOS, param))),
-        DelayCut | XParam | Volume => 0,
+        // (`build` puts it in the volume column when that is free or holds a volume)
+        Volume => return (Option::None, Some((xm::FX_VOLSET, param.min(64)))),
+        DelayCut | XParam => 0,
     };
     if letter == 0 || (!to_it && matches!(letter, b'@' | b'M' | b'N' | b'P' | b'W' | b'Y' | b'Z')) {
         return (Option::None, Option::None);
@@ -985,17 +1003,35 @@ fn fit_it_pattern(grid: &mut [Vec<NCell>]) {
     }
 }
 
+/// The envelope as OpenMPT plays it (`InstrumentEnvelope::Sanitize`: the first node at tick 0,
+/// no node before the one ahead of it, the loop and sustain within the nodes), with the nodes
+/// that share a tick made one: OpenMPT's `GetValueFromPosition` takes the first of them at that
+/// tick (libxmp the last, and IT cannot hold two on one tick), and the loop and sustain points
+/// that were on one of them on that one.
 fn to_env(e: &Envelope, shift: u32) -> Env {
     let mut out = Env { flags: e.flags, ..Default::default() };
-    let n = e.nodes.len().min(25);
+    let mut nodes: Vec<(u16, u8)> = Vec::with_capacity(e.nodes.len());
+    let mut index = Vec::with_capacity(e.nodes.len());
+    for (k, &(t, v)) in e.nodes.iter().enumerate() {
+        let t = if k == 0 { 0 } else { t.max(nodes.last().map_or(0, |n: &(u16, u8)| n.0)) };
+        if nodes.last().is_none_or(|n| n.0 != t) {
+            nodes.push((t, v));
+        }
+        index.push((nodes.len() - 1) as u8);
+    }
+    let last = e.nodes.len().saturating_sub(1) as u8;
+    let at = |i: u8| index.get(i.min(last) as usize).copied().unwrap_or(0);
+    let loop_end = e.loop_end.min(last);
+    let sus_end = e.sus_end.min(last);
+    let n = nodes.len().min(25);
     out.num = n as u8;
-    for (k, &(t, v)) in e.nodes.iter().take(n).enumerate() {
+    for (k, &(t, v)) in nodes.iter().take(n).enumerate() {
         out.points[k] = (t as i16, ((v as i32) << shift) as i16);
     }
-    out.loop_start = e.loop_start;
-    out.loop_end = e.loop_end;
-    out.sus_start = e.sus_start;
-    out.sus_end = e.sus_end;
+    out.loop_start = at(e.loop_start.min(loop_end));
+    out.loop_end = at(loop_end);
+    out.sus_start = at(e.sus_start.min(sus_end));
+    out.sus_end = at(sus_end);
     out
 }
 
@@ -1061,7 +1097,6 @@ pub fn build(md: &Module, kind: Kind) -> Option<(Vec<u8>, Fixups)> {
         return None;
     }
 
-    let mut has_tempo = false;
     let mut patterns: Vec<Option<Vec<Vec<NCell>>>> = Vec::with_capacity(used.len());
     for (np, &p) in used.iter().enumerate() {
         let pat = md.patterns[p].as_ref()?;
@@ -1069,7 +1104,16 @@ pub fn build(md: &Module, kind: Kind) -> Option<(Vec<u8>, Fixups)> {
         for r in 0..pat.rows {
             let mut row = Vec::with_capacity(channels);
             for ch in 0..channels {
-                let c = pat.cells.get(r * md.channels + ch).copied().unwrap_or_default();
+                let mut c = pat.cells.get(r * md.channels + ch).copied().unwrap_or_default();
+                // OpenMPT's set-volume command (MOD / XM Cxx), which IT and S3M only have in the
+                // volume column, as OpenMPT saves it: there, over a volume the column holds (the
+                // command is applied after the column on the row's first tick); beside another
+                // volume-column command, a libxmp effect in the event's free slot
+                if c.cmd == Cmd::Volume && (!to_it || matches!(c.volcmd, VolCmd::None | VolCmd::Volume)) {
+                    c.volcmd = VolCmd::Volume;
+                    c.vol = c.param.min(64);
+                    c.cmd = Cmd::None;
+                }
                 let mut n = NCell::default();
                 n.note = match c.note {
                     NOTE_NONE => None,
@@ -1096,9 +1140,6 @@ pub fn build(md: &Module, kind: Kind) -> Option<(Vec<u8>, Fixups)> {
                 };
                 n.vol = vol;
                 let (fx, ex) = save_effect(&c, to_it, md.rules);
-                if c.cmd == Cmd::Tempo {
-                    has_tempo = true;
-                }
                 n.fx = fx;
                 if to_it {
                     for e in [vx, ex].into_iter().flatten() {
@@ -1214,13 +1255,7 @@ pub fn build(md: &Module, kind: Kind) -> Option<(Vec<u8>, Fixups)> {
     let tempo_int = md.tempo.round();
     let whole = (md.tempo - tempo_int).abs() < 1e-9 && (32.0..=255.0).contains(&tempo_int);
     if !whole {
-        if !has_tempo {
-            fix.tempo = Some(md.tempo);
-        } else {
-            // with tempo commands in the patterns the time factor would scale them too: the
-            // nearest whole tempo
-            fix.tempo = Some(tempo_int.clamp(1.0, 1000.0));
-        }
+        fix.tempo = Some(md.tempo);
     }
     let song = Song {
         kind,

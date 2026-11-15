@@ -74,6 +74,37 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A function of an AmigaOS library that the 68k code of a custom module called and that the
+/// emulated system does not implement (see [`Song::missing_calls`]). It answered 0 and did
+/// nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MissingCall {
+    /// The library (or device, or resource) the call went to, as the code opened it
+    /// (`"exec.library"`, `"audio.device"`).
+    pub library: String,
+    /// The function's name from the library's interface description (`"AddTask"`), where the
+    /// host knows it.
+    pub function: Option<String>,
+    /// The library vector offset that was called, negative as in the interface files (`-282`).
+    pub lvo: i32,
+    /// The replay cannot work without the call (the code waits for something the host never
+    /// does): the song then stops, and [`Song::error`] names the call. Otherwise the module
+    /// plays on, and the call only may make it play differently.
+    pub fatal: bool,
+}
+
+impl fmt::Display for MissingCall {
+    /// `exec.library/AddTask() (LVO -282)`, or `foo.library LVO -30` for a function the host
+    /// has no name for.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.function {
+            Some(n) => write!(f, "{}/{n}() (LVO {})", self.library, self.lvo),
+            None => write!(f, "{} LVO {}", self.library, self.lvo),
+        }
+    }
+}
+
 /// `Result` with this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -378,6 +409,17 @@ impl Song {
     /// A host that streams checks this (as it checks [`Song::songend`]) after a render.
     pub fn error(&self) -> Option<&Error> {
         self.failed.as_ref()
+    }
+
+    /// The library functions the 68k code of a custom module has called so far that the
+    /// emulated AmigaOS does not implement, each once, in the order first called (at most 64).
+    /// Empty for every other format. A [`MissingCall::fatal`] one has also stopped the song
+    /// ([`Song::error`] is then [`Error::Guest`] naming it); the others are warnings: the
+    /// module plays on, and may play differently than on an Amiga. Kept across
+    /// [`Song::set_subsong`]; [`Song::restart`] and [`Song::seek`] start the list again (the
+    /// code makes its calls again as it plays again).
+    pub fn missing_calls(&self) -> &[MissingCall] {
+        &self.e.engine().m.os.missing_calls
     }
 
     /// The first, last and current subsong.

@@ -164,6 +164,43 @@ fn an_interrupt_that_never_returns_stops_the_song() {
     assert_stopped(&mut song, "did not return");
 }
 
+/// 68000 code calling exec function `lvo` (negative), its registers kept.
+fn exec_call_code(lvo: i16) -> Vec<u8> {
+    let mut c = vec![0x48, 0xE7, 0xFF, 0xFE, 0x2C, 0x78, 0x00, 0x04, 0x4E, 0xAE]; // movem.l ..,-(sp) ; movea.l 4.w,a6 ; jsr
+    c.extend_from_slice(&lvo.to_be_bytes());
+    c.extend_from_slice(&[0x4C, 0xDF, 0x7F, 0xFF]); // movem.l (sp)+,..
+    c
+}
+
+#[test]
+fn a_call_the_host_does_not_implement_is_a_warning() {
+    // InitSound calls exec AllocEntry (twice): listed once, and the tone plays
+    let mut init = exec_call_code(-222);
+    init.extend(exec_call_code(-222));
+    let mut song = open(&custom_with(&init, &[])).unwrap();
+    let pcm = render(&mut song, 0.5);
+    assert!(pcm.iter().any(|&x| x != 0.0));
+    assert!(song.error().is_none());
+    let calls = song.missing_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].to_string(), "exec.library/AllocEntry() (LVO -222)");
+    assert_eq!((calls[0].library.as_str(), calls[0].function.as_deref(), calls[0].lvo, calls[0].fatal), ("exec.library", Some("AllocEntry"), -222, false));
+    // a module that calls nothing of the kind lists nothing
+    let mut song = open(&minimal_custom()).unwrap();
+    render(&mut song, 0.5);
+    assert!(song.missing_calls().is_empty());
+}
+
+#[test]
+fn a_call_the_replay_cannot_do_without_stops_the_song() {
+    let mut irq = exec_call_code(-726); // ColdReboot
+    irq.extend_from_slice(&RTS);
+    let mut song = open(&custom_with(&[], &irq)).unwrap();
+    render(&mut song, 0.5);
+    assert!(song.missing_calls().iter().any(|c| c.fatal && c.function.as_deref() == Some("ColdReboot")));
+    assert_stopped(&mut song, "exec.library/ColdReboot() (LVO -726)");
+}
+
 #[test]
 fn an_init_that_never_returns_is_an_error() {
     let t = Instant::now();

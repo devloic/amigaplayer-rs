@@ -354,6 +354,10 @@ fn render_wav(args: &Args) -> Result<()> {
         if let Some(err) = &e.last_error {
             eprintln!("error: {err}");
         }
+        for c in &e.m.os.missing_calls {
+            let what = if c.fatal { "error" } else { "warning" };
+            eprintln!("{what}: the module called {c}, which the host does not implement");
+        }
         if !e.m.os.console.is_empty() {
             eprintln!("guest console:\n{}", e.m.os.console);
         }

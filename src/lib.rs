@@ -108,7 +108,7 @@ pub mod songdb;
 pub mod songlengths;
 pub mod unpack;
 
-pub use song::{detect, detect_with, formats, Error, Options, Result, Song, Subsongs};
+pub use song::{detect, detect_with, formats, Error, MissingCall, Options, Result, Song, Subsongs};
 #[cfg(feature = "custom-modules")]
 pub use song::detect_custom;
 

@@ -643,6 +643,8 @@ impl Engine {
         self.m.deli.note_struct = 0;
         eagle::stop(&mut self.m);
         deli::end_new_procs(&mut self.m);
+        self.m.os.ports.clear();
+        self.m.os.timer_reqs.clear();
         for (a, _) in std::mem::take(&mut self.m.deli.list) {
             self.m.heap.free(a);
         }
@@ -716,6 +718,7 @@ impl Engine {
             self.m.bus.ram[..0x400].copy_from_slice(&self.vec_snap);
         }
         self.last_error = None;
+        self.m.os.clear_missing_calls();
         self.m.deli.songend = false;
         self.prowizard_converted = false;
         self.prowizard_format = None;
@@ -1515,7 +1518,8 @@ impl Engine {
         let cias = [&self.m.bus.ciaa, &self.m.bus.ciab];
         let cia_due = cias.iter().filter_map(|c| c.until_underflow()).min().map(|n| (self.m.bus.e_ticks + n) * ECLOCK_DIV);
         let mut due = u64::MAX;
-        for d in [Some(self.next_vblank), self.next_timer, cia_due].into_iter().flatten() {
+        let timer_dev = crate::os::timer_due(&self.m);
+        for d in [Some(self.next_vblank), self.next_timer, cia_due, timer_dev].into_iter().flatten() {
             due = due.min(d);
         }
         // nothing outside Paula looks at the time between two samples: no task to
@@ -1610,12 +1614,15 @@ impl Engine {
                 let (code, data) = (self.m.bus.r32(is + 18), self.m.bus.r32(is + 14));
                 crate::os::call_int_code(&mut self.m, code, data, 0);
             }
+            crate::os::timer_service(&mut self.m, true);
         }
         if let Some(e) = self.m.crashed.take() {
             self.fail(e);
             return;
         }
-        // audio.device writes that finished wake the processes waiting for them
+        // timer.device requests whose time has come, then audio.device writes that finished,
+        // wake the processes waiting for them
+        crate::os::timer_service(&mut self.m, false);
         crate::os::audio_service(&mut self.m);
         if !self.m.deli.procs.is_empty() {
             deli::run_procs(&mut self.m);

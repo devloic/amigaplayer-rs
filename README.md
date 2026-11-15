@@ -265,6 +265,15 @@ was: its calls answer 0 (stonepacker.library's LVO -30 a handle). A library that
 opens another goes through the same path. The libraries are the user's own files,
 loaded at run time; none ship with this program.
 
+A function the host does not implement answers 0. Each one a module calls is logged and,
+after a `--wav` render, named on standard error as `warning: the module called
+exec.library/AllocEntry() (LVO -222), which the host does not implement` (library, function
+name where the host knows it, offset). A few exec functions the code cannot go on without
+(the scheduler's entries, `Exception`, `ColdReboot`) stop the module instead, with that line
+as an `error:`. Tasks a module starts with exec `AddTask` run as the processes of dos
+`CreateNewProc` do: at once until they wait, then when they are signalled; timer.device
+`TR_ADDREQUEST` is answered when its time has passed (`UNIT_VBLANK` at a vertical blank).
+
 You can drop files or folders onto the window, or use **Add** / **Dir**.
 
 | Key | Action |

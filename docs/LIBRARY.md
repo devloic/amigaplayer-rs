@@ -79,12 +79,14 @@ while !song.songend() && song.elapsed_secs() < 120.0 {
 | `Song::open_opts(name, bytes, companions, rate, &Options)` | as `open_with`, with `Options` (`Options::new().allow_custom(true)`: custom modules, `custom-modules` builds) |
 | `detect_custom(&[u8]) -> bool` | the bytes are a custom module (`custom-modules` builds); nothing is run |
 | `error() -> Option<&Error>` | why the song stopped by itself and renders silence: `Error::Guest` (a custom module's code failed), `Error::Internal` (a replayer panicked) |
+| `missing_calls() -> &[MissingCall]` | the AmigaOS library functions a custom module's code called that the host does not implement, each once, in the order first called; empty for other formats (see [Custom modules](#custom-modules)) |
 | `render_f32` / `render_i16` | fill interleaved stereo; return frames written |
 | `subsongs()` / `set_subsong(n)` | `Subsongs { first, last, current }`; out of range is an `Error` |
 | `songend()` | the replayer reported the end (many never do: use a time limit and/or silence detection) |
 | `duration_hint()` | seconds, for recordings and PC trackers; `None` for Amiga replayers |
 | `elapsed_secs()` / `restart()` / `seek(secs)` | position; `seek` restarts and renders up to the point |
 | `title()` / `format()` / `sample_rate()` | metadata |
+| `MissingCall` | `library` (`"exec.library"`), `function` (`Some("AddTask")` where the host knows the name), `lvo` (`-282`), `fatal`; `Display` gives `exec.library/AddTask() (LVO -282)`; `#[non_exhaustive]` |
 | `Error` | `NotRecognised`, `MissingCompanion { format, wanted }`, `Invalid(String)`, `InvalidRate(u32)`, `SubsongOutOfRange{..}`, `Internal(String)`, `Guest(String)`; `#[non_exhaustive]` |
 
 `Error::NotRecognised` means that no replayer claims the bytes. A module a replayer does
@@ -143,7 +145,28 @@ let mut song = Song::open_opts("cust.Rodland", &bytes, &[], 48000, &opts)?;
 assert_eq!(song.format(), "Custom");
 song.render_i16(&mut pcm);
 if let Some(e) = song.error() { /* Error::Guest: the module's code failed; silence from here */ }
+for c in song.missing_calls() { eprintln!("warning: the module called {c}"); }
 ```
+
+**Calls the host does not implement.** The emulated AmigaOS has exec, dos, utility, a few
+functions of intuition, the CIA resources, audio.device and timer.device; graphics.library
+and every other library are stubs. A function it does not implement answers 0 and does
+nothing else. `Song::missing_calls()` lists each one the module called (at most 64): the
+library, the function's name (from the libraries' interface files, for exec, dos, graphics,
+intuition and the device vectors; otherwise only the offset) and the offset. Most are
+warnings: the module plays on, perhaps differently than on an Amiga. `MissingCall::fatal`
+marks the few the code cannot go on without (exec's scheduler entries `Schedule`,
+`Reschedule`, `Switch`, `Dispatch`, and `Exception`, `ColdReboot`: the caller waits for
+something that never happens): such a call stops the song as a fault does, and
+`Song::error()` is `Error::Guest` naming it. The list is kept across `set_subsong`; `restart`
+and `seek` start it again.
+
+Tasks the code starts with exec `AddTask` (on the stack it set up in the Task structure) run as
+dos `CreateNewProc` processes do: at once until they first wait, then whenever they have
+received a signal they wait for (after each interrupt, or while the code that started them
+waits); `RemTask` ends one. timer.device `TR_ADDREQUEST` sent with `SendIO`/`BeginIO` is
+answered when its time has passed on the emulated clock (`UNIT_VBLANK` at a vertical blank),
+to a signal or a software-interrupt port.
 
 `detect_custom(&bytes)` tells whether a file is one (the hunks are loaded and the tags read;
 nothing is run). An open replayer that claims the file still plays it (`detect` names it);
@@ -362,7 +385,8 @@ cc -O2 -Icrates/amigaplayer-capi/include examples/c/play.c -Ltarget/release -lam
 
 The header is `crates/amigaplayer-capi/include/amigaplayer.h` (hand-written, documented):
 `ap_open` / `ap_open_with` / `ap_open_opts`, `ap_render_s16` / `ap_render_f32`, `ap_subsongs`,
-`ap_set_subsong`, `ap_songend`, `ap_error` / `ap_error_code`, `ap_elapsed_secs`,
+`ap_set_subsong`, `ap_songend`, `ap_error` / `ap_error_code`, `ap_missing_call` /
+`ap_missing_call_fatal`, `ap_elapsed_secs`,
 `ap_duration_hint`, `ap_restart`, `ap_seek`, `ap_title`, `ap_format`, `ap_detect`,
 `ap_detect_custom`, `ap_close`, `ap_last_error` / `ap_last_error_code` / `ap_last_missing`,
 `ap_version`, and the `ap_songdb_*` functions. `Error::MissingCompanion` is
@@ -375,7 +399,12 @@ library is built with `custom-modules` by default, and `--no-default-features` l
 hosting out (the flag then fails with `AP_ERR_UNSUPPORTED`). API 0.2.0 (`ap_version()` 200)
 added `ap_open_opts`, `ap_detect_custom`, `ap_error` and `ap_error_code`; nothing changed in
 the functions of 0.1.0. API 0.3.0 (`ap_version()` 300) added `AP_ERR_MISSING_COMPANION` and
-`ap_last_missing` (a module recognised without its companions was `AP_ERR_INVALID` before). Linking statically needs `-lpthread -ldl -lm`. Other languages bind to it with
+`ap_last_missing` (a module recognised without its companions was `AP_ERR_INVALID` before).
+API 0.4.0 (`ap_version()` 400) added `ap_missing_call(song, i)` (the `i`-th function a custom
+module called that the host does not implement, as `"exec.library/AddTask() (LVO -282)"`,
+NULL past the last) and `ap_missing_call_fatal(song, i)` (1: it stopped the song and
+`ap_error` names it, 0: a warning, -1 past the last), as `Song::missing_calls` of the Rust
+API; nothing else changed. Linking statically needs `-lpthread -ldl -lm`. Other languages bind to it with
 their FFI (Python `ctypes`/`cffi`, C#, Go `cgo`, Zig, ...).
 
 The [song database](#song-database) is in a library built with the `songdb` feature (off by

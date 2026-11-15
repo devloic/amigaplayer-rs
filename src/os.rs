@@ -80,6 +80,10 @@ const ALLOCVEC0_ROOM: u32 = 0x2000;
 const CONSOLE_MAX: usize = 1 << 20;
 /// The most interrupt servers one interrupt takes.
 const INT_SERVERS_MAX: usize = 256;
+/// The most entries `OsState::missing_calls` keeps.
+const MISSING_CALLS_MAX: usize = 64;
+/// The most public message ports AddPort keeps.
+const PORTS_MAX: usize = 256;
 
 #[derive(Default)]
 pub struct OsState {
@@ -125,6 +129,15 @@ pub struct OsState {
     pub console: String,
     /// The processes players made with dos CreateNewProc (see `deli::create_process`).
     pub new_procs: HashSet<u32>,
+    /// The public message ports guest code added (AddPort), for FindPort.
+    pub ports: Vec<u32>,
+    /// The library functions guest code called that the host does not implement, each once,
+    /// in the order first called (at most `MISSING_CALLS_MAX`); the engine clears it when a
+    /// module starts. See `missing_call`.
+    pub missing_calls: Vec<crate::MissingCall>,
+    /// timer.device TR_ADDREQUESTs waiting: the bus clock each is answered at (UNIT_VBLANK:
+    /// at the first vertical blank from then), the request, and whether it is UNIT_VBLANK's.
+    pub timer_reqs: Vec<(u64, u32, bool)>,
     /// dos Delay() of one of `new_procs`: the bus clock it sleeps until.
     pub delays: HashMap<u32, u64>,
     /// The files `read_file` looked for and did not find, in order (at most `MISSING_MAX`):
@@ -595,13 +608,53 @@ pub fn lib_call(m: &mut Machine, lib: usize, lvo: i32) {
     };
     if !handled {
         if m.os.logged.insert((lib, lvo)) {
-            log::warn!("unimplemented {} LVO -{}", m.os.libs[lib].name, lvo);
+            missing_call(m, lib, kind, lvo);
         }
         m.set_d0(0);
     }
     // (a player that prints in a loop does not grow the host's memory)
     if m.os.console.len() > CONSOLE_MAX {
         m.os.console.clear();
+    }
+}
+
+/// exec functions a player cannot do without when they do nothing: the scheduler's own
+/// entries and the exception and reboot calls, whose callers wait for a task switch, an
+/// exception or a restart that never comes. A call of one stops the song with the error
+/// naming it. Every other function the host does not implement answers 0 and is a warning:
+/// most players ignore what such a call does (a graphics or intuition call, a stub
+/// library's), and play.
+const FATAL_EXEC: &[&str] = &["Schedule", "Reschedule", "Switch", "Dispatch", "Exception", "ColdReboot"];
+
+/// The name of function `lvo` (positive) of a library of `kind` named `lib`, from the
+/// libraries' interface descriptions, where the host has a table of them.
+fn function_name(kind: LibKind, lib: &str, lvo: i32) -> Option<&'static str> {
+    let names = match kind {
+        LibKind::Exec => EXEC_NAMES,
+        LibKind::Dos => DOS_NAMES,
+        LibKind::Graphics => GRAPHICS_NAMES,
+        LibKind::Intuition => INTUITION_NAMES,
+        LibKind::AudioDev | LibKind::TimerDev => DEVICE_NAMES,
+        LibKind::Stub if lib.ends_with(".device") => DEVICE_NAMES,
+        _ => return None,
+    };
+    lvo_name(names, lvo)
+}
+
+/// Notes the first call of function `lvo` of library `lib` that the host does not implement:
+/// logged, kept in `OsState::missing_calls`, and for one of `FATAL_EXEC` the song's end
+/// (`Machine::crashed`).
+fn missing_call(m: &mut Machine, lib: usize, kind: LibKind, lvo: i32) {
+    let library = m.os.libs[lib].name.rsplit([':', '/']).next().unwrap_or("").to_string();
+    let function = function_name(kind, &library, lvo);
+    let fatal = kind == LibKind::Exec && function.is_some_and(|f| FATAL_EXEC.contains(&f));
+    let call = crate::MissingCall { library, function: function.map(str::to_string), lvo: -lvo, fatal };
+    log::warn!("unimplemented {call}");
+    if fatal && m.crashed.is_none() {
+        m.crashed = Some(format!("it called {call}, which the host does not implement"));
+    }
+    if m.os.missing_calls.len() < MISSING_CALLS_MAX && !m.os.missing_calls.contains(&call) {
+        m.os.missing_calls.push(call);
     }
 }
 
@@ -654,6 +707,47 @@ const EXEC_NAMES: &[&str] = &[
     "CachePostDMA",
 ];
 
+/// graphics.library (graphics_lib.fd, to V33's last function).
+const GRAPHICS_NAMES: &[&str] = &[
+    "BltBitMap", "BltTemplate", "ClearEOL", "ClearScreen", "TextLength", "Text", "SetFont",
+    "OpenFont", "CloseFont", "AskSoftStyle", "SetSoftStyle", "AddBob", "AddVSprite",
+    "DoCollision", "DrawGList", "InitGels", "InitMasks", "RemIBob", "RemVSprite",
+    "SetCollision", "SortGList", "AddAnimOb", "Animate", "GetGBuffers", "InitGMasks",
+    "DrawEllipse", "AreaEllipse", "LoadRGB4", "InitRastPort", "InitVPort", "MrgCop",
+    "MakeVPort", "LoadView", "WaitBlit", "SetRast", "Move", "Draw", "AreaMove", "AreaDraw",
+    "AreaEnd", "WaitTOF", "QBlit", "InitArea", "SetRGB4", "QBSBlit", "BltClear", "RectFill",
+    "BltPattern", "ReadPixel", "WritePixel", "Flood", "PolyDraw", "SetAPen", "SetBPen",
+    "SetDrMd", "InitView", "CBump", "CMove", "CWait", "VBeamPos", "InitBitMap",
+    "ScrollRaster", "WaitBOVP", "GetSprite", "FreeSprite", "ChangeSprite", "MoveSprite",
+    "LockLayerRom", "UnlockLayerRom", "SyncSBitMap", "CopySBitMap", "OwnBlitter",
+    "DisownBlitter", "InitTmpRas", "AskFont", "AddFont", "RemFont", "AllocRaster",
+    "FreeRaster", "AndRectRegion", "OrRectRegion", "NewRegion", "ClearRectRegion",
+    "ClearRegion", "DisposeRegion", "FreeVPortCopLists", "FreeCopList", "ClipBlit",
+    "XorRectRegion", "FreeCprList", "GetColorMap", "FreeColorMap", "GetRGB4", "ScrollVPort",
+    "UCopperListInit", "FreeGBuffers", "BltBitMapRastPort", "OrRegionRegion",
+    "XorRegionRegion", "AndRegionRegion", "SetRGB4CM", "BltMaskBitMapRastPort",
+];
+
+/// intuition.library (intuition_lib.fd, to V33's last function).
+const INTUITION_NAMES: &[&str] = &[
+    "OpenIntuition", "Intuition", "AddGadget", "ClearDMRequest", "ClearMenuStrip",
+    "ClearPointer", "CloseScreen", "CloseWindow", "CloseWorkBench", "CurrentTime",
+    "DisplayAlert", "DisplayBeep", "DoubleClick", "DrawBorder", "DrawImage", "EndRequest",
+    "GetDefPrefs", "GetPrefs", "InitRequester", "ItemAddress", "ModifyIDCMP", "ModifyProp",
+    "MoveScreen", "MoveWindow", "OffGadget", "OffMenu", "OnGadget", "OnMenu", "OpenScreen",
+    "OpenWindow", "OpenWorkBench", "PrintIText", "RefreshGadgets", "RemoveGadget",
+    "ReportMouse", "Request", "ScreenToBack", "ScreenToFront", "SetDMRequest", "SetMenuStrip",
+    "SetPointer", "SetWindowTitles", "ShowTitle", "SizeWindow", "ViewAddress",
+    "ViewPortAddress", "WindowToBack", "WindowToFront", "WindowLimits", "SetPrefs",
+    "IntuiTextLength", "WBenchToBack", "WBenchToFront", "AutoRequest", "BeginRefresh",
+    "BuildSysRequest", "EndRefresh", "FreeSysRequest", "MakeScreen", "RemakeDisplay",
+    "RethinkDisplay", "AllocRemember", "AlohaWorkbench", "FreeRemember", "LockIBase",
+    "UnlockIBase",
+];
+
+/// The vectors every device has after the four of a library (exec/io.h).
+const DEVICE_NAMES: &[&str] = &["BeginIO", "AbortIO"];
+
 fn lvo_name(names: &[&'static str], lvo: i32) -> Option<&'static str> {
     if lvo < 30 || (lvo - 30) % 6 != 0 {
         return None;
@@ -667,7 +761,7 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
     match name {
         "Disable" | "Enable" | "Forbid" | "Permit" | "UserState" | "CacheClearU" | "CacheClearE"
         | "InitSemaphore" | "ObtainSemaphore" | "ReleaseSemaphore" | "ObtainSemaphoreShared"
-        | "ObtainSemaphoreList" | "ReleaseSemaphoreList" | "AddPort" | "RemPort" | "AddTask"
+        | "ObtainSemaphoreList" | "ReleaseSemaphoreList"
         | "CloseDevice" | "CachePreDMA"
         | "CachePostDMA" | "SumLibrary" | "AddResource" | "AddDevice"
         | "AddSemaphore" | "RemSemaphore" | "Debug" | "DeletePrivatePool" => m.set_d0(0),
@@ -805,6 +899,19 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
             }
             m.set_d0(found);
         }
+        "AddTask" => {
+            // a1 = task, a2 = initialPC, a3 = finalPC -> the task (V36)
+            let (a2, a3) = (m.a(2), m.a(3));
+            let t = crate::deli::add_task(m, a1, a2, a3);
+            m.set_d0(t);
+        }
+        "RemTask" => {
+            let me = a1 == 0 || a1 == m.os.current_task;
+            if crate::deli::rem_task(m, a1) && me && m.can_yield() {
+                // the task is gone: it does not come back from the call
+                m.yield_now(None);
+            }
+        }
         "FindTask" => m.set_d0(if a1 == 0 { m.os.current_task } else { 0 }),
         "SetTaskPri" => {
             // a1 = task, d0 = priority -> old priority
@@ -863,14 +970,42 @@ fn exec_call(m: &mut Machine, lvo: i32) -> bool {
             if head != 0 && m.bus.r32(head) != 0 {
                 m.set_d0(head);
             } else if a0 != 0 && head != 0 && m.can_yield() {
+                // as exec's WaitPort: Wait for the port's signal, which takes it (a signal
+                // whose message was already taken would otherwise wake the task for ever)
                 let t = m.os.current_task;
-                m.bus.w32(t + TC_SIGWAIT, 1 << (m.bus.r8(a0 + 15) & 31));
+                let bit = 1 << (m.bus.r8(a0 + 15) & 31);
+                m.bus.w32(t + TC_SIGRECVD, m.bus.r32(t + TC_SIGRECVD) & !bit);
+                m.bus.w32(t + TC_SIGWAIT, bit);
                 m.yield_now(None);
             } else {
                 m.set_d0(0);
             }
         }
-        "FindPort" | "FindSemaphore" | "FindResident" => m.set_d0(0),
+        "AddPort" => {
+            // exec's AddPort makes the port's message list empty: a port the code built by hand
+            // has none before (a reply sent there would be dropped), and FindPort finds it
+            if a1 != 0 {
+                m.bus.w8(a1 + 8, 4); // NT_MSGPORT
+                let l = a1 + 20;
+                m.bus.w32(l, l + 4);
+                m.bus.w32(l + 4, 0);
+                m.bus.w32(l + 8, l);
+                if !m.os.ports.contains(&a1) && m.os.ports.len() < PORTS_MAX {
+                    m.os.ports.push(a1);
+                }
+            }
+            m.set_d0(0);
+        }
+        "RemPort" => m.os.ports.retain(|&p| p != a1),
+        "FindPort" => {
+            let want = m.bus.read_cstr(a1);
+            let found = m.os.ports.iter().copied().find(|&p| {
+                let np = m.bus.r32(p + 10);
+                np != 0 && m.bus.read_cstr(np) == want
+            });
+            m.set_d0(found.unwrap_or(0));
+        }
+        "FindSemaphore" | "FindResident" => m.set_d0(0),
         "PutMsg" => put_msg(m, a0, a1, 5),   // NT_MESSAGE
         "ReplyMsg" => {
             let port = m.bus.r32(a1 + 14); // mn_ReplyPort
@@ -1014,10 +1149,22 @@ pub fn put_msg(m: &mut Machine, port: u32, msg: u32, kind: u8) {
     let l = port + 20;
     let pred = m.bus.r32(l + 8);
     list_insert(m, l, msg, pred);
-    // PA_SIGNAL: wake the port's task
-    if m.bus.r8(port + 14) & 3 == 0 {
-        let task = m.bus.r32(port + 16);
-        signal(m, task, 1 << (m.bus.r8(port + 15) & 31));
+    match m.bus.r8(port + 14) & 3 {
+        // PA_SIGNAL: wake the port's task
+        0 => {
+            let task = m.bus.r32(port + 16);
+            signal(m, task, 1 << (m.bus.r8(port + 15) & 31));
+        }
+        // PA_SOFTINT: mp_SigTask is an Interrupt, caused now (Defender of the Crown's older
+        // player gets its timer.device replies this way, and plays a tick in the handler)
+        1 => {
+            let is = m.bus.r32(port + 16);
+            if is != 0 {
+                let (code, data) = (m.bus.r32(is + 18), m.bus.r32(is + 14));
+                call_int_code(m, code, data, 0);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1192,6 +1339,15 @@ fn open_device(m: &mut Machine, name: &str, unit: u32, ioreq: u32) -> i8 {
         m.bus.w8(ioreq + 31, 0xFF);
         return -1;
     };
+    log::debug!(
+        "OpenDevice(\"{name}\", {unit}) ${ioreq:06x}: pri {} unit {:x} key {} data ${:x} len {} ({:02x?})",
+        m.bus.r8(ioreq + 9) as i8,
+        m.bus.r32(ioreq + 24),
+        m.bus.r16(ioreq + 32),
+        m.bus.r32(ioreq + 34),
+        m.bus.r32(ioreq + 38),
+        (0..m.bus.r32(ioreq + 38).min(16)).map(|i| m.bus.r8(m.bus.r32(ioreq + 34) + i)).collect::<Vec<u8>>()
+    );
     m.bus.w32(ioreq + 20, base);
     m.bus.w32(ioreq + 24, unit);
     m.bus.w8(ioreq + 31, 0);
@@ -1294,8 +1450,16 @@ fn audio_allocate(m: &mut Machine, ioreq: u32) -> bool {
         m.bus.w16(ioreq + 32, key);
     }
     let combos: Vec<u32> = if n == 0 { vec![0xF] } else { (0..n.min(16)).map(|i| m.bus.r8(masks + i) as u32 & 0xF).collect() };
-    let fits = |c: &AudioChan| c.key == 0 || c.key == key || c.pri < pri;
-    let Some(&mask) = combos.iter().find(|&&mk| (0..4).all(|ch| mk & 1 << ch == 0 || fits(&m.os.audio[ch]))) else {
+    // a combination of free channels (or the request's own) first; only when there is none,
+    // one that takes channels from allocations of lower precedence. (Astate opens audio.device
+    // four times with the map 1, 8, 2, 4 at rising precedence, one channel each: stealing in
+    // a single pass left every opener but the last without a channel.)
+    let free = |c: &AudioChan| c.key == 0 || c.key == key;
+    let fits = |c: &AudioChan| free(c) || c.pri < pri;
+    let pick = |ok: &dyn Fn(&AudioChan) -> bool| {
+        combos.iter().copied().find(|&mk| (0..4).all(|ch| mk & 1 << ch == 0 || ok(&m.os.audio[ch])))
+    };
+    let Some(mask) = pick(&free).or_else(|| pick(&fits)) else {
         if m.bus.r8(ioreq + 30) & ADIOF_NOWAIT != 0 {
             m.bus.w8(ioreq + 31, ADIOERR_ALLOCFAILED);
         } else if !m.os.audio_alloc.waiting.contains(&ioreq) {
@@ -1360,11 +1524,73 @@ fn begin_io(m: &mut Machine, ioreq: u32) -> i8 {
             }
             return 0;
         }
-        Some(LibKind::TimerDev) => {}
+        Some(LibKind::TimerDev) => {
+            m.bus.w8(ioreq + 31, 0);
+            timer_command(m, ioreq, cmd);
+            return 0;
+        }
         _ => log::warn!("IO request for unknown device ${dev:06x}"),
     }
     m.bus.w8(ioreq + 31, 0);
     0
+}
+
+// timer.device. timerequest: an IORequest, then tr_time (tv_secs 32, tv_micro 36).
+
+const TR_ADDREQUEST: u16 = 9;
+const TR_GETSYSTIME: u16 = 10;
+const UNIT_VBLANK: u32 = 1;
+/// The most timer.device requests waiting at once.
+const TIMER_REQS_MAX: usize = 64;
+
+/// A timer.device command. TR_ADDREQUEST is answered when its time has passed on the bus
+/// clock (`timer_service`), on UNIT_VBLANK at the first vertical blank after that (the unit
+/// counts vertical blanks: the older Defender of the Crown player asks for 42 ms and gets a
+/// tick every third frame, the tempo UADE plays it at). A DoIO of it where nothing can wait
+/// (the host's own context) is done at once. TR_GETSYSTIME gives the time since the machine
+/// started; the other commands are done at once.
+fn timer_command(m: &mut Machine, ioreq: u32, cmd: u16) {
+    let (secs, micro) = (m.bus.r32(ioreq + 32), m.bus.r32(ioreq + 36));
+    log::trace!("timer.device ${ioreq:06x} cmd {cmd} unit {} secs {secs} micro {micro}", m.bus.r32(ioreq + 24));
+    let quick = m.bus.r8(ioreq + 30) & 1 != 0;
+    match cmd {
+        TR_ADDREQUEST if !(quick && !m.can_yield()) && m.os.timer_reqs.len() < TIMER_REQS_MAX => {
+            let us = secs as u64 * 1_000_000 + micro as u64;
+            let clocks = (us as f64 * crate::paula::PAULA_CLOCK_PAL / 1e6) as u64;
+            let vblank = m.bus.r32(ioreq + 24) == UNIT_VBLANK;
+            m.os.timer_reqs.retain(|&(_, r, _)| r != ioreq);
+            m.os.timer_reqs.push((m.bus.clock + clocks.max(1), ioreq, vblank));
+            // answered later: never quick
+            m.bus.w8(ioreq + 30, m.bus.r8(ioreq + 30) & !1);
+            m.bus.w8(ioreq + 8, 5); // NT_MESSAGE
+            return;
+        }
+        TR_GETSYSTIME => {
+            let us = (m.bus.clock as f64 * 1e6 / crate::paula::PAULA_CLOCK_PAL) as u64;
+            m.bus.w32(ioreq + 32, (us / 1_000_000) as u32);
+            m.bus.w32(ioreq + 36, (us % 1_000_000) as u32);
+        }
+        _ => {}
+    }
+    reply_io(m, ioreq);
+}
+
+/// The earliest bus clock a timer.device request is answered at (UNIT_VBLANK's wait for a
+/// vertical blank, which is due anyway).
+pub fn timer_due(m: &Machine) -> Option<u64> {
+    m.os.timer_reqs.iter().filter(|r| !r.2).map(|r| r.0).min()
+}
+
+/// Answers the timer.device requests whose time has come, earliest first: at a vertical
+/// blank (`vblank`) those of UNIT_VBLANK too.
+pub fn timer_service(m: &mut Machine, vblank: bool) {
+    let now = m.bus.clock;
+    let due = |r: &(u64, u32, bool)| r.0 <= now && (vblank || !r.2);
+    while let Some(i) = (0..m.os.timer_reqs.len()).filter(|&i| due(&m.os.timer_reqs[i])).min_by_key(|&i| m.os.timer_reqs[i].0) {
+        let (_, io, _) = m.os.timer_reqs.remove(i);
+        m.bus.w8(io + 31, 0);
+        reply_io(m, io);
+    }
 }
 
 /// Completes an IO request: with IOF_QUICK clear, it is replied to its port.
@@ -1377,7 +1603,9 @@ fn reply_io(m: &mut Machine, ioreq: u32) {
 
 /// A request audio.device has accepted but not answered yet.
 fn io_pending(m: &Machine, ioreq: u32) -> bool {
-    m.os.audio.iter().any(|c| c.holds(ioreq)) || m.os.audio_alloc.waiting.contains(&ioreq)
+    m.os.audio.iter().any(|c| c.holds(ioreq))
+        || m.os.audio_alloc.waiting.contains(&ioreq)
+        || m.os.timer_reqs.iter().any(|r| r.1 == ioreq)
 }
 
 /// WaitIO: a request still playing blocks the task until it is done; a replied one is taken
@@ -1405,6 +1633,12 @@ fn wait_io(m: &mut Machine, ioreq: u32, resume: Option<u32>) {
 }
 
 fn abort_io(m: &mut Machine, ioreq: u32) {
+    if let Some(i) = m.os.timer_reqs.iter().position(|r| r.1 == ioreq) {
+        m.os.timer_reqs.remove(i);
+        m.bus.w8(ioreq + 31, IOERR_ABORTED);
+        reply_io(m, ioreq);
+        return;
+    }
     if let Some(i) = m.os.audio_alloc.waiting.iter().position(|&w| w == ioreq) {
         m.os.audio_alloc.waiting.remove(i);
         m.bus.w8(ioreq + 31, IOERR_ABORTED);
@@ -1791,6 +2025,51 @@ fn cia_call(m: &mut Machine, cia: usize, lvo: i32) -> bool {
 
 fn intuition_call(m: &mut Machine, lvo: i32) -> bool {
     match lvo {
+        396 => {
+            // AllocRemember(a0 &key, d0 size, d1 flags) -> memory: a Remember node (next,
+            // size, memory) put at the head of the key's list (the older Lemmings player loads
+            // its songs and instruments into such memory: 0 was its "Error during load")
+            let (key, size) = (m.a(0), m.d(0));
+            let node = m.alloc(12);
+            let mem = if node == 0 { 0 } else { m.alloc(size) };
+            if mem == 0 {
+                if node != 0 {
+                    m.heap.free(node);
+                }
+                m.set_d0(0);
+            } else {
+                m.bus.w32(node, if key == 0 { 0 } else { m.bus.r32(key) });
+                m.bus.w32(node + 4, size);
+                m.bus.w32(node + 8, mem);
+                if key != 0 {
+                    m.bus.w32(key, node);
+                }
+                m.set_d0(mem);
+            }
+            true
+        }
+        408 => {
+            // FreeRemember(a0 &key, d0 reallyForget): the nodes go, and their memory too when
+            // d0 is set
+            let (key, really) = (m.a(0), m.d(0) != 0);
+            if key != 0 {
+                let mut node = m.bus.r32(key);
+                // (a list that loops is cut)
+                for _ in 0..4096 {
+                    if node == 0 {
+                        break;
+                    }
+                    let next = m.bus.r32(node);
+                    if really {
+                        m.heap.free(m.bus.r32(node + 8));
+                    }
+                    m.heap.free(node);
+                    node = next;
+                }
+                m.bus.w32(key, 0);
+            }
+            true
+        }
         588 => {
             // EasyRequestArgs: answer the first gadget, except that with an "Ignore"
             // gadget there is the one that is answered (nobody is there to rename or
@@ -1962,6 +2241,13 @@ impl OsState {
     }
 
     /// Forgets the files `read_file` did not find so far.
+    /// A module starts: the calls the last one made that the host does not implement are
+    /// forgotten (the new one's are reported, and logged, afresh).
+    pub fn clear_missing_calls(&mut self) {
+        self.missing_calls.clear();
+        self.logged.clear();
+    }
+
     pub fn clear_missing(&self) {
         if let Ok(mut v) = self.missing.lock() {
             v.clear();
@@ -3129,4 +3415,205 @@ mod tests {
         assert_eq!(drain(&mut m, p), vec![w]);
     }
 
+
+    /// A task's code: `flag` = $1234, Wait($10000), `flag` = $5678, rts.
+    fn waiting_task_code(m: &mut Machine, flag: u32) -> u32 {
+        let mut c: Vec<u8> = vec![0x2C, 0x78, 0x00, 0x04]; // movea.l 4.w,a6
+        c.extend_from_slice(&[0x23, 0xFC, 0, 0, 0x12, 0x34]); // move.l #$1234,flag
+        c.extend_from_slice(&flag.to_be_bytes());
+        c.extend_from_slice(&[0x20, 0x3C, 0, 1, 0, 0]); // move.l #$10000,d0
+        c.extend_from_slice(&[0x4E, 0xAE, 0xFE, 0xC2]); // jsr -318(a6): Wait
+        c.extend_from_slice(&[0x23, 0xFC, 0, 0, 0x56, 0x78]); // move.l #$5678,flag
+        c.extend_from_slice(&flag.to_be_bytes());
+        c.extend_from_slice(&[0x4E, 0x75]);
+        let at = m.alloc(c.len() as u32);
+        m.bus.write_bytes(at, &c);
+        at
+    }
+
+    /// A Task structure with a stack of its own, as guest code sets one up for AddTask.
+    fn guest_task(m: &mut Machine) -> u32 {
+        let tcb = m.alloc(92);
+        let stack = m.alloc(0x400);
+        m.bus.w8(tcb + 8, 1); // NT_TASK
+        m.bus.w32(tcb + 58, stack); // tc_SPLower
+        m.bus.w32(tcb + 62, stack + 0x400); // tc_SPUpper
+        m.bus.w32(tcb + 54, stack + 0x400); // tc_SPReg
+        tcb
+    }
+
+    fn add_task(m: &mut Machine, tcb: u32, code: u32) -> u32 {
+        m.cpu.dar[9] = tcb;
+        m.cpu.dar[10] = code;
+        m.cpu.dar[11] = 0;
+        assert!(exec_call(m, 282));
+        m.d(0)
+    }
+
+    /// AddTask (Arcticfox and the other early EA players run their music in tasks of their
+    /// own): the task starts at once on its own stack and runs until it waits; a Signal makes
+    /// it runnable, and it runs on with the player processes. RemTask stops one for good.
+    #[test]
+    fn add_task_runs_the_task_until_it_waits_and_signal_wakes_it() {
+        let mut m = Machine::new(CpuType::M68000);
+        let flag = m.alloc(4);
+        let code = waiting_task_code(&mut m, flag);
+        let tcb = guest_task(&mut m);
+        assert_eq!(add_task(&mut m, tcb, code), tcb);
+        assert_eq!(m.bus.r32(flag), 0x1234);
+        assert!(m.crashed.is_none());
+        // the stack it ran on is its own
+        // (its return address, to end it, is at the top of that stack)
+        assert_eq!(m.bus.r32(m.bus.r32(tcb + 62) - 4), crate::machine::SENTINEL_ADDR);
+        // a signal it does not wait for leaves it waiting
+        signal(&mut m, tcb, 1);
+        crate::deli::run_procs(&mut m);
+        assert_eq!(m.bus.r32(flag), 0x1234);
+        signal(&mut m, tcb, 0x10000);
+        crate::deli::run_procs(&mut m);
+        assert_eq!(m.bus.r32(flag), 0x5678);
+        // a removed task never runs again
+        let flag2 = m.alloc(4);
+        let code2 = waiting_task_code(&mut m, flag2);
+        let tcb2 = guest_task(&mut m);
+        add_task(&mut m, tcb2, code2);
+        m.cpu.dar[9] = tcb2;
+        assert!(exec_call(&mut m, 288));
+        signal(&mut m, tcb2, 0x10000);
+        crate::deli::run_procs(&mut m);
+        assert_eq!(m.bus.r32(flag2), 0x1234);
+        assert!(!m.os.new_procs.contains(&tcb2));
+    }
+
+    /// A call of a function the host does not implement is noted once, with its library, name
+    /// and offset; one whose caller cannot go on without it also ends the song.
+    #[test]
+    fn unimplemented_calls_are_reported() {
+        let mut m = Machine::new(CpuType::M68000);
+        let gfx = m.os.libs.iter().position(|l| l.name == "graphics.library").unwrap();
+        lib_call(&mut m, 0, 222);
+        lib_call(&mut m, 0, 222);
+        lib_call(&mut m, gfx, 270);
+        assert!(m.crashed.is_none());
+        let shown: Vec<String> = m.os.missing_calls.iter().map(|c| c.to_string()).collect();
+        assert_eq!(shown, ["exec.library/AllocEntry() (LVO -222)", "graphics.library/WaitTOF() (LVO -270)"]);
+        assert!(m.os.missing_calls.iter().all(|c| !c.fatal));
+        lib_call(&mut m, 0, 726);
+        let last = m.os.missing_calls.last().unwrap();
+        assert_eq!((last.function.as_deref(), last.lvo, last.fatal), (Some("ColdReboot"), -726, true));
+        assert!(m.crashed.as_deref().is_some_and(|e| e.contains("exec.library/ColdReboot() (LVO -726)")));
+        // the known names sit at their offsets
+        assert_eq!(lvo_name(EXEC_NAMES, 282), Some("AddTask"));
+        assert_eq!(lvo_name(EXEC_NAMES, 552), Some("OpenLibrary"));
+        assert_eq!(lvo_name(GRAPHICS_NAMES, 456), Some("OwnBlitter"));
+        assert_eq!(lvo_name(GRAPHICS_NAMES, 636), Some("BltMaskBitMapRastPort"));
+        assert_eq!(lvo_name(INTUITION_NAMES, 204), Some("OpenWindow"));
+        assert_eq!(lvo_name(INTUITION_NAMES, 420), Some("UnlockIBase"));
+        assert_eq!(lvo_name(DOS_NAMES, 198), Some("Delay"));
+        m.os.clear_missing_calls();
+        lib_call(&mut m, 0, 222);
+        assert_eq!(m.os.missing_calls.len(), 1, "a new module reports its calls afresh");
+    }
+
+    /// Astate opens audio.device four times with the map 1, 8, 2, 4 at rising precedence:
+    /// each gets a free channel, not the first one taken from the opener before.
+    #[test]
+    fn allocation_takes_free_channels_before_stealing() {
+        let mut m = Machine::new(CpuType::M68000);
+        let p = port(&mut m);
+        let map = m.alloc(4);
+        m.bus.write_bytes(map, &[1, 8, 2, 4]);
+        let units: Vec<u32> = (0..4)
+            .map(|i| {
+                let io = m.alloc(68);
+                m.bus.w8(io + 9, 10 + i);
+                m.bus.w32(io + 14, p);
+                m.bus.w32(io + 34, map);
+                m.bus.w32(io + 38, 4);
+                assert_eq!(open_device(&mut m, "audio.device", 0, io), 0);
+                m.bus.r32(io + 24)
+            })
+            .collect();
+        assert_eq!(units, [1, 8, 2, 4]);
+        // with every channel taken, a higher precedence still steals one
+        let (b, _) = allocate(&mut m, p, 1, 20);
+        assert_eq!((m.bus.r8(b + 31), m.bus.r32(b + 24)), (0, 1));
+    }
+
+    /// A timer.device TR_ADDREQUEST sent with SendIO is replied when its time has passed (on
+    /// UNIT_VBLANK at a vertical blank), to a PA_SOFTINT port by causing its interrupt.
+    #[test]
+    fn timer_requests_are_answered_when_due() {
+        let mut m = Machine::new(CpuType::M68000);
+        let p = port(&mut m);
+        let mk = |m: &mut Machine, unit: u32, micro: u32| {
+            let io = m.alloc(40);
+            assert_eq!(open_device(m, "timer.device", unit, io), 0);
+            m.bus.w32(io + 14, p);
+            m.bus.w16(io + 28, TR_ADDREQUEST);
+            m.bus.w32(io + 36, micro);
+            m.cpu.dar[9] = io;
+            assert!(exec_call(m, 462)); // SendIO
+            io
+        };
+        let io = mk(&mut m, 0, 10_000);
+        assert!(io_pending(&m, io));
+        let due = timer_due(&m).unwrap();
+        assert_eq!(due - m.bus.clock, 35_468);
+        m.bus.clock = due - 1;
+        timer_service(&mut m, false);
+        assert!(drain(&mut m, p).is_empty());
+        m.bus.clock = due;
+        timer_service(&mut m, false);
+        assert_eq!(drain(&mut m, p), vec![io]);
+        // UNIT_VBLANK: only at a vertical blank
+        let v = mk(&mut m, UNIT_VBLANK, 10_000);
+        assert_eq!(timer_due(&m), None);
+        m.bus.clock += 40_000;
+        timer_service(&mut m, false);
+        assert!(drain(&mut m, p).is_empty());
+        timer_service(&mut m, true);
+        assert_eq!(drain(&mut m, p), vec![v]);
+        // AbortIO answers it at once
+        let a = mk(&mut m, 0, 1_000_000);
+        abort_io(&mut m, a);
+        assert_eq!((drain(&mut m, p), m.bus.r8(a + 31)), (vec![a], IOERR_ABORTED));
+        assert!(!io_pending(&m, a));
+        // PA_SOFTINT: the reply causes the port's interrupt (its code: addq.l #1,(a1) ; rts)
+        let count = m.alloc(4);
+        let code = m.alloc(4);
+        m.bus.write_bytes(code, &[0x52, 0x91, 0x4E, 0x75]);
+        let is = m.alloc(22);
+        m.bus.w32(is + 14, count);
+        m.bus.w32(is + 18, code);
+        m.bus.w8(p + 14, 1); // PA_SOFTINT
+        m.bus.w32(p + 16, is);
+        let s = mk(&mut m, 0, 100);
+        m.bus.clock = timer_due(&m).unwrap();
+        timer_service(&mut m, false);
+        assert_eq!(m.bus.r32(count), 1);
+        assert_eq!(drain(&mut m, p), vec![s]);
+    }
+
+    /// AddPort makes a port's message list empty, and FindPort finds the port by its name.
+    #[test]
+    fn add_port_initialises_the_list_and_find_port_finds_it() {
+        let mut m = Machine::new(CpuType::M68000);
+        let mp = m.alloc(34);
+        let name = m.alloc_cstr("test.port");
+        m.bus.w32(mp + 10, name);
+        m.cpu.dar[9] = mp;
+        assert!(exec_call(&mut m, 354));
+        let msg = m.alloc(20);
+        put_msg(&mut m, mp, msg, 5);
+        assert_eq!(get_msg(&mut m, mp), msg);
+        m.cpu.dar[9] = m.alloc_cstr("test.port");
+        assert!(exec_call(&mut m, 390));
+        assert_eq!(m.d(0), mp);
+        m.cpu.dar[9] = mp;
+        assert!(exec_call(&mut m, 360)); // RemPort
+        m.cpu.dar[9] = name;
+        assert!(exec_call(&mut m, 390));
+        assert_eq!(m.d(0), 0);
+    }
 }

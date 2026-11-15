@@ -16,7 +16,7 @@ use std::ffi::{c_char, c_double, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Version of this C API, not of the crate: `major * 10000 + minor * 100 + patch`.
-const API_VERSION: c_int = 300; // 0.3.0
+const API_VERSION: c_int = 400; // 0.4.0
 
 thread_local! {
     static LAST: RefCell<(c_int, CString)> = RefCell::new((0, CString::default()));
@@ -80,6 +80,7 @@ pub struct ApSong {
     title: CString,
     format: CString,
     error: CString,
+    missing: Vec<CString>,
 }
 
 fn cstring(s: &str) -> CString {
@@ -89,7 +90,7 @@ fn cstring(s: &str) -> CString {
 impl ApSong {
     fn new(song: Song) -> Box<ApSong> {
         let (title, format) = (cstring(song.title()), cstring(song.format()));
-        Box::new(ApSong { song, title, format, error: CString::default() })
+        Box::new(ApSong { song, title, format, error: CString::default(), missing: Vec::new() })
     }
 }
 
@@ -409,6 +410,25 @@ pub unsafe extern "C" fn ap_error(song: *mut ApSong) -> *const c_char {
 pub unsafe extern "C" fn ap_error_code(song: *mut ApSong) -> c_int {
     let s = song!(song, 0);
     s.song.error().map_or(0, code_of)
+}
+
+/// The `i`-th library function (from 0, in the order first called) the 68k code of a custom
+/// module called that the emulated AmigaOS does not implement, as
+/// `"exec.library/AddTask() (LVO -282)"`, or null past the last (and for every other format).
+/// Valid until the next `ap_missing_call` call on `song`. New in 0.4.0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_missing_call(song: *mut ApSong, i: c_int) -> *const c_char {
+    let s = song!(song, std::ptr::null());
+    s.missing = s.song.missing_calls().iter().map(|c| cstring(&c.to_string())).collect();
+    usize::try_from(i).ok().and_then(|i| s.missing.get(i)).map_or(std::ptr::null(), |c| c.as_ptr())
+}
+
+/// Whether the `i`-th call of `ap_missing_call` is one the replay cannot work without (it has
+/// stopped the song, and `ap_error` names it): 1, else 0; -1 past the last. New in 0.4.0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_missing_call_fatal(song: *mut ApSong, i: c_int) -> c_int {
+    let s = song!(song, -1);
+    usize::try_from(i).ok().and_then(|i| s.song.missing_calls().get(i)).map_or(-1, |c| c.fatal as c_int)
 }
 
 /// The module's title (UTF-8, may be empty). Valid until the next `ap_title` call on `song`.
@@ -777,6 +797,50 @@ mod tests {
             assert_eq!(last_error().0, E_GUEST);
             assert_eq!(ap_restart(s), 0);
             assert!(ap_error(s).is_null());
+            ap_close(s);
+        }
+    }
+
+    /// 68000 code calling exec function `lvo` (negative), its registers kept.
+    #[cfg(feature = "custom-modules")]
+    fn exec_call_code(lvo: i16) -> Vec<u8> {
+        let mut c = vec![0x48, 0xE7, 0xFF, 0xFE, 0x2C, 0x78, 0x00, 0x04, 0x4E, 0xAE];
+        c.extend_from_slice(&lvo.to_be_bytes());
+        c.extend_from_slice(&[0x4C, 0xDF, 0x7F, 0xFF]);
+        c
+    }
+
+    #[cfg(feature = "custom-modules")]
+    #[test]
+    fn calls_the_host_does_not_implement_are_listed() {
+        // InitSound calls exec AllocEntry: a warning, the module plays
+        let m = amigaplayer_rs::testdata::custom_with(&exec_call_code(-222), &[]);
+        unsafe {
+            let s = open(&m, OPEN_CUSTOM);
+            assert!(!s.is_null(), "{:?}", last_error());
+            let mut pcm = vec![0f32; 2 * 4800];
+            ap_render_f32(s, pcm.as_mut_ptr(), 4800);
+            assert!(ap_error(s).is_null());
+            let c = CStr::from_ptr(ap_missing_call(s, 0)).to_string_lossy().into_owned();
+            assert_eq!(c, "exec.library/AllocEntry() (LVO -222)");
+            assert_eq!(ap_missing_call_fatal(s, 0), 0);
+            assert!(ap_missing_call(s, 1).is_null());
+            assert_eq!(ap_missing_call_fatal(s, 1), -1);
+            ap_close(s);
+        }
+        // the interrupt calls ColdReboot: the song stops, and ap_error names the call
+        let mut irq = exec_call_code(-726);
+        irq.extend_from_slice(&[0x4E, 0x75]);
+        let m = amigaplayer_rs::testdata::custom_with(&[], &irq);
+        unsafe {
+            let s = open(&m, OPEN_CUSTOM);
+            assert!(!s.is_null(), "{:?}", last_error());
+            let mut pcm = vec![0f32; 2 * 48000];
+            ap_render_f32(s, pcm.as_mut_ptr(), 48000);
+            assert_eq!(ap_error_code(s), E_GUEST);
+            let why = CStr::from_ptr(ap_error(s)).to_string_lossy().into_owned();
+            assert!(why.contains("exec.library/ColdReboot() (LVO -726)"), "{why}");
+            assert_eq!(ap_missing_call_fatal(s, 0), 1);
             ap_close(s);
         }
     }

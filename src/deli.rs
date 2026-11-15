@@ -299,6 +299,79 @@ pub fn create_process(m: &mut Machine, entry: u32, stack_size: u32, pri: i8, nam
     tcb
 }
 
+/// exec AddTask(task, initialPC, finalPC) for a player: the Task structure is the guest's
+/// own, with the stack it set up (tc_SPReg, within tc_SPLower..tc_SPUpper). Scheduled as the
+/// processes of CreateNewProc are: started at once and run until it first waits, then run
+/// when it has received what it waits for (after each interrupt, or while the caller waits).
+/// Its code returning ends it (`final_pc` is not run). Returns the task (0: it could not be
+/// started).
+pub fn add_task(m: &mut Machine, tcb: u32, entry: u32, final_pc: u32) -> u32 {
+    let ram = crate::bus::RAM_SIZE as u32;
+    if tcb == 0 || entry == 0 || entry >= ram || m.os.new_procs.contains(&tcb) {
+        return 0;
+    }
+    // tc_SPReg, tc_SPLower, tc_SPUpper
+    let (sp_reg, lower, upper) = (m.bus.r32(tcb + 54), m.bus.r32(tcb + 58), m.bus.r32(tcb + 62));
+    // the guest's stack when it is one, else one of the host's
+    let sp = sp_reg & !1;
+    let own = lower < sp && sp <= upper && upper <= ram && sp - lower >= 0x100;
+    let t = if own {
+        let sp = sp - 4;
+        m.bus.w32(sp, crate::machine::SENTINEL_ADDR);
+        let mut regs = [0; 16];
+        regs[15] = sp;
+        Some(crate::machine::TaskCtx { regs, pc: entry, sr: 0x2000, entry, ret_sp: sp + 4, tcb, done: false })
+    } else {
+        let top = std::mem::replace(&mut m.alloc_top, true);
+        let t = m.new_task(entry, 0x4000, tcb);
+        m.alloc_top = top;
+        t
+    };
+    let Some(mut t) = t else { return 0 };
+    if m.bus.r32(tcb + crate::os::TC_SIGALLOC) == 0 {
+        m.bus.w32(tcb + crate::os::TC_SIGALLOC, 0xFFFF); // the system signals
+    }
+    let pri = m.bus.r8(tcb + 9) as i8;
+    log::debug!(
+        "AddTask: task ${tcb:06x} at ${entry:06x} (final ${final_pc:06x}), priority {pri}, stack {}",
+        if own { format!("${lower:06x}..${upper:06x} sp ${sp_reg:06x}") } else { "of the host".into() }
+    );
+    m.os.new_procs.insert(tcb);
+    m.deli.procs.push(PlayerProc {
+        entry,
+        pri,
+        stack_size: if own { upper - lower } else { 0x4000 },
+        msg_port_ptr: 0,
+        fns: HashSet::new(),
+        task: None,
+        running: true,
+        port: 0,
+        msg: 0,
+        reply: 0,
+    });
+    let i = m.deli.procs.len() - 1;
+    let r = m.resume(&mut t);
+    m.deli.procs[i].task = Some(t);
+    if let Err(e) = r {
+        m.crashed = Some(e);
+    }
+    tcb
+}
+
+/// exec RemTask(task) of a task `add_task` or `create_process` made (0: the running one): it is
+/// never run again. False for any other task.
+pub fn rem_task(m: &mut Machine, task: u32) -> bool {
+    let tcb = if task == 0 { m.os.current_task } else { task };
+    if !m.os.new_procs.remove(&tcb) {
+        return false;
+    }
+    m.os.delays.remove(&tcb);
+    // (a task that removes itself is not in the list while it runs: it yields, and nothing wakes it)
+    m.bus.w32(tcb + crate::os::TC_SIGWAIT, 0);
+    m.deli.procs.retain(|p| !p.task.as_ref().is_some_and(|t| t.tcb == tcb));
+    true
+}
+
 /// Calls a process player's function through a DeliMessage. Only D0 comes back.
 fn proc_call(m: &mut Machine, i: usize, entry: u32) -> Result<Regs, String> {
     if m.deli.procs[i].task.is_none() && !m.deli.procs[i].running {

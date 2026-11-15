@@ -61,7 +61,7 @@ enum {
     AP_OPEN_CUSTOM = 1
 };
 
-/* The version of this API: major * 10000 + minor * 100 + patch (0.3.0 is 300). */
+/* The version of this API: major * 10000 + minor * 100 + patch (0.4.0 is 400). */
 int ap_version(void);
 
 /* The message of the last failed call on this thread (empty if none). */
@@ -152,6 +152,19 @@ uint32_t ap_sample_rate(ap_song *song);
  */
 const char *ap_error(ap_song *song);
 int ap_error_code(ap_song *song);
+
+/*
+ * The i-th library function (from 0, in the order first called) that the 68k code of a custom
+ * module called and the emulated AmigaOS does not implement, as
+ * "exec.library/AddTask() (LVO -282)" ("foo.library LVO -30" where the host has no name for
+ * it), or NULL past the last; NULL for every other format. Each is listed once. Most are
+ * warnings: the call answered 0 and the module plays on, perhaps differently than on an
+ * Amiga. ap_missing_call_fatal() gives 1 for one the replay cannot work without (it stopped
+ * the song: ap_error() names it), 0 for a warning, -1 past the last. The string is valid until
+ * the next ap_missing_call call on that song. New in 0.4.0.
+ */
+const char *ap_missing_call(ap_song *song, int i);
+int ap_missing_call_fatal(ap_song *song, int i);
 
 /* Starts the current subsong again from its beginning. Returns 0 or -1. */
 int ap_restart(ap_song *song);

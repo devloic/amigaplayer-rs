@@ -14,7 +14,7 @@
 //!   module in guest memory, as this port does, and writes Paula through the
 //!   host's ENPP_ calls.
 //! * "Hippel" (the Eagleplayer, 2.06) calls the replayer a "TFMX" module carries
-//!   itself, one of the 13 builds of it listed in `BUILDS` and `A94` (told apart
+//!   itself, one of the 16 builds of it listed in `BUILDS` and `A94` (told apart
 //!   by a hash of their code). They share the song data and differ in the effects
 //!   their code has, as NostalgicPlayer reads them from it, and in how they order
 //!   their Paula writes (see `Build`). The port is checked against the
@@ -1198,6 +1198,8 @@ enum Timing {
     E8e6,
     Ea4c,
     Ea50,
+    /// Song data at $93E (the effects of $962 and E4).
+    E93e,
     /// $A2C (the two versions of its code), $A58, $B02.
     Middle,
     Ma2cb,
@@ -1276,9 +1278,9 @@ struct Build {
     /// The voices' fields InitSound leaves alone are read from the replayer's
     /// variables ($52 bytes each after the empty table), as the A94 build keeps them.
     saved_vars: bool,
-    /// The loops left pending in the early builds' variables ($4A bytes per
-    /// voice from 6A after the empty table: loop length, address, pending).
-    early_vars: bool,
+    /// The fields InitSound leaves in the replayer's variables (a module saved
+    /// from a game's memory has them set; see `Kept`).
+    early_vars: Option<Kept>,
     /// The speed counter starts at the subsong's speed (else at 1).
     counter_from_speed: bool,
     /// Voices InitSound sets up.
@@ -1289,6 +1291,11 @@ struct Build {
     init_len: u16,
     init_per: u16,
     init_vol: u16,
+    /// Where after the empty table the replayer keeps the DMA bits a tick has
+    /// turned off so far: a note past the period table can read it (note 72 in
+    /// the third $A2C version) while the port's table read would see the
+    /// module's saved word.
+    dma_var: Option<u32>,
 }
 
 /// The replayers with the song data at $A94 (Leaving Teramis, Wings of
@@ -1326,13 +1333,29 @@ const A94: Build = Build {
     dma_always: false,
     counter_from_speed: false,
     saved_vars: true,
-    early_vars: false,
+    early_vars: None,
     init_voices: 4,
     init_loc: None,
     init_len: 1,
     init_per: 0,
     init_vol: 0,
+    dma_var: None,
 };
+
+/// Where the early and middle builds keep the voices' fields InitSound leaves
+/// alone, as offsets after the empty table of the first voice's (the middle
+/// builds' found by changing them in copies of modules saved from a game and
+/// running the reference).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Kept {
+    /// The loop's length (a word), its address (a long) after it, and in the
+    /// early builds whether it is pending (a word) after that.
+    loops: u32,
+    /// The voices' stride ($4A in the early builds, $48 in the middle ones).
+    stride: u32,
+    /// The last row's note (a byte).
+    note: Option<u32>,
+}
 
 fn fnv(d: &[u8], skip: &[std::ops::Range<usize>]) -> u32 {
     let mut h = 0x811c_9dc5u32;
@@ -1379,12 +1402,13 @@ const EARLY: Build = Build {
     dma_always: true,
     counter_from_speed: true,
     saved_vars: false,
-    early_vars: true,
+    early_vars: Some(Kept { loops: 0x6a, stride: 0x4a, note: None }),
     init_voices: 4,
     init_loc: Some(0x18),
     init_len: 0x100,
     init_per: 0,
     init_vol: 0,
+    dma_var: None,
 };
 
 /// The middle builds ($A2C to $B02): no mute, E5 plays a sample from an offset,
@@ -1420,13 +1444,19 @@ const MIDDLE: Build = Build {
     dma_always: true,
     counter_from_speed: false,
     saved_vars: false,
-    early_vars: false,
+    early_vars: Some(Kept { loops: 0x66, stride: 0x48, note: Some(0x2c) }),
     init_voices: 4,
     init_loc: None,
     init_len: 1,
     init_per: 0,
     init_vol: 0,
+    dma_var: None,
 };
+
+/// The third version of the $A2C build: the first one's timing (a refit was no
+/// closer to the reference), its DMA bits where a note past the period table
+/// reads them.
+const A2C3: Build = Build { dma_var: Some(0x1fe), ..MIDDLE };
 
 /// The builds the port plays by the hash of their code up to the empty table
 /// (see `fnv`).
@@ -1447,6 +1477,15 @@ const BUILDS: &[(u32, Build)] = &[
     (0x7d97_d238, Build { timing: Timing::Ma2cb, init_at: 55872, waits: 2, poll_from: 195, poll_to: 13, ..MIDDLE }),
     // $B02: three voices
     (0xaf7d_cbe8, Build { timing: Timing::Mb02, init_at: 60566, led_gap: 345, init_stop: true, init_k: 8298, voices: 3, waits: 3, waits_after: 3, poll_from: 273, poll_to: -1, ..MIDDLE }),
+    // $93E (Prince, RSI): the $962 build's effects, costs of their own (they play
+    // E4, which no $962 module does); $910 (Cybernoid 2): the $962 build (its
+    // code has no E4, which its tables do not use). The Eagleplayer's search for
+    // the song data takes 42.5 colour clocks a word, so the LED write comes that
+    // much earlier per word before $962.
+    (0x2995_688a, Build { timing: Timing::E93e, init_at: 51121, ..EARLY }),
+    (0x4779_7b9d, Build { init_at: 50144, ..EARLY }),
+    // $A2C, a third version (Crazy Comets, Jambala, Quartex, Rings of Medusa)
+    (0x33d3_ae54, A2C3),
     // $A58
     (0x91ba_7e51, Build { timing: Timing::Ma58, init_at: 56454, led_gap: 348, init_stop: true, init_k: 8291, dma_always: false, waits: 3, waits_after: 3, poll_from: 144, poll_to: 40, init_loc: Some(0), init_per: 0xc0, init_vol: 0x40, ..MIDDLE }),
 ];
@@ -1467,6 +1506,9 @@ fn tfmx_version(d: &[u8]) -> Option<(Build, usize)> {
     }
     if synthetic_early(d) {
         return Some((EARLY, t));
+    }
+    if synthetic_mid(d) {
+        return Some((A2C3, t));
     }
     let empty = (0..t).find(|&i| d[i..i + 8] == [1, 0, 0, 0, 0, 0, 0, 0xe1])?;
     let h = fnv(&d[..empty], &[]);
@@ -1495,6 +1537,17 @@ fn synthetic_early(d: &[u8]) -> bool {
 
 #[cfg(not(test))]
 fn synthetic_early(_: &[u8]) -> bool {
+    false
+}
+
+/// And of the third $A2C version.
+#[cfg(test)]
+fn synthetic_mid(d: &[u8]) -> bool {
+    d.get(2..10) == Some(b"SYNTHMID")
+}
+
+#[cfg(not(test))]
+fn synthetic_mid(_: &[u8]) -> bool {
     false
 }
 
@@ -1593,6 +1646,7 @@ impl Tp {
             Timing::Ea50 => self.cost_ea50(),
             Timing::Middle => self.cost_middle(),
             Timing::Ma2cb => self.cost_ma2cb(),
+            Timing::E93e => self.cost_e93e(),
             Timing::Ma58 => self.cost_ma58(),
             Timing::Mb02 => self.cost_mb02(),
         }
@@ -2205,6 +2259,54 @@ impl Tp {
             _ => self.cost_a94(),
         }
     }
+
+    fn cost_e93e(self) -> u64 {
+        use Tp::*;
+        match self {
+            E2End => 23,
+            E2Len => 18,
+            E2Loc => 86,
+            E2Off => 47,
+            E4End => 2,
+            E4Len => 18,
+            E4Loc => 111,
+            E8 => 81,
+            EnvRead => 65,
+            EnvStop => 0,
+            EnvVol => 30,
+            EnvWait => 0,
+            FreqLoop => 0,
+            FreqNote => 91,
+            FreqRead => 24,
+            FreqStop => 0,
+            Fx => 154,
+            LineOn => 24,
+            Loops => 271,
+            OnLen => 8,
+            OnLoc => 61,
+            PerStart => 13,
+            PerStart0 => 40,
+            Period => 0,
+            Porta => 0,
+            Row => 0,
+            RowEmpty => 0,
+            RowEnd => 97,
+            RowEnv => 0,
+            RowNext => 159,
+            RowNote => 248,
+            RowTrack => 0,
+            Rows => 0,
+            SlideOff => 0,
+            VibDelay => 0,
+            VibDown => 78,
+            VibDownTurn => 93,
+            VibUp => 78,
+            VibUpTurn => 85,
+            Write => 8,
+            WriteVol => 8,
+            _ => self.cost_a94(),
+        }
+    }
     // GENERATED-COSTS-END
 }
 
@@ -2424,13 +2526,16 @@ fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         v.info = bus.r8(a + 0x43);
         v.vib_flag = bus.r8(a + 0x51);
     }
-    if ver.early_vars {
-        for ch in 0..ver.voices {
-            let a = empty + 0x6a + 0x4a * ch as u32;
+    if let Some(k) = ver.early_vars {
+        for ch in 0..ver.voices.max(ver.loop_voices) {
+            let a = empty + k.loops + k.stride * ch as u32;
             let bus = &m.bus;
             p.voices[ch].loop_len = bus.r16(a);
             p.voices[ch].loop_addr = bus.r32(a + 2);
             p.pend[ch] = bus.r16(a + 6) != 0;
+            if let Some(n) = k.note {
+                p.voices[ch].note = bus.r8(empty + n + k.stride * ch as u32);
+            }
         }
     }
     p.trace.timing = Some(ver.timing);
@@ -2693,7 +2798,7 @@ impl Tfmx {
             v.volume = 0;
             v.freq_pos = 0;
             v.porta = 0;
-            if !self.ver.early_vars {
+            if self.ver.early_vars.is_none() {
                 v.loop_len = 0;
             }
             v.dma = 1 << ch;
@@ -3225,7 +3330,11 @@ impl Tfmx {
         if (n as i8) >= 0 {
             n = n.wrapping_add(v.note).wrapping_add(v.track_transpose);
         }
-        let mut per = hw.bus.r16(self.periods + 2 * (n & 0x7f) as u32);
+        let at = self.periods + 2 * (n & 0x7f) as u32;
+        let mut per = match self.ver.dma_var {
+            Some(o) if at == self.empty + o => self.dma_acc,
+            _ => hw.bus.r16(at),
+        };
         let v = &mut self.voices[ch];
         if self.ver.vib == 1 {
             // the older vibrato: a step in the note's scale, every other tick
@@ -5310,6 +5419,71 @@ mod tests {
         let loops = log.iter().skip(on).filter(|w| w.0 == 0xDFF0A4 && w.1 == 32).count();
         assert!(loops >= 1, "no loop written after the DMA on");
         assert!(out.iter().any(|&s| s != 0.0), "no sound");
+    }
+
+    /// A module of the third $A2C version saved from a game: the replayer's code
+    /// is a marker; voice 0 plays a sample, the others an empty row, with a note
+    /// and a loop left in their variables.
+    fn saved_middle_module() -> Vec<u8> {
+        const T: usize = 0xa2c;
+        const E: usize = 0x826; // the empty table
+        const TFREQ: usize = T + 0x20;
+        const TENV: usize = TFREQ + 64;
+        const TTRACK: usize = TENV + 64;
+        const TPOS: usize = TTRACK + 4;
+        const TINFO: usize = TPOS + 12 + 12;
+        let mut d = vec![0x60, 0x02];
+        d.extend(b"SYNTHMID");
+        d.resize(E, 0);
+        d.extend([1, 0, 0, 0, 0, 0, 0, 0xe1]);
+        d.resize(E + 0x16e, 0);
+        d.extend(super::PERIODS[..60].iter().flat_map(|p| p.to_be_bytes()));
+        d.resize(T, 0);
+        d[E + 0x1fe..E + 0x200].copy_from_slice(&[0x01, 0x10]); // the DMA bits, as saved
+        // voice 1: note 71 (with the empty table's transpose of 1, note 72: the DMA
+        // bits), a loop of 5 words at $12340; voice 2: note 12
+        let v = |ch: usize| E + 0x48 * ch;
+        d[v(1) + 0x2c] = 71;
+        d[v(1) + 0x66..v(1) + 0x6c].copy_from_slice(&[0, 5, 0, 1, 0x23, 0x40]);
+        d[v(2) + 0x2c] = 12;
+        d.extend(b"TFMX");
+        // one frequency table, envelope, position; two tracks of one row; one
+        // subsong; one sample
+        d.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 1]);
+        d.resize(TFREQ, 0);
+        d.extend([0xe2, 0, 0, 0xe1]); // play sample 0, no transpose, stop
+        d.resize(TENV, 0);
+        d.extend([1, 0, 0, 0, 0, 0x40, 0xe1]);
+        d.resize(TTRACK, 0);
+        d.extend([24, 0, 0, 0]); // track 0: note 24; track 1: an empty row
+        d.extend([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0]); // voice 0 on track 0, the others on 1
+        d.extend([0, 0, 0, 0, 0, 3]); // positions 0 to 0, speed 3
+        d.resize(TINFO + 0x16, 0);
+        d.extend([0, 32, 0, 0, 0, 0, 0, 32]);
+        d.resize(TINFO + 30, 0);
+        d.extend((0..64).map(|i| if i < 32 { 0x40 } else { 0xc0 }));
+        d
+    }
+
+    #[test]
+    fn a_saved_middle_module_keeps_its_notes_and_loops() {
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        e.play_data(Path::new("test.hip"), saved_middle_module()).unwrap();
+        assert_eq!(e.playing.as_ref().unwrap().format, "Hippel TFMX");
+        let mut out = vec![0f32; 2 * 4800];
+        e.render(&mut out);
+        let log = e.m.bus.write_log.take().unwrap();
+        let reg = |a: u32| log.iter().filter(|w| w.0 == a).map(|w| w.1).collect::<Vec<_>>();
+        // the Eagleplayer's stop and InitSound's writes, then the first tick's: the
+        // row's sample on voice 0 (its DMA off), voice 1's period read from the DMA
+        // bits, voice 2's note 12 + 1, every voice's loop
+        assert_eq!(reg(0xDFF096)[..3], [0x000F, 0x000F, 0x0001]);
+        assert_eq!(reg(0xDFF0B6)[1], 1);
+        assert_eq!(reg(0xDFF0C6)[1], super::PERIODS[13]);
+        assert_eq!(reg(0xDFF0B4)[1], 5);
+        assert_eq!((reg(0xDFF0B0)[1], reg(0xDFF0B2)[1]), (0x0001, 0x2340));
     }
 
     #[test]

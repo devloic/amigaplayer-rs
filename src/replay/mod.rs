@@ -56,6 +56,7 @@ pub mod infogrames;
 pub mod instereo1;
 pub mod instereo2;
 pub mod hippel;
+pub mod hippelastaroth;
 pub mod hvl;
 pub mod jamcracker;
 pub mod jasonbrooke;
@@ -312,6 +313,7 @@ pub const REPLAYERS: &[Open] = &[
     jochenhippelst::OPEN_COSO,
     hippel::OPEN_COSO,
     hippel::OPEN,
+    hippelastaroth::OPEN,
     davidwhittaker::OPEN,
     actionamics::OPEN,
     soundcontrol::OPEN,

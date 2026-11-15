@@ -17,6 +17,7 @@
 //! | [`PowerPlayer`](Packer::PowerPlayer) | `SFHD` / `SFCD` |
 //! | [`Imploder`](Packer::Imploder)     | `IMP!` and its variants (`ATN!`, `EDAM`, `M.H.`, `BDPI`, `CHFI`, `RDC9`, `Dupa`, `FLT!`, `PARA`) |
 //! | [`ModCrusher`](Packer::ModCrusher) | `Okm0` / `OkmC` (clean-room; not streams past 32451 symbols) |
+//! | [`StCruncher`](Packer::StCruncher) | `STC\0` (clean-room; a file as saved by the tool lacks its last 2-4 bytes, zero-filled) |
 //! | [`XpkImpl`](Packer::XpkImpl)         | XPK container with the IMPL (Imploder) method |
 //! | [`XpkBzp2`](Packer::XpkBzp2)         | XPK container with the BZP2 method |
 //! | [`XpkBlzw`](Packer::XpkBlzw)         | XPK container with the BLZW method |
@@ -68,6 +69,8 @@ pub enum Packer {
     Imploder,
     /// modCRUSHER (`Okm0`, `OkmC`).
     ModCrusher,
+    /// SoundTracker Cruncher V1.0 (`STC\0`).
+    StCruncher,
     /// XPK container using the IMPL (Imploder) method.
     XpkImpl,
     /// XPK container using the BZP2 (bzip2) method.
@@ -109,6 +112,7 @@ impl Packer {
             Packer::PowerPlayer => "PowerPlayer",
             Packer::Imploder => "Imploder",
             Packer::ModCrusher => "modCRUSHER",
+            Packer::StCruncher => "SoundTracker Cruncher",
             Packer::XpkImpl => "XPK IMPL",
             Packer::XpkBzp2 => "XPK BZP2",
             Packer::XpkBlzw => "XPK BLZW",
@@ -145,6 +149,7 @@ impl From<Kind> for Packer {
             Kind::PowerPlayer => Packer::PowerPlayer,
             Kind::Imploder => Packer::Imploder,
             Kind::ModCrusher => Packer::ModCrusher,
+            Kind::StCruncher => Packer::StCruncher,
             Kind::Xpk(m) => match m {
                 XpkMethod::Impl => Packer::XpkImpl,
                 XpkMethod::Bzp2 => Packer::XpkBzp2,

@@ -71,7 +71,9 @@
 //!
 //! An early `TFMX-SONG ` module of the fixed tables (nothing at $1D0) with no
 //! `smpl.NAME` beside it but one `smpl.set` is played by the TFMX 1.5 engine
-//! (`new_early`), as UADE's TFMX player does, which differs from the
+//! (`new_early`), as UADE's TFMX player does; so is one whose text starts right after
+//! the header, at $0A, which the Pro check refuses (`detect_early_text`; its samples
+//! `smpl.NAME`, `NAME.sam` and the rest, else `smpl.set`). UADE's player differs from the
 //! Eagleplayer's in three ways found by comparing its write log: the song starts
 //! at master volume $40 (no fade to $3F), SetNote adds the note's detune, and
 //! DMA on goes out at the macro's command. It also reports the song end, at the
@@ -3092,7 +3094,7 @@ impl Replayer for Pro {
 // older replayer of its own: fixed tables at $400/$600/$800, 26 macro
 // commands, and its Paula writes through the ENPP_Poke functions.
 
-pub const OPEN_15: Open = Open { name: "TFMX 1.5", detect: detect_15, new: new_15 };
+pub const OPEN_15: Open = Open { name: "TFMX 1.5", detect: |d| detect_15(d) || detect_early_text(d), new: new_15 };
 
 /// CHECK5: "TFMX" not followed by "SONG" (the TFHD single file, which it also
 /// takes, is `tfhd.rs`'s).
@@ -3352,9 +3354,24 @@ pub struct V15 {
     next_tick: u64,
 }
 
+/// An early `TFMX-SONG ` module of the fixed tables (nothing at $1D0) whose text starts right
+/// after the header, at $0A (`TFMX-SONG by ERN0/SB ...`): the Pro check refuses it (a word at $0C)
+/// and CHECK5 any "SONG"; UADE's TFMX player plays it as TFMX 1.5 (`new_early`'s engine).
+fn detect_early_text(d: &[u8]) -> bool {
+    d.len() >= 0x800 && d.starts_with(b"TFMX-SONG ") && be32(d, 0x1d0) == 0 && be16(d, 0xc) != 0 && !detect_7v(d)
+}
+
 fn new_15(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     if !detect_15(d) {
-        return None;
+        if !detect_early_text(d) {
+            return None;
+        }
+        // its samples by the module's name (`NAME.sam` in the NostalgicPlayer collections), else the game's set
+        let smpl_data = match read_smpl(m) {
+            Some(s) => s,
+            None => crate::deli::read_companion(m, "smpl.set").1.ok()?,
+        };
+        return build_15(d, base, m, &smpl_data, true);
     }
     let smpl_data = read_smpl(m)?;
     build_15(d, base, m, &smpl_data, false)
@@ -6560,6 +6577,37 @@ mod tests {
         // with smpl.NAME present the Pro replayer keeps it
         let (format, _) = play_smpl("early-own", d, "smpl.test");
         assert_eq!(format, "TFMX Pro");
+    }
+
+    #[test]
+    fn early_song_with_its_text_at_0a_plays_as_tfmx_15() {
+        // "TFMX-SONG by ERN0/SB ..." (Erno's NAME.tfx beside NAME.sam): the text starts right
+        // after the header, which the Pro check refuses (a word at $0C) and CHECK5 too ("SONG");
+        // UADE's TFMX player plays it, as the early modules
+        let mut d = mdat(b"TFMX-SONG ", &[0x0000_0000, 0x0200_0000, 0x0300_0010, 0x0e00_0030, 0x0900_0000, 0x0100_0000, 0x0700_0000]);
+        d[0x0a..0x14].copy_from_slice(b"by ERN0/SB");
+        assert!(!super::detect_pro(&d) && !super::detect_15(&d));
+        assert_eq!(crate::detect(&d).as_deref(), Some("TFMX 1.5"));
+        let dir = std::env::temp_dir().join(format!("amigaplayer-tfmx-test-erno-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let smpl: Vec<u8> = (0..64).map(|i| if i < 32 { 0x40 } else { 0xc0 }).collect();
+        std::fs::write(dir.join("Erno.sam"), smpl).unwrap();
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.m.bus.write_log = Some(Vec::new());
+        let r = e.play_data(&dir.join("Erno.tfx"), d.clone());
+        let _ = std::fs::remove_dir_all(&dir);
+        r.unwrap();
+        assert_eq!(e.playing.as_ref().unwrap().format, "TFMX 1.5");
+        let mut out = vec![0f32; 2 * 9600];
+        e.render(&mut out);
+        assert!(out.iter().any(|&s| s != 0.0), "no sound");
+        let log = e.m.bus.write_log.take().unwrap();
+        // played as the early modules: no fade to $3F
+        assert!(reg(&log, 0xDFF0A8).contains(&0x30));
+        // the editor's text at $10 is still the Pro replayer's
+        d[0x0a..0x10].fill(0);
+        assert!(super::detect_pro(&d));
     }
 
     #[test]

@@ -509,6 +509,37 @@ def stage_maxtrax_samples(mod):
             return
 
 
+def early_text_tfmx(d):
+    """An early TFMX-SONG module of the fixed tables whose text starts at $0A, right after the
+    header ("TFMX-SONG by ERN0/SB ..."): the port's detect_early_text."""
+    return len(d) >= 0x1d4 and d[:10] == b'TFMX-SONG ' and d[0x1d0:0x1d4] == b'\0\0\0\0' and d[0xc:0xe] != b'\0\0'
+
+
+def stage_tfmx_early_text(mod):
+    """Such a module (early_text_tfmx) in the NostalgicPlayer form NAME.tfx beside NAME.sam: UADE's
+    TFMX player, its original, asks for smpl.NAME.tfx (then SMPL.set) only. The staged copy gets the
+    samples under that name as well (the port takes the same file under either name)."""
+    d, leaf = os.path.split(mod)
+    try:
+        with open(mod, 'rb') as fh:
+            head = fh.read(0x1d4)
+    except OSError:
+        return
+    if not early_text_tfmx(head):
+        return
+    names = {f.lower(): f for f in os.listdir(d)}
+    if ('smpl.' + leaf).lower() in names or '.' not in leaf:
+        return
+    stem = leaf.rsplit('.', 1)[0]
+    for c in (stem + '.smpl', stem + '.sam'):
+        src = names.get(c.lower())
+        if src:
+            t = os.path.join(d, 'smpl.' + leaf)
+            shutil.copy(os.path.join(d, src), t + '.tmp')
+            os.replace(t + '.tmp', t)
+            return
+
+
 ALIAS_ROOT = '/dev/shm/refcmp'   # 16 characters
 ALIAS_LEN = 76                   # characters of a cache alias path
 
@@ -1319,6 +1350,10 @@ def special_reference(mod, fmt):
         if (d[:10] == b'TFMX-SONG ' and d[0x1d0:0x1d4] == b'\0\0\0\0' and os.path.exists(os.path.join(base, 'smpl.set'))
                 and not os.path.exists(os.path.join(base, 'smpl.' + stem))):
             return [('uade+early', UADE_PLAYERS, ('--player', 'TFMX'))]
+        # one whose text starts at $0A (Erno's "TFMX-SONG by ERN0/SB"): TFMX_Pro and TFMX_1.5 refuse it, the
+        # port plays it the same way (its samples given as smpl.NAME by stage_tfmx_early_text)
+        if early_text_tfmx(d):
+            return [('uade+early', UADE_PLAYERS, ('--player', 'TFMX'))]
     if fmt == 'digitalsoundstudio':
         try:
             with open(mod, 'rb') as fh:
@@ -1562,6 +1597,7 @@ def process(ctx, f):
         mod = ctx.stage(path) if ctx.stage else _fallback_stage(path, ctx.cache)
         stage_fixed_companions(path, mod)
         stage_maxtrax_samples(mod)
+        stage_tfmx_early_text(mod)
         pw, pplay, pout, pled, plines = render_engine(ctx, mod, True, None)
         if pout and _norm(parse_output(pout).get('format', '')) == 'tfmxpro' and retext_empty(ctx, mod) != mod:
             # a TFMX Pro "(Empty) " module's original runs on a retexted copy (retext_empty): the port too, as

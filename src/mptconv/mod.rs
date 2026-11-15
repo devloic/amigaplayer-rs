@@ -1328,6 +1328,63 @@ mod tests {
         assert_eq!(m.module.xxs[0].len, 16);
     }
 
+    /// A Dynamic Studio file: one channel, one order, one 16-frame sample, one pattern whose
+    /// first row has C-3 (byte 0x38 = 28 * 2), instrument 1, command 0x0C (volume) 0x20 and
+    /// second row command 0x08 param 0x14 (default volume slide up).
+    fn synth_dynamic() -> Vec<u8> {
+        let mut f = b"DSm\x1Atitle".to_vec();
+        f.resize(64, 0);
+        f[4] = 0x20;
+        (f[45], f[46], f[47], f[48], f[49]) = (1, 1, 1, 0, 100);
+        f.push(0x08); // channel pan
+        f.push(0); // order 0
+        f.extend_from_slice(b"TRACK001"); // track name
+        let mut sh = [0u8; 32];
+        sh[..4].copy_from_slice(b"smp1");
+        sh[23] = 16; // length
+        sh[26] = 64; // volume
+        f.extend_from_slice(&sh);
+        let mut pat = vec![0u8; 64 * 4];
+        pat[..4].copy_from_slice(&[1, 56, 0x0C, 0x20]);
+        pat[4..8].copy_from_slice(&[0, 0, 0x08, 0x14]);
+        f.extend_from_slice(&pat);
+        f.extend((0..16u8).map(|i| i.wrapping_mul(16)));
+        f
+    }
+
+    #[test]
+    fn loads_synthetic_dynamic_studio() {
+        let f = synth_dynamic();
+        assert!(super::dsm::test_dynamic(&f));
+        assert!(!super::dsm::test(&f));
+        let mut m = ModuleData::default();
+        super::dsm::load_dynamic(&mut m, &mut Hio::new(&f)).unwrap();
+        assert!(m.module.type_.starts_with("Dynamic Studio"), "{}", m.module.type_);
+        assert_eq!((m.module.chn, m.module.ins, m.module.spd, m.module.bpm), (1, 1, 6, 125));
+        let e = *m.module.event(0, 0, 0);
+        assert_eq!((e.note, e.ins, e.vol), (28 + 36, 1, 32 + 1));
+        assert_eq!(m.module.xxs[0].len, 16);
+        let md = super::dsm::read_dynamic(&f).unwrap();
+        assert_eq!(md.patterns[0].as_ref().unwrap().cells[1].cmd, super::Cmd::VolumeSlide);
+        assert_eq!(md.patterns[0].as_ref().unwrap().cells[1].param, 0x40);
+        assert_eq!(md.samples[0].c5speed, 8363);
+    }
+
+    #[test]
+    fn damaged_dynamic_studio() {
+        let f = synth_dynamic();
+        for n in 0..f.len() {
+            let _ = super::dsm::load_dynamic(&mut ModuleData::default(), &mut Hio::new(&f[..n]));
+        }
+        for at in 0..f.len() {
+            for v in [0x00, 0xFF, f[at].wrapping_add(1), 0x80] {
+                let mut g = f.clone();
+                g[at] = v;
+                let _ = super::dsm::load_dynamic(&mut ModuleData::default(), &mut Hio::new(&g));
+            }
+        }
+    }
+
     /// Damaged files (cut short, bytes changed) load or are refused, never panic; the same for
     /// the MadTracker 2 and AMS loaders on a DSM file given their magic.
     #[test]

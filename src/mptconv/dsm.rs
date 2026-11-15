@@ -6,9 +6,13 @@
 //! MOD effects, panning 00..80 and A4 surround as in S3M) and `INST` chunks (sample header and
 //! 8 or 16-bit signed, unsigned or delta PCM data).
 //!
-//! Left out: Dynamic Studio's `DSm\x1A` modules, which the same libopenmpt file reads; the
-//! restart position (the song ends at its end). DSIK DSM v1, a different format, is not read by
-//! libopenmpt either.
+//! Left out: the restart position (the song ends at its end). DSIK DSM v1, a different format,
+//! is not read by libopenmpt either.
+//!
+//! The same libopenmpt file also reads Dynamic Studio's `DSm\x1A` modules (`ReadDSm`, a
+//! different format with the same extension): see [`read_dynamic`]. OpenMPT plays those as MOD
+//! (Amiga periods, finetune from the PT tuned period table); they are written as S3M with the
+//! MOD volume-slide and portamento rules (as for MadTracker 2).
 //!
 //! Ported from libopenmpt 0.8.7 (BSD-3-Clause, OpenMPT Project Developers and Contributors; see
 //! LICENSE-openmpt).
@@ -179,4 +183,167 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
     let md = read(&file).ok_or(())?;
     let (native, fix) = build(&md, Kind::S3m).ok_or(())?;
     load_native(m, &native, Kind::S3m, &fix, NAME)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dynamic Studio (`DSm\x1A`)
+
+/// The format name the libxmp port gives these modules.
+pub const NAME_DYNAMIC: &str = "Dynamic Studio";
+
+/// `ProTrackerTunedPeriods[finetune * 12]`: the C period of each MOD finetune 0..15.
+const PT_C_PERIODS: [u32; 16] =
+    [1712, 1700, 1688, 1676, 1664, 1652, 1640, 1628, 1814, 1800, 1788, 1774, 1762, 1750, 1736, 1724];
+
+/// `DSmFileHeader::IsValid` and the minimum size of what follows it; None when invalid.
+fn dynamic_header(d: &[u8]) -> Option<(usize, usize, usize)> {
+    if d.len() < 64 || &d[..4] != b"DSm\x1A" {
+        return None;
+    }
+    let (version, chn, smp, ord, gv) = (d[4], d[45] as usize, d[46] as usize, d[47] as usize, d[49]);
+    if version != 0x20 || !(1..=16).contains(&chn) || smp == 0 || ord == 0 || gv > 100 {
+        return None;
+    }
+    Some((chn, smp, ord))
+}
+
+/// `ProbeFileHeaderDSm`.
+pub fn test_dynamic(d: &[u8]) -> bool {
+    matches!(dynamic_header(d), Some((c, s, o)) if d.len() >= 64 + c + o + s * 32)
+}
+
+/// The module OpenMPT's `ReadDSm` reads from `file`, or None when it does not load it.
+pub fn read_dynamic(file: &[u8]) -> Option<Module> {
+    let (channels, num_samples, num_orders) = dynamic_header(file)?;
+    if file.len() < 64 + channels + num_orders + num_samples * 32 {
+        return None;
+    }
+    let mut f = Reader::new(file);
+    f.seek(64);
+    let global_vol = ((file[49] as u32 * 256) * 2 + 100) / 200;
+    let chn_pan: Vec<u16> = (0..channels).map(|_| (f.u8() & 0x0F) as u16 * 0x11).collect();
+    let mut orders = Vec::with_capacity(num_orders);
+    for _ in 0..num_orders {
+        orders.push(f.u8() as u16);
+    }
+    let num_patterns = orders.iter().copied().max().unwrap_or(0) as usize + 1;
+    if !f.can_read(num_patterns * channels * 8 + num_samples * 32 + num_patterns * channels * 64 * 4) {
+        return None;
+    }
+    // track names: nothing plays them
+    f.skip(num_patterns * channels * 8);
+
+    let mut samples: Vec<Sample> = Vec::with_capacity(num_samples);
+    for _ in 0..num_samples {
+        let (h, _) = f.struct_or_zero(32);
+        let mut s = Sample::new();
+        s.name = name(&h[0..22]);
+        let ft = h[25] & 0x0F;
+        s.c5speed = (8363.0 * 1712.0 / PT_C_PERIODS[ft as usize] as f64).round() as u32;
+        s.bits16 = h[22] == 16;
+        s.length = u16::from_le_bytes([h[23], h[24]]) as u32;
+        s.volume = h[26].min(64) as u16 * 4;
+        let loop_start = u16::from_le_bytes([h[27], h[28]]) as u32;
+        let loop_len = u16::from_le_bytes([h[29], h[30]]) as u32;
+        s.loop_start = loop_start;
+        s.loop_end = loop_start + loop_len;
+        s.looped = loop_len > 2;
+        samples.push(s);
+    }
+
+    let mut patterns: Vec<Option<Pattern>> = Vec::with_capacity(num_patterns);
+    for _ in 0..num_patterns {
+        let mut pat = Pattern::new(64, channels);
+        for m in pat.cells.iter_mut() {
+            let d = f.bytes(4)?;
+            if d[1] > 0 && d[1] <= 84 * 2 {
+                m.note = (d[1] >> 1) + NOTE_MIN + 35;
+            }
+            m.instr = d[0];
+            m.param = d[3];
+            if d[2] == 0x08 {
+                match m.param & 0xF0 {
+                    0x00 => {
+                        m.cmd = Cmd::ModCmdEx;
+                        m.param |= 0x80;
+                    }
+                    0x10 => {
+                        m.cmd = Cmd::VolumeSlide;
+                        m.param <<= 4;
+                    }
+                    0x20 => {
+                        m.cmd = Cmd::ModCmdEx;
+                        m.param |= 0xA0;
+                    }
+                    0x30 | 0x40 => {
+                        m.cmd = Cmd::ModCmdEx;
+                        m.param -= 0x20;
+                    }
+                    _ => {}
+                }
+            } else if d[2] == 0x13 {
+                // 3D Simulate
+                m.cmd = Cmd::Panning8;
+                let p = m.param as u32;
+                let mut v = (p & 0x7F) * 2;
+                if p <= 0x40 {
+                    v += 0x80;
+                } else if p < 0x80 {
+                    v = 0x180 - v;
+                } else if p < 0xC0 {
+                    v = 0x80 - v;
+                } else {
+                    v -= 0x80;
+                }
+                m.param = v.min(255) as u8;
+            } else if d[2] & 0xF0 == 0x20 {
+                // offset + volume
+                m.cmd = Cmd::Offset;
+                m.volcmd = VolCmd::Volume;
+                m.vol = (d[2] & 0x0F) * 4 + 4;
+            } else if d[2] <= 0x0F || d[2] == 0x11 || d[2] == 0x12 {
+                convert_mod_command(m, d[2] & 0x0F, d[3]);
+                // Cxx sets the volume as the S3M volume column does (a free column here)
+                if m.cmd == Cmd::Volume {
+                    m.cmd = Cmd::None;
+                    m.volcmd = VolCmd::Volume;
+                    m.vol = m.param.min(64);
+                }
+            }
+        }
+        patterns.push(Some(pat));
+    }
+
+    for s in samples.iter_mut() {
+        let bits16 = s.bits16;
+        s.data = read_pcm(&mut f, s.length, bits16, false, Enc::Signed);
+    }
+
+    Some(Module {
+        title: name(&file[5..25]),
+        channels,
+        speed: 6,
+        tempo: 125.0,
+        global_vol,
+        preamp: 48,
+        linear: false,
+        old_effects: false,
+        compat_gxx: false,
+        chn_surround: vec![false; channels],
+        chn_vol: vec![64; channels],
+        chn_pan,
+        orders,
+        patterns,
+        instruments: Vec::new(),
+        samples,
+        rules: Rules { xm_volslides: true, no_fine_porta: true },
+    })
+}
+
+/// The `xmp::LOADERS` entry: the module written as S3M, loaded by the libxmp port's S3M loader.
+pub fn load_dynamic(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
+    let file = whole_file(f);
+    let md = read_dynamic(&file).ok_or(())?;
+    let (native, fix) = build(&md, Kind::S3m).ok_or(())?;
+    load_native(m, &native, Kind::S3m, &fix, NAME_DYNAMIC)
 }

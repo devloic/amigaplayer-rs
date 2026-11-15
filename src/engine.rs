@@ -1293,6 +1293,10 @@ impl Engine {
         }
         // the amplifier's channels play whatever the player did to Paula
         crate::amplifier::restart(&mut self.m.bus);
+        // A song end reported while the song is being set up, before it has played a tick,
+        // ends nothing: Super Hang-On's title custom module calls dtg_SongEnd in its init and
+        // then plays for minutes. Left set, `songend()` was true before the first sample.
+        self.m.deli.songend = false;
         Ok(())
     }
 

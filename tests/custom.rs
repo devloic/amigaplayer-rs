@@ -127,6 +127,25 @@ fn the_song_end_of_a_custom_module_is_reported() {
     assert!(song.error().is_none());
 }
 
+#[test]
+fn a_song_end_called_from_init_ends_nothing() {
+    // Super Hang-On's title calls dtg_SongEnd in its InitSound, then plays for minutes
+    let init = [
+        0x20, 0x6D, 0x00, 0x5C, // movea.l dtg_SongEnd(a5),a0
+        0x4E, 0x90, // jsr (a0)
+    ];
+    let mut song = open(&custom_with(&init, &[])).unwrap();
+    assert!(!song.songend(), "true at open, before any sample");
+    let hz = pitch(&render(&mut song, 1.0));
+    assert!((250.0..270.0).contains(&hz), "{hz} Hz");
+    assert!(!song.songend());
+    // and after a subsong change too
+    song.set_subsong(1).unwrap();
+    assert!(!song.songend());
+    render(&mut song, 3.5);
+    assert!(song.songend(), "the interrupt's own song end still counts");
+}
+
 /// What a failed song looks like to the host from then on.
 fn assert_stopped(song: &mut Song, what: &str) {
     match song.error() {

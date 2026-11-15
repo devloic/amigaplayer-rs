@@ -16,6 +16,15 @@ use std::path::{Path, PathBuf};
 /// last-resort 15-instrument heuristic ("SoundTracker") is not: it is loose, and the
 /// host's own players take the modules it alone would claim.
 pub fn detect(data: &[u8]) -> Option<String> {
+    // a gzip / xz wrapper first, whatever it holds, as the engine does
+    #[cfg(feature = "archives")]
+    if let Some(d) = crate::decrunch::unwrap_wrapper(data) {
+        return detect_unwrapped(&d);
+    }
+    detect_unwrapped(data)
+}
+
+fn detect_unwrapped(data: &[u8]) -> Option<String> {
     if crate::aiff::detect(data) {
         return Some("AIFF".to_string());
     }
@@ -65,6 +74,14 @@ pub fn detect(data: &[u8]) -> Option<String> {
 /// files: Infogrames and Rob Hubbard 2 modules are one format and pass both checks, and
 /// Infogrames hands a module with no bank of its own name (`rh.ins` beside it) to Rob Hubbard 2.
 pub fn claimed_by_several(data: &[u8]) -> bool {
+    #[cfg(feature = "archives")]
+    if let Some(d) = crate::decrunch::unwrap_wrapper(data) {
+        return claimed_by_several_unwrapped(&d);
+    }
+    claimed_by_several_unwrapped(data)
+}
+
+fn claimed_by_several_unwrapped(data: &[u8]) -> bool {
     if crate::aiff::detect(data)
         || crate::iff8svx::detect(data)
         || crate::iff8svx::detect_16sv(data)

@@ -210,3 +210,20 @@ fn refcmp_pcm_groups_are_recognised() {
         s.render_f32(&mut buf);
     }
 }
+
+/// A gzip wrapper is looked through, as the engine does, and the samples are those of the bare file.
+#[cfg(feature = "archives")]
+#[test]
+fn a_gzip_wrapped_file_is_recognised_and_played() {
+    for (name, data, format) in cases() {
+        let gz = amigaplayer_rs::archive::testdata::gzip(&data, Some(name));
+        assert_eq!(detect(&gz).as_deref(), Some(format), "detect {name}.gz");
+        let mut a = Song::open(&format!("{name}.gz"), &gz, RATE).unwrap_or_else(|e| panic!("{name}.gz: {e}"));
+        let mut b = Song::open(name, &data, RATE).unwrap();
+        assert_eq!(a.format(), format);
+        assert!(render(&mut a, 1000) == render(&mut b, 1000), "{name}.gz: samples differ");
+    }
+    let m = amigaplayer_rs::testdata::minimal_mod();
+    let gz = amigaplayer_rs::archive::testdata::gzip(&m, None);
+    assert_eq!(detect(&gz).as_deref(), Some("ProTracker"));
+}

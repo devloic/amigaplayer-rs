@@ -381,7 +381,15 @@ struct Song {
     eight: bool,
 }
 
+/// The start-up of the OctaMED Eagleplayer on a MED 2.10 module (measured: 875 samples at 48 kHz
+/// on every file, whatever its size).
+const MED4_START_DELAY: u64 = 60_000;
+
 fn kind_of(d: &[u8]) -> Option<Kind> {
+    if d.starts_with(b"MED\x04") {
+        // a MED 2.10 module of 5-8 channels plays converted to MMD0
+        return super::med4::to_mmd0(d).and_then(|c| kind_of(&c));
+    }
     if d.len() < 840 || &d[0..3] != b"MMD" {
         return None;
     }
@@ -1667,6 +1675,8 @@ pub struct OctaMed {
     brk: Brk,
     songend: bool,
     first_tick: bool,
+    /// Colour clocks the original takes to read a MED 2.10 module before its timer runs.
+    start_delay: u64,
 }
 
 #[derive(Default)]
@@ -1679,6 +1689,19 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
     if kind_of(d) != Some(kind) {
         return None;
     }
+    let med4 = d.starts_with(b"MED\x04");
+    let conv;
+    let (d, base) = if med4 {
+        conv = super::med4::to_mmd0(d)?;
+        let a = m.alloc(conv.len() as u32);
+        if a == 0 {
+            return None;
+        }
+        m.bus.write_bytes(a, &conv);
+        (&conv[..], a)
+    } else {
+        (d, base)
+    };
     let mut song = load(d, base, m, kind)?;
     let soft_mode = kind == Kind::Oss;
     let nvoices = song.subs.iter().map(|s| s.channels).max().unwrap_or(4).clamp(1, if soft_mode { MAX_TRACKS } else { MAX_VOICES });
@@ -1780,6 +1803,7 @@ fn new(d: &[u8], base: u32, m: &mut Machine, kind: Kind) -> Option<Box<dyn Repla
         brk: Brk::Normal,
         songend: false,
         first_tick: true,
+        start_delay: if med4 { MED4_START_DELAY } else { 0 },
     };
     p.play_song(0);
     p.init_led(&mut Hw { bus: &mut m.bus });
@@ -3352,6 +3376,10 @@ impl Replayer for OctaMed {
             return if s.stage == 0 { SOFT_SETUP_AT } else { 1 << 40 };
         }
         self.tick_clocks_f() as u64
+    }
+
+    fn timer_delay(&self) -> u64 {
+        self.start_delay
     }
 
     fn next_tick_at(&self) -> Option<u64> {

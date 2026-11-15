@@ -179,6 +179,28 @@ fn converts_med4() {
     assert!(super::detect(&med4()));
 }
 
+#[test]
+fn med4_with_the_eight_channel_flag_goes_to_the_mix_player() {
+    let mut d = med4();
+    // flags: samples in the file, 8 channels
+    let at = d.iter().position(|&b| b == 0x08).unwrap();
+    assert_eq!(d[at - 1], 0); // the transpose before it
+    d[at] = 0x48;
+    assert!(!super::detect(&d));
+    assert!((super::mix::OPEN_MIX.detect)(&d));
+    assert!(!(super::mix::OPEN_MIX.detect)(&med4()));
+}
+
+#[test]
+fn a_truncated_med4_sample_reads_as_silence_past_the_end() {
+    let mut d = med4();
+    d.truncate(d.len() - 3);
+    let c = super::med4::to_mmd0(&d).unwrap();
+    let be32 = |o: usize| u32::from_be_bytes(c[o..o + 4].try_into().unwrap()) as usize;
+    let smp = be32(be32(0x18));
+    assert_eq!(c[smp..smp + 14], [0, 0, 0, 8, 0, 0, 1, 2, 3, 4, 5, 0, 0, 0]);
+}
+
 // ---- OctaMED SoundStudio (MMD3) on the amplifier
 
 const O_SONG: usize = 0x34;

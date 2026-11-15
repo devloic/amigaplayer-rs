@@ -229,7 +229,10 @@ pub fn to_mmd0(d: &[u8]) -> Option<Vec<u8>> {
             put32(&mut o, len);
             // NostalgicPlayer writes type 0; the original keeps multi-octave types
             put16(&mut o, typ);
-            o.extend_from_slice(r.bytes(len as usize)?);
+            // a truncated file ends inside its last sample: the rest reads as silence
+            let have = r.d.len().saturating_sub(r.p).min(len as usize);
+            o.extend_from_slice(r.bytes(have)?);
+            o.resize(o.len() + len as usize - have, 0);
         }
     }
     let n = o.len() as u32;

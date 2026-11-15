@@ -166,7 +166,10 @@ dos `CreateNewProc` processes do: at once until they first wait, then whenever t
 received a signal they wait for (after each interrupt, or while the code that started them
 waits); `RemTask` ends one. timer.device `TR_ADDREQUEST` sent with `SendIO`/`BeginIO` is
 answered when its time has passed on the emulated clock (`UNIT_VBLANK` at a vertical blank),
-to a signal or a software-interrupt port.
+to a signal or a software-interrupt port. Code that puts its own handler at a CIA's CPU
+autovector (`$68` CIA-A, `$78` CIA-B) gets that CIA's timer interrupts there, as an exception
+ending in `RTE`, while INTENA has the CIA's bit and the master enable on (INTENA starts as
+Kickstart leaves it, `$602C`).
 
 `detect_custom(&bytes)` tells whether a file is one (the hunks are loaded and the tags read;
 nothing is run). An open replayer that claims the file still plays it (`detect` names it);

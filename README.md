@@ -273,6 +273,9 @@ name where the host knows it, offset). A few exec functions the code cannot go o
 as an `error:`. Tasks a module starts with exec `AddTask` run as the processes of dos
 `CreateNewProc` do: at once until they wait, then when they are signalled; timer.device
 `TR_ADDREQUEST` is answered when its time has passed (`UNIT_VBLANK` at a vertical blank).
+Code that puts its own handler at a CIA's CPU autovector (`$68` for CIA-A, `$78` for CIA-B)
+and starts a CIA timer gets the interrupt there, ending in `RTE`, while INTENA lets it
+through; INTENA starts as Kickstart leaves it (`$602C`: EXTER and PORTS on).
 
 You can drop files or folders onto the window, or use **Add** / **Dir**.
 

@@ -1580,6 +1580,12 @@ impl Engine {
         for cia in 0..2 {
             let c = if cia == 0 { &mut self.m.bus.ciaa } else { &mut self.m.bus.ciab };
             let fired = c.take_pending();
+            // guest code that took over the CIA's autovector gets the interrupt there
+            let boot = self.vec_snap.get(crate::os::CIA_AUTOVECTOR[cia].0 as usize..).and_then(|v| v.get(..4));
+            let boot = boot.map_or(0, |v| u32::from_be_bytes([v[0], v[1], v[2], v[3]]));
+            if fired != 0 && crate::os::cia_autovector(&mut self.m, cia, boot) {
+                continue;
+            }
             for bit in 0..2 {
                 if fired & (1 << bit) != 0 {
                     let is = self.m.os.icr_vectors[cia][bit];

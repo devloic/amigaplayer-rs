@@ -201,6 +201,65 @@ fn a_call_the_replay_cannot_do_without_stops_the_song() {
     assert_stopped(&mut song, "exec.library/ColdReboot() (LVO -726)");
 }
 
+/// InitSound code that takes over a CIA's interrupt itself, as game code does: its own
+/// handler at the CPU autovector ($68 for CIA-A, $78 for CIA-B), timer A started at a latch of
+/// $FFFF (an underflow every 92 ms) with its ICR bit enabled. The handler reads the ICR,
+/// clears the request in INTREQ and mutes the tone (AUD0VOL 0), then returns with RTE. With
+/// `intena_clear`, the code then clears that INTENA bit, so the handler must never run.
+fn own_cia_handler(cia_b: bool, intena_clear: bool) -> Vec<u8> {
+    let (vec, base, bit): (u16, u32, u16) = if cia_b { (0x78, 0xBF_D000, 0x2000) } else { (0x68, 0xBF_E001, 0x0008) };
+    let cia = |reg: u32, v: u8| {
+        let mut c = vec![0x13, 0xFC, 0x00, v]; // move.b #v,addr.l
+        c.extend_from_slice(&(base + reg * 0x100).to_be_bytes());
+        c
+    };
+    let mut handler = vec![0x4A, 0x39]; // tst.b ICR.l
+    handler.extend_from_slice(&(base + 0xD00).to_be_bytes());
+    handler.extend_from_slice(&[0x33, 0xFC]); // move.w #bit,$dff09c
+    handler.extend_from_slice(&bit.to_be_bytes());
+    handler.extend_from_slice(&[0x00, 0xDF, 0xF0, 0x9C]);
+    handler.extend_from_slice(&[0x42, 0x79, 0x00, 0xDF, 0xF0, 0xA8, 0x4E, 0x73]); // clr.w $dff0a8 ; rte
+    let mut body = Vec::new();
+    for (reg, v) in [(4, 0xFF), (5, 0xFF), (0xD, 0x81), (0xE, 0x11)] {
+        body.extend(cia(reg, v));
+    }
+    if intena_clear {
+        body.extend_from_slice(&[0x33, 0xFC]); // move.w #bit,$dff09a
+        body.extend_from_slice(&bit.to_be_bytes());
+        body.extend_from_slice(&[0x00, 0xDF, 0xF0, 0x9A]);
+    }
+    // lea handler(pc),a0 ; move.l a0,vec.w ; body ; bra.w over the handler ; handler
+    let lea_disp = (2 + 4 + body.len() + 4) as u16;
+    let mut c = vec![0x41, 0xFA];
+    c.extend_from_slice(&lea_disp.to_be_bytes());
+    c.extend_from_slice(&[0x21, 0xC8]);
+    c.extend_from_slice(&vec.to_be_bytes());
+    c.extend(body);
+    c.extend_from_slice(&[0x60, 0x00]);
+    c.extend_from_slice(&(handler.len() as u16 + 2).to_be_bytes());
+    c.extend(handler);
+    c
+}
+
+#[test]
+fn a_handler_of_its_own_at_a_cia_autovector_takes_the_interrupt() {
+    let loud = |pcm: &[f32]| pcm.iter().fold(0f32, |a, &x| a.max(x.abs()));
+    for cia_b in [false, true] {
+        // the handler runs at the first underflow (92 ms) and mutes the tone
+        let mut song = open(&custom_with(&own_cia_handler(cia_b, false), &RTS)).unwrap();
+        let pcm = render(&mut song, 0.5);
+        assert!(song.error().is_none(), "{:?}", song.error());
+        let at = |s: f64| 2 * (s * RATE as f64) as usize;
+        assert!(loud(&pcm[..at(0.08)]) > 0.05, "CIA-{}: no tone before the interrupt", if cia_b { 'B' } else { 'A' });
+        assert!(loud(&pcm[at(0.2)..]) < 0.01, "CIA-{}: the handler did not run", if cia_b { 'B' } else { 'A' });
+        // with the CIA's INTENA bit off, the interrupt never reaches the CPU
+        let mut song = open(&custom_with(&own_cia_handler(cia_b, true), &RTS)).unwrap();
+        let pcm = render(&mut song, 0.5);
+        assert!(song.error().is_none());
+        assert!(loud(&pcm[at(0.2)..]) > 0.05, "CIA-{}: the handler ran with INTENA off", if cia_b { 'B' } else { 'A' });
+    }
+}
+
 #[test]
 fn an_init_that_never_returns_is_an_error() {
     let t = Instant::now();

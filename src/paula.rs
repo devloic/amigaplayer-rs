@@ -25,6 +25,10 @@ pub const DMAF_MASTER: u16 = 0x0200;
 pub const INTF_SETCLR: u16 = 0x8000;
 pub const INTF_INTEN: u16 = 0x4000;
 pub const INTF_AUD0: u16 = 0x0080;
+/// INTENA as a booted Kickstart leaves it: the master enable, EXTER (CIA-B, level 6),
+/// VERTB, PORTS (CIA-A, level 2) and SOFT. Code that takes over a CIA's autovector itself
+/// (puts its own handler at $68 or $78) relies on PORTS or EXTER being on already.
+pub const INTENA_OS: u16 = 0x602C;
 
 /// One channel: the programmer-visible registers and the state machine.
 #[derive(Clone, Default)]
@@ -99,8 +103,8 @@ pub fn ram_word(ram: &[u8], a: u32) -> u16 {
 }
 
 impl Paula {
-    /// Paula at colour clock 0, as AmigaOS leaves it (DMA and interrupt master
-    /// enables on), at 48 kHz with no filter.
+    /// Paula at colour clock 0, as AmigaOS leaves it (DMA master enable on, INTENA
+    /// [`INTENA_OS`]), at 48 kHz with no filter.
     pub fn new() -> Self {
         Self::with_output(48000, Filter::None)
     }
@@ -114,7 +118,7 @@ impl Paula {
         Paula {
             ch,
             dmacon: DMAF_MASTER,
-            intena: INTF_INTEN,
+            intena: INTENA_OS,
             intreq: 0,
             raised: 0,
             adkcon: 0,

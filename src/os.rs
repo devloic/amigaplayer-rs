@@ -161,6 +161,31 @@ const MEMF_LARGEST: u32 = 1 << 17;
 pub const INTB_AUD0: usize = 7;
 pub const INTB_VERTB: usize = 5;
 
+/// The CPU autovector a CIA's interrupt goes through (CIA-A: level 2, $68; CIA-B:
+/// level 6, $78) and the INTENA bit that lets it through.
+pub const CIA_AUTOVECTOR: [(u32, u16); 2] = [(0x68, 0x0008), (0x78, 0x2000)];
+
+/// Takes a CIA interrupt through the CPU autovector when guest code has put its own
+/// handler there (`boot` is what the vector held at boot, exec's): with the master enable
+/// and the CIA's INTENA bit on, the handler at the vector runs as the exception would run
+/// it (an exception frame, ending in RTE; it reads the ICR itself and acknowledges the
+/// request in INTREQ). Returns whether it ran: if not, the interrupt goes to exec's
+/// handler, the ICR vectors of ciaX.resource.
+pub fn cia_autovector(m: &mut Machine, cia: usize, boot: u32) -> bool {
+    let (vec, enable) = CIA_AUTOVECTOR[cia];
+    let code = m.bus.r32(vec);
+    let on = crate::paula::INTF_INTEN | enable;
+    if code == boot || code == 0 || m.bus.paula.intena & on != on || code as usize >= crate::bus::RAM_SIZE {
+        return false;
+    }
+    // the request the CIA raised, as Paula would latch it for the handler to clear
+    m.bus.paula.intreq |= enable;
+    if let Err(e) = call_rte(m, code, &[0; 16]) {
+        m.crashed = Some(format!("CIA-{} interrupt handler at ${code:x}: {e}", if cia == 0 { 'A' } else { 'B' }));
+    }
+    true
+}
+
 pub fn init(m: &mut Machine) {
     let exec = make_library(m, "exec.library", LibKind::Exec, 140, 0x280, 40);
     m.os.exec_base = exec;

@@ -3157,9 +3157,10 @@ const POLL_TO_LOOP: u64 = 20;
 /// bytes before the module's start, outside the file: a variable of the
 /// loader's that the file lacks. What is there is the host's: in this host the
 /// low byte of an RTS of its library-call stubs ($75), larger than any volume,
-/// so the Eagleplayer and UADE's player run here write every volume 0 (and so
-/// does the port, which reads the same guest byte); uade123 has a byte there
-/// that leaves the volumes audible.
+/// so the Eagleplayer and UADE's player run here write every volume 0; uade123
+/// has a byte there that leaves the volumes audible. The port takes a byte
+/// outside the file as 0 (volumes as the song sets them), so `hip.boot_loader`
+/// plays: it then differs from this host's reference in the volumes only.
 fn vol_sub_at(d: &[u8], t: usize) -> Option<i64> {
     let i = (0..t.saturating_sub(8)).step_by(2).find(|&i| d[i..i + 6] == [0x10, 0x28, 0x00, 0x2d, 0x90, 0x3a])?;
     Some(i as i64 + 6 + be16(d, i + 6) as i16 as i64)
@@ -3187,7 +3188,9 @@ fn new_tfmx(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
         dead: ver.song_var && be16(d, t - 6) != 0,
         ep: !(ver.song_var && be16(d, t - 6) != 0),
         songend: false,
-        vol_sub: vol_sub_at(d, t).map(|o| base.wrapping_add(o as u32)),
+        // a byte outside the file (the $A3A loader's variable) is taken as 0: what the
+        // host has there is no part of the song, and here it would mute every voice
+        vol_sub: vol_sub_at(d, t).filter(|&o| (0..d.len() as i64).contains(&o)).map(|o| base.wrapping_add(o as u32)),
         periods,
         empty,
         freqs,

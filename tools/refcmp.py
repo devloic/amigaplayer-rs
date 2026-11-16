@@ -1500,7 +1500,8 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
             if isinstance(ref, dict):
                 ref['player'] = 'libxmp 4.7.4 refuses it; ' + ref['player']
                 return ref
-            return dict(none, note='oracle: libxmp 4.7.4 refuses it; ' + ref[:80], noref=False)
+            # a silent openmpt123 render is no reference (NOREF); a refusal by both is FAIL
+            return dict(none, note='oracle: libxmp 4.7.4 refuses it; ' + ref[:80], noref='renders it silent' in ref)
         if not raw or '\t' not in info:
             return dict(none, note='oracle: ' + info[:100], noref=False)
         return dict(kind='libxmp', wav=raw, data=read_raw(raw, ctx.rate), out='libxmp 4.7.4 ' + info.replace('\t', ' '),

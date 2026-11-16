@@ -318,6 +318,8 @@ pub struct ChannelData {
     pub info_position: i32,
     pub info_finalvol: i32,
     pub info_finalpan: i32,
+    /// Not libxmp: the last mixer period of `process_frequency`, for an OPL note.
+    pub final_period: f64,
 }
 
 impl ChannelData {
@@ -476,6 +478,8 @@ pub struct Context {
     pub s: MixerData,
     pub rng: u32,
     pub playing: bool,
+    /// Not libxmp: the OPL of a module with AdLib instruments (`opl_glue`).
+    pub opl: Option<Box<super::opl_glue::OplState>>,
 }
 
 /// libxmp's `pow(2, x)`, with glibc's pow (see aormath) so that wasm gets the
@@ -681,7 +685,7 @@ pub const RNG_SEED: u32 = 0x2545_f491;
 
 impl Context {
     pub fn new(m: ModuleData) -> Context {
-        Context { m, p: PlayerData::default(), s: MixerData::default(), rng: RNG_SEED, playing: false }
+        Context { m, p: PlayerData::default(), s: MixerData::default(), rng: RNG_SEED, playing: false, opl: None }
     }
 
     fn has_quirk(&self, q: i32) -> bool {
@@ -1245,6 +1249,7 @@ impl Context {
             final_period = 16.239270;
         }
         self.virt_setperiod(chn as i32, final_period);
+        self.p.xc_data[chn].final_period = final_period;
         self.p.xc_data[chn].info_pitchbend = linear_bend >> 7;
 
         // Process filter
@@ -1530,7 +1535,12 @@ impl Context {
         // IT MIDI macros update whatever the voice state
         self.update_midi_macro(chn);
 
-        let act = self.virt_cstat(chn as i32);
+        let mut act = self.virt_cstat(chn as i32);
+        // (not libxmp: an OPL note has no voice, and is processed as an active one)
+        let opl_on = self.opl.is_some() && self.opl_chan_on(chn);
+        if opl_on && act == VIRT_INVALID {
+            act = VIRT_ACTIVE;
+        }
         if act == VIRT_INVALID {
             self.update_volume(chn);
             return;
@@ -1560,6 +1570,9 @@ impl Context {
                     self.virt_voicepos(chn as i32, 0.0);
                 } else {
                     self.p.xc_data[chn].set_note(NOTE_END);
+                    if opl_on {
+                        self.opl_cut(chn);
+                    }
                 }
                 let xc = &mut self.p.xc_data[chn];
                 let (s, mm, d) = RVAL[(xc.retrig.type_ as usize).min(16)];
@@ -1593,6 +1606,9 @@ impl Context {
         self.process_volume(chn, act);
         self.process_frequency(chn, act);
         self.process_pan(chn, act);
+        if opl_on {
+            self.opl_update(chn);
+        }
 
         if self.has_quirk(QUIRK_PROTRACK | QUIRK_INVLOOP) && (self.p.xc_data[chn].ins as u32 as usize) < self.m.module.ins {
             self.update_invloop(chn);
@@ -1798,6 +1814,7 @@ impl Context {
             xc.filter.cutoff = 0xff;
         }
         self.reset_channels();
+        self.opl_start();
         self.playing = true;
     }
 
@@ -1847,6 +1864,9 @@ impl Context {
             self.update_from_ord_info();
             self.virt_reset();
             self.reset_channels();
+            if self.opl.is_some() {
+                self.opl_reset();
+            }
         } else {
             if self.p.bad_sequence != 0 {
                 return false;
@@ -2616,6 +2636,9 @@ impl Context {
         self.process_fx(chn, e, 1);
         self.process_fx(chn, e, 0);
         self.set_period(note, sub, chn, is_toneporta);
+        if self.opl.is_some() {
+            self.opl_event(chn, e.note == XMP_KEY_OFF, note);
+        }
 
         if sub.is_none() {
             return;

@@ -766,6 +766,11 @@ impl Context {
             vi.old_vr = vol_r;
         }
 
+        // (not libxmp: the OPL of a module with AdLib instruments)
+        if self.opl.is_some() {
+            self.opl_mix(ticksize as usize);
+        }
+
         // downmix_int_16bit
         let size = ((ticksize * 2).min(self.s.total_size)) as usize;
         let shift = DOWNMIX_SHIFT - self.s.amplify;

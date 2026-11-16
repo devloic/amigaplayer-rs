@@ -25,6 +25,7 @@ pub mod lzw;
 pub mod loaders;
 pub mod mixer;
 pub mod module;
+pub mod opl_glue;
 pub mod player;
 pub mod scan;
 mod spline_lut;

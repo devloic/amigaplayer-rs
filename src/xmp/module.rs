@@ -630,6 +630,13 @@ pub struct ModuleData {
     /// Not libxmp: the filter has OpenMPT's extended range and damping
     /// (`filter::filter_setup_ext`), for MadTracker 2 modules converted by `mptconv`.
     pub mpt_ext_filter: bool,
+    /// Not libxmp: the AdLib (OPL2) instrument of each instrument slot, for the
+    /// S3M modules that have them (`SCRI`); empty for every other module, which
+    /// then never touches the OPL path (`xmp::opl_glue`).
+    pub opl_patches: Vec<Option<crate::opl::OplPatch>>,
+    /// Not libxmp: OpenMPT's OPL level for the module, `m_nVSTiVolume` (36 for a
+    /// stereo S3M, 36 * 8 / 11 for a mono one).
+    pub opl_vsti_volume: i32,
 }
 
 impl Default for ModuleData {
@@ -664,6 +671,8 @@ impl Default for ModuleData {
             scan_cnt: Vec::new(),
             midi: None,
             mpt_ext_filter: false,
+            opl_patches: Vec::new(),
+            opl_vsti_volume: 36,
         };
         for i in 0..XMP_MAX_CHANNELS {
             let pan = (((i as i32 + 1) / 2) % 2) * 0xff;

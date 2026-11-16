@@ -8,7 +8,9 @@
 //! compatibility as libxmp does for files written by ModPlug, OpenMPT, Impulse
 //! Tracker, Imago Orpheus, Schism Tracker and the others. OPL2 (AdLib)
 //! instruments load as libxmp loads them: named, with their volume and pitch,
-//! and no sample data, so they play silent.
+//! and no sample data; not in libxmp, their 12 register bytes are kept in
+//! `opl_patches`, and the player plays them on the Opal OPL3 emulator
+//! (`xmp::opl_glue`).
 
 use crate::xmp::load::*;
 use crate::xmp::module::*;
@@ -263,6 +265,9 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
     if !stereo {
         m.mvol = m.mvol * 8 / 11;
     }
+    // (not libxmp) OpenMPT's level for OPL instruments, "approximately as loud
+    // as in DOSBox and a real SoundBlaster 16", scaled as the mix volume in mono
+    m.opl_vsti_volume = if stereo { 36 } else { (36 * 8 + 5) / 11 };
 
     for (i, &cs) in chset.iter().enumerate() {
         if cs == S3M_CH_OFF {
@@ -384,6 +389,13 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
             sub.xpo = xpo + 12;
             sub.fin = fin;
             m.module.xxi[i].sub = vec![sub];
+            // (not libxmp: the 12 register bytes, which the OPL synthesis plays)
+            if m.opl_patches.len() < insnum {
+                m.opl_patches.resize(insnum, None);
+            }
+            let mut patch = [0u8; 12];
+            patch.copy_from_slice(&buf[16..28]);
+            m.opl_patches[i] = Some(patch);
             continue;
         }
 
@@ -521,6 +533,43 @@ mod tests {
         // a sample slot with that length is still refused
         d[0x70] = 1;
         assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
+    }
+
+    /// synth() with its instrument made an AdLib one (type 2, `SCRI`).
+    fn synth_adlib() -> Vec<u8> {
+        let mut d = synth();
+        let ins = 0x70;
+        d[ins] = 2;
+        let patch = [0x21, 0x21, 0x10, 0x00, 0xf2, 0xf2, 0x05, 0x05, 0x00, 0x00, 0x01, 0];
+        d[ins + 16..ins + 28].copy_from_slice(&patch);
+        d[ins + 76..ins + 80].copy_from_slice(b"SCRI");
+        d
+    }
+
+    #[test]
+    fn adlib_instrument_plays_on_the_opl() {
+        let d = synth_adlib();
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!(m.opl_patches.len(), 1);
+        assert_eq!(m.opl_patches[0].unwrap()[..4], [0x21, 0x21, 0x10, 0x00]);
+        assert_eq!((m.module.xxi[0].nsm, m.module.xxs[0].data.is_none()), (1, true));
+        let peak = |d: &[u8]| {
+            let mut p = crate::xmp::XmpPlayer::new(d, 48000).unwrap();
+            let mut out = vec![0i16; 48000 * 2];
+            let n = p.render(&mut out);
+            out[..n * 2].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0)
+        };
+        // the note plays (libxmp alone renders it silent)
+        // (volume 32 of 64 on the right: 630 at 48 kHz)
+        assert!(peak(&d) > 300);
+        // a module without AdLib instruments has no OPL
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&synth())).unwrap();
+        assert!(m.opl_patches.is_empty());
+        let mut c = crate::xmp::load_module(&synth()).unwrap();
+        c.start_player(48000);
+        assert!(c.opl.is_none());
     }
 
     #[test]

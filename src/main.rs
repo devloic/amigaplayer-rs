@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// The options that need the 68k players, which only a build with `host-68k` has.
 #[cfg(not(feature = "host-68k"))]
-const NEEDS_68K: &[&str] = &["--players", "--eagleplayers", "--player", "--68k-players", "--genies", "--genie", "--noteplayer", "--libs"];
+const NEEDS_68K: &[&str] = &["--players", "--eagleplayers", "--player", "--68k-players", "--68k-first", "--genies", "--genie", "--noteplayer", "--libs"];
 
 struct Args {
     #[cfg(feature = "host-68k")]
@@ -88,7 +88,7 @@ const USAGE_68K: &str = "68k players (this build has them): [--players DIR] [--e
          ~/.config/amigaplayer-rs/DeliGenies, ./DeliGenies); --genie NAME runs one, and a\n\
          NotePlayer genie (--noteplayer NAME) plays the notes of _note players\n\
          (default: 4Voices-NotePlayer when installed; --noteplayer builtin has the\n\
-         built-in renderer play them). --68k-players\n\
+         built-in renderer play them). --68k-players (or --68k-first)\n\
          plays the formats the open replayers know with the 68k players instead\n\
          (--player NAME always does).";
 
@@ -149,7 +149,8 @@ fn parse_args() -> Args {
             #[cfg(not(feature = "host-68k"))]
             "--open-replayers" => {}
             #[cfg(feature = "host-68k")]
-            "--68k-players" => a.open_replayers = false,
+            // (`--68k-first` is amigaplayer-render's name for it)
+            "--68k-players" | "--68k-first" => a.open_replayers = false,
             #[cfg(feature = "host-68k")]
             "--genies" => a.genies = it.next().map(PathBuf::from),
             #[cfg(feature = "host-68k")]
@@ -202,6 +203,11 @@ fn parse_args() -> Args {
             "--volume" => a.volume = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
             "--archive-entry" => a.archive_entry = Some(it.next().unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
+            // (an unknown option is not taken for a file name; `./--x` names such a file)
+            o if o.starts_with("--") => {
+                eprintln!("amigaplayer-rs: unknown option {o}");
+                std::process::exit(2);
+            }
             _ => a.files.push(PathBuf::from(&raw[raw.len() - it.len() - 1])),
         }
     }

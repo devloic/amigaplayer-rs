@@ -432,6 +432,7 @@ fn start(e: &mut Engine, a: &Args, dbs: &Dbs, item: &amigaplayer_rs::playlist::I
     let db_info = dbs.songdb.as_ref().map(|db| db.lookup(&data));
     // the HVSC lengths of the file's songs, if it is listed
     let hvsc: Option<Vec<u32>> = dbs.songlengths.as_ref().and_then(|l| l.lookup(&data).map(|l| l.to_vec()));
+    let raw = data.clone();
     e.play_data(&item.path, data)?;
     let (lo, hi, start) = match &e.playing {
         Some(p) => (p.sub_min, p.sub_max, p.sub),
@@ -468,11 +469,12 @@ fn start(e: &mut Engine, a: &Args, dbs: &Dbs, item: &amigaplayer_rs::playlist::I
     };
     #[allow(unused_mut)]
     let mut info = format!(
-        "{{\"title\":{},\"format\":{},\"author\":{},\"backend\":\"{backend}\",\"subsong_min\":{lo},\"subsong_max\":{hi},\"subsong_default\":{start},\"subsong\":{}}}",
+        "{{\"title\":{},\"format\":{},\"author\":{},\"backend\":\"{backend}\",\"subsong_min\":{lo},\"subsong_max\":{hi},\"subsong_default\":{start},\"subsong\":{},\"text\":{}}}",
         json_str(&p.module_name),
         json_str(&p.format),
         json_str(&p.author),
-        p.sub
+        p.sub,
+        json_str(&amigaplayer_rs::text::module_text(&p.format, &raw))
     );
     // the entry of the archive this is
     if let Some(name) = &item.entry {

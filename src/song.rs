@@ -398,6 +398,13 @@ impl Song {
         &self.meta.1
     }
 
+    /// The text the composer left in the module (song and sample or instrument names, the song
+    /// message), lines joined with `\n`; empty when the format has none. See
+    /// [`text::module_text`](crate::text::module_text).
+    pub fn text(&self) -> String {
+        crate::text::module_text(self.format(), &self.data)
+    }
+
     /// The module's own title, or its file name when it has none.
     pub fn title(&self) -> &str {
         &self.meta.0

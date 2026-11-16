@@ -106,6 +106,7 @@ mod song;
 #[cfg(feature = "songdb")]
 pub mod songdb;
 pub mod songlengths;
+pub mod text;
 pub mod unpack;
 
 pub use song::{detect, detect_with, formats, Error, MissingCall, Options, Result, Song, Subsongs};

@@ -86,6 +86,7 @@ while !song.songend() && song.elapsed_secs() < 120.0 {
 | `duration_hint()` | seconds, for recordings and PC trackers; `None` for Amiga replayers |
 | `elapsed_secs()` / `restart()` / `seek(secs)` | position; `seek` restarts and renders up to the point |
 | `title()` / `format()` / `sample_rate()` | metadata |
+| `text()` | the module text: composer messages kept in the song title, sample and instrument names and song message (`""` if none); also `amigaplayer_rs::text::module_text(format, bytes)`, which needs no `Song` and no feature (packed files are unpacked first; SID gives `""`) |
 | `MissingCall` | `library` (`"exec.library"`), `function` (`Some("AddTask")` where the host knows the name), `lvo` (`-282`), `fatal`; `Display` gives `exec.library/AddTask() (LVO -282)`; `#[non_exhaustive]` |
 | `Error` | `NotRecognised`, `MissingCompanion { format, wanted }`, `Invalid(String)`, `InvalidRate(u32)`, `SubsongOutOfRange{..}`, `Internal(String)`, `Guest(String)`; `#[non_exhaustive]` |
 
@@ -330,7 +331,7 @@ the engine's full instruction budget and the host's files visible to them; `--pl
 `--eagleplayers` and `--genies` add original players. The render stops at the player's song
 end, after `--silence` seconds of silence (10) or after `--seconds` (600). `--info` prints one
 line of JSON (`title`, `format`, `author`, `backend`, `subsong_min`, `subsong_max`,
-`subsong_default`, `subsong`) and renders nothing; a render prints the same line on standard
+`subsong_default`, `subsong`, `text`: the module text, a string that is always present) and renders nothing; a render prints the same line on standard
 error. Exit status 0 played, 1 not playable (missing, not recognised, no such subsong: nothing
 is written to standard output), 2 wrong usage. A module that no player recognises is
 `unknown module format`; one that a replayer recognises but cannot play for want of the files

@@ -51,6 +51,9 @@ pub static LOADERS: &[Loader] = &[
     // "Apocalypse Abyss" (Software Visions, `.dmf`; ".M.K", header and first pattern
     // byte-swapped). The other MODs stay on the built-in ProTracker (see `mod_load`).
     Loader { name: "Software Visions DMF", test: software_visions_test, load: loaders::mod_load::load },
+    // (not libxmp's order) and for a MOD whose samples ModPlug packed as 4-bit ADPCM, which the
+    // built-in ProTracker declines (it plays sample bytes as PCM); mod_load decodes them.
+    Loader { name: "ModPlug ADPCM MOD", test: modplug_adpcm_test, load: loaders::mod_load::load },
     // Un4seen MO3 (`.mo3`): IT, XM, S3M, MOD and MTM modules with packed music data and
     // compressed samples, put back into their format for that format's loader (see `mo3`).
     Loader { name: "Un4seen MO3", test: crate::mo3::test, load: crate::mo3::load },
@@ -105,6 +108,11 @@ pub static LOADERS: &[Loader] = &[
 /// libxmp's `mod_test` for a module whose magic is ".M.K" (Software Visions DMF).
 fn software_visions_test(data: &[u8]) -> bool {
     data.get(1080..1084) == Some(b".M.K") && loaders::mod_load::test(data)
+}
+
+/// libxmp's `mod_test` for a MOD with ModPlug ADPCM samples (see `ProTracker::modplug_adpcm`).
+fn modplug_adpcm_test(data: &[u8]) -> bool {
+    crate::protracker::ProTracker::modplug_adpcm(data) && loaders::mod_load::test(data)
 }
 
 /// The loader that claims `data`, if any.

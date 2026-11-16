@@ -438,6 +438,10 @@ impl ProTracker {
     /// Recognises a 31-instrument (M.K. and friends) or 15-instrument module.
     pub fn detect(d: &[u8]) -> Option<&'static str> {
         if d.len() >= 1084 {
+            if Self::modplug_adpcm(d) {
+                // ModPlug's 4-bit ADPCM samples: the libxmp port's MOD loader decodes them
+                return None;
+            }
             match &d[1080..1084] {
                 b"M.K." | b"M!K!" | b"M&K!" | b"N.T." => return Some("ProTracker"),
                 b"FLT4" => return Some("StarTrekker"),
@@ -449,6 +453,32 @@ impl ProTracker {
             return Some("SoundTracker");
         }
         None
+    }
+
+    /// A 31-instrument module whose sample data ModPlug packed: a sample stored as `ADPCM`, a
+    /// 16-byte delta table and (length + 1) / 2 nibble bytes. Per sample (a module can mix
+    /// packed and raw ones), walked as libxmp's MOD loader reads them; this replayer plays
+    /// sample bytes as PCM, so such a module is left to that loader.
+    pub(crate) fn modplug_adpcm(d: &[u8]) -> bool {
+        if d.len() < 1084 {
+            return false;
+        }
+        let pats = d[952..1080].iter().copied().max().unwrap_or(0) as usize + 1;
+        let mut pos = 1084 + pats * 1024;
+        for i in 0..31 {
+            let len = word(d, 20 + i * 30 + 22) as usize * 2;
+            if len == 0 {
+                continue;
+            }
+            if pos + 5 > d.len() {
+                return false;
+            }
+            if &d[pos..pos + 5] == b"ADPCM" {
+                return true;
+            }
+            pos += len;
+        }
+        false
     }
 
     fn plausible_st(d: &[u8]) -> bool {
@@ -1391,6 +1421,33 @@ mod tests {
             d[o..o + 4].copy_from_slice(&l.to_be_bytes());
         }
         d
+    }
+
+    /// A MOD whose sample ModPlug packed as ADPCM is left to the libxmp port's MOD loader,
+    /// also when a raw sample comes first; a plain MOD stays here.
+    #[test]
+    fn modplug_adpcm_mod_goes_to_libxmp() {
+        let plain = module(8, 0, 1, 0, &[(0, 0, 0x0D60_1000)]);
+        assert_eq!(ProTracker::detect(&plain), Some("ProTracker"));
+        assert!(crate::xmp::detect_open(&plain).is_none());
+        // sample 1: 16 bytes, packed to "ADPCM" + 16-byte table + 8 nibble bytes
+        let mut d = plain[..1084 + 1024].to_vec();
+        d.extend_from_slice(b"ADPCM");
+        d.extend_from_slice(&[0, 1, 2, 4, 8, 16, 32, 64, 0xff, 0xfe, 0xfc, 0xf8, 0xf0, 0xe0, 0xd0, 0xc0]);
+        d.extend_from_slice(&[0x11; 8]);
+        assert_eq!(ProTracker::detect(&d), None);
+        assert_eq!(crate::xmp::detect_open(&d).map(|l| l.name), Some("ModPlug ADPCM MOD"));
+        // a raw 4-word sample 1, then the packed one as sample 2
+        let mut m = d[..1084 + 1024].to_vec();
+        m[42..44].copy_from_slice(&4u16.to_be_bytes());
+        m[72..74].copy_from_slice(&8u16.to_be_bytes());
+        m.extend_from_slice(&[0u8; 8]);
+        m.extend_from_slice(&d[1084 + 1024..]);
+        assert_eq!(ProTracker::detect(&m), None);
+        // "ADPCM" past a raw sample's end is not the next sample's start: plain MOD
+        let mut r = plain.clone();
+        r[1084 + 1024 + 2..1084 + 1024 + 7].copy_from_slice(b"ADPCM");
+        assert_eq!(ProTracker::detect(&r), Some("ProTracker"));
     }
 
     /// Instrument numbers above 31 name no sample: ignored, no panic.

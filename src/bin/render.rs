@@ -33,7 +33,8 @@ const USAGE: &str = "usage: amigaplayer-render [OPTIONS] MODULE
                     subsong to play: a number, the lowest one, or the module's own
                     start (the default)
   --seconds S       stop after S seconds (default 600; 0 = no limit)
-  --silence S       stop after S seconds of silence (default 10; 0 = never)
+  --silence S       stop after S seconds of silence (default 10; 0 = never); before the
+                    first sound after max(S, 60) (modules with silent intros of 10-28 s)
   --no-songend      play on when the player reports the song's end
   --volume V        output volume (default 0.8; UADE's level is 1)
   --info            print one line of JSON about the module on standard output
@@ -291,6 +292,8 @@ fn songdb_json(info: Option<&amigaplayer_rs::songdb::Info>, sub: u16) -> String 
 /// How long the output has to be digitally silent, past the song database's length, for
 /// `--stop-at songdb` to stop there.
 const SONGDB_SILENCE_SECS: f64 = 0.5;
+/// The least silence before a module's first sound that `--silence` stops at.
+const LEAD_SILENCE_SECS: u64 = 60;
 
 fn wav_header(rate: u32, data_len: u32) -> [u8; 44] {
     let mut h = [0u8; 44];
@@ -522,6 +525,9 @@ fn render_module(e: &mut Engine, a: &Args, st: &Started, out: &mut Sink) -> Resu
     let limit = if a.seconds > 0.0 { (a.seconds * a.rate as f64) as u64 } else { u64::MAX };
     let limit = st.songlength_stop.map_or(limit, |l| limit.min(l));
     let quiet_limit = if a.silence > 0.0 { (a.silence * a.rate as f64) as u64 } else { u64::MAX };
+    // before the first sound: some S3Ms open with 10 to 28 s of silence
+    let lead_limit = quiet_limit.max(LEAD_SILENCE_SECS * a.rate as u64);
+    let mut sounded = false;
     let mut buf = vec![0f32; 2 * 4096];
     let mut bytes = Vec::with_capacity(4 * 4096);
     let (mut done, mut quiet) = (0u64, 0u64);
@@ -571,13 +577,14 @@ fn render_module(e: &mut Engine, a: &Args, st: &Started, out: &mut Sink) -> Resu
         }
         done += n as u64;
         quiet = if silent { quiet + n as u64 } else { 0 };
+        sounded |= !silent;
         if songdb_len.is_some_and(|len| done >= len) && run >= window {
             // the database's length has passed and the output is silent: the song ends where
             // the silence began, or at that length if it began before (nothing held is written)
             done -= std::mem::take(&mut held);
             break;
         }
-        if e.playing.is_none() || (a.songend && e.songend()) || quiet >= quiet_limit {
+        if e.playing.is_none() || (a.songend && e.songend()) || quiet >= if sounded { quiet_limit } else { lead_limit } {
             break;
         }
     }

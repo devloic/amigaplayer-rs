@@ -13,12 +13,17 @@
 //! An AIFF file is decoded by the library's AIFF decoder (a recording: played to its end).
 //!
 //! The PCM is interleaved stereo s16le. A tune ends where its replayer says, after
-//! 10 s of silence, or at `max_bytes` (truncated): many Amiga players loop for ever.
+//! 10 s of silence once it has sounded (60 s before its first sound: some modules open
+//! with that long a silent intro), or at `max_bytes` (truncated): many Amiga players loop
+//! for ever.
 
 use amigaplayer_rs::{Error, Options, Song};
 use std::path::PathBuf;
 
 const SILENCE_S: u32 = 10;
+/// The silence before the first sound that ends a tune: S3Ms with silent intros of 10 to
+/// 28 s (amp/Jakim, Xenoc, ZeOLiTe ...) were cut off at `SILENCE_S`.
+const LEAD_SILENCE_S: u32 = 60;
 
 struct State {
     files: Vec<(String, Vec<u8>)>,
@@ -145,6 +150,7 @@ pub unsafe extern "C" fn dp_open(
     let max_frames = max_bytes / 4;
     let mut buf = vec![0i16; 2 * 1024];
     let mut quiet = 0u32;
+    let mut sounded = false;
     // a recording is played to its end, silent stretches included
     let recorded = song.format().starts_with("AIFF");
     while !song.songend() {
@@ -159,7 +165,9 @@ pub unsafe extern "C" fn dp_open(
             s.pcm.push(v);
         }
         quiet = if silent { quiet + buf.len() as u32 / 2 } else { 0 };
-        if !recorded && quiet >= SILENCE_S * rate {
+        sounded |= !silent;
+        let limit = if sounded { SILENCE_S } else { LEAD_SILENCE_S };
+        if !recorded && quiet >= limit * rate {
             break;
         }
     }

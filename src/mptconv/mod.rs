@@ -6,7 +6,8 @@
 //! - [`dsm`]: Digisound Interface Kit (DSIK) internal format (`RIFF` / `DSMF`, `.dsm`),
 //!   `Load_dsm.cpp`, as S3M;
 //! - [`ams`]: Velvet Studio (`AMShdr`) and Extreme's Tracker (`Extreme`, `.ams`), `Load_ams.cpp`,
-//!   as IT.
+//!   as IT;
+//! - [`gt2`]: Graoumf Tracker (`GTK`) and Graoumf Tracker 2 (`GT2`), `Load_gt2.cpp`, as IT.
 //!
 //! This file holds the pieces of OpenMPT the three loaders share: the effect commands
 //! (`ModCommand`, `EffectCommand`, `VolumeCommand`), the MOD / S3M / IT command readers
@@ -27,6 +28,7 @@
 
 pub mod ams;
 pub mod dsm;
+pub mod gt2;
 pub mod mt2;
 
 use crate::mo3::{Cell as NCell, Env, Ins, Kind, Smp, Song};

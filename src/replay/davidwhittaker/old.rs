@@ -3,6 +3,11 @@
 //! LICENSE-NostalgicPlayer), its `oldPlayer` paths. The original 68k player
 //! crashes on this replayer, so NostalgicPlayer is the only reference: this
 //! port does what its C# does and nothing the Eagleplayer's scans would add.
+//! Checked 2026-11-16 against NostalgicPlayer's own DavidWhittaker.dll, run tick
+//! by tick with a recording channel: dw.Q-Ball's 4 subsongs, 2950 ticks each,
+//! 3608 channel events, 0 differences. No original-player reference exists, so
+//! this is the weakest verification of the open replayers (refcmp row 2099
+//! compares against a fallback reference).
 //!
 //! What differs from the other builds, as NostalgicPlayer has it:
 //! * the module is found by the same byte patterns as the other builds' (the

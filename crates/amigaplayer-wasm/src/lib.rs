@@ -63,8 +63,25 @@ pub unsafe extern "C" fn dp_detect(p: *const u8, n: usize) -> i32 {
     // (a panic aborts under panic = "abort"; the guard is for builds without it)
     let d = unsafe { bytes(p, n) };
     // a custom module too (the module's own 68k code, which `dp_open` plays)
-    std::panic::catch_unwind(|| (amigaplayer_rs::detect(d).is_some() || amigaplayer_rs::detect_custom(d)) as i32)
-        .unwrap_or(0)
+    std::panic::catch_unwind(|| (amigaplayer_rs::detect(d).is_some() || is_custom(d)) as i32).unwrap_or(0)
+}
+
+#[cfg(feature = "custom-modules")]
+fn is_custom(d: &[u8]) -> bool {
+    amigaplayer_rs::detect_custom(d)
+}
+
+#[cfg(not(feature = "custom-modules"))]
+fn is_custom(_: &[u8]) -> bool {
+    false
+}
+
+/// The options `dp_open` opens a song with: custom modules allowed when the build has them.
+fn open_options() -> Options {
+    #[cfg(feature = "custom-modules")]
+    return Options::new().allow_custom(true);
+    #[cfg(not(feature = "custom-modules"))]
+    Options::new()
 }
 
 /// A companion file for the next `dp_open`, at `path` relative to the module.
@@ -101,7 +118,7 @@ pub unsafe extern "C" fn dp_open(
     let data = unsafe { bytes(p, n) };
     let name = String::from_utf8_lossy(unsafe { bytes(name, name_len) }).replace(['/', '\\'], "_");
     let companions: Vec<(&str, &[u8])> = files.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
-    let mut song = match Song::open_opts(&name, data, &companions, rate, &Options::new().allow_custom(true)) {
+    let mut song = match Song::open_opts(&name, data, &companions, rate, &open_options()) {
         Ok(song) => song,
         Err(Error::NotRecognised) => return -2,
         Err(e) => {

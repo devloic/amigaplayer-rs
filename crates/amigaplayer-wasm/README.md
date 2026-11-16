@@ -45,6 +45,9 @@ The PCM is interleaved stereo signed 16-bit little-endian at the rate given to `
 | `dp_pcm_ptr() / dp_pcm_len()` | the PCM (length in **bytes**) |
 | `dp_truncated() -> 0/1` | the byte limit cut the tune short |
 | `dp_close()` | drop the PCM and info |
+| `dp_archive(name_ptr, name_len, ptr, n) -> i32` | extracts an archive (LhA, Amiga LZX, zip, tar, gzip, xz) into the shim; `name` is its file name (it names the file inside a gzip / xz wrapper). Returns the **entry count**, **-2** not an archive, **-1** unreadable (reason in the info string). The info string then lists the entries, one line each: `index\tpath\tsize\tclaimed` (`claimed` 1: an open replayer claims it, as `dp_detect`, and it is not a known non-music file). The archive's bytes may be freed after the call |
+| `dp_open_entry(index, rate, max_bytes, subsong) -> i32` | as `dp_open`, on entry `index`, with the archive's other entries as its companion files (a TFMX `mdat.*` finds its `smpl.*`); its name is the entry's file name. Same return values |
+| `dp_archive_close()` | drop the extracted entries |
 
 `subsong`, `first`, `last` are in the format's own numbering. The info string, the PCM and
 `dp_alloc` pointers are only valid until the next call that allocates (the linear memory can
@@ -77,7 +80,12 @@ For companion files call `x.dp_add_file(...)` before `dp_open`.
 
 `amigaplayer.mjs` of the archive web app (`createAmigaPlayer(wasmBytes)`, `A.decode({ bytes,
 name, companions, rate, limitS })`) is a ready-made wrapper of exactly this protocol; the ABI
-is unchanged since it was written and must stay so.
+is unchanged since it was written and must stay so (the archive exports were added beside it).
+
+An archive: `n = x.dp_archive(...)`, read the entry list from the info string, then
+`x.dp_open_entry(i, rate, maxBytes, -1)` per claimed entry (the PCM and info as after
+`dp_open`), and `x.dp_archive_close()` when done. `test/archive.mjs WASM ARCHIVE [INDEX]`
+drives it.
 
 ## Smoke test
 

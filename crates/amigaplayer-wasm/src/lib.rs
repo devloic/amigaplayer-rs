@@ -8,6 +8,13 @@
 //! dp_open(name, len, p, n, rate, max_bytes, subsong)   0, -2 not claimed, -1 failed
 //! dp_info_ptr/len            "title\tformat\tsubsong\tfirst\tlast"; after -1, the reason
 //! dp_pcm_ptr/len, dp_truncated, dp_close
+//!
+//! dp_archive(name, len, p, n)    an archive (LhA, LZX, zip, tar, gzip, xz) extracted into
+//!                                the shim: its entry count, -2 not an archive, -1 unreadable;
+//!                                dp_info: one line per entry, "index\tpath\tsize\tclaimed"
+//! dp_open_entry(i, rate, max_bytes, subsong)   as dp_open, on entry i, the other entries
+//!                                its companions
+//! dp_archive_close               frees the extracted entries
 //! ```
 //!
 //! An AIFF file is decoded by the library's AIFF decoder (a recording: played to its end).
@@ -27,12 +34,15 @@ const LEAD_SILENCE_S: u32 = 60;
 
 struct State {
     files: Vec<(String, Vec<u8>)>,
+    /// The entries of the archive `dp_archive` extracted, until `dp_archive_close`.
+    archive: Vec<(String, Vec<u8>)>,
     info: String,
     pcm: Vec<i16>,
     truncated: bool,
 }
 
-static mut STATE: State = State { files: Vec::new(), info: String::new(), pcm: Vec::new(), truncated: false };
+static mut STATE: State =
+    State { files: Vec::new(), archive: Vec::new(), info: String::new(), pcm: Vec::new(), truncated: false };
 
 #[allow(static_mut_refs)]
 fn st() -> &'static mut State {
@@ -115,15 +125,93 @@ pub unsafe extern "C" fn dp_open(
     max_bytes: usize,
     subsong: i32,
 ) -> i32 {
+    let files = std::mem::take(&mut st().files);
+    let data = unsafe { bytes(p, n) };
+    let name = String::from_utf8_lossy(unsafe { bytes(name, name_len) }).replace(['/', '\\'], "_");
+    let companions: Vec<(&str, &[u8])> = files.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
+    decode(&name, data, &companions, rate, max_bytes, subsong)
+}
+
+/// Extracts the archive `p` (its file name `name`, which names the file inside a gzip or xz
+/// wrapper) into the shim for `dp_open_entry`. Returns the number of entries, -2 when it is
+/// not an archive, -1 when nothing can be read from it (the reason in dp_info). dp_info then
+/// lists the entries, one line each: "index\tpath\tsize\tclaimed", claimed 1 when an open
+/// replayer claims the entry (as dp_detect) and its name is not a known non-music file.
+///
+/// # Safety
+/// The pointers point at their lengths in bytes; `name` is UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dp_archive(name: *const u8, name_len: usize, p: *const u8, n: usize) -> i32 {
+    use amigaplayer_rs::archive;
+    let s = st();
+    s.archive = Vec::new();
+    s.info.clear();
+    let data = unsafe { bytes(p, n) };
+    if archive::format(data).is_none() {
+        return -2;
+    }
+    let name = String::from_utf8_lossy(unsafe { bytes(name, name_len) }).into_owned();
+    let a = match archive::extract(&name, data, &archive::Limits::default()) {
+        Ok(a) => a,
+        Err(e) => {
+            s.info = e.to_string();
+            return -1;
+        }
+    };
+    for (i, e) in a.entries.iter().enumerate() {
+        let base = e.name.rsplit('/').next().unwrap_or(&e.name);
+        let claimed = !archive::is_not_music(base)
+            && std::panic::catch_unwind(|| amigaplayer_rs::detect(&e.data).is_some() || is_custom(&e.data))
+                .unwrap_or(false);
+        s.info.push_str(&format!("{i}\t{}\t{}\t{}\n", e.name.replace(['\t', '\n'], " "), e.data.len(), claimed as i32));
+    }
+    s.archive = a.entries.into_iter().map(|e| (e.name, e.data)).collect();
+    s.archive.len() as i32
+}
+
+/// As `dp_open`, on entry `index` of the archive `dp_archive` extracted, with the archive's
+/// other entries as its companion files (at their paths relative to the entry's directory,
+/// and at their full paths). -1 when there is no such entry.
+#[unsafe(no_mangle)]
+pub extern "C" fn dp_open_entry(index: i32, rate: u32, max_bytes: usize, subsong: i32) -> i32 {
+    let entries = std::mem::take(&mut st().archive);
+    let r = match usize::try_from(index).ok().and_then(|i| entries.get(i).map(|e| (i, e))) {
+        None => {
+            st().info = format!("no archive entry {index}");
+            -1
+        }
+        Some((i, (path, data))) => {
+            let dir = path.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
+            let mut companions: Vec<(&str, &[u8])> = Vec::new();
+            for (j, (p, d)) in entries.iter().enumerate() {
+                if j != i {
+                    if let Some(rel) = p.strip_prefix(dir.as_str()).filter(|r| !dir.is_empty() && !r.is_empty()) {
+                        companions.push((rel, d.as_slice()));
+                    }
+                    companions.push((p.as_str(), d.as_slice()));
+                }
+            }
+            let name = path.rsplit('/').next().unwrap_or(path).to_string();
+            decode(&name, data, &companions, rate, max_bytes, subsong)
+        }
+    };
+    st().archive = entries;
+    r
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dp_archive_close() {
+    st().archive = Vec::new();
+}
+
+/// Decodes `data` (its file name `name`) with its companions into the shim's PCM: dp_open's
+/// work, shared by dp_open_entry.
+fn decode(name: &str, data: &[u8], companions: &[(&str, &[u8])], rate: u32, max_bytes: usize, subsong: i32) -> i32 {
     let s = st();
     s.pcm = Vec::new();
     s.info.clear();
     s.truncated = false;
-    let files = std::mem::take(&mut s.files);
-    let data = unsafe { bytes(p, n) };
-    let name = String::from_utf8_lossy(unsafe { bytes(name, name_len) }).replace(['/', '\\'], "_");
-    let companions: Vec<(&str, &[u8])> = files.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
-    let mut song = match Song::open_opts(&name, data, &companions, rate, &open_options()) {
+    let mut song = match Song::open_opts(name, data, companions, rate, &open_options()) {
         Ok(song) => song,
         Err(Error::NotRecognised) => return -2,
         Err(e) => {

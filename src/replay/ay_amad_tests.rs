@@ -212,7 +212,9 @@ fn amad_malformed_is_bounded() {
 }
 
 /// Writes the AY registers 0..=13 after each 50 Hz frame, one line per frame (hex), for
-/// AY_DUMP=file [AY_SONG=n] [AY_FRAMES=n] to AY_OUT (default stdout).
+/// AY_DUMP=file [AY_SONG=n] [AY_FRAMES=n] to AY_OUT (default stdout). With AY_WRITES=1 each
+/// line also lists the frame's register writes in order, after " |", as " register=value"
+/// (register decimal, value hex): the reference format of tools/zxay-st-ref.py.
 #[test]
 #[ignore]
 fn regdump() {
@@ -221,11 +223,20 @@ fn regdump() {
     let mut p = AyPlayer::new(&d, 48000).unwrap();
     p.start(std::env::var("AY_SONG").ok().and_then(|s| s.parse().ok()).unwrap_or(0));
     let frames: u64 = std::env::var("AY_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(500);
+    let writes = std::env::var("AY_WRITES").is_ok_and(|v| v == "1");
     let mut out = String::new();
     for _ in 0..frames {
         p.frame();
         let r = p.m.regs;
         out += &r[..14].iter().map(|v| format!("{v:02x}")).collect::<Vec<_>>().join(" ");
+        if writes {
+            out += " |";
+            for &(_, e) in &p.m.events {
+                if let Ev::Reg(r, v) = e {
+                    out += &format!(" {r}={v:02x}");
+                }
+            }
+        }
         out.push('\n');
     }
     match std::env::var("AY_OUT") {

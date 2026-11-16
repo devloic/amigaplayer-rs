@@ -1,7 +1,7 @@
 # index	note	zx_ay_period	playay_paula_period	formula round(30714.9*2^(-index/12))
 # zx_ay_period: AY tone period (R0/R1 etc.) the Z80 Sound Tracker player writes (Spectrum AY clock 1.77345 MHz)
 # playay_paula_period: Paula AUDxPER PlayAY ZXAYST11/ZXAYSTRC writes for the same index (about 8 x an AY period)
-# indexes 96..255: no ZX entry measured; PlayAY reads memory after its table (values as observed, partly run-time state)
+# indexes 96..255: no ZX entry. The Z80 player masks the index to 0..127 and reads the word at $C35F + 2 x index: 96..110 fall in its code (not usable), 111..127 in the song's first 34 bytes (SPEC section 7). PlayAY reads memory after its table (values as observed, partly run-time state)
 0	C0	3832	30715	30715
 1	C#0	3600	28991	28991
 2	D0	3424	27364	27364

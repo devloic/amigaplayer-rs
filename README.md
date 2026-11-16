@@ -516,7 +516,7 @@ python3 -I tools/refcmp.py --all --update-baseline
 
 The original is the same binary playing the real Eagleplayer/DeliPlayer on the
 emulated Amiga (so the output stage is identical and bit-identical output is
-possible); for the libxmp-port formats it is libxmp itself. Each file gets a
+possible); for the libxmp-port formats it is libxmp itself. The exception is an S3M with AdLib (OPL2) instruments, which libxmp renders silent: its reference is openmpt123 (marked REF-OPENMPT). Each file gets a
 class (IDENTICAL, LAG-ONLY, NEAR, SIMILAR, or an inconsistency: FAIL,
 STAGE-MISMATCH, SILENT, LENGTH, FILTER, LEVEL, PITCH, TEMPO, DIFF, with the
 thresholds as named constants at the top of the script). `tools/refcmp-baseline.tsv`

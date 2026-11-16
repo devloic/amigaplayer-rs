@@ -95,7 +95,7 @@ RAM, the reference's allocations land at other addresses, and 18 rows move (Musi
 IDENTICAL -> SIMILAR, several MED/SoundFactory/ArtOfNoise rows): not a regression of the port.
 Check the binary is the right kind: it is about 10 MB without gen, about 33 MB with.
 """
-import argparse, concurrent.futures as cf, hashlib, html, json, lzma, os, re, shutil, subprocess, sys, wave
+import argparse, concurrent.futures as cf, hashlib, html, json, lzma, os, re, shutil, struct, subprocess, sys, wave
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1030,6 +1030,27 @@ XMP_REFUSED_BLACKBOX = ('digitrakker', 'un4seenmo3', 'madtracker2', 'dsikriffdsm
                         'extremestrackerams', 'dynamicstudio', 'graoumftracker', 'disordertracker2plm')
 
 
+def s3m_has_adlib(path):
+    """True if the file is an S3M with an AdLib (OPL2) instrument: an instrument header of type >= 2
+    carrying 'SCRI'. libxmp 4.7.4 renders those parts silent; the port plays them on its Opal port."""
+    try:
+        with open(path, 'rb') as fh:
+            d = fh.read()
+    except OSError:
+        return False
+    if len(d) < 0x60 or d[0x2C:0x30] != b'SCRM':
+        return False
+    ordn, insn = struct.unpack_from('<HH', d, 0x20)
+    for i in range(insn):
+        o = 0x60 + ordn + 2 * i
+        if o + 2 > len(d):
+            break
+        h = struct.unpack_from('<H', d, o)[0] * 16
+        if h + 0x50 <= len(d) and d[h] >= 2 and d[h + 0x4C:h + 0x50] == b'SCRI':
+            return True
+    return False
+
+
 def blackbox_key(fmt):
     """The BLACKBOX_REF key of a port format name, or None."""
     n = _norm(fmt)
@@ -1393,6 +1414,13 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
             if ctx.rate != RATE:
                 return dict(none, note=f'no libxmp harness build that renders at {ctx.rate} Hz', norate=True)
             return dict(none, note='no libxmp oracle')
+        if s3m_has_adlib(mod):   # (the format name carries the tracker that wrote the file, not always Scream Tracker)
+            # libxmp 4.7.4 renders the AdLib instruments silent, the port plays them on its Opal port
+            # (src/opl): openmpt123 (0.7.3, OPL through Opal too) is the reference, at the port's stage
+            ref = render_blackbox(ctx, mod, po, pplay, 'openmpt123')
+            if isinstance(ref, dict):
+                ref['fallback'] = 'REF-OPENMPT (S3M with AdLib instruments: libxmp 4.7.4 renders them silent)'
+                return ref
         raw, info = render_oracle(ctx, mod)
         if not raw and info.startswith('-\t0\tload') and _norm(po.get('format', '')).startswith(XMP_REFUSED_BLACKBOX):
             ref = render_blackbox(ctx, mod, po, pplay, 'openmpt123')

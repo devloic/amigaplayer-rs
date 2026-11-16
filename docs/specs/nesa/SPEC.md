@@ -373,3 +373,29 @@ change flags, waveform offset, period, volume), `<file>.write.log` (Paula writes
 5. `$4008` values 1–3 (no effect seen) and the exact linear-value arithmetic are inferred from the
    observed expiry times (step 4, stop below 4); every probe and random file agrees with that rule.
 6. The noise table is the player's data (section 6).
+
+## Errata (found while implementing, from black-box runs; 2026-11-16)
+
+The sequencer (sections 3-6) was exact: a model from it alone matched all three voice
+dumps on every tick. Section 8 (Paula write timing) was not fitted when this spec was
+written; the implementation (`src/replay/nesa.rs`, refcmp rows 2008-2010 IDENTICAL)
+measured:
+
+1. The host's `--player` name is `NESA`, not `NESA_note`.
+2. The first write of a tick is not at about 5 400-5 900 colour clocks: it is at the
+   player's time + 505 + 104 (frequency change) or + 197 (volume only), about 4 200 cc on
+   quiet ticks and up to about 9 500 on busy ones.
+3. The genie divides (utility.library) for all four voices every tick, changed or not: 369,
+   321 or 192 cc per voice (frequency change, volume only, no change), + 2 when the voice's
+   period is 0.
+4. From the last write to the end of the tick: 160 cc after a frequency change, 161 after a
+   volume-only change.
+5. A period of 0 is written as PER 0 (not raised to 122).
+6. Audio interrupt handler: LOC written 63 cc after entry; INTREQ cleared after 367 cc
+   (silence), 1263 (pulse), 846 (triangle), 478-550 (noise, by read position); exit 30 cc
+   later.
+7. The interrupt raised when DMA first starts is cleared by the start-up's INTREQ write and
+   never handled.
+8. The start-up's write times and its end set the DMA phase (Paula's line grid restarts
+   there); see the implementation's start-up model.
+9. The very first record of a playback costs 25 cc more than the same record after a restart.

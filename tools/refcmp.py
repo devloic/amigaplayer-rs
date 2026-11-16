@@ -86,7 +86,9 @@ Outputs (in --out): refcmp.tsv, summary.txt, report.html. The baseline
 class was measured against: `primary` (the format's own reference: the original player, libxmp,
 the Z80 original ...), `fallback` (a stand-in, because that reference refuses or cannot run the
 file: REF-FALLBACK in the note, so a SIMILAR there says less), `openmpt` (openmpt123 for
-libxmp, REF-OPENMPT) or `none` (NOREF / NORATE); a run reports
+libxmp, REF-OPENMPT) or `none` (NOREF / NORATE). A `none` row also keeps `port_sha`, the
+port's own output's sha256 (16 hex digits; `-` when it renders nothing): its class cannot change,
+so a run reports PORT CHANGED when the output differs, and exits 1 on it; a run reports
 NEW inconsistencies (bad now, good or absent before) and FIXED ones, and exits 1
 on a new one. Renders are cached (--cache) by binary mtime and size, settings,
 module and player directories.
@@ -1733,6 +1735,7 @@ def process(ctx, f):
             if ref['kind'] == 'none' and ref['noref']:
                 row['cls'] = 'NOREF'
                 row['note'] += '; ' + ref['note']
+                row['port_sha'] = '-'  # the port renders nothing: kept, so that it rendering shows too
             return row
         row['player'] = pplay
         po = parse_output(pout)
@@ -1747,6 +1750,7 @@ def process(ctx, f):
         with wave.open(pw, 'rb') as w:
             port_short = w.getnframes() < w.getframerate() // 4
         rb = read_wav(pw)
+        port_sha = hashlib.sha256(np.ascontiguousarray(rb[1]).tobytes()).hexdigest()[:16]
         ref = find_reference(ctx, mod, po, port_short, port_silent=not rb[1].any(), pplay=pplay)
         if ref['kind'] == 'none' and _norm(po.get('format', '')) == 'hippel7v':
             twin = coso_twin(path)
@@ -1765,6 +1769,8 @@ def process(ctx, f):
         if ref['kind'] == 'none':
             row['cls'] = 'NORATE' if ref.get('norate') else 'NOREF' if ref['noref'] else 'FAIL'
             row['note'] = ref['note']
+            # nothing to compare with: the port's own output is kept, so that a change shows (PORT CHANGED)
+            row['port_sha'] = port_sha
             return row
         if ref['kind'] == 'hvl-ticks':
             row.update(cls=ref['cls'], note=ref['note'], ref_player='hvl_replay 1.9 (BSD-3) tick dump')
@@ -1821,7 +1827,7 @@ def process(ctx, f):
 # ---- reports ----------------------------------------------------------------
 COLS = ['id', 'fmt', 'cls', 'ref_kind', 'identical', 'first_diff_s', 'pct_identical', 'maxabs', 'level_db', 'lag', 'lag_pct',
         'len_a', 'len_b', 'silent_a', 'silent_b', 'peak_a', 'peak_b', 'tempo_drift_s', 'pitch_cents', 'bands_db',
-        'note', 'path', 'ref_player', 'out_ref', 'out_port', 'led_ref', 'led_port']
+        'note', 'path', 'ref_player', 'out_ref', 'out_port', 'led_ref', 'led_port', 'port_sha']
 
 
 def ref_kind(row):
@@ -1965,6 +1971,12 @@ def main():
             changed.append((r, b['cls']))
         elif not bad_now and bad_then:
             fixed.append(r)
+    # a row without a reference: its class cannot change, so the port's output is compared with the
+    # baseline's (port_sha: '-' when the port renders nothing); rows the baseline has no sha for
+    # (written before the column) are not compared
+    port_changed = [(r, b['port_sha']) for r in rows
+                    if ref_kind(r) == 'none' and (b := base.get(r['path'])) is not None
+                    and ref_kind(b) == 'none' and b.get('port_sha') and r.get('port_sha', '') != b['port_sha']]
     text = summary(rows)
     if a.rate != RATE:
         text += f'\nsample rate {a.rate} Hz (both sides; NORATE: the reference tool cannot render at it)'
@@ -1983,6 +1995,9 @@ def main():
         text += f'  CHANGED {r["fmt"]} #{r["id"]} {was} -> {r["cls"]}\n'
     for r in newfb:
         text += f'  NEW REFERENCE FALLBACK {r["cls"]} {r["fmt"]} #{r["id"]}\n'
+    text += f'rows without a reference whose port output changed: {len(port_changed)}\n'
+    for r, was in port_changed:
+        text += f'  PORT CHANGED {r["cls"]} {r["fmt"]} #{r["id"]} sha {was} -> {r.get("port_sha") or "(none)"} (- = no output)\n'
     open(os.path.join(a.out, 'summary.txt'), 'w').write(text)
     write_html(os.path.join(a.out, 'report.html'), rows, new, fixed)
     print('\n' + text)
@@ -1990,7 +2005,7 @@ def main():
         write_tsv(a.baseline, rows)
         print('baseline updated:', a.baseline)
         return 0
-    return 1 if new or newfb else 0
+    return 1 if new or newfb or port_changed else 0
 
 
 if __name__ == '__main__':

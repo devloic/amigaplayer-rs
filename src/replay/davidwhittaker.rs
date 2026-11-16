@@ -118,6 +118,17 @@ struct Ep {
     last_subsong: u16,
 }
 
+/// The scans' word count: `(length - 10) / 2` of the whole file (at least a
+/// $2a0a-byte module's), kept in 16 bits as the scans' counters are. The length
+/// is halved before it is cut to 16 bits, so a module over 64 KiB (Battle Of The
+/// Ashes, 66,106 bytes) is scanned from its start like a shorter one. This is
+/// NostalgicPlayer's behaviour (it identifies the module); the Eagleplayer, which
+/// cut the length to 16 bits first, does not recognise such a module (refcmp
+/// reports the file against a stand-in original).
+fn scan_limit(len: usize) -> u16 {
+    ((len.max(0x2a0a) - 10) >> 1) as u16
+}
+
 /// The Eagleplayer's DTP_Check2 (and the scans of its InitPlayer), to the
 /// instruction: it finds the stop routine by its `move.w #$ff,$dff09e`, the
 /// sample table by the replayer's sample loop, the init routine by the call to
@@ -125,7 +136,7 @@ struct Ep {
 /// first test of a variable.
 fn ep_check(d: &[u8]) -> Option<Ep> {
     let r = Rd(d);
-    let lim = (d.len().max(0x2a0a) as u16).wrapping_sub(10) >> 1;
+    let lim = scan_limit(d.len());
     let mut a0 = 0i64;
     let mut n = lim as i32;
     while r.l(a0) != 0x33fc_00ff {
@@ -2576,6 +2587,21 @@ mod tests {
         // the sample: 32 bytes at 8287 Hz
         a.l("sdata").w(&[0, 0x20, 8287]).w(&[0x4000; 16]);
         a.bytes()
+    }
+
+    /// A module over 64 KiB (Battle Of The Ashes is 66,106 bytes) is scanned over
+    /// its whole length: the word count is halved before it is cut to 16 bits.
+    #[test]
+    fn scans_a_module_over_64k() {
+        assert_eq!(super::scan_limit(66106), 33048);
+        assert_eq!(super::scan_limit(62334), 31162);
+        assert_eq!(super::scan_limit(100), super::scan_limit(0x2a0a));
+        // the replayer 1000 bytes into a 66,106-byte file: past the 560 bytes a
+        // length cut to 16 bits first would scan
+        let mut d = vec![0u8; 1000];
+        d.extend(module());
+        d.resize(66106, 0);
+        assert!(super::detect(&d));
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Dynamic Studio", test: crate::mptconv::dsm::test_dynamic, load: crate::mptconv::dsm::load_dynamic },
     Loader { name: "Velvet Studio AMS", test: crate::mptconv::ams::test, load: crate::mptconv::ams::load },
     Loader { name: "Graoumf Tracker", test: crate::mptconv::gt2::test, load: crate::mptconv::gt2::load },
+    Loader { name: "Disorder Tracker 2 PLM", test: crate::mptconv::plm::test, load: crate::mptconv::plm::load },
     Loader { name: "Impulse Tracker", test: loaders::it::test, load: loaders::it::load },
     Loader { name: "Scream Tracker 3", test: loaders::s3m::test, load: loaders::s3m::load },
     Loader { name: "Scream Tracker 2", test: loaders::stm::test, load: loaders::stm::load },

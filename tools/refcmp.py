@@ -18,7 +18,8 @@ settings, WAV for WAV:
              ships, whose player runs on the 68k); for the formats the libxmp
              port plays, libxmp 4.7.4 itself (the C harness `render`, 48 kHz
              s16, its defaults); for Atari ST SNDH, AtariAudio 1.30 (SNDH_ORACLE,
-             at volume 0.8); for HivelyTracker (no Amiga player plays HVL), Pete Gordon's C
+             at volume 0.8); for C64 SID tunes, NostalgicPlayer's C# ports of libsidplayfp /
+             reSIDfp (SID_ORACLE, no ROMs, dither held at 0.5 on both sides); for HivelyTracker (no Amiga player plays HVL), Pete Gordon's C
              replayer hvl_replay 1.9 (BSD-3-Clause, HVL_REF_DIR) compared TICK BY TICK
              (volume, period, pan and a hash of each voice's waveform loop; see
              render_hvl_ticks), not by audio: the port plays through the Eagleplayer amplifier,
@@ -598,7 +599,7 @@ class Ctx:
 def _run_cached(ctx, key, cmd, env, cwd, wav):
     """Runs cmd (writing wav) unless cached; returns (wav path or None, stderr lines)."""
     h = hashlib.sha1(json.dumps([ctx.binkey, key, cmd, sorted((k, env[k]) for k in env if k in
-                                 ('DELIPLAYERS', 'EAGLEPLAYERS', 'DELIGENIES', 'DELI_CPU_SPEED'))]).encode()).hexdigest()[:20]
+                                 ('DELIPLAYERS', 'EAGLEPLAYERS', 'DELIGENIES', 'DELI_CPU_SPEED', 'SID_DITHER_CONST'))]).encode()).hexdigest()[:20]
     out = os.path.join(ctx.cache, h + '.wav')
     err = out + '.err'
     if not (os.path.exists(out) and os.path.exists(err)) and not os.path.exists(err):
@@ -622,6 +623,9 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None, fast_c
     if 'PreTracker' in extra:
         # UADE's PreTracker player has no check: the engine accepts a checkless player for it
         env['DELI_CHECKLESS'] = '1'
+    if mod.lower().endswith('.sid'):
+        # the C# SID reference holds its dither at 0.5; the port's hook does the same (src/sid)
+        env['SID_DITHER_CONST'] = '0.5'
     if fast_cpu:
         # the port says its original's code does not fit a 68000's time (see needs_fast_reference_cpu)
         env['DELI_CPU_SPEED'] = '8'
@@ -942,6 +946,38 @@ def ptk_cleared_copy(ctx, mod):
 SNDH_ORACLE = SCRATCH + '/fixround/port-sndh/ref/cbuild/ref'
 # the same build with the rate as its 6th argument (main.cpp's 48000s read from argv; equal at 48000)
 SNDH_ORACLE_RATE = SCRATCH + '/fixround/rate441/oracles/sndh/ref'
+
+
+# C64 SID (PSID / RSID): NostalgicPlayer's C# ports of libsidplayfp + reSIDfp (git e183943), compiled
+# from the checkout (fixround/sidref/README.txt: `run.sh FILE OUT.raw SECONDS [RATE]`, stereo s16le, the file's
+# start song, no ROMs, power-on delay 0, dither held at 0.5 = the port's SID_DITHER_CONST=0.5). Takes the rate.
+SID_ORACLE = SCRATCH + '/fixround/sidref/run.sh'
+SID_ORACLE_DLL = SCRATCH + '/fixround/sidref/bin/Release/net10.0/csplay.dll'
+
+
+def render_sid_oracle(ctx, mod):
+    """The C# SID ports' render of the file's start song, or a NOREF note (str)."""
+    if not (os.path.exists(SID_ORACLE) and os.path.exists(SID_ORACLE_DLL)):
+        return 'no C# SID reference build (fixround/sidref)'
+    h = hashlib.sha1(json.dumps([int(os.path.getmtime(SID_ORACLE_DLL)), mod, ctx.secs, *rate_key(ctx.rate)]).encode()).hexdigest()[:20]
+    raw = os.path.join(ctx.cache, h + '.sid.raw')
+    inf = raw + '.txt'
+    if not os.path.exists(inf):
+        try:
+            r = subprocess.run([SID_ORACLE, mod, raw, str(ctx.secs), str(ctx.rate)], capture_output=True, text=True,
+                               cwd=os.path.dirname(mod), timeout=ctx.secs * 20 + 120)
+            text = (r.stdout.strip() or '').splitlines()[:1]
+            text = text[0] if text and os.path.exists(raw) else (r.stderr.strip().splitlines() or ['no output'])[0]
+        except subprocess.TimeoutExpired:
+            text = 'timeout'
+        if not text.startswith('song ') and os.path.exists(raw):
+            os.unlink(raw)
+        open(inf, 'w').write(text)
+    info = open(inf).read()
+    if not os.path.exists(raw) or not info.startswith('song '):
+        return 'the C# SID ports fail on it: ' + info[:80]
+    return dict(kind='csid', wav=raw, data=read_raw(raw, ctx.rate), out='C# LibSidPlayFp/LibReSidFp (e183943) ' + info,
+                led='', player='NostalgicPlayer C# LibSidPlayFp + LibReSidFp (oracle): ' + info[:60], o={}, note='')
 
 
 class NoRate(str):
@@ -1442,6 +1478,11 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
         # an Atari ST program: the 68k DeliPlayer chain accepts the files and plays them silent (README)
         ref = render_sndh_oracle(ctx, mod, po, pplay)
         return ref if isinstance(ref, dict) else dict(none, note=str(ref), norate=isinstance(ref, NoRate))
+    if want in ('psid', 'rsid'):
+        # the port plays it itself (src/sid); the hosted PlaySID Eagleplayer synthesises on Paula (music only), so the
+        # reference is the C# code the port is ported from
+        ref = render_sid_oracle(ctx, mod)
+        return ref if isinstance(ref, dict) else dict(none, note=str(ref), noref=True)
     dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
     if want in UADE_FIRST:
         dirs = dirs[::-1]

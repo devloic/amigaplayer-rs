@@ -45,6 +45,11 @@ pub fn mixer_offset(i: usize) -> usize {
 /// Upstream fills the buffer from the shared .NET random generator, so its
 /// output differs from run to run. Here it is a fixed-seed xorshift64
 /// sequence, which makes every table and every rendered sample reproducible.
+///
+/// Test hook: with the environment variable `SID_DITHER_CONST` set to a number the
+/// whole buffer holds that number (tools/refcmp.py sets 0.5, and the C# reference
+/// harness holds its own at 0.5 too, because upstream's one shared buffer is
+/// consumed in a different order than this port's per-filter buffers). Unset, nothing changes.
 pub struct Dither {
     buffer: Box<[f64; 1024]>,
     index: usize,
@@ -60,6 +65,10 @@ impl Dither {
             state ^= state >> 7;
             state ^= state << 17;
             *b = (state >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0);
+        }
+
+        if let Some(c) = std::env::var("SID_DITHER_CONST").ok().and_then(|v| v.parse::<f64>().ok()) {
+            buffer.fill(c);
         }
 
         Dither { buffer, index: 0 }

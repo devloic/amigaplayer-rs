@@ -1250,10 +1250,13 @@ pub fn build(md: &Module, kind: Kind) -> Option<(Vec<u8>, Fixups)> {
     if md.linear {
         flags |= crate::mo3::hflag::LINEAR;
     }
-    if md.old_effects {
+    // MO3 headers hold these two IT flags inverted (libopenmpt's Load_mo3.cpp sets
+    // SONG_ITOLDEFFECTS when itOldFX is clear), and the writer turns them back into IT's 0x10 /
+    // 0x20 that way, so a mode that is on is a bit that is clear here.
+    if !md.old_effects {
         flags |= crate::mo3::hflag::IT_OLD_FX;
     }
-    if md.compat_gxx {
+    if !md.compat_gxx {
         flags |= crate::mo3::hflag::IT_COMPAT_GXX;
     }
     let tempo_int = md.tempo.round();
@@ -1320,6 +1323,46 @@ pub fn whole_file(f: &mut crate::xmp::load::Hio) -> Vec<u8> {
 mod tests {
     use crate::xmp::load::Hio;
     use crate::xmp::module::ModuleData;
+
+    /// Writes the IT or S3M module each MT2, DSM, AMS, GT2 or PLM file in `$MPTCONV_DUMP_IN`
+    /// is converted to into `$MPTCONV_DUMP_OUT` (`<name>.it` / `<name>.s3m`), for openmpt123 to
+    /// render against the original (the conversion check):
+    /// `MPTCONV_DUMP_IN=dir MPTCONV_DUMP_OUT=dir cargo test --release mptconv::tests::dump -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump() {
+        use super::{build, Kind};
+        let (Ok(inp), Ok(out)) = (std::env::var("MPTCONV_DUMP_IN"), std::env::var("MPTCONV_DUMP_OUT")) else { return };
+        let mut names: Vec<_> = std::fs::read_dir(&inp).unwrap().flatten().map(|e| e.path()).collect();
+        names.sort();
+        for p in names {
+            let f = std::fs::read(&p).unwrap();
+            let it = |m: Option<Vec<u8>>| m.map(|m| (m, "it"));
+            let s3m = |m: Option<super::Module>| m.and_then(|m| build(&m, Kind::S3m)).map(|(m, _)| (m, "s3m"));
+            let r = if super::mt2::test(&f) {
+                it(super::mt2::to_native(&f).map(|r| r.0))
+            } else if super::ams::test(&f) {
+                it(super::ams::to_native(&f).map(|r| r.0))
+            } else if super::gt2::test(&f) {
+                it(super::gt2::to_native(&f).map(|r| r.0))
+            } else if super::plm::test(&f) {
+                it(super::plm::read(&f).and_then(|m| build(&m, Kind::It)).map(|r| r.0))
+            } else if super::dsm::test(&f) {
+                s3m(super::dsm::read(&f))
+            } else if super::dsm::test_dynamic(&f) {
+                s3m(super::dsm::read_dynamic(&f))
+            } else {
+                None
+            };
+            match r {
+                Some((m, ext)) => {
+                    let stem = p.file_name().unwrap().to_string_lossy().into_owned();
+                    std::fs::write(std::path::Path::new(&out).join(format!("{stem}.{ext}")), m).unwrap();
+                }
+                None => println!("refused: {}", p.display()),
+            }
+        }
+    }
 
     /// A DSIK RIFF DSM file: one channel, one 64-row pattern (C-4, instrument 1, volume 32 and
     /// a volume slide 0x04 on row 0), one signed 8-bit sample of 16 bytes.

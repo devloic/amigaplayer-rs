@@ -550,6 +550,11 @@ fn read2(file: &[u8]) -> Option<(Module, EnvFix)> {
         global_vol: 256,
         preamp: 48,
         linear: header_flags & 0x40 != 0,
+        // OpenMPT's: IT's old effects and compatible Gxx. The conversion check (openmpt123 on the
+        // AMS file against openmpt123 on the IT, 120 s) agrees: `fall of the golden rose` is
+        // 54 dB under the signal with both, 27 dB with the old effects alone, 20 dB with
+        // compatible Gxx alone, 19 dB with neither; `Algorythm` 58 dB with the old effects, 35
+        // dB without (compatible Gxx makes no difference there)
         old_effects: true,
         compat_gxx: true,
         chn_pan: (0..channels).map(|c| if c & 3 == 1 || c & 3 == 2 { 0xC0 } else { 0x40 }).collect(),

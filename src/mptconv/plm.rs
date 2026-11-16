@@ -269,13 +269,14 @@ pub fn read(file: &[u8]) -> Option<Module> {
         global_vol: 256,
         preamp: (amplify as u32).min(128),
         linear: false,
-        // `build` hands these to the MO3 header's flags, which are set for what IT's header
-        // clears, so false / false writes IT's old effects and compatible Gxx both on. OpenMPT
-        // sets only the old effects for PLM, but written so (IT flags 0x31) openmpt123 renders
-        // the module exactly as it renders the PLM file over the whole 375 s of the archive's
-        // file, and with the old effects alone (0x11) it differs from 262 s on (tone portamentos)
-        old_effects: false,
-        compat_gxx: false,
+        // IT's old effects and compatible Gxx both on. OpenMPT sets only the old effects for PLM
+        // (and plays it with its PLM-only rules), but written so (IT flags 0x31) openmpt123
+        // renders the module as it renders the PLM file over the whole 375 s of the archive's
+        // file: 38.5 dB under the signal (the pans IT's scale rounds; sample for sample with
+        // them moved onto it), against 30.3 dB with the old effects alone (it differs from 262
+        // s on, tone portamentos), 34.2 dB with compatible Gxx alone and 29.4 dB with neither
+        old_effects: true,
+        compat_gxx: true,
         chn_surround: vec![false; channels],
         chn_vol: vec![64; channels],
         chn_pan,
@@ -358,6 +359,20 @@ mod tests {
         load(&mut m, &mut Hio::new(&f)).unwrap();
         assert_eq!((m.module.chn, m.module.spd, m.module.bpm), (3, 6, 125));
         assert_eq!(m.module.type_, NAME);
+    }
+
+    /// `old_effects` / `compat_gxx` are IT's header flags 0x10 / 0x20 as written (`build`
+    /// turns them into the MO3 header's inverted bits, which the writer inverts back).
+    #[test]
+    fn it_header_flags() {
+        let mut md = read(&synth_plm()).unwrap();
+        assert_eq!(build(&md, Kind::It).unwrap().0[0x2C] & 0x30, 0x30);
+        for (oe, gxx, want) in [(false, false, 0x00), (true, false, 0x10), (false, true, 0x20), (true, true, 0x30)] {
+            (md.old_effects, md.compat_gxx) = (oe, gxx);
+            let it = build(&md, Kind::It).unwrap().0;
+            assert_eq!(&it[..4], b"IMPM");
+            assert_eq!(it[0x2C] & 0x30, want, "{oe} {gxx}");
+        }
     }
 
     #[test]

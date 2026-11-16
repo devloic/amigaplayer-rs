@@ -696,6 +696,11 @@ pub fn read(file: &[u8]) -> Option<(Module, Vec<(usize, usize, usize, u8, u8)>)>
             global_vol: 256,
             preamp: preamp.min(2000),
             linear: true,
+            // OpenMPT's: IT's compatible Gxx, not the old effects. The conversion check
+            // (openmpt123, 120 s) tells them apart on `If there is no god` only: 19.6 dB under
+            // the signal so, 19.3 dB with neither, 17.3 / 17.5 dB with the old effects (most
+            // other files render the same with all four, or their IT renders do not follow the
+            // MT2 render closely enough to tell)
             old_effects: false,
             compat_gxx: true,
             chn_pan,

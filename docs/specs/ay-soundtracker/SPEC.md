@@ -467,3 +467,19 @@ PlayAY plays `st11.megamix1` and `strc.megamix1` identically. It differs from th
 
 Its 50 Hz interrupt is 70 940 colour clocks. `songs.tsv` keeps its song end and the model's
 comparison (columns `playay_song_end_s`, `pa_model_*`).
+
+## Errata (found while implementing `src/replay/ay_st.rs`, 2026-11-16)
+
+1. Section 6.4: `period = (base ± m) & $FFF` holds for the sound, not for the writes. The original
+   writes the high byte of the unmasked 16-bit result (e.g. R1 = `$11`, R3 = `$F0`); the chip ignores
+   the high nibble. A register-exact port writes the 16-bit result.
+2. STC stream and table offsets are relative to the song data: add the data's load address (`$C43C`
+   in the reference image) to reach them.
+3. Not covered above, chosen by the port (unverified against the original): a missing sample,
+   ornament or pattern number leaves the channel as it was (pattern: the first record); a `$FF` on
+   channel B or C is ignored; `delay` 0 plays as 1; note index 96 (B♯ of octave 7) is an empty cell;
+   `patlen` above 64 is refused.
+4. Write timing (not in this spec): the original writes R0–R13 1 500–4 500 T-states into the frame,
+   56 T apart, the start varying with the code path; the port writes them at the frame start, so its
+   audio is about 1 ms early (refcmp SIMILAR, not IDENTICAL). Measurable black-box from register-write
+   logs if wanted.

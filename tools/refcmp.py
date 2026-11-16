@@ -1095,6 +1095,9 @@ BLACKBOX_PREFIX = ('delusiondigitalmusicformat',)
 # at best SIMILAR. MadTracker 2, DSIK RIFF DSM, Dynamic Studio, Velvet Studio / Extreme's Tracker AMS, Graoumf Tracker
 # (GTK, GT2) and Disorder Tracker 2 PLM: no libxmp loader
 # either (the port reads them as libopenmpt 0.8.7 does and plays them put into IT or S3M, src/mptconv).
+# S3M (any format name ending "S3M", the tracker that wrote it first): the loader plays a few modules
+# libxmp refuses, as ST3 / st3play / libopenmpt do (src/xmp/loaders/s3m.rs, "not libxmp").
+XMP_REFUSED_SUFFIX = ('s3m',)
 XMP_REFUSED_BLACKBOX = ('digitrakker', 'un4seenmo3', 'madtracker2', 'dsikriffdsm', 'velvetstudioams',
                         'extremestrackerams', 'dynamicstudio', 'graoumftracker', 'disordertracker2plm')
 
@@ -1491,7 +1494,8 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
                 ref['fallback'] = 'REF-OPENMPT (S3M with AdLib instruments: libxmp 4.7.4 renders them silent)'
                 return ref
         raw, info = render_oracle(ctx, mod)
-        if not raw and info.startswith('-\t0\tload') and _norm(po.get('format', '')).startswith(XMP_REFUSED_BLACKBOX):
+        nf = _norm(po.get('format', ''))
+        if not raw and info.startswith('-\t0\tload') and (nf.startswith(XMP_REFUSED_BLACKBOX) or nf.endswith(XMP_REFUSED_SUFFIX)):
             ref = render_blackbox(ctx, mod, po, pplay, 'openmpt123')
             if isinstance(ref, dict):
                 ref['player'] = 'libxmp 4.7.4 refuses it; ' + ref['player']

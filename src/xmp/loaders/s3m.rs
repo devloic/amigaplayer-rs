@@ -242,7 +242,9 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
     if ffi != 1 && ffi != 2 {
         return Err(());
     }
-    if ordnum > 255 || insnum > 255 || patnum > 255 {
+    // (not libxmp 4.7.4, which refuses 256 orders: Scream Tracker 3 keeps up to 256, st3play
+    // and libopenmpt 0.8.7 read them all, and they fit XMP_MAX_MOD_LENGTH; Loki's 20mc10sp)
+    if ordnum > 256 || insnum > 255 || patnum > 255 {
         return Err(());
     }
     if &h[44..48] != b"SCRM" {
@@ -304,7 +306,7 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
         };
     }
 
-    // ordnum is at most 255, within XMP_MAX_MOD_LENGTH
+    // ordnum is at most 256, XMP_MAX_MOD_LENGTH
     m.module.len = ordnum;
     if f.read(&mut m.module.xxo[..ordnum]) != ordnum {
         return Err(());
@@ -316,6 +318,16 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
         if o < 0xfe && o as i32 > pat {
             pat = o as i32;
         }
+    }
+    if pat < 0 && patnum > 0 {
+        // (not libxmp 4.7.4, which refuses a module whose order list names no pattern, "no
+        // song") st3play, the model of ST3's player, plays pattern 0 then: its neworder() finds
+        // no pattern and leaves the current one, 0, which plays once; the song ends there.
+        // libopenmpt 0.8.7 plays nothing. SiD's DRIVIN, VOODAA and TEMP (orders FF FF) start
+        // in pattern 0; Purple Motion's benefx5 has no pattern data at all and stays silent.
+        m.module.len = 1;
+        m.module.xxo[0] = 0;
+        pat = 0;
     }
     let pat = ((pat + 1) as usize).min(patnum);
     if pat == 0 {
@@ -352,6 +364,13 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
     for i in 0..pat {
         m.module.alloc_pattern_tracks(i, 64);
         if pp_pat[i] == 0 {
+            continue;
+        }
+        if start + pp_pat[i] * 16 + 2 > f.size() {
+            // (not libxmp 4.7.4, which refuses the module: its pattern length reads 0xffff
+            // at the end of the file. A truncated file's last pattern: libopenmpt 0.8.7 keeps
+            // it as an empty pattern, as a zero pointer; Statix's "...4LS" and "Fire Eyes",
+            // whose last pattern points at the end of the file. st3play refuses them.)
             continue;
         }
         f.seek(start + pp_pat[i] * 16);
@@ -403,6 +422,18 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
         }
         let mut sub = SubInstrument { pan: XMP_INST_NO_DEFAULT_PAN, sid: i as i32, ..Default::default() };
 
+        if buf[0] > 2 && &buf[76..80] != b"SCRI" {
+            // (not libxmp 4.7.4, which refuses the module: no instrument type of ST3 and no
+            // "SCRI", an empty slot. libopenmpt 0.8.7 keeps only its name, volume and C-5 rate,
+            // with no sample or OPL patch (types 3 and up), st3play plays no sample from it
+            // (type 1 only); Shrike's "DarkNess Remix", instrument 90 of type 255. Loaded as
+            // libxmp loads an empty slot of type 0 with length 0.)
+            sub.vol = buf[28] as i32;
+            (sub.xpo, sub.fin) = c2spd_to_note(rd16(&buf, 32) as i32);
+            m.module.xxi[i].name = copy_adjust(&buf[48..76], 28);
+            m.module.xxi[i].sub = vec![sub];
+            continue;
+        }
         if buf[0] >= 2 {
             // OPL2 FM instrument: libxmp keeps no sample for it
             if &buf[76..80] != b"SCRI" {
@@ -443,7 +474,10 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
         let pack = buf[30];
         let sflags = buf[31];
         let c2spd = rd16(&buf, 32);
-        if buf[0] == 1 && &buf[76..80] != b"SCRS" {
+        // (not libxmp 4.7.4, which refuses any sample header without "SCRS": one of length 0
+        // holds no sample, and neither st3play nor libopenmpt 0.8.7 reads the magic; Tangerine's
+        // "Soul Surfer soundtrack", instruments 28 and 29: type 1, length 0, no name, no magic.)
+        if buf[0] == 1 && &buf[76..80] != b"SCRS" && length != 0 {
             return Err(());
         }
 
@@ -570,6 +604,107 @@ mod tests {
         assert_eq!((m.module.xxi[0].nsm, m.module.xxs[0].len), (0, 0));
         // a sample slot with that length is still refused
         d[0x70] = 1;
+        assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
+    }
+
+    /// The peak sample of the first second the libxmp port renders of `d`.
+    fn peak(d: &[u8]) -> u16 {
+        let mut p = crate::xmp::XmpPlayer::new(d, 48000).unwrap();
+        let mut out = vec![0i16; 48000 * 2];
+        let n = p.render(&mut out);
+        out[..n * 2].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn order_list_without_pattern_plays_pattern_0() {
+        // orders FF FF: libxmp refuses "no song"; st3play plays pattern 0 once
+        let mut d = synth();
+        d[0x60] = 0xff;
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!((m.module.len, m.module.xxo[0], m.module.pat), (1, 0, 1));
+        assert_eq!(m.module.event(0, 1, 0).note, 61);
+        assert!(peak(&d) > 0 && peak(&d) == peak(&synth()));
+        // separators only, the same
+        d[0x60] = 0xfe;
+        d[0x61] = 0xfe;
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!((m.module.len, m.module.xxo[0]), (1, 0));
+        // a list that names a pattern is kept as it is
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&synth())).unwrap();
+        assert_eq!((m.module.len, &m.module.xxo[..2]), (2, &[0u8, 0xff][..]));
+        // no pattern at all: still refused
+        d[36] = 0;
+        assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
+    }
+
+    #[test]
+    fn pattern_at_end_of_file_is_empty() {
+        // the pattern's parapointer at the end of a (truncated) file
+        let mut d = synth();
+        d.resize(0xe0, 0);
+        d[0x64] = 0x0e;
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!(m.module.pat, 1);
+        assert_eq!(m.module.event(0, 1, 0).note, 0);
+        // one byte short of the pattern's length word: empty too
+        d.push(0x42);
+        load(&mut ModuleData::default(), &mut Hio::new(&d)).unwrap();
+        // pattern data cut short after its length word: still refused, as libxmp does
+        d.push(0);
+        assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
+    }
+
+    #[test]
+    fn sample_header_without_magic() {
+        let mut d = synth();
+        d[0x70 + 76..0x70 + 80].fill(0);
+        // with a length: refused, as libxmp does
+        assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
+        // length 0: an empty sample
+        d[0x70 + 16..0x70 + 20].fill(0);
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!((m.module.xxi[0].nsm, m.module.xxs[0].len, m.module.xxi[0].name.as_str()), (0, 0, "inst"));
+    }
+
+    #[test]
+    fn unknown_instrument_type_is_an_empty_slot() {
+        let mut d = synth();
+        d[0x70] = 0xff;
+        d[0x70 + 76..0x70 + 80].fill(0);
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!((m.module.xxi[0].nsm, m.module.xxs[0].data.is_none()), (0, true));
+        assert_eq!((m.module.xxi[0].name.as_str(), m.module.xxi[0].sub[0].vol), ("inst", 48));
+        assert!(m.opl_patches.is_empty());
+        assert_eq!(peak(&d), 0);
+        // an AdLib melody instrument (type 2) without "SCRI": still refused, as libxmp does
+        d[0x70] = 2;
+        assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
+    }
+
+    #[test]
+    fn up_to_256_orders() {
+        // synth() with 256 orders: 254 more FFs and 2 bytes of padding move the rest 16 paragraphs on
+        let s = synth();
+        let mut d = s[..0x62].to_vec();
+        d[32..34].copy_from_slice(&256u16.to_le_bytes());
+        d.resize(0x160, 0xff);
+        d.extend(23u16.to_le_bytes()); // instrument at 0x170
+        d.extend(0x1cu16.to_le_bytes()); // pattern at 0x1c0
+        d.resize(0x170, 0);
+        d.extend(&s[0x70..]);
+        d[0x170 + 14..0x170 + 16].copy_from_slice(&0x1du16.to_le_bytes()); // sample at 0x1d0
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!((m.module.len, m.module.xxo[0], m.module.xxo[255], m.module.xxi[0].name.as_str()), (256, 0, 0xff, "inst"));
+        assert_eq!(m.module.event(0, 1, 0).note, 61);
+        assert!(peak(&d) > 0 && peak(&d) == peak(&synth()));
+        d[32..34].copy_from_slice(&257u16.to_le_bytes());
         assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
     }
 

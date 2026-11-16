@@ -137,6 +137,28 @@ fn rd32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
+/// Whether libopenmpt 0.8.7 takes the module for one saved by Scream Tracker 3 itself (its
+/// `isST3`): tracker ID 1, but not Sound Club 2 and none of the trackers that write 0x1320
+/// with tell-tale header fields (ModPlug / OpenMPT 1.17, Schism, PlayerPRO, Velvet Studio,
+/// Impulse Tracker before 1.03).
+fn made_by_st3(h: &[u8], offsets_canonical: bool) -> bool {
+    let flags = rd16(h, 38);
+    let version = rd16(h, 40);
+    let ordnum = rd16(h, 32);
+    let (uc, dp) = (h[52], h[53]);
+    let special = rd16(h, 62);
+    if version >> 12 != 1 || &h[54..62] == b"SCLUB2.0" {
+        return false;
+    }
+    let fingerprinted = version == 0x1320
+        && special == 0
+        && uc == 0
+        && ((ordnum & 1 == 0 && flags & !0x50 == 0 && dp == 0xfc && offsets_canonical)
+            || (flags == 0 && dp != 0xfc)
+            || (flags == 8 && dp != 0xfc));
+    !fingerprinted
+}
+
 /// The tracker libxmp names from the header's tracker ID, and the flow mode
 /// and quirks that go with it.
 fn tracker(m: &mut ModuleData, h: &[u8]) -> String {
@@ -370,10 +392,14 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
 
     m.init_instrument();
     let mut buf = [0u8; 80];
+    let mut gus_addresses = 0u16;
     for i in 0..insnum {
         f.seek(start + pp_ins[i] * 16);
         if f.read(&mut buf) != 80 {
             return Err(());
+        }
+        if buf[0] < 2 {
+            gus_addresses |= rd16(&buf, 0x28);
         }
         let mut sub = SubInstrument { pan: XMP_INST_NO_DEFAULT_PAN, sid: i as i32, ..Default::default() };
 
@@ -448,6 +474,18 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
 
         f.seek(start + 16 * (memseg + (memseg_hi << 16)));
         load_sample(m, f, load_flags, i, None)?;
+    }
+
+    // (not libxmp 4.7.4, which always applies the header's mix volume) Scream Tracker 3's
+    // GUS driver doesn't use it. ST3 saved with the GUS driver loaded writes a distinct GUS
+    // memory address in each used sample slot; with the SoundBlaster driver they are 0 or 1.
+    // So, as libopenmpt 0.8.7 (Load_s3m.cpp) does, a module made by ST3 whose OR of
+    // addresses is above 1 plays its samples at mix volume 48, whatever the header says and
+    // in mono too. That keeps the balance between samples and AdLib instruments the composer
+    // heard (Manwe's Rotagilla, mix volume 127, and "and this is UltrSound", 64).
+    let canonical = !pp_pat.is_empty() && !pp_ins.is_empty() && pp_pat[0] > pp_ins[0];
+    if gus_addresses > 1 && made_by_st3(&h, canonical) {
+        m.mvol = 48;
     }
 
     m.quirk |= QUIRKS_ST3 | QUIRK_ARPMEM;
@@ -533,6 +571,35 @@ mod tests {
         // a sample slot with that length is still refused
         d[0x70] = 1;
         assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
+    }
+
+    #[test]
+    fn st3_gus_ignores_mix_volume() {
+        let mut d = synth();
+        d[51] = 0xc0; // stereo, mix volume 64
+        d[52] = 16; // ultra-clicks as ST3.20 writes them (no "other tracker" fingerprint)
+        let mvol = |d: &[u8]| {
+            let mut m = ModuleData::default();
+            load(&mut m, &mut Hio::new(d)).unwrap();
+            m.mvol
+        };
+        // SoundBlaster driver: GUS address 0 or 1, the header's mix volume plays
+        assert_eq!(mvol(&d), 64);
+        d[0x70 + 0x28] = 1;
+        assert_eq!(mvol(&d), 64);
+        // GUS driver: a real GUS address, mix volume 48 whatever the header says
+        d[0x70 + 0x28..0x70 + 0x2a].copy_from_slice(&0x1234u16.to_le_bytes());
+        assert_eq!(mvol(&d), 48);
+        d[51] = 0x7f; // mono, 127
+        assert_eq!(mvol(&d), 48);
+        // not made by ST3 (OpenMPT's tracker ID): the header's mix volume plays
+        d[51] = 0xc0;
+        d[40..42].copy_from_slice(&0x5131u16.to_le_bytes());
+        assert_eq!(mvol(&d), 64);
+        // ST3.20's ID written by Impulse Tracker < 1.03 (flags 8, no pan table, no clicks)
+        d[40..42].copy_from_slice(&0x1320u16.to_le_bytes());
+        d[52] = 0;
+        assert_eq!(mvol(&d), 64);
     }
 
     /// synth() with its instrument made an AdLib one (type 2, `SCRI`).

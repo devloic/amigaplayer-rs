@@ -57,7 +57,7 @@ symphonia-codec-vorbis = "0.6.1"
 # the third-party DeliPlayers, Eagleplayers and DeliGenies are never loaded or run, and nothing
 # recompiled from them is in the binary. They come back only with `host-68k` at build time:
 #   cargo build --release --features host-68k
-default = ["ui", "archives", "custom-modules"]
+default = ["ui", "archives", "custom-modules", "sid"]
 # Custom modules (`cust.*`, `CustomPlay`: a hunk executable with a DeliTracker player header
 # whose own code plays it): the emulated 68000 runs that code on the project's own host
 # (src/deli.rs). No player of anybody else is involved. `Song::open_opts` with
@@ -84,8 +84,9 @@ archives = ["dep:delharc", "dep:flate2", "dep:lzma-rs"]
 # LICENCE: those two ports are under the GNU General Public License VERSION 2
 # (LICENSE-LibSidPlayFp, LICENSE-LibReSidFp), and their files do not say "or any later
 # version": a binary or library built with this feature is a GPL-2.0-only work as a whole
-# (not GPL-2.0-or-later like the rest). Off by default for that reason. No Commodore ROM
-# image is included (see src/sid/mod.rs).
+# (not GPL-2.0-or-later like the rest). On by default since 2026-11-16 (the owner's decision),
+# so the default build is GPL-2.0-only; `--no-default-features` (as the C API and wasm crates
+# use) leaves it out. No Commodore ROM image is included (see src/sid/mod.rs).
 sid = []
 # The SDL3 player window. The library (engine only) builds without it.
 ui = ["dep:sdl3"]

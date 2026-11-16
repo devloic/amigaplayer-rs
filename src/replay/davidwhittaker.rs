@@ -47,12 +47,17 @@
 //!   (`Leviathan`), written from a clean-room description of its replayer (no
 //!   NostalgicPlayer code) and checked against the Eagleplayer's writes; its
 //!   code paths have their own fitted times, the other builds' are kept;
-//! * not ported: the old replayer (Q-Ball), which this port refuses; an effect
+//! * the old replayer (Q-Ball, which crashes the original) has no Eagleplayer
+//!   behind it: `old` plays it as NostalgicPlayer's `oldPlayer` paths do (its own
+//!   module, checked against NostalgicPlayer's channel calls);
+//! * not ported: an effect
 //!   that starts the game's sound effect routine (Super League Manager, Emlyn
 //!   Hughes International Soccer); and the Eagleplayer's relocation reaching
 //!   only part of the code (its scan length comes from a false match of the
 //!   sample loop in Jaws, whose voice code then writes Paula directly), where
 //!   this port always flushes.
+
+mod old;
 
 use super::{Hw, Open, Replayer};
 use crate::machine::Machine;
@@ -495,7 +500,7 @@ fn count_subsongs(r: Rd, init: i64, base: i64) -> u16 {
 }
 
 fn detect(d: &[u8]) -> bool {
-    ep_check(d).is_some_and(|ep| analyse(Rd(d), &ep).is_some() || lev_analyse(Rd(d), &ep).is_some())
+    ep_check(d).is_some_and(|ep| analyse(Rd(d), &ep).is_some() || lev_analyse(Rd(d), &ep).is_some() || old::detect(d))
 }
 
 /// The stop routine's DMACON write (`move.w #mask,$dff096`) and the voices
@@ -1317,7 +1322,7 @@ enum Next {
 fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
     let ep = ep_check(d)?;
     let Some(mut v) = analyse(Rd(d), &ep) else {
-        return lev_new(d, &ep, base, m);
+        return lev_new(d, &ep, base, m).or_else(|| old::new(d, base, m));
     };
     // offsets in the module to guest addresses
     let g = |o: u32| base.wrapping_add(o);

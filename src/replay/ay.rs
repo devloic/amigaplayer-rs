@@ -27,8 +27,8 @@
 //!
 //! The container's `ZXAYAMAD` type (Frantisek Fuka's "Amadeus" music data, no Z80 code) is
 //! played by the host's own play routine of `ay_amad.rs` on the same AY and output, the
-//! registers set at the start of each 50 Hz frame. The types `ST11` and `STRC` (Sound Tracker
-//! data) are not played: `detect` leaves them alone.
+//! registers set at the start of each 50 Hz frame. The same goes for `ZXAYST11` and `ZXAYSTRC`
+//! (ZX Spectrum Sound Tracker songs, `ay_st.rs`, the rules of the original Z80 player).
 //!
 //! Bounds: each frame runs at most one frame of T-states (every instruction costs at least 4),
 //! so a tune that never halts costs the same as one that does; the file's blocks are clipped to
@@ -40,6 +40,8 @@ pub mod z80;
 pub mod chip;
 #[path = "ay_amad.rs"]
 pub mod amad;
+#[path = "ay_st.rs"]
+pub mod st;
 
 use chip::Ay;
 use z80::{Bus, Z80};
@@ -47,6 +49,9 @@ use z80::{Bus, Z80};
 pub const MAGIC: &[u8; 8] = b"ZXAYEMUL";
 /// Fuka's "Amadeus" tunes: data for a play routine the host supplies (`ay_amad.rs`).
 pub const MAGIC_AMAD: &[u8; 8] = b"ZXAYAMAD";
+/// Sound Tracker songs, uncompiled (ST11) and compressed (STRC): played by `ay_st.rs`.
+pub const MAGIC_ST11: &[u8; 8] = b"ZXAYST11";
+pub const MAGIC_STRC: &[u8; 8] = b"ZXAYSTRC";
 
 const SPECTRUM: Clock = Clock { cpu: 3_546_900, frame: 70_938, ay: 1_773_450 };
 const CPC: Clock = Clock { cpu: 4_000_000, frame: 80_000, ay: 1_000_000 };
@@ -80,6 +85,9 @@ pub struct Song {
     /// An AMAD song: the offset of its song data structure (EMUL fields unused). Its
     /// `length` is where the fade starts.
     pub amad: Option<usize>,
+    /// A Sound Tracker song (ST11 or STRC): the offset of its song data. Its `length` is one
+    /// pass of the position list.
+    pub st: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,10 +116,11 @@ fn cstr(d: &[u8], o: Option<usize>) -> String {
 }
 
 pub fn parse(d: &[u8]) -> Option<AyFile> {
-    if d.len() < 20 || (&d[..8] != MAGIC && &d[..8] != MAGIC_AMAD) {
+    if d.len() < 20 || (&d[..8] != MAGIC && &d[..8] != MAGIC_AMAD && &d[..8] != MAGIC_ST11 && &d[..8] != MAGIC_STRC) {
         return None;
     }
     let is_amad = &d[..8] == MAGIC_AMAD;
+    let is_st = &d[..8] == MAGIC_ST11 || &d[..8] == MAGIC_STRC;
     let n = d[16] as usize + 1;
     let ss = rel(d, 18)?;
     let mut songs = Vec::new();
@@ -139,6 +148,24 @@ pub fn parse(d: &[u8]) -> Option<AyFile> {
                 interrupt: 0,
                 blocks: Vec::new(),
                 amad: Some(sd),
+                st: None,
+            });
+            continue;
+        }
+        if is_st {
+            let Some(length) = st::pass_length(d, &d[4..8], sd) else { break };
+            songs.push(Song {
+                name,
+                length,
+                fade: 0,
+                hi: 0,
+                lo: 0,
+                stack: 0,
+                init: 0,
+                interrupt: 0,
+                blocks: Vec::new(),
+                amad: None,
+                st: Some(sd),
             });
             continue;
         }
@@ -153,6 +180,7 @@ pub fn parse(d: &[u8]) -> Option<AyFile> {
             interrupt: 0,
             blocks: Vec::new(),
             amad: None,
+            st: None,
         };
         let pp = rel(d, sd + 10)?;
         song.stack = be16(d, pp)?;
@@ -183,15 +211,23 @@ pub fn parse(d: &[u8]) -> Option<AyFile> {
     Some(AyFile { author: cstr(d, rel(d, 12)), misc: cstr(d, rel(d, 14)), first, songs })
 }
 
-/// A ZXAYEMUL or ZXAYAMAD file with at least one song this player can read.
+/// A ZXAY file (EMUL, AMAD, ST11, STRC) with at least one song this player can read.
 pub fn detect(d: &[u8]) -> bool {
-    d.len() >= 8 && (&d[..8] == MAGIC || &d[..8] == MAGIC_AMAD) && parse(d).is_some()
+    d.len() >= 8 && [MAGIC, MAGIC_AMAD, MAGIC_ST11, MAGIC_STRC].contains(&&d[..8].try_into().unwrap()) && parse(d).is_some()
 }
 
-/// The format name the player reports for the tune: "ZXAYAMAD" or "ZXAYEMUL".
+/// The format name the player reports for the tune: "ZXAYAMAD", "ZXAYST11", "ZXAYSTRC" or
+/// "ZXAYEMUL".
 pub fn format_of(d: &[u8]) -> Option<&'static str> {
     let ay = parse(d)?;
-    Some(if ay.songs[ay.first as usize].amad.is_some() { "ZXAYAMAD" } else { "ZXAYEMUL" })
+    let s = &ay.songs[ay.first as usize];
+    Some(if s.amad.is_some() {
+        "ZXAYAMAD"
+    } else if s.st.is_some() {
+        if &d[..8] == MAGIC_ST11 { "ZXAYST11" } else { "ZXAYSTRC" }
+    } else {
+        "ZXAYEMUL"
+    })
 }
 
 /// The container's type tag ("EMUL", "AMAD", "ST11", "STRC", ...) of a `ZXAY` file.
@@ -358,6 +394,8 @@ pub struct AyPlayer {
     m: Mach,
     /// The host's play routine of an AMAD song (in place of the Z80).
     native: Option<Box<amad::Amad>>,
+    /// The host's play routine of a Sound Tracker song.
+    st: Option<Box<st::St>>,
     chip: Ay,
     clock: Clock,
     rate: u64,
@@ -395,6 +433,7 @@ impl AyPlayer {
             z,
             m,
             native: None,
+            st: None,
             chip: Ay::new(),
             clock: SPECTRUM,
             rate,
@@ -424,9 +463,10 @@ impl AyPlayer {
         let s = &self.ay.songs[n as usize];
         let (z, m) = boot(&self.file, s);
         self.native = s.amad.and_then(|o| amad::Amad::new(&self.file, o)).map(Box::new);
+        self.st = s.st.and_then(|o| st::St::new(&self.file, &self.file[4..8], o)).map(Box::new);
         // the CPC test: a copy runs the first second
         let mut cpc = false;
-        if s.amad.is_none() {
+        if s.amad.is_none() && s.st.is_none() {
             let (mut tz, mut tm) = (z.clone(), m.clone());
             for _ in 0..PROBE_FRAMES {
                 run_frame(&mut tz, &mut tm, SPECTRUM);
@@ -477,6 +517,13 @@ impl AyPlayer {
             for (r, &v) in a.tick().iter().enumerate() {
                 self.m.regs[r] = v & MASK[r];
                 self.m.events.push((0, Ev::Reg(r as u8, v)));
+            }
+        } else if let Some(a) = self.st.as_mut() {
+            // the registers the play routine writes at the start of the frame, in order
+            self.m.events.clear();
+            for (r, v) in a.tick() {
+                self.m.regs[r as usize] = v & MASK[r as usize];
+                self.m.events.push((0, Ev::Reg(r, v)));
             }
         } else {
             run_frame(&mut self.z, &mut self.m, self.clock);
@@ -575,7 +622,7 @@ pub fn player(d: &[u8], rate: u32) -> Result<crate::aiff::AiffPlayer, String> {
     let p = AyPlayer::new(d, rate)?;
     let s = &p.ay.songs[p.cur as usize];
     let title = if p.ay.misc.is_empty() { s.name.clone() } else { p.ay.misc.clone() };
-    let format = if s.amad.is_some() { "ZXAYAMAD" } else { "ZXAYEMUL" };
+    let format = format_of(d).unwrap_or("ZXAYEMUL");
     Ok(crate::aiff::AiffPlayer::from_stream(Box::new(p), format, title, rate))
 }
 
@@ -586,3 +633,7 @@ mod tests;
 #[cfg(test)]
 #[path = "ay_amad_tests.rs"]
 mod amad_tests;
+
+#[cfg(test)]
+#[path = "ay_st_tests.rs"]
+mod st_tests;

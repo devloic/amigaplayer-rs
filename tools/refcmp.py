@@ -980,6 +980,39 @@ def render_sid_oracle(ctx, mod):
                 led='', player='NostalgicPlayer C# LibSidPlayFp + LibReSidFp (oracle): ' + info[:60], o={}, note='')
 
 
+# ZX Spectrum Sound Tracker (ZXAYST11, ZXAYSTRC): the port plays the song itself (src/replay/ay_st.rs, the
+# rules of the ORIGINAL Z80 player, docs/specs/ay-soundtracker/SPEC.md); the reference is that Z80 player: the
+# song compiled to the compiled-song layout by tools/zxay-st-ref.py (spec section 9: put in place of the song
+# of the EMUL rip "agent-x nonamedzak 01", one pass, no fade) and rendered by the same binary's ZXAYEMUL
+# player (its Z80 and AY: the same AY emulation and output stage on both sides).
+ST_RIP = SCRATCH + '/dl-modules/PlayAY/agent-x nonamedzak 01.emul'
+ST_REF_TOOL = os.path.join(HERE, 'zxay-st-ref.py')
+
+
+def render_st_oracle(ctx, mod):
+    """The original Z80 Sound Tracker player's render of a ZXAYST11 / ZXAYSTRC file, or a NOREF note (str)."""
+    if not os.path.exists(ST_RIP):
+        return 'no EMUL rip of the original player (' + os.path.basename(ST_RIP) + ')'
+    key = [open(mod, 'rb').read(), open(ST_REF_TOOL, 'rb').read(), open(ST_RIP, 'rb').read()]
+    h = hashlib.sha1(b'\0'.join(key)).hexdigest()[:20]
+    emul = os.path.join(ctx.cache, h + '.st.emul')
+    if not os.path.exists(emul):
+        r = subprocess.run([sys.executable, '-I', ST_REF_TOOL, mod, ST_RIP, emul + '.tmp', '--length'],
+                           capture_output=True, text=True, timeout=300)
+        if r.returncode != 0 or not os.path.exists(emul + '.tmp'):
+            return 'zxay-st-ref.py: ' + (r.stderr.strip().splitlines() or ['failed'])[-1][:80]
+        os.replace(emul + '.tmp', emul)
+    rw, rplay, rout, rled, rlines = render_engine(ctx, emul, True, None)
+    o = parse_output(rout)
+    if not (rw and rplay):
+        return 'the ZXAYEMUL player: ' + (rlines[-1] if rlines else 'no output')[:80]
+    data = read_wav(rw)
+    if not data[1].any():
+        return 'the original Z80 player renders it silent'
+    return dict(kind='engine', wav=rw, data=data, out=rout, led=rled or '', o=o, note='',
+                player='original Z80 Sound Tracker player (zxay-st-ref.py: the song compiled, run as ZXAYEMUL on the same Z80 and AY): ' + rplay)
+
+
 class NoRate(str):
     """A NOREF note that says the reference tool cannot render at the run's rate (class NORATE)."""
 
@@ -1482,6 +1515,9 @@ def find_reference(ctx, mod, po, port_short=False, port_silent=False, pplay=''):
         # the port plays it itself (src/sid); the hosted PlaySID Eagleplayer synthesises on Paula (music only), so the
         # reference is the C# code the port is ported from
         ref = render_sid_oracle(ctx, mod)
+        return ref if isinstance(ref, dict) else dict(none, note=str(ref), noref=True)
+    if want in ('zxayst11', 'zxaystrc'):
+        ref = render_st_oracle(ctx, mod)
         return ref if isinstance(ref, dict) else dict(none, note=str(ref), noref=True)
     dirs = (('ep206', EP206), ('uade', UADE_PLAYERS))
     if want in UADE_FIRST:

@@ -241,6 +241,8 @@ pub fn formats() -> Vec<&'static str> {
         "MPEG audio layer 3",
         "ZXAYEMUL",
         "ZXAYAMAD",
+        "ZXAYST11",
+        "ZXAYSTRC",
         "NSF",
         "SNDH",
     ];

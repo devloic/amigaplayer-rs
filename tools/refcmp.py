@@ -82,7 +82,11 @@ carry the rate (when not 48000). The baseline is tools/refcmp-baseline.tsv at 48
 tools/refcmp-baseline-N.tsv at any other N (--baseline overrides it).
 
 Outputs (in --out): refcmp.tsv, summary.txt, report.html. The baseline
-(tools/refcmp-baseline.tsv) holds each file's class and numbers; a run reports
+(tools/refcmp-baseline.tsv) holds each file's class and numbers, and in `ref_kind` what the
+class was measured against: `primary` (the format's own reference: the original player, libxmp,
+the Z80 original ...), `fallback` (a stand-in, because that reference refuses or cannot run the
+file: REF-FALLBACK in the note, so a SIMILAR there says less), `openmpt` (openmpt123 for
+libxmp, REF-OPENMPT) or `none` (NOREF / NORATE); a run reports
 NEW inconsistencies (bad now, good or absent before) and FIXED ones, and exits 1
 on a new one. Renders are cached (--cache) by binary mtime and size, settings,
 module and player directories.
@@ -1815,12 +1819,25 @@ def process(ctx, f):
 
 
 # ---- reports ----------------------------------------------------------------
-COLS = ['id', 'fmt', 'cls', 'identical', 'first_diff_s', 'pct_identical', 'maxabs', 'level_db', 'lag', 'lag_pct',
+COLS = ['id', 'fmt', 'cls', 'ref_kind', 'identical', 'first_diff_s', 'pct_identical', 'maxabs', 'level_db', 'lag', 'lag_pct',
         'len_a', 'len_b', 'silent_a', 'silent_b', 'peak_a', 'peak_b', 'tempo_drift_s', 'pitch_cents', 'bands_db',
         'note', 'path', 'ref_player', 'out_ref', 'out_port', 'led_ref', 'led_port']
 
 
+def ref_kind(row):
+    """What the row's class was measured against (the `ref_kind` column; see the docstring)."""
+    if row.get('cls') in ('NOREF', 'NORATE'):
+        return 'none'
+    note = row.get('note', '')
+    if 'REF-FALLBACK' in note:
+        return 'fallback'
+    if 'REF-OPENMPT' in note:
+        return 'openmpt'
+    return 'primary'
+
+
 def tsv_line(row):
+    row = dict(row, ref_kind=ref_kind(row))
     return '\t'.join(str(row.get(c, '')).replace('\t', ' ').replace('\n', ' ') for c in COLS)
 
 

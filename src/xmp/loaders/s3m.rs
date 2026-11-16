@@ -389,9 +389,15 @@ pub fn load_at(m: &mut ModuleData, f: &mut Hio, start: usize) -> Result<(), ()> 
 
         let memseg_hi = buf[13] as usize;
         let memseg = rd16(&buf, 14) as usize;
-        let length = rd32(&buf, 16);
+        let mut length = rd32(&buf, 16);
         if length > MAX_SAMPLE_SIZE as u32 {
-            return Err(());
+            // (not libxmp 4.7.4, which refuses the module: an empty slot, type 0, holds no
+            // sample, and Impulse Tracker 2.14 left a garbage length in one, 33213_alarma.s3m's
+            // instrument 13; libopenmpt plays the file. Only a module libxmp refuses gets here.)
+            if buf[0] != 0 {
+                return Err(());
+            }
+            length = 0;
         }
         let loopbeg = rd32(&buf, 20);
         let loopend = rd32(&buf, 24);
@@ -501,6 +507,20 @@ mod tests {
         assert_eq!(m.module.xxi[0].name, "inst");
         assert_eq!(m.module.xxs[0].data.as_ref().unwrap()[SAMPLE_GUARD..SAMPLE_GUARD + 4], [0, 0x10, 0xf0, 0xe0]);
         assert_eq!(m.read_event_type, ReadEvent::St3);
+    }
+
+    #[test]
+    fn empty_slot_with_garbage_length_loads() {
+        // instrument at 0x70: type 0 (empty) with a length over MAX_SAMPLE_SIZE
+        let mut d = synth();
+        d[0x70] = 0;
+        d[0x70 + 16..0x70 + 20].copy_from_slice(&2_080_714_880u32.to_le_bytes());
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!((m.module.xxi[0].nsm, m.module.xxs[0].len), (0, 0));
+        // a sample slot with that length is still refused
+        d[0x70] = 1;
+        assert!(load(&mut ModuleData::default(), &mut Hio::new(&d)).is_err());
     }
 
     #[test]

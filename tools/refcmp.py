@@ -681,8 +681,10 @@ VERIFIED = verified_players()
 # ports whose original is a PlayerStore DeliPlayer (UADE's Eagleplayer of the format converts
 # the bank to a ProTracker module and plays that, so it is no reference): normalised format -> player
 # Rob Hubbard 2: the DeliPlayer RobHubbard_2 (with the 4Voices NotePlayer genie) is the original;
-# EP206's Rob Hubbard 2 asks for other bank names and returns silent with an unbalanced stack
-DELI_REF = {'amosmusicbank': 'AmosMusicBank', 'robhubbard2': 'RobHubbard_2', 'powertracker': 'PowerTracker'}
+# EP206's Rob Hubbard 2 asks for other bank names and returns silent with an unbalanced stack;
+# NESA: the DeliPlayer NESA_note (its --player name is NESA), no Eagleplayer of the format
+DELI_REF = {'amosmusicbank': 'AmosMusicBank', 'robhubbard2': 'RobHubbard_2', 'powertracker': 'PowerTracker',
+            'nesa': 'NESA'}
 
 
 # Formats whose modules play past their sample data's end (the port plays silence there): the

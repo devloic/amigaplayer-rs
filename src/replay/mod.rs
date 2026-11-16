@@ -128,6 +128,7 @@ pub mod medley;
 pub mod artandmagic;
 pub mod robhubbard;
 pub mod robhubbard2;
+pub mod nesa;
 pub mod robhubbardst;
 pub mod stevebarrett;
 pub mod paulshields;
@@ -499,6 +500,8 @@ pub const REPLAYERS: &[Open] = &[
     // after Infogrames, the same format: Infogrames hands it the modules with no bank of their own name (rh.ins
     // beside them); this entry takes those Infogrames' looser check does not
     robhubbard2::OPEN,
+    // "NESA" and the version byte
+    nesa::OPEN,
     // a header rule only (four words that must agree, no magic): after every format with a stricter check
     powertracker::OPEN,
     // last: its content check takes anything (the file name is checked in `new`)

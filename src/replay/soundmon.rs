@@ -244,7 +244,7 @@ const LOAD_22: (u64, [u64; 5]) = (18029 - 100, [164, 14, 57, 18, 0]);
 
 /// Colour clocks from the song's start to the first tick's interrupt, past the timer's period;
 /// the time from there to the first write is the first segment's (see `cycles`).
-const TIMER_DELAY_20: u64 = 331;
+const TIMER_DELAY_20: u64 = 329;
 const TIMER_DELAY_22: u64 = 214;
 
 /// A counter's decrement: 2.0 keeps words, 2.2 bytes.
@@ -1190,7 +1190,22 @@ struct Cost {
     last: u16,
     /// The next write's site.
     site: u16,
+    /// A tick has run (see `FIRST_TICK_LATE`).
+    started: bool,
+    /// This is the first tick.
+    first: bool,
 }
+
+/// 2.0: the colour clocks by which the first tick's first write is later than the later ticks'
+/// when the path to it is shorter than the tick's own latency (a segment from the tick that sums
+/// to nothing or less). The port starts a tick at its interrupt and cannot write before it, so
+/// the later ticks' interrupt is taken `LATE` clocks early (`TIMER_DELAY_20`, the whole grid) and
+/// every segment from the tick lengthened by `2 * LATE` cycles; the first tick, whose time was
+/// fitted, is then held to `LATE` clocks of wait at least. Measured on bp.ALIENBREED, whose ticks
+/// start with the LFO's period (-4 cycles, written at the interrupt) or the ADSR's volume (42
+/// cycles): the original's second kind of tick comes 23 clocks after the first kind, the port's
+/// only 21, and the first kind of the first tick 2 clocks after the later ones.
+const FIRST_TICK_LATE: i32 = 2;
 
 const TICK: u16 = 0;
 const WAIT: u16 = 1;
@@ -1201,6 +1216,8 @@ impl Cost {
         self.cyc = 0;
         self.owed = 0;
         self.last = TICK;
+        self.first = !self.started;
+        self.started = true;
     }
 }
 
@@ -1217,14 +1234,20 @@ fn host(c: &mut Cost) {
     c.cyc = 0;
 }
 
+/// The colour clocks to wait for a write whose segment's cost is `s` cycles.
+fn clocks(c: &Cost, s: i32) -> i32 {
+    let from_tick = !c.v22 && c.last == TICK;
+    let n = c.owed + (c.cyc + s + if from_tick { 2 * FIRST_TICK_LATE } else { 0 }).div_euclid(2);
+    n.max(if from_tick && c.first { FIRST_TICK_LATE } else { 0 })
+}
+
 /// The time up to the write at `c.site` of voice `ch`.
 fn put(c: &mut Cost, hw: &mut Hw, ch: usize) {
     log(hw.bus, c.site);
     let k = c.site * 4 + ch as u16;
     let t = if c.v22 { SEG_22 } else { SEG_20 };
     let s = t.binary_search_by(|e| (e.0, e.1).cmp(&(c.last, k))).map_or(0, |i| t[i].2);
-    let n = c.owed + (c.cyc + s).div_euclid(2);
-    hw.wait(n.max(0) as u64);
+    hw.wait(clocks(c, s) as u64);
     c.cyc = 0;
     c.owed = 0;
     c.last = k;
@@ -1305,6 +1328,32 @@ mod tests {
                 assert_eq!(bus.r16(empty + periods + 2 * k as u32), *p);
             }
         }
+    }
+
+    /// 2.0's ticks run `FIRST_TICK_LATE` clocks early on the grid and every path from the tick is
+    /// that much longer, so a write is where it was; a write that sums to less than nothing
+    /// (clamped at the interrupt) comes that much before the interrupt's grid time on a later
+    /// tick, and not on the first.
+    #[test]
+    fn writes_before_the_interrupt_wait_by_tick() {
+        use super::{clocks, Cost, TICK};
+        let late = super::FIRST_TICK_LATE;
+        let mut c = Cost { last: TICK, ..Cost::default() };
+        // 42 cycles after the interrupt: 21 clocks, as before the shift, on every tick
+        assert_eq!(clocks(&c, 42), 21 + late);
+        // -4 cycles: the later ticks' grid is `late` early, so the write is at the interrupt
+        assert_eq!(clocks(&c, -4), 0);
+        assert_eq!(clocks(&c, -100), 0);
+        c.first = true;
+        // the first tick's was fitted: held `late` after its interrupt
+        assert_eq!(clocks(&c, -4), late);
+        assert_eq!(clocks(&c, 42), 21 + late);
+        // a write after another write, and 2.2, are not shifted
+        c.last = 812;
+        assert_eq!(clocks(&c, 42), 21);
+        c.last = TICK;
+        c.v22 = true;
+        assert_eq!(clocks(&c, 42), 21);
     }
 
     fn reg(log: &[(u32, u16, u64)], a: u32) -> Vec<u16> {

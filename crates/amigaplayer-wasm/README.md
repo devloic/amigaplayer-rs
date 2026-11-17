@@ -4,12 +4,15 @@ The open replayers of amigaplayer-rs for the browser (or Node, Deno, any WebAsse
 Amiga modules and the PC tracker formats in, 16-bit stereo PCM out, behind a small C-style ABI
 (`dp_*`, "decode and play") that a few lines of JavaScript can drive. No imports are needed
 (an empty import object), no threads, no SDL, none of the 68k player files: the module is the
-library of the repository's root built with `default-features = false` plus `archives` and
-`custom-modules`. Custom modules (`cust.*`, a hunk executable carrying the module's own 68k replay
+library of the repository's root built with `default-features = false` plus `archives`,
+`custom-modules` and `sid` (C64 SID tunes). Custom modules (`cust.*`, a hunk executable carrying the module's own 68k replay
 code) run in the engine's 68k host, as natively; no player of anyone else's is in the `.wasm`.
 
-Licence: GPL-2.0-or-later (see `../../LICENSE` and the `LICENSE-*` files). A page that ships
-this `.wasm` ships a GPL-2.0-or-later combined work: offer the source.
+Licence: the source is GPL-2.0-or-later (see `../../LICENSE` and the `LICENSE-*` files), but
+the default build has the `sid` feature (C64 SID tunes, on the libsidplayfp / reSIDfp ports,
+whose files are GPL-2.0-only), which makes the `.wasm` a **GPL-2.0-only** work as a whole; a
+page that ships it ships a GPL-2.0-only combined work: offer the source. `--no-default-features
+--features custom-modules` builds a GPL-2.0-or-later `.wasm` without SID.
 
 ## Build
 

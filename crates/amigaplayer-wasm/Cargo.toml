@@ -15,10 +15,14 @@ crate-type = ["cdylib"]
 amigaplayer-rs = { path = "../..", default-features = false, features = ["archives"] }
 
 [features]
-default = ["custom-modules"]
+default = ["custom-modules", "sid"]
 # custom modules (`cust.*`, the module's own 68k code) run in the engine's 68k host, as
 # natively; `--no-default-features` leaves them out (about 16 KB of the wasm)
 custom-modules = ["amigaplayer-rs/custom-modules"]
+# C64 SID tunes (PSID / RSID) on the libsidplayfp / reSIDfp ports, as natively (about 128 KB).
+# Their files are GPL-2.0-only, so a .wasm built with this feature is a GPL-2.0-only work as a
+# whole (the owner's decision, 2026-11-16, for the web page too); without it, GPL-2.0-or-later.
+sid = ["amigaplayer-rs/sid"]
 
 [profile.release]
 opt-level = 3

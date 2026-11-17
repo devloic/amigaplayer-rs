@@ -9,7 +9,7 @@
 //!
 //! * Paula voice n plays the step column 3 - n, and the columns are read 3 to 0.
 //! * The sample pointer and length are written every tick, a one-shot sample's as
-//!   the player's empty word with length 0; the arpeggio sets the period of a
+//!   the player's empty word with length 1 (looping it); the arpeggio sets the period of a
 //!   2.0 voice for one tick only, and 2.0 cycles it over 3 ticks, not 4.
 //! * A new instrument comes with no range check; 2.0 turns DMA off only for a
 //!   voice whose instrument changes (or that played a one-shot sample), and
@@ -31,7 +31,10 @@
 //! moment the original does, and restore them when the voice restarts.
 //!
 //! A voice that has played a one-shot sample goes on playing from the player's
-//! empty word, with length 0: 131072 bytes of the player's own memory. The port
+//! empty word, with length 1: that word, looped. (EP206's Eagleplayers write length 0 there,
+//! which is 65536 words: the voice plays 128 KB of memory past the word and does not latch its
+//! next pointer for a minute; the Wanted Team's players UADE ships write 1, and Alien Breed's
+//! menu music, bp.ALIENMENU, is audibly broken with 0.) The port
 //! keeps the originals' variables there, in their layout (from memory dumps of the
 //! two Eagleplayers: the voices' structures, the song position and counters, the
 //! saved waveforms, the period table and the samples' addresses), as they are
@@ -44,8 +47,8 @@ use crate::machine::Machine;
 
 pub const OPEN: Open = Open { name: "SoundMon", detect, new };
 
-/// Bytes of the player's empty sample: what Paula reads after a one-shot sample,
-/// at length 0 (65536 words). The original's is its own memory, which is not silent:
+/// Bytes of the player's empty sample: what Paula reads after a one-shot sample at length 0
+/// (65536 words; EP206's players; the port writes 1, so only the empty word is played). The original's is its own memory, which is not silent:
 /// the empty word is followed by the player's variables (`write_state`), which this
 /// keeps there as the original does. What follows those is whatever the machine has
 /// after the player's hunk (zeros when the Eagleplayer is loaded alone, the next
@@ -215,15 +218,6 @@ fn new(d: &[u8], base: u32, m: &mut Machine) -> Option<Box<dyn Replayer>> {
 /// there; this plays period 0 (Paula's slowest) instead.
 fn period(note: i32) -> u16 {
     usize::try_from(note + 35).ok().and_then(|i| PERIODS.get(i)).copied().unwrap_or(0)
-}
-
-/// The length the original writes: 1 (and 0) as 0.
-fn plen(len: u16) -> u16 {
-    if len <= 1 {
-        0
-    } else {
-        len
-    }
 }
 
 /// DMA on as the original's ENPP_DMAMask does it, waiting for the DMA to start.
@@ -529,7 +523,7 @@ impl SoundMon {
         self.c.site = 205;
         ev(&mut self.c, hw.bus, if v.len <= 1 { 150 } else { 151 });
         put(&mut self.c, hw, i);
-        hw.len(i, plen(v.len));
+        hw.len(i, v.len);
         if v.arp_value == 0 && v.auto_arp == 0 {
             ev(&mut self.c, hw.bus, 55);
         }
@@ -779,7 +773,7 @@ impl SoundMon {
             self.c.site = 213;
             ev(&mut self.c, hw.bus, if v.len <= 1 { 150 } else { 151 });
             put(&mut self.c, hw, i);
-            hw.len(i, plen(v.len));
+            hw.len(i, v.len);
             if n[4] != 0 {
                 self.adsr_start(i, n[5], n[0x19], hw);
             } else {
@@ -815,7 +809,7 @@ impl SoundMon {
             self.c.site = 215;
             ev(&mut self.c, hw.bus, if w(0x18) <= 1 { 150 } else { 151 });
             put(&mut self.c, hw, i);
-            hw.len(i, plen(w(0x18)));
+            hw.len(i, w(0x18));
             Self::restart_volume(&mut self.c, hw, i, v.volume, w(0x1e), false);
             // only the loop plays: its pointer is written before DMA starts
             v.len = w(0x1c);
@@ -831,7 +825,7 @@ impl SoundMon {
                 self.c.site = 217;
                 ev(&mut self.c, hw.bus, if v.len <= 1 { 150 } else { 151 });
                 put(&mut self.c, hw, i);
-                hw.len(i, plen(v.len));
+                hw.len(i, v.len);
             }
         }
         dma_on(&mut self.c, hw, 218, 1 << i);
@@ -875,7 +869,7 @@ impl SoundMon {
             self.c.site = 221;
             ev(&mut self.c, hw.bus, if v.len <= 1 { 150 } else { 151 });
             put(&mut self.c, hw, i);
-            hw.len(i, plen(v.len));
+            hw.len(i, v.len);
             if n[4] != 0 {
                 self.adsr_start(i, n[5], n[0x1d], hw);
             } else {
@@ -898,7 +892,7 @@ impl SoundMon {
             self.c.site = 223;
             ev(&mut self.c, hw.bus, if w(0x18) <= 1 { 150 } else { 151 });
             put(&mut self.c, hw, i);
-            hw.len(i, plen(w(0x18)));
+            hw.len(i, w(0x18));
             Self::restart_volume(&mut self.c, hw, i, v.volume, w(0x1e), false);
             v.len = w(0x1c);
             let loop_start = w(0x1a);
@@ -920,7 +914,7 @@ impl SoundMon {
                 self.c.site = 225;
                 ev(&mut self.c, hw.bus, if v.len <= 1 { 150 } else { 151 });
                 put(&mut self.c, hw, i);
-                hw.len(i, plen(v.len));
+                hw.len(i, v.len);
             }
         }
         self.mask |= 1 << i;
@@ -1365,7 +1359,7 @@ mod tests {
         let log = play(module(b"V.2", 0x19), "SoundMon 2.0");
         // the first tick's empty voices, then the note's period, waveform and volume
         assert_eq!(&reg(&log, 0xDFF0A6)[..2], &[0, super::PERIODS[60]]);
-        assert_eq!(&reg(&log, 0xDFF0A4)[..2], &[0, 16]);
+        assert_eq!(&reg(&log, 0xDFF0A4)[..2], &[1, 16], "the empty word is looped, length 1");
         assert_eq!(&reg(&log, 0xDFF0A8)[..2], &[0xff, 64]);
         // 2.0 turns each voice on by itself
         assert_eq!(&reg(&log, 0xDFF096)[..5], &[0x000F, 0x8001, 0x8002, 0x8004, 0x8008]);

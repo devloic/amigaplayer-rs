@@ -755,10 +755,14 @@ REFUSED_NO_FALLBACK = {'hippel7v'}
 # Formats whose Eagleplayer is pre-empted in the full player directory by another player's looser
 # check (UADE's Soundtracker IV takes MYST files before YM-2149 is asked): the original runs from a
 # directory holding that player alone.
-# SoundMon 2.0 / 2.2 (EP206): a one-shot sample ends on the player's "empty" word with length 0,
-# so Paula plays 128 KB of memory from there on: the player's own variables, then whatever was
-# loaded after its hunk. In the full directory that is the next Eagleplayer's code, which no port
-# can hold; loaded alone, zeros follow and the original is one a port can equal.
+# SoundMon 2.0 / 2.2 (UADE's SoundMon2.0 / SoundMon2.2, the Wanted Team's builds; before 2026-11-16
+# EP206's SoundMon / SoundMon 2.2): EP206's players write AUDxLEN 0 when a voice is pointed at the
+# player's "empty" word (a one-shot sample's end), which is 65536 words: the voice plays 128 KB
+# past the word and latches no next pointer for a minute, so voices stop retriggering (Alien Breed's
+# menu music, bp.ALIENMENU, from 2.7 s: noise bursts). UADE's players write 1, and so does uade123 on
+# that file: that is what plays. The write is the player's own (it does not depend on memory contents,
+# the CPU speed, the load address or the module), not something the 68k host gives it. Each runs from a directory
+# holding it alone, as before.
 # PreTracker (UADE): a wave at a note of octave 9 (prt.m065's wave 2) is generated from an
 # oscillator index that runs away, up to 64K past the oscillator buffers in the player's BSS hunk:
 # through the player's own first hunk (of which the port holds its computed tables and 4 table bytes,
@@ -769,7 +773,7 @@ SOAMC = SCRATCH + '/soamc/x'
 ALONE = {'emsv6': ('uade', 'EMS-6'),   # with all of UADE's players loaded the original's memory differs from 1.5 s on
          'gtgamesystems': ('soamc', 'G&T_Game_Systems/1.0_(08.Aug.2008)/G&T Game Systems'),
          'digitalsoundcreations': ('soamc', 'Digital_Sound_Creations/1.0_(29.Dec.2005)/Digital Sound Creations'),
-         'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('ep206', 'SoundMon'), 'soundmon22': ('ep206', 'SoundMon 2.2'),
+         'ym2149': ('uade', 'YM-2149'), 'soundmon20': ('uade', 'SoundMon2.0'), 'soundmon22': ('uade', 'SoundMon2.2'),
          # SidMon 1.0 (EP206): a finetuned period read past the table lands in the next player's hunk
          'sidmon10': ('ep206', 'SIDMon 1.0'),
          'pretracker': ('uade', 'PreTracker'),

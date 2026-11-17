@@ -1,6 +1,6 @@
 mod ui;
 
-use amigaplayer_rs::paulaout::Filter;
+use amigaplayer_rs::paulaout::{Filter, Resampler};
 use amigaplayer_rs::xmp::mixer::Interp;
 #[cfg(feature = "host-68k")]
 use amigaplayer_rs::{default_eagleplayers_dir, default_genies_dir, default_libs_dir, default_players_dir};
@@ -37,7 +37,10 @@ struct Args {
     led: bool,
     led_force: bool,
     filter: Option<Filter>,
+    /// `--filter auto-a500|auto-a1200`: the model `auto` takes for an Amiga format.
+    auto_a500: Option<bool>,
     separation: Option<f32>,
+    resampler: Option<Resampler>,
     mono: bool,
     interp: Interp,
     xmp_filter: bool,
@@ -61,8 +64,8 @@ fn usage() -> ! {
 }
 
 const USAGE_HEAD: &str = "usage: amigaplayer-rs [--wav OUT.wav [--rate HZ] [--seconds N] [--subsong N] [--volume V]]\n\
-         \x20                 [--filter a500|a1200|none|auto] [--led auto|on|off|force]\n\
-         \x20                 [--separation 0..1] [--mono] [--interp nearest|linear|spline]\n\
+         \x20                 [--filter a500|a1200|none|auto|auto-a500] [--led auto|on|off|force]\n\
+         \x20                 [--separation 0..1] [--resampler default|sinc] [--mono] [--interp nearest|linear|spline]\n\
          \x20                 [--xmp-filter on|off] [--archive-entry NAME]\n\
          \x20                 [FILES/DIRS...]\n\
          \n\
@@ -96,8 +99,11 @@ const USAGE_TAIL: &str = "--led off renders with the LED filter\n\
          ignored (UADE's start state; an Amiga starts with it on); auto (the\n\
          default, also spelled on) follows the player's LED; force switches it on\n\
          whatever the player does. --filter picks the Amiga filter model (auto:\n\
-         A500, none for PC formats; the A1200 has no fixed filter). --separation\n\
-         (default 0.7; 1 = hard Amiga panning) and --mono shape the Paula mix.\n\
+         A1200, none for PC formats; auto-a500 is the A500, which adds a fixed 6.2 kHz low-pass). --resampler\n\
+         sinc (the default) is UADE's Sinc resampler, as the audacious-uade plugin's, whose\n\
+         tables do the filtering; default is UADE's older averaging one with RC filters.\n\
+         --separation (default 0.3 = plugin panning 0.7; 1 = hard Amiga panning) and\n\
+         --mono shape the Paula mix.\n\
          --interp and --xmp-filter are libxmp's mixer's (linear, on). --volume V\n\
          sets the output volume (default 0.8; UADE's level is 1). --rate HZ is the\n\
          --wav render's sample rate (8000 to 192000, default 48000). With --wav the\n\
@@ -125,7 +131,7 @@ fn parse_args() -> Args {
         only_player: None,
         #[cfg(feature = "host-68k")]
         open_replayers: true,
-        wav: None, rate: SAMPLE_RATE, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, separation: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
+        wav: None, rate: SAMPLE_RATE, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, auto_a500: None, separation: None, resampler: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
     // (a file name need not be UTF-8: options are read as text, file names as given)
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
@@ -179,7 +185,21 @@ fn parse_args() -> Args {
                     Some("a500") => Some(Filter::A500),
                     Some("a1200") => Some(Filter::A1200),
                     Some("none") => Some(Filter::None),
-                    Some("auto") => None,
+                    Some("auto" | "auto-a1200") => {
+                        a.auto_a500 = Some(false);
+                        None
+                    }
+                    Some("auto-a500") => {
+                        a.auto_a500 = Some(true);
+                        None
+                    }
+                    _ => usage(),
+                }
+            }
+            "--resampler" => {
+                a.resampler = match it.next().as_deref() {
+                    Some("default") => Some(Resampler::UadeDefault),
+                    Some("sinc") => Some(Resampler::Sinc),
                     _ => usage(),
                 }
             }
@@ -241,6 +261,9 @@ fn apply_settings(args: &Args, s: &mut Settings) {
     s.led_filter = args.led;
     s.led_force = args.led_force;
     s.filter_model = args.filter;
+    if let Some(b) = args.auto_a500 {
+        s.a500_filter = b;
+    }
     s.mono = args.mono;
     s.interp = args.interp;
     s.xmp_filter = args.xmp_filter;
@@ -249,6 +272,9 @@ fn apply_settings(args: &Args, s: &mut Settings) {
     }
     if let Some(v) = args.separation {
         s.separation = v;
+    }
+    if let Some(v) = args.resampler {
+        s.resampler = v;
     }
 }
 
@@ -292,6 +318,12 @@ fn render_wav(args: &Args) -> Result<()> {
     }
     if let Some(v) = args.separation {
         e.settings.separation = v;
+    }
+    if let Some(v) = args.resampler {
+        e.settings.resampler = v;
+    }
+    if let Some(b) = args.auto_a500 {
+        e.settings.a500_filter = b;
     }
     if std::env::var_os("DELI_DMA_LOG").is_some() {
         e.m.bus.paula.dma_log = Some(Vec::new());

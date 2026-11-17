@@ -76,7 +76,7 @@ while !song.songend() && song.elapsed_secs() < 120.0 {
 | `detect_with(name, &[u8], companions) -> Option<String>` | as `detect`, given the file name and companion files; where the bytes pass more than one replayer's check (Infogrames and Rob Hubbard 2 modules; the bank beside them decides) it starts the song to name the one that plays it |
 | `formats() -> Vec<&'static str>` | the formats the library knows |
 | `Song::open(name, bytes, rate)` / `open_with(.., companions, ..)` | start a module. Companions (TFMX `smpl.*`, Mark Cooksey `mcs.*`, IFF-SMUS `Instruments/*`, ...) are `(relative path, bytes)` pairs |
-| `Song::open_opts(name, bytes, companions, rate, &Options)` | as `open_with`, with `Options` (`Options::new().allow_custom(true)`: custom modules, `custom-modules` builds) |
+| `Song::open_opts(name, bytes, companions, rate, &Options)` | as `open_with`, with `Options` (`Options::new().allow_custom(true)`: custom modules, `custom-modules` builds; `.filter(Filter::A500\|A1200\|None)`, `.resampler(Resampler::Sinc\|UadeDefault)`, `.separation(0..1)`: the output stage of Paula's formats, by default the audacious-uade plugin's: A1200, Sinc, 0.3; before 2026-11-16 the library played A500, UadeDefault, 0.7) |
 | `detect_custom(&[u8]) -> bool` | the bytes are a custom module (`custom-modules` builds); nothing is run |
 | `error() -> Option<&Error>` | why the song stopped by itself and renders silence: `Error::Guest` (a custom module's code failed), `Error::Internal` (a replayer panicked) |
 | `missing_calls() -> &[MissingCall]` | the AmigaOS library functions a custom module's code called that the host does not implement, each once, in the order first called; empty for other formats (see [Custom modules](#custom-modules)) |

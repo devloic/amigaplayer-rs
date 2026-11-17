@@ -446,13 +446,19 @@ colour clocks (3,546,895 Hz):
   It departs from UADE where UADE departs from the hardware: volume 64 is full
   volume (UADE plays 63), and periods below 16 are played as written (UADE
   raises them to 16).
-* The output stage is UADE's default one: each channel's output averaged over
-  the colour clocks of an output sample, hard left/right, then the A500 filter
-  (fixed 6.2 kHz RC plus 20 kHz) or the A1200 one (none), and the LED filter
-  (CIA-A PRA bit 1) on top. It matches UADE's `--write-audio` dumps to the bit.
-  Formats from the PC (XM, S3M, 669, WAV, AIFF, MP3, TakeTracker) skip the
-  filters, since their music was not made for them. **F** switches between the
-  A500 and A1200 models.
+* The output stage defaults to the audacious-uade plugin's: UADE's Sinc
+  resampler (BLEP mixing with UADE's windowed-sinc tables, ported from its
+  `audio.c`; the table for the filter model and the LED state does the
+  filtering) on the A1200 model, with a separation of 0.3 (the plugin's panning
+  0.7). The older stage stays selectable (`--resampler default`): UADE's
+  "default" resampler, each channel's output averaged over the colour clocks of
+  an output sample, then the A500 filter (fixed 6.2 kHz RC plus 20 kHz) or the
+  A1200 one (none), and the LED filter (CIA-A PRA bit 1) on top, at separation
+  0.7 and the A500 model (`--filter auto-a500 --resampler default --separation
+  0.7`). Both match uade123's output to the bit: every sample of its `--write-audio` dumps (20 s at 48 kHz, A500 and A1200, LED off, on and switching) is recomputed from the dump's per-channel outputs by `paulaout::tests::matches_uade_write_audio` (ignored; env vars in its comment), for a ProTracker module, SoundMon, David Whittaker and a module that switches the LED with `E0x`. The Sinc resampler is a port of `sample16si_sinc_handler` and `sinc_prehandler` of UADE's `audio.c` (the UAE and UADE sound core: Bernd Schmidt, Marcus Sundberg, Manfred Thole, Heikki Orsila, Antti S. Lankila; GNU GPL version 2 or later, UADE's COPYING) with its table `winsinc_integral` (`src/sinctable.rs`, from uade 3.05's `sinctable.c`; `contrib/sinc-integral.py` is Python 2 and today's scipy gives other values, so the table is kept as UADE ships it). Formats
+  from the PC (XM, S3M, 669, WAV, AIFF, MP3, TakeTracker) skip the filters,
+  since their music was not made for them. **F** switches between the A500 and
+  A1200 models.
 * Frames are 313 lines (49.92 Hz vertical blank; UADE uses 312), the CIA
   timers count E-clock ticks (colour clock / 5), DeliTracker's timer
   interrupt comes every timer value + 1 E-clock ticks, and `dtg_WaitAudioDMA`
@@ -486,10 +492,10 @@ on at start)`).
 
 | Stage | Models | Default | Used by | Switch |
 |---|---|---|---|---|
-| Paula resampler (`src/paulaout.rs`) | UADE's "default" resampler: each channel averaged over the colour clocks of an output sample (48 kHz), hard left/right (channels 0, 3 left; 1, 2 right) | on, always | every Paula backend: 68k players, Eagleplayers, built-in ProTracker, open replayers | none |
-| Filter model | A500: fixed RC low-pass 6.2 kHz plus 20 kHz; A1200: none; none | `auto`: A500, and none for PC formats (`PC_FORMATS` in `src/engine.rs`: 669, ADPCM, AIFF, WAV/RIFF, MPEG/MP3, FastTracker, ScreamTracker, PS3M, TakeTracker) | Paula backends | `--filter a500\|a1200\|none\|auto`; **F** in the window toggles A500/A1200 |
+| Paula resampler (`src/paulaout.rs`, `src/sinctable.rs`) | `sinc`: UADE's Sinc resampler, BLEP mixing with its windowed-sinc tables (21 kHz cutoff at the colour clock; one table each for A500, A1200 and no filter, with the LED filter off and on), which filter as the model does, so the RC filters are not run; `default`: UADE's "default" resampler, each channel averaged over the colour clocks of an output sample, then the RC filters. Either way hard left/right (channels 0, 3 left; 1, 2 right) | `sinc` (the audacious-uade plugin's; before 2026-11-16 `default`) | every Paula backend: 68k players, Eagleplayers, built-in ProTracker, open replayers | `--resampler sinc\|default`; wasm `dp_set_output`; C `ap_open_output`; Rust `Options::resampler` |
+| Filter model | A500: fixed RC low-pass 6.2 kHz plus 20 kHz; A1200: none; none | `auto`: A1200 (the plugin's; the A500 until 2026-11-16), and none for PC formats (`PC_FORMATS` in `src/engine.rs`: 669, ADPCM, AIFF, WAV/RIFF, MPEG/MP3, FastTracker, ScreamTracker, PS3M, TakeTracker) | Paula backends | `--filter a500\|a1200\|none\|auto\|auto-a500` (`auto-a500` is `auto` with the A500 for Amiga formats, what `auto` was; `a500` and `a1200` also force PC formats through the model); **F** in the window toggles A500/A1200 |
 | LED filter | the Amiga's LED low-pass (7 kHz biquad), on while CIA-A PRA bit 1 is low; an Amiga starts with it on, UADE with it off | `auto`: follows the player (`--led on` is the same) | Paula backends, except where the filter model is none | `--led auto\|on\|off\|force`: `off` ignores it, `force` keeps it on whatever the player writes |
-| Separation | mixes a fraction of each side into the other: 1 = hard Amiga panning, 0 = mono (`Settings::separation`); UADE-compat (`DELI_UADE=1`) sets 1 | 0.7 | Paula backends (libxmp's own mix is 100 %) | `--separation V` |
+| Separation | mixes a fraction of each side into the other: 1 = hard Amiga panning, 0 = mono (`Settings::separation`); UADE-compat (`DELI_UADE=1`) sets 1 (and the A500 filter, the default resampler: what uade123 does with no options) | 0.3 (the audacious-uade plugin's panning 0.7; UADE mixes 35 % of each side into the other; 0.7 before 2026-11-16) | Paula backends (libxmp's own mix is 100 %) | `--separation V` |
 | Mono | sums both sides | off | all backends | `--mono` |
 | Volume | output gain; UADE's level is 1 | 0.8 (= libxmp's full scale on its backend) | all | `--volume V` |
 | 8-bit amplifier (`src/amplifier.rs`) | Eagleplayer's "8 Bit Amplifier": voices mixed sample-and-hold at the mix rate (28 kHz less 500 Hz per voice past 2) onto Paula channels 0 and 1, boost 1.0 + (voices-1)/4 tenths (10 + (n-1)/4 in tenths, scaled by the player's gain), clipped to 8 bits | on, for the players that ask for it | the Eagleplayers that call `EP_InitAmplifier` (the software-mixing ones) and the open replayers that port them | none (printed as `amplifier=8bit@...Hz,boost=...`) |
@@ -498,9 +504,10 @@ on at start)`).
 | libxmp resonant filter | the IT/LIQ/IMF lowpass (`QUIRK_FILTER`) | on (only modules that use it are affected) | libxmp backend | `--xmp-filter on\|off` |
 
 Other places: the wasm crate (`crates/amigaplayer-wasm`) renders through
-`open::Song`, so it has the engine's default settings (A500 filter, LED
-following the player, separation 0.7, 0.8 volume); libxmp formats there are the
-same mixer. There is no DC removal or dithering anywhere, and the only clipping
+`open::Song`, so it has the engine's default settings (A1200 filter, Sinc
+resampler, LED following the player, separation 0.3, 0.8 volume), changed by
+`dp_set_output` (its README); the C API's `ap_open_output` and `Options` in Rust
+do the same; libxmp formats there are the same mixer. There is no DC removal or dithering anywhere, and the only clipping
 is the final `clamp(-1, 1)` of the f32 mix (and the 8-bit amplifier's).
 
 ### Comparing with the originals

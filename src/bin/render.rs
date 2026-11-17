@@ -20,6 +20,7 @@
 //! (`--stop-at songlengths`: stop at that length, since a SID tune never ends by itself).
 
 use amigaplayer_rs::engine::{Backend, Engine};
+use amigaplayer_rs::paulaout::{Filter, Resampler};
 use anyhow::{bail, Context, Result};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -37,6 +38,12 @@ const USAGE: &str = "usage: amigaplayer-render [OPTIONS] MODULE
                     first sound after max(S, 60) (modules with silent intros of 10-28 s)
   --no-songend      play on when the player reports the song's end
   --volume V        output volume (default 0.8; UADE's level is 1)
+  --filter a500|a1200|none|auto|auto-a500
+                    the Amiga filter model (default auto: the A1200's, none for PC formats; auto-a500: the A500's, none for PC formats)
+  --resampler sinc|default
+                    UADE's Sinc resampler (the default, the audacious-uade plugin's) or its
+                    older averaging one with the RC filters
+  --separation S    0..1, 1 = hard Amiga panning (default 0.3, the plugin's panning 0.7)
   --info            print one line of JSON about the module on standard output
                     (title, format, backend, subsongs) and render nothing
   --songdb DIR      look the file up in the song database of audacious-uade in DIR
@@ -84,6 +91,10 @@ struct Args {
     silence: f64,
     songend: bool,
     volume: Option<f32>,
+    filter: Option<Filter>,
+    auto_a500: Option<bool>,
+    resampler: Option<Resampler>,
+    separation: Option<f32>,
     info: bool,
     songdb: Option<PathBuf>,
     stop_songdb: bool,
@@ -120,6 +131,10 @@ fn parse_args() -> Args {
         silence: 10.0,
         songend: true,
         volume: None,
+        filter: None,
+        auto_a500: None,
+        resampler: None,
+        separation: None,
         info: false,
         songdb: None,
         stop_songdb: false,
@@ -163,6 +178,30 @@ fn parse_args() -> Args {
             "--silence" => a.silence = num(it.next()),
             "--no-songend" => a.songend = false,
             "--volume" => a.volume = Some(num(it.next())),
+            "--filter" => {
+                a.filter = match it.next().as_deref() {
+                    Some("a500") => Some(Filter::A500),
+                    Some("a1200") => Some(Filter::A1200),
+                    Some("none") => Some(Filter::None),
+                    Some("auto" | "auto-a1200") => {
+                        a.auto_a500 = Some(false);
+                        None
+                    }
+                    Some("auto-a500") => {
+                        a.auto_a500 = Some(true);
+                        None
+                    }
+                    _ => usage(),
+                }
+            }
+            "--resampler" => {
+                a.resampler = match it.next().as_deref() {
+                    Some("default") => Some(Resampler::UadeDefault),
+                    Some("sinc") => Some(Resampler::Sinc),
+                    _ => usage(),
+                }
+            }
+            "--separation" => a.separation = Some(num(it.next())),
             "--info" => a.info = true,
             "--songdb" => a.songdb = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--stop-at" => {
@@ -370,6 +409,16 @@ fn run(a: &Args) -> Result<()> {
     e.open_replayers = !a.m68k_first;
     if let Some(v) = a.volume {
         e.settings.volume = v;
+    }
+    e.settings.filter_model = a.filter;
+    if let Some(b) = a.auto_a500 {
+        e.settings.a500_filter = b;
+    }
+    if let Some(v) = a.resampler {
+        e.settings.resampler = v;
+    }
+    if let Some(v) = a.separation {
+        e.settings.separation = v;
     }
     // an archive: its entries in order, those no player takes skipped (`items` gives the file
     // itself for anything else)

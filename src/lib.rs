@@ -171,6 +171,7 @@ pub mod playlist;
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod paulaout;
+pub mod sinctable;
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod protracker;

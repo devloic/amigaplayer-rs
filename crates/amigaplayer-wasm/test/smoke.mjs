@@ -1,6 +1,7 @@
 // Smoke test of the dp_* ABI with no glue code: node smoke.mjs AMIGAPLAYER_WASM [MODULE_FILE]
 // Without a module file a minimal ProTracker module is built here. Prints the module's
-// info string and a checksum of the PCM; exits 1 on a failure.
+// info string and a checksum of the PCM (the default output stage, then the old one that
+// dp_set_output(0, 0, 700) selects); exits 1 on a failure.
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
@@ -37,4 +38,12 @@ const pcm = new Uint8Array(x.memory.buffer, x.dp_pcm_ptr(), x.dp_pcm_len());
 console.log('pcm bytes', pcm.length, 'truncated', x.dp_truncated());
 console.log('sha256', createHash('sha256').update(pcm).digest('hex'));
 if (pcm.length === 0) process.exit(1);
+x.dp_close();
+
+// The same again with the output stage the ABI had before dp_set_output (A500 filter, UADE's
+// default resampler, separation 0.7): the checksum of the PCM it gave then.
+if (x.dp_set_output(0, 0, 700) !== 0) process.exit(1);
+if (x.dp_open(pn, name.length, pm, bytes.length, 48000, 48000 * 4 * 5, -1) !== 0) process.exit(1);
+const old = new Uint8Array(x.memory.buffer, x.dp_pcm_ptr(), x.dp_pcm_len());
+console.log('sha256 (old output: dp_set_output(0, 0, 700))', createHash('sha256').update(old).digest('hex'));
 x.dp_close();

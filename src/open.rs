@@ -5,7 +5,7 @@
 //! emulated Paula, and the PC tracker formats of the libxmp port (`crate::xmp`) on
 //! its own mixer.
 
-use crate::engine::{Backend, Engine, Playing};
+use crate::engine::{Backend, Engine, Playing, Settings};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
@@ -141,7 +141,7 @@ impl Song {
     /// As `open`, with the companion files given in memory (each at its host path,
     /// e.g. beside `path`) for a host with no file system.
     pub fn open_with(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32) -> Result<Song> {
-        Song::start(path, data, files, rate, false)
+        Song::start(path, data, files, rate, false, Settings::default())
     }
 
     /// As `open_with`, and a custom module (see `detect_custom`) plays too, on the emulated
@@ -150,11 +150,18 @@ impl Song {
     /// player is loaded: only the module's own code runs.
     #[cfg(feature = "custom-modules")]
     pub fn open_custom(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32) -> Result<Song> {
-        Song::start(path, data, files, rate, true)
+        Song::start(path, data, files, rate, true, Settings::default())
     }
 
-    fn start(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32, custom: bool) -> Result<Song> {
+    /// As `open_with` (`custom`: as `open_custom`, in builds that have it), with the output
+    /// `settings` (filter model, resampler, separation, ...) in effect from the first sample.
+    pub fn open_configured(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32, custom: bool, settings: Settings) -> Result<Song> {
+        Song::start(path, data, files, rate, custom, settings)
+    }
+
+    fn start(path: &Path, data: Vec<u8>, files: Vec<(PathBuf, Vec<u8>)>, rate: u32, custom: bool, settings: Settings) -> Result<Song> {
         let mut e = Engine::new(rate as f64);
+        e.settings = settings;
         #[cfg(feature = "custom-modules")]
         if custom {
             e.m.os.no_host_files = true;

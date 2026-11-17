@@ -61,7 +61,7 @@ enum {
     AP_OPEN_CUSTOM = 1
 };
 
-/* The version of this API: major * 10000 + minor * 100 + patch (0.4.0 is 400). */
+/* The version of this API: major * 10000 + minor * 100 + patch (0.5.0 is 500). */
 int ap_version(void);
 
 /* The message of the last failed call on this thread (empty if none). */
@@ -106,6 +106,22 @@ ap_song *ap_open_with(const char *name, const uint8_t *data, size_t len, uint32_
 ap_song *ap_open_opts(const char *name, const uint8_t *data, size_t len, uint32_t rate,
                       size_t n, const char *const *paths, const uint8_t *const *datas,
                       const size_t *lens, uint32_t flags);
+
+/*
+ * As ap_open_opts, with the output stage of Paula's formats (the libxmp-port and SID
+ * formats ignore it, and the PC formats have no Amiga filter whatever the model):
+ * filter     0 = A500 (a fixed 6.2 kHz low-pass the A1200 lacks), 1 = A1200 (the default), 2 = none
+ * resampler  0 = UADE's default one (each channel averaged over an output sample, then the
+ *            RC filters), 1 = UADE's Sinc one (the default; its tables do the filtering)
+ * separation_milli  0 (mono) to 1000 (hard Amiga panning), default 300
+ * The defaults are the audacious-uade plugin's; ap_open_opts uses them (before 0.5.0 it had
+ * A500, resampler 0 and separation 700). A value out of range is AP_ERR_ARGUMENT and NULL.
+ * New in 0.5.0.
+ */
+ap_song *ap_open_output(const char *name, const uint8_t *data, size_t len, uint32_t rate,
+                        size_t n, const char *const *paths, const uint8_t *const *datas,
+                        const size_t *lens, uint32_t flags,
+                        int filter, int resampler, int separation_milli);
 
 /*
  * 1 if data[0..len) is a custom module (which ap_open_opts plays with AP_OPEN_CUSTOM, unless

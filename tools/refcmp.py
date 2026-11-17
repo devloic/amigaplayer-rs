@@ -108,6 +108,12 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRATCH = '/media/lolo/kingston2tb/claude-scratch/deliplayerrust'
 DEFAULT_LIST = SCRATCH + '/listen/files.json'
+# The output stage every baseline row was measured with: the A500 filter (none for the PC formats,
+# as `auto` was), UADE's default resampler, separation 0.7. The port's defaults became the
+# audacious-uade plugin's (A1200, Sinc, 0.3); these flags keep the measurement as it was. Given
+# first, so that --flags can still override them.
+OLD_OUTPUT = ['--filter', 'auto-a500', '--resampler', 'default', '--separation', '0.7']
+
 DEFAULT_BIN = os.path.join(HERE, '..', 'target', 'release', 'amigaplayer-rs')
 EP206 = SCRATCH + '/eplicense/x/Eagleplayer_2.06/Eagleplayers'
 UADE_PLAYERS = os.path.expanduser('~/.local/opt/uade/share/uade/players')
@@ -635,7 +641,7 @@ def render_engine(ctx, mod, open_replayers, eagle, extra=(), genies=None, fast_c
     if fast_cpu:
         # the port says its original's code does not fit a 68000's time (see needs_fast_reference_cpu)
         env['DELI_CPU_SPEED'] = '8'
-    cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else ['--68k-players']), *ctx.flags, *extra,
+    cmd = [ctx.bin, *(['--open-replayers'] if open_replayers else ['--68k-players']), *OLD_OUTPUT, *ctx.flags, *extra,
            *(['--rate', str(ctx.rate)] if ctx.rate != RATE else []), '--wav', '@WAV@', '--seconds', str(ctx.secs), mod]
     wav, lines = _run_cached(ctx, mod, cmd, env, os.path.dirname(mod), None)
     play = next((l for l in lines if l.startswith('playing')), None)
@@ -1203,10 +1209,10 @@ def render_8svx_dma(ctx, mod):
                    EAGLEPLAYERS=alone_dir(ctx, src, name), DELI_DMA_LOG=base + '.dma')
         r = p = None
         try:
-            r = subprocess.run([ctx.bin, '--68k-players', '--player', name, '--wav', base + '.o.wav', '--seconds', str(ctx.secs), mod],
+            r = subprocess.run([ctx.bin, '--68k-players', *OLD_OUTPUT, '--player', name, '--wav', base + '.o.wav', '--seconds', str(ctx.secs), mod],
                                env=env, cwd=os.path.dirname(mod), capture_output=True, text=True, timeout=ctx.secs * 4 + 120)
             orig_ok = r.returncode == 0 and 'backend=68k' in r.stderr and os.path.exists(base + '.dma')
-            p = subprocess.run([render, '--format', 'raw', '--rate', str(rate), '--seconds', str(ctx.secs), '--silence', '0',
+            p = subprocess.run([render, *OLD_OUTPUT, '--format', 'raw', '--rate', str(rate), '--seconds', str(ctx.secs), '--silence', '0',
                                 '--out', base + '.p.raw', mod], cwd=os.path.dirname(mod), capture_output=True, text=True,
                                timeout=ctx.secs * 4 + 120)
         except subprocess.TimeoutExpired:

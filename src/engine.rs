@@ -5,7 +5,7 @@ use crate::deli::{self, dtg, tag, Player};
 use crate::eagle;
 use crate::machine::Machine;
 use crate::bus::FRAME;
-use crate::paulaout::Filter;
+use crate::paulaout::{Filter, Resampler};
 use crate::protracker::ProTracker;
 use anyhow::{anyhow, bail, Result};
 use m68k::CpuType;
@@ -84,8 +84,15 @@ impl Playing {
 #[derive(Clone)]
 pub struct Settings {
     pub volume: f32,       // 0..1
-    pub separation: f32,   // 0 = mono, 1 = full Amiga hard panning
-    pub a500_filter: bool, // fixed 4.4 kHz RC low-pass
+    /// 0 = mono, 1 = full Amiga hard panning. The default, 0.3, is the audacious-uade plugin's
+    /// panning 0.7 (UADE mixes 35 % of each side into the other).
+    pub separation: f32,
+    /// The Amiga model of the filter when `filter_model` is None: the A500's (true) or the
+    /// A1200's (false, the default, as the audacious-uade plugin's).
+    pub a500_filter: bool,
+    /// How Paula's output is resampled (`--resampler`); the default is UADE's Sinc one, the
+    /// audacious-uade plugin's. `Resampler::UadeDefault` is the older averaging stage.
+    pub resampler: Resampler,
     pub led_filter: bool,  // honour the LED filter
     pub mono: bool,
     /// Forces the filter model (`--filter`); None follows the format (`output_filter`).
@@ -102,8 +109,9 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             volume: 0.8,
-            separation: 0.7,
-            a500_filter: true,
+            separation: 0.3,
+            a500_filter: false,
+            resampler: Resampler::Sinc,
             led_filter: true,
             mono: false,
             filter_model: None,
@@ -320,8 +328,11 @@ impl Engine {
 
     /// Departs from the Amiga where UADE does, to compare with it: 312 lines a
     /// frame, Paula's volume 64 as 63 and periods below 16 as 16, hard panning
-    /// and full volume.
+    /// and full volume; and the output stage of uade123 with no options (A500 filter, the
+    /// default resampler).
     pub fn set_uade_compat(&mut self) {
+        self.settings.a500_filter = true;
+        self.settings.resampler = Resampler::UadeDefault;
         self.m.bus.frame = 312 * crate::paula::LINE;
         self.m.bus.paula.set_uade_quirks(true);
         self.settings.separation = 1.0;
@@ -678,6 +689,7 @@ impl Engine {
     /// takes seconds on a 68000) passed while it loaded, not while it played.
     fn song_starts(&mut self) {
         self.m.bus.paula.sync(self.m.bus.clock, &self.m.bus.ram);
+        self.m.bus.paula.out.set_resampler(self.settings.resampler);
         self.m.bus.paula.align_to_start(self.m.bus.clock);
         self.m.bus.paula.samples.clear();
         self.batch_scopes.clear();
@@ -1805,10 +1817,14 @@ impl Engine {
             };
             let voices = if self.m.deli.voices.in_use { "builtin-noteplayer(onepole4420+led-biquad3275)" } else { "no" };
             o += &format!(
-                " filter={}{auto} led={led} sep={:.2} mono={} resampler=uade-default amplifier={amp} builtin-voices={voices}",
+                " filter={}{auto} led={led} sep={:.2} mono={} resampler={} amplifier={amp} builtin-voices={voices}",
                 name(f),
                 sx.separation.clamp(0.0, 1.0),
-                sx.mono as u8
+                sx.mono as u8,
+                match sx.resampler {
+                    Resampler::UadeDefault => "uade-default",
+                    Resampler::Sinc => "uade-sinc",
+                }
             );
         }
         o += &format!(" volume={:.2}", sx.volume);
@@ -1856,6 +1872,7 @@ impl Engine {
         let vol = self.settings.volume;
         let filter = self.output_filter();
         self.m.bus.paula.out.set_filter(filter);
+        self.m.bus.paula.out.set_resampler(self.settings.resampler);
         let frames = out.len() / 2;
         for (k, frame) in out.chunks_exact_mut(2).enumerate() {
             if self.playing.is_none() || self.paused {

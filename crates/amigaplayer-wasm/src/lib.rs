@@ -9,6 +9,14 @@
 //! dp_info_ptr/len            "title\tformat\tsubsong\tfirst\tlast"; after -1, the reason
 //! dp_pcm_ptr/len, dp_truncated, dp_close
 //!
+//! dp_set_output(filter, resampler, separation_milli)   the output stage of the next dp_open or
+//!                                dp_open_entry: filter 0 = A500, 1 = A1200, 2 = none; resampler
+//!                                0 = UADE's default (averaging), 1 = UADE's Sinc; separation in
+//!                                thousandths, 0..1000. 0, or -1 (nothing changed) when a value
+//!                                is outside its range. Defaults: 1, 1, 300
+//! dp_get_output(what), dp_default_output(what)   the setting now in force / the default, for
+//!                                what = 0 filter, 1 resampler, 2 separation; -1 for another what
+//!
 //! dp_archive(name, len, p, n)    an archive (LhA, LZX, zip, tar, gzip, xz) extracted into
 //!                                the shim: its entry count, -2 not an archive, -1 unreadable;
 //!                                dp_info: one line per entry, "index\tpath\tsize\tclaimed"
@@ -24,6 +32,7 @@
 //! with that long a silent intro), or at `max_bytes` (truncated): many Amiga players loop
 //! for ever.
 
+use amigaplayer_rs::paulaout::{Filter, Resampler};
 use amigaplayer_rs::{Error, Options, Song};
 use std::path::PathBuf;
 
@@ -39,10 +48,21 @@ struct State {
     info: String,
     pcm: Vec<i16>,
     truncated: bool,
+    /// `dp_set_output`: filter, resampler, separation in thousandths.
+    output: [i32; 3],
 }
 
-static mut STATE: State =
-    State { files: Vec::new(), archive: Vec::new(), info: String::new(), pcm: Vec::new(), truncated: false };
+/// The output stage defaults (the audacious-uade plugin's): A1200, Sinc, separation 0.3.
+const DEFAULT_OUTPUT: [i32; 3] = [1, 1, 300];
+
+static mut STATE: State = State {
+    files: Vec::new(),
+    archive: Vec::new(),
+    info: String::new(),
+    pcm: Vec::new(),
+    truncated: false,
+    output: DEFAULT_OUTPUT,
+};
 
 #[allow(static_mut_refs)]
 fn st() -> &'static mut State {
@@ -93,10 +113,48 @@ fn is_custom(_: &[u8]) -> bool {
 
 /// The options `dp_open` opens a song with: custom modules allowed when the build has them.
 fn open_options() -> Options {
+    let [filter, resampler, sep] = st().output;
+    let o = Options::new()
+        .filter(match filter {
+            0 => Filter::A500,
+            2 => Filter::None,
+            _ => Filter::A1200,
+        })
+        .resampler(if resampler == 0 { Resampler::UadeDefault } else { Resampler::Sinc })
+        .separation(sep as f32 / 1000.0);
     #[cfg(feature = "custom-modules")]
-    return Options::new().allow_custom(true);
+    return o.allow_custom(true);
     #[cfg(not(feature = "custom-modules"))]
-    Options::new()
+    o
+}
+
+/// Sets the output stage for the next `dp_open` / `dp_open_entry` (and those after it, until
+/// the next call): `filter` 0 = A500, 1 = A1200, 2 = none (formats from the PC have no Amiga
+/// filter whichever model; libxmp-port and SID tunes ignore the setting), `resampler` 0 =
+/// UADE's default one (each channel averaged over the colour clocks of an output sample, then
+/// the RC filters), 1 = UADE's Sinc one (its tables do the filtering), `separation_milli` 0
+/// (mono) to 1000 (hard Amiga panning). Returns 0, or -1 when a value is out of range, in which
+/// case none is changed. The defaults are 1, 1, 300.
+#[unsafe(no_mangle)]
+pub extern "C" fn dp_set_output(filter: i32, resampler: i32, separation_milli: i32) -> i32 {
+    if !(0..=2).contains(&filter) || !(0..=1).contains(&resampler) || !(0..=1000).contains(&separation_milli) {
+        return -1;
+    }
+    st().output = [filter, resampler, separation_milli];
+    0
+}
+
+/// The output setting in force (`what` 0 = filter, 1 = resampler, 2 = separation in thousandths),
+/// or -1 for another `what`.
+#[unsafe(no_mangle)]
+pub extern "C" fn dp_get_output(what: i32) -> i32 {
+    usize::try_from(what).ok().and_then(|i| st().output.get(i).copied()).unwrap_or(-1)
+}
+
+/// The default of that output setting (see `dp_get_output`), or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn dp_default_output(what: i32) -> i32 {
+    usize::try_from(what).ok().and_then(|i| DEFAULT_OUTPUT.get(i).copied()).unwrap_or(-1)
 }
 
 /// A companion file for the next `dp_open`, at `path` relative to the module.

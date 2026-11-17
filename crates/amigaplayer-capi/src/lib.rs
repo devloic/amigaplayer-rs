@@ -16,7 +16,7 @@ use std::ffi::{c_char, c_double, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Version of this C API, not of the crate: `major * 10000 + minor * 100 + patch`.
-const API_VERSION: c_int = 400; // 0.4.0
+const API_VERSION: c_int = 500; // 0.5.0
 
 thread_local! {
     static LAST: RefCell<(c_int, CString)> = RefCell::new((0, CString::default()));
@@ -196,7 +196,7 @@ pub unsafe extern "C" fn ap_detect_custom(data: *const u8, len: usize) -> c_int 
     }
 }
 
-/// As `ap_open_with`, with `flags` (`AP_OPEN_*`, or 0).
+/// As `ap_open_with`, with `flags` (`AP_OPEN_*`, or 0). The output stage is the default one.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ap_open_opts(
     name: *const c_char,
@@ -209,19 +209,53 @@ pub unsafe extern "C" fn ap_open_opts(
     lens: *const usize,
     flags: u32,
 ) -> *mut ApSong {
+    unsafe { ap_open_output(name, data, len, rate, n, paths, datas, lens, flags, 1, 1, 300) }
+}
+
+/// As `ap_open_opts`, with the output stage: `filter` 0 = A500, 1 = A1200 (the default), 2 =
+/// none; `resampler` 0 = UADE's default (averaging) one, 1 = its Sinc one (the default);
+/// `separation_milli` 0 (mono) to 1000 (hard Amiga panning), default 300. A value out of its
+/// range is AP_ERR_ARGUMENT and a NULL result. New in 0.5.0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ap_open_output(
+    name: *const c_char,
+    data: *const u8,
+    len: usize,
+    rate: u32,
+    n: usize,
+    paths: *const *const c_char,
+    datas: *const *const u8,
+    lens: *const usize,
+    flags: u32,
+    filter: c_int,
+    resampler: c_int,
+    separation_milli: c_int,
+) -> *mut ApSong {
+    if !(0..=2).contains(&filter) || !(0..=1).contains(&resampler) || !(0..=1000).contains(&separation_milli) {
+        set_error(E_ARGUMENT, "output setting out of range");
+        return std::ptr::null_mut();
+    }
     if flags & !OPEN_CUSTOM != 0 {
         set_error(E_ARGUMENT, "unknown flags");
         return std::ptr::null_mut();
     }
+    let out = Options::new()
+        .filter(match filter {
+            0 => amigaplayer_rs::paulaout::Filter::A500,
+            2 => amigaplayer_rs::paulaout::Filter::None,
+            _ => amigaplayer_rs::paulaout::Filter::A1200,
+        })
+        .resampler(if resampler == 0 { amigaplayer_rs::paulaout::Resampler::UadeDefault } else { amigaplayer_rs::paulaout::Resampler::Sinc })
+        .separation(separation_milli as f32 / 1000.0);
     #[cfg(feature = "custom-modules")]
-    let opts = Options::new().allow_custom(flags & OPEN_CUSTOM != 0);
+    let opts = out.allow_custom(flags & OPEN_CUSTOM != 0);
     #[cfg(not(feature = "custom-modules"))]
     let opts = {
         if flags & OPEN_CUSTOM != 0 {
             set_error(E_UNSUPPORTED, "this build cannot play custom modules (built without the custom-modules feature)");
             return std::ptr::null_mut();
         }
-        Options::new()
+        out
     };
     let (Some(name), Some(data)) = (unsafe { str_arg(name) }, unsafe { bytes(data, len) }) else {
         set_error(E_ARGUMENT, "null or invalid name or data");
@@ -724,6 +758,40 @@ mod tests {
 
     unsafe fn open(data: &[u8], flags: u32) -> *mut ApSong {
         unsafe { ap_open_opts(c"cust.test".as_ptr(), data.as_ptr(), data.len(), 48000, 0, std::ptr::null(), std::ptr::null(), std::ptr::null(), flags) }
+    }
+
+    #[test]
+    fn open_output_selects_the_output_stage() {
+        let m = minimal_mod();
+        let pcm = |filter, resampler, sep| unsafe {
+            let s = ap_open_output(c"a.mod".as_ptr(), m.as_ptr(), m.len(), 48000, 0, std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, filter, resampler, sep);
+            assert!(!s.is_null());
+            let mut v = vec![0i16; 2 * 9000];
+            assert_eq!(ap_render_s16(s, v.as_mut_ptr(), 9000), 9000);
+            ap_close(s);
+            v
+        };
+        unsafe {
+            // ap_open_opts is the defaults: A1200, Sinc, 300
+            let d = ap_open_opts(c"a.mod".as_ptr(), m.as_ptr(), m.len(), 48000, 0, std::ptr::null(), std::ptr::null(), std::ptr::null(), 0);
+            let mut v = vec![0i16; 2 * 9000];
+            assert_eq!(ap_render_s16(d, v.as_mut_ptr(), 9000), 9000);
+            ap_close(d);
+            assert_eq!(v, pcm(1, 1, 300));
+        }
+        let old = pcm(0, 0, 700);
+        assert!(old.iter().any(|&x| x != 0));
+        assert_ne!(old, pcm(1, 1, 300));
+        assert_ne!(pcm(1, 1, 300), pcm(1, 0, 300));
+        assert_ne!(pcm(1, 1, 300), pcm(0, 1, 300));
+        assert_ne!(pcm(1, 1, 300), pcm(1, 1, 1000));
+        for bad in [(3, 1, 300), (-1, 1, 300), (1, 2, 300), (1, 1, 1001), (1, 1, -1)] {
+            unsafe {
+                let s = ap_open_output(c"a.mod".as_ptr(), m.as_ptr(), m.len(), 48000, 0, std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, bad.0, bad.1, bad.2);
+                assert!(s.is_null(), "{bad:?}");
+            }
+            assert_eq!(last_error().0, E_ARGUMENT);
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 use crate::engine::{Backend, Playing};
 use crate::open;
+use crate::paulaout::{Filter, Resampler};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -194,16 +195,63 @@ pub fn detect_custom(data: &[u8]) -> bool {
 /// # }
 /// # Ok::<(), amigaplayer_rs::Error>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Options {
     custom: bool,
+    filter: Filter,
+    resampler: Resampler,
+    separation_milli: u16,
+}
+
+impl Default for Options {
+    /// Open replayers only; the output stage of the audacious-uade plugin: the A1200 filter
+    /// model, UADE's Sinc resampler, separation 0.3 (see [`Options::filter`]).
+    fn default() -> Options {
+        Options { custom: false, filter: Filter::A1200, resampler: Resampler::Sinc, separation_milli: 300 }
+    }
 }
 
 impl Options {
-    /// The defaults: open replayers only.
+    /// The defaults: open replayers only, and the output stage of the audacious-uade plugin.
     pub fn new() -> Options {
         Options::default()
+    }
+
+    /// The Amiga model of Paula's output filter: [`Filter::A1200`] (the default), [`Filter::A500`]
+    /// (a fixed 6.2 kHz low-pass the A1200 lacks) or [`Filter::None`]. The LED filter follows the
+    /// player in the first two. Formats that come from the PC (XM, S3M, ...) have no Amiga
+    /// filter whatever the model, and the libxmp-port and SID backends ignore it.
+    pub fn filter(mut self, f: Filter) -> Options {
+        self.filter = f;
+        self
+    }
+
+    /// How Paula's output is resampled: [`Resampler::Sinc`] (UADE's Sinc resampler, the default;
+    /// its tables do the filtering) or [`Resampler::UadeDefault`] (UADE's averaging resampler
+    /// with the RC filters, what this library did before the Sinc one was added).
+    pub fn resampler(mut self, r: Resampler) -> Options {
+        self.resampler = r;
+        self
+    }
+
+    /// The stereo separation of the Paula mix, 0 (mono) to 1 (hard Amiga panning), in
+    /// thousandths (clamped; the default is 0.3, the plugin's panning 0.7).
+    pub fn separation(mut self, s: f32) -> Options {
+        self.separation_milli = (s.clamp(0.0, 1.0) * 1000.0).round() as u16;
+        self
+    }
+
+    pub(crate) fn settings(&self) -> crate::engine::Settings {
+        let mut s = crate::engine::Settings::default();
+        match self.filter {
+            Filter::A500 => s.a500_filter = true,
+            Filter::A1200 => s.a500_filter = false,
+            Filter::None => s.filter_model = Some(Filter::None),
+        }
+        s.resampler = self.resampler;
+        s.separation = self.separation_milli as f32 / 1000.0;
+        s
     }
 
     /// Lets a custom module (see [`detect_custom`]) play: its own 68k code runs on the emulated
@@ -374,11 +422,10 @@ impl Song {
         let path = PathBuf::from(DIR).join(name);
         let open = || {
             #[cfg(feature = "custom-modules")]
-            if opts.custom {
-                return open::Song::open_custom(&path, data.to_vec(), files.to_vec(), rate);
-            }
-            let _ = opts;
-            open::Song::open_with(&path, data.to_vec(), files.to_vec(), rate)
+            let custom = opts.custom;
+            #[cfg(not(feature = "custom-modules"))]
+            let custom = false;
+            open::Song::open_configured(&path, data.to_vec(), files.to_vec(), rate, custom, opts.settings())
         };
         match catch_unwind(AssertUnwindSafe(open)) {
             Ok(Ok(s)) => Ok(s),
@@ -576,6 +623,35 @@ mod tests {
     use super::*;
 
     fn assert_send<T: Send>() {}
+
+    #[test]
+    fn output_defaults_are_the_plugins_and_the_old_ones_selectable() {
+        use crate::engine::Settings;
+        let d = Settings::default();
+        assert_eq!((d.a500_filter, d.resampler, d.separation), (false, Resampler::Sinc, 0.3));
+        assert_eq!(d.filter_model, None);
+        let o = Options::new();
+        assert_eq!(o, Options::default());
+        let s = o.settings();
+        assert_eq!((s.a500_filter, s.resampler, s.separation, s.filter_model), (false, Resampler::Sinc, 0.3, None));
+        let old = Options::new().filter(Filter::A500).resampler(Resampler::UadeDefault).separation(0.7).settings();
+        assert_eq!((old.a500_filter, old.resampler, old.separation), (true, Resampler::UadeDefault, 0.7));
+        assert_eq!(Options::new().filter(Filter::None).settings().filter_model, Some(Filter::None));
+        // the old output is audibly another PCM, and each is deterministic
+        let m = crate::testdata::minimal_mod();
+        let pcm = |o: &Options| {
+            let mut s = Song::open_opts("a.mod", &m, &[], 48000, o).unwrap();
+            let mut v = vec![0i16; 2 * 6000];
+            s.render_i16(&mut v);
+            v
+        };
+        assert_eq!(pcm(&Options::new()), pcm(&Options::new()));
+        assert_ne!(pcm(&Options::new()), pcm(&Options::new().filter(Filter::A500).resampler(Resampler::UadeDefault).separation(0.7)));
+        let mut s = Song::open("a.mod", &m, 48000).unwrap();
+        let mut v = vec![0i16; 2 * 6000];
+        s.render_i16(&mut v);
+        assert_eq!(v, pcm(&Options::new()), "Song::open is the defaults");
+    }
 
     #[test]
     fn song_is_send() {

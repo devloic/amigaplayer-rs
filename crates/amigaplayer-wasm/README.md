@@ -44,6 +44,8 @@ The PCM is interleaved stereo signed 16-bit little-endian at the rate given to `
 | `dp_detect(ptr, n) -> 0/1` | 1 if an open replayer claims the module, or it is a custom module |
 | `dp_add_file(path_ptr, path_len, ptr, n)` | a companion file for the next `dp_open`, at `path` relative to the module (`smpl.tune` for TFMX, `Instruments/Piano` for IFF-SMUS); `..` components are dropped. Consumed by `dp_open` |
 | `dp_open(name_ptr, name_len, ptr, n, rate, max_bytes, subsong) -> i32` | decodes the module (`name` is its file name, UTF-8; `/` and `\` in it become `_`) at `rate` Hz, at most `max_bytes` of PCM, from `subsong` (-1: the first). Returns **0** ok, **-2** not claimed by any open replayer (the page should use another player), **-1** failed (the reason is in the info string) |
+| `dp_set_output(filter, resampler, separation_milli) -> i32` | the output stage for the next opens: filter 0 = A500, 1 = A1200, 2 = none; resampler 0 = UADE default, 1 = Sinc; separation 0..1000. 0 ok, **-1** out of range (nothing changed). Defaults 1, 1, 300; see Output stage below |
+| `dp_get_output(what) / dp_default_output(what) -> i32` | the setting in force / its default, `what` 0 = filter, 1 = resampler, 2 = separation_milli; -1 for another `what` |
 | `dp_info_ptr() / dp_info_len()` | UTF-8 string `title\tformat\tsubsong\tfirst\tlast` after a successful open; after -1 the failure reason |
 | `dp_pcm_ptr() / dp_pcm_len()` | the PCM (length in **bytes**) |
 | `dp_truncated() -> 0/1` | the byte limit cut the tune short |
@@ -90,6 +92,29 @@ An archive: `n = x.dp_archive(...)`, read the entry list from the info string, t
 `dp_open`), and `x.dp_archive_close()` when done. `test/archive.mjs WASM ARCHIVE [INDEX]`
 drives it.
 
+## Output stage
+
+`x.dp_set_output(filter, resampler, separation_milli)` sets the output stage of the next
+`dp_open` / `dp_open_entry` (and those after, until the next call). It returns 0, or -1 with
+nothing changed when a value is out of range. `dp_open`'s own arguments are unchanged.
+
+| Argument | Values | Default |
+|---|---|---|
+| `filter` | 0 = A500 (a fixed 6.2 kHz low-pass the A1200 lacks), 1 = A1200, 2 = none | 1 |
+| `resampler` | 0 = UADE's default resampler (each channel averaged over an output sample, then the RC filters), 1 = UADE's Sinc resampler (BLEP tables that do the filtering) | 1 |
+| `separation_milli` | thousandths, 0 (mono) to 1000 (hard Amiga panning) | 300 |
+
+The defaults are the audacious-uade plugin's (A1200, Sinc, panning 0.7 = separation 0.3). Before
+`dp_set_output` existed the ABI played `0, 0, 700`: call `dp_set_output(0, 0, 700)` for that
+output. The setting applies to the formats that play on Paula; the libxmp-port formats (XM,
+S3M, ...) and SID tunes have their own mixers and ignore it, and PC formats on Paula have no
+Amiga filter whichever model is set.
+
+`x.dp_get_output(what)` reads the setting in force (`what` 0 = filter, 1 = resampler,
+2 = separation_milli) and `x.dp_default_output(what)` the default, so a page need not hard-code
+them; another `what` gives -1. `test/output.mjs WASM` checks the defaults, the range errors and
+that each value changes the PCM.
+
 ## Smoke test
 
 `test/smoke.mjs` drives the raw exports without any glue and prints a checksum of the PCM:
@@ -98,4 +123,6 @@ drives it.
 node crates/amigaplayer-wasm/test/smoke.mjs target/wasm32-unknown-unknown/release/amigaplayer_wasm.wasm [module]
 ```
 
-Without a module it builds a minimal ProTracker module itself.
+Without a module it builds a minimal ProTracker module itself. It prints the checksum for the default
+output stage and then for `dp_set_output(0, 0, 700)`, the output before the Sinc resampler (the
+defaults changed with it, so the first checksum changed).

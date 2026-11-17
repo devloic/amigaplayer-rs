@@ -7,8 +7,9 @@
 //!
 //! The Sinc resampler is a port of `sample16si_sinc_handler` and `sinc_prehandler` of UADE's
 //! audio.c (Copyright 1995-1997 Bernd Schmidt, 1996 Marcus Sundberg, 1996 Manfred Thole,
-//! 2005 Heikki Orsila, 2005 Antti S. Lankila: the UAE and UADE sound core, GNU GPL version 2
-//! or later as the UADE distribution's COPYING says, COPYING.GPL being version 2, June 1991),
+//! 2005 Heikki Orsila, 2005 Antti S. Lankila: the UAE and UADE sound core, under the GNU GPL
+//! with no version stated (the UADE distribution's COPYING; its COPYING.GPL is version 2,
+//! June 1991, and GPL v2 section 9 lets a program that names no version be used under any),
 //! with the table of [`crate::sinctable`].
 //!
 //! Time is in colour clocks (3546895 per second, PAL). The caller advances the

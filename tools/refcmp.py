@@ -81,6 +81,13 @@ cross-correlation window (10 s), the LENGTH tolerance and the TEMPO minimum leng
 carry the rate (when not 48000). The baseline is tools/refcmp-baseline.tsv at 48000 and
 tools/refcmp-baseline-N.tsv at any other N (--baseline overrides it).
 
+What it cannot see: the port and the original are both rendered through the engine's own
+output stage, at OLD_OUTPUT (A500 filter, UADE's default resampler, separation 0.7, not the
+player's defaults), so an artefact of that stage (aliasing, a raw step where Paula's level
+jumps) is the same on both sides and cancels: an IDENTICAL row can still crack audibly
+(bp.ALIENMENU at 2.7 s, reported 2026-11-16). Output-stage changes are checked against
+uade123's --write-audio instead (paulaout::tests::matches_uade_write_audio).
+
 Outputs (in --out): refcmp.tsv, summary.txt, report.html. The baseline
 (tools/refcmp-baseline.tsv) holds each file's class and numbers, and in `ref_kind` what the
 class was measured against: `primary` (the format's own reference: the original player, libxmp,

@@ -225,7 +225,9 @@ fn dma_on(c: &mut Cost, hw: &mut Hw, site: u16, mask: u16) {
     c.site = site;
     put(c, hw, 0);
     hw.dmacon(0x8000 | mask & 0xF);
-    dma_wait(c, hw);
+    if c.v22 {
+        dma_wait(c, hw);
+    }
 }
 
 /// The original's time from the module's start to the song's (its set-up), in colour clocks: a
@@ -238,8 +240,8 @@ const LOAD_22: (u64, [u64; 5]) = (18029 - 100, [164, 14, 57, 18, 0]);
 
 /// Colour clocks from the song's start to the first tick's interrupt, past the timer's period;
 /// the time from there to the first write is the first segment's (see `cycles`).
-const TIMER_DELAY_20: u64 = 329;
-const TIMER_DELAY_22: u64 = 214;
+const TIMER_DELAY_20: u64 = 331 - TICK_EARLY_20 as u64;
+const TIMER_DELAY_22: u64 = 214 - TICK_EARLY_22 as u64;
 
 /// A counter's decrement: 2.0 keeps words, 2.2 bytes.
 fn dec(v22: bool, c: u16) -> u16 {
@@ -650,10 +652,6 @@ impl SoundMon {
             }
             // ENPP_PokeCommand's LED filter
             3 if data == 0 => {
-                // 2.0's goes through a host call (its time counts anew), 2.2's not
-                if !v22 {
-                    host(&mut self.c);
-                }
                 ev(&mut self.c, hw.bus, 137);
                 hw.bus.ciaa.pra |= 2
             }
@@ -818,14 +816,15 @@ impl SoundMon {
                 ev(&mut self.c, hw.bus, 108);
                 v.addr = empty;
             } else {
+                // UADE's player writes the loop's length, then its pointer (EP206's the other way)
+                ev(&mut self.c, hw.bus, if v.len <= 1 { 150 } else { 151 });
+                self.c.site = 217;
+                put(&mut self.c, hw, i);
+                hw.len(i, v.len);
+                ev(&mut self.c, hw.bus, 109);
                 self.c.site = 216;
                 put(&mut self.c, hw, i);
                 hw.loc(i, v.addr);
-                ev(&mut self.c, hw.bus, 109);
-                self.c.site = 217;
-                ev(&mut self.c, hw.bus, if v.len <= 1 { 150 } else { 151 });
-                put(&mut self.c, hw, i);
-                hw.len(i, v.len);
             }
         }
         dma_on(&mut self.c, hw, 218, 1 << i);
@@ -1142,13 +1141,16 @@ fn log(bus: &mut Bus, id: u16) {
 }
 
 /// The original's time, in 68000 cycles (the engine's count; a colour clock is two), fitted on the
-/// write logs of the reference players (89 modules of 2.0, 74 of 2.2, 4 s each). The engine runs a
-/// player's code from a whole colour clock and each host call (every Paula write here goes
-/// through the host's poke functions, and the LED filter's ENPP_PokeCommand) starts the count
-/// anew, so a write comes `floor(cycles / 2)` colour clocks after the previous one, where `cycles`
-/// is the code path between them: the segment's cost by the two writes' sites and voices
-/// (`SEG_20`, `SEG_22`: site * 4 + voice, 0 the tick's interrupt, 1 the end of the DMA wait) plus
-/// each event's on the way (`EV_20`, `EV_22`).
+/// write logs of the reference players (UADE's SoundMon2.0 and SoundMon2.2 on this engine's 68k
+/// host: 89 modules of 2.0, 74 of 2.2, 4 s each). Those players write the chip registers
+/// themselves, so their code runs on from the tick's interrupt (and, in 2.2, from the end of the
+/// DMA wait) without a break: a write comes `floor(cycles / 2)` colour clocks after that epoch,
+/// where `cycles` is the whole code path up to it: the segments' cost between the writes, by the
+/// two writes' sites and voices (`SEG_20`, `SEG_22`: site * 4 + voice, 0 the tick's interrupt, 1
+/// the end of the DMA wait), plus each event's on the way (`EV_20`, `EV_22`). (The Eagleplayers'
+/// players, which the tables were fitted on before, call the host for every write: the count
+/// started anew at each. 2.0 of UADE waits after DMA off for a fixed 2570 colour clocks or so,
+/// not to a raster line: it is a segment from the DMA off like any other, and has no wait.)
 ///
 /// The sites are the write calls: 200 DMA on, 201 the row's DMA off, 202/203/206 the effects'
 /// periods, 204/205 their pointer and length, 207 a row's volume, 208/209 a restart's volume
@@ -1177,29 +1179,27 @@ fn log(bus: &mut Bus, id: u16) {
 #[derive(Default)]
 struct Cost {
     v22: bool,
+    /// Cycles of the code path since the epoch.
     cyc: i32,
-    /// Colour clocks owed from host calls since the last write.
-    owed: i32,
+    /// The epoch's clock: the tick's interrupt or the end of a DMA wait.
+    t0: u64,
     /// The last write's site * 4 + voice.
     last: u16,
     /// The next write's site.
     site: u16,
-    /// A tick has run (see `FIRST_TICK_LATE`).
-    started: bool,
-    /// This is the first tick.
-    first: bool,
 }
 
-/// 2.0: the colour clocks by which the first tick's first write is later than the later ticks'
-/// when the path to it is shorter than the tick's own latency (a segment from the tick that sums
-/// to nothing or less). The port starts a tick at its interrupt and cannot write before it, so
-/// the later ticks' interrupt is taken `LATE` clocks early (`TIMER_DELAY_20`, the whole grid) and
-/// every segment from the tick lengthened by `2 * LATE` cycles; the first tick, whose time was
-/// fitted, is then held to `LATE` clocks of wait at least. Measured on bp.ALIENBREED, whose ticks
-/// start with the LFO's period (-4 cycles, written at the interrupt) or the ADSR's volume (42
-/// cycles): the original's second kind of tick comes 23 clocks after the first kind, the port's
-/// only 21, and the first kind of the first tick 2 clocks after the later ones.
-const FIRST_TICK_LATE: i32 = 2;
+/// The colour clocks by which a tick starts before the grid of the timer's period plus the
+/// `TIMER_DELAY_*` the first fit saw, with every path from the tick longer by twice this in
+/// cycles (so each write stays where the fit puts it). UADE's players write a tick's first
+/// register 50 clocks (2.0) and 33 (2.2) before that grid, and the port cannot write before its
+/// tick starts: that is the least. 2.0 takes 300: its tick changes the synth waveforms in memory
+/// (the EG, the restore at a restart) before its first write, ahead of the wave's DMA fetch where
+/// the original's code does, and only a tick that early puts them there on all of the fit's 89
+/// modules (4 s each: the DMA words equal; 50 gives 8 modules a word changed late). 2.2's, at
+/// 33, equal on 73 of 74 (`Green Beret`: the empty sample, see the README).
+const TICK_EARLY_20: i32 = 300;
+const TICK_EARLY_22: i32 = 33;
 
 const TICK: u16 = 0;
 const WAIT: u16 = 1;
@@ -1207,11 +1207,9 @@ const WAIT: u16 = 1;
 impl Cost {
     fn tick(&mut self, bus: &mut Bus) {
         log(bus, 1);
-        self.cyc = 0;
-        self.owed = 0;
+        self.t0 = bus.clock;
+        self.cyc = 2 * if self.v22 { TICK_EARLY_22 } else { TICK_EARLY_20 };
         self.last = TICK;
-        self.first = !self.started;
-        self.started = true;
     }
 }
 
@@ -1222,17 +1220,9 @@ fn ev(c: &mut Cost, bus: &mut Bus, id: u16) {
     c.cyc += t.binary_search_by(|e| e.0.cmp(&id)).map_or(0, |i| t[i].1);
 }
 
-/// A host call that writes nothing: the count starts anew.
-fn host(c: &mut Cost) {
-    c.owed += c.cyc.div_euclid(2);
-    c.cyc = 0;
-}
-
-/// The colour clocks to wait for a write whose segment's cost is `s` cycles.
-fn clocks(c: &Cost, s: i32) -> i32 {
-    let from_tick = !c.v22 && c.last == TICK;
-    let n = c.owed + (c.cyc + s + if from_tick { 2 * FIRST_TICK_LATE } else { 0 }).div_euclid(2);
-    n.max(if from_tick && c.first { FIRST_TICK_LATE } else { 0 })
+/// The clock of a write whose segment's cost is `s` cycles.
+fn due(c: &Cost, s: i32) -> u64 {
+    c.t0 + (c.cyc + s).div_euclid(2).max(0) as u64
 }
 
 /// The time up to the write at `c.site` of voice `ch`.
@@ -1241,18 +1231,17 @@ fn put(c: &mut Cost, hw: &mut Hw, ch: usize) {
     let k = c.site * 4 + ch as u16;
     let t = if c.v22 { SEG_22 } else { SEG_20 };
     let s = t.binary_search_by(|e| (e.0, e.1).cmp(&(c.last, k))).map_or(0, |i| t[i].2);
-    hw.wait(clocks(c, s) as u64);
-    c.cyc = 0;
-    c.owed = 0;
+    c.cyc += s;
+    hw.wait(due(c, 0).saturating_sub(hw.bus.clock));
     c.last = k;
 }
 
-/// The host's wait for the DMA to start after a DMA on: to the tenth line from the write's.
+/// The host's wait for the DMA to start after a DMA on (2.2): to the tenth line from the write's.
 fn dma_wait(c: &mut Cost, hw: &mut Hw) {
     let (now, line) = (hw.bus.clock, crate::paula::LINE);
     hw.wait((now / line + 10) * line - now);
+    c.t0 = hw.bus.clock;
     c.cyc = 0;
-    c.owed = 0;
     c.last = WAIT;
 }
 
@@ -1324,30 +1313,20 @@ mod tests {
         }
     }
 
-    /// 2.0's ticks run `FIRST_TICK_LATE` clocks early on the grid and every path from the tick is
-    /// that much longer, so a write is where it was; a write that sums to less than nothing
-    /// (clamped at the interrupt) comes that much before the interrupt's grid time on a later
-    /// tick, and not on the first.
+    /// A tick runs `TICK_EARLY_*` clocks early on the timer's grid and the first write's path
+    /// is that much longer (twice in cycles), so a write is where the fit put it; a write whose
+    /// path sums to less than that is clamped at the interrupt.
     #[test]
-    fn writes_before_the_interrupt_wait_by_tick() {
-        use super::{clocks, Cost, TICK};
-        let late = super::FIRST_TICK_LATE;
-        let mut c = Cost { last: TICK, ..Cost::default() };
-        // 42 cycles after the interrupt: 21 clocks, as before the shift, on every tick
-        assert_eq!(clocks(&c, 42), 21 + late);
-        // -4 cycles: the later ticks' grid is `late` early, so the write is at the interrupt
-        assert_eq!(clocks(&c, -4), 0);
-        assert_eq!(clocks(&c, -100), 0);
-        c.first = true;
-        // the first tick's was fitted: held `late` after its interrupt
-        assert_eq!(clocks(&c, -4), late);
-        assert_eq!(clocks(&c, 42), 21 + late);
-        // a write after another write, and 2.2, are not shifted
-        c.last = 812;
-        assert_eq!(clocks(&c, 42), 21);
-        c.last = TICK;
-        c.v22 = true;
-        assert_eq!(clocks(&c, 42), 21);
+    fn writes_are_due_from_the_epoch() {
+        use super::{due, Cost, TICK_EARLY_20};
+        let c = Cost { t0: 1000, cyc: 2 * TICK_EARLY_20, ..Cost::default() };
+        // 42 cycles after the fit's tick start: 21 clocks later, `early` of them before the grid
+        assert_eq!(due(&c, 42), 1000 + 21 + TICK_EARLY_20 as u64);
+        assert_eq!(due(&c, 43), 1000 + 21 + TICK_EARLY_20 as u64);
+        assert_eq!(due(&c, -2 * TICK_EARLY_20 - 4), 1000);
+        // the cycles add up from the epoch: two halves of 21 clocks and a cycle are 43 clocks
+        let c = Cost { t0: 1000, cyc: 43, ..Cost::default() };
+        assert_eq!(due(&c, 43), 1000 + 43);
     }
 
     fn reg(log: &[(u32, u16, u64)], a: u32) -> Vec<u16> {

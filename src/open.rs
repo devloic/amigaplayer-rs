@@ -50,6 +50,9 @@ fn detect_unwrapped(data: &[u8]) -> Option<String> {
     if crate::replay::nsf::detect(data) {
         return crate::replay::nsf::check(data).ok().map(|_| "NSF".to_string());
     }
+    if crate::replay::ym::detect(data) {
+        return Some("YM".to_string());
+    }
     let data = crate::decrunch::decrunch(data.to_vec());
     if crate::replay::sndh::detect(&data) {
         return Some("SNDH".to_string());
@@ -89,6 +92,7 @@ fn claimed_by_several_unwrapped(data: &[u8]) -> bool {
         || crate::mpegaudio::detect(data)
         || crate::replay::ay::detect(data)
         || crate::replay::nsf::detect(data)
+        || crate::replay::ym::detect(data)
     {
         return false;
     }

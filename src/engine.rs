@@ -782,6 +782,11 @@ impl Engine {
             let x = crate::replay::nsf::player(&data, self.rate as u32).map_err(|e| anyhow!(e))?;
             return self.start_pcm(Box::new(x), path);
         }
+        // Atari ST / CPC / ZX YM register dumps (YM2! .. YM6!, usually LZH-packed)
+        if self.only_player.is_none() && crate::replay::ym::detect(&data) {
+            let x = crate::replay::ym::player(&data, self.rate as u32).map_err(|e| anyhow!(e))?;
+            return self.start_pcm(Box::new(x), path);
+        }
         let data = crate::decrunch::decrunch(data);
         // Atari ST SNDH tunes (the ICE!-packed ones are undone above): their own 68000 code on the
         // built-in ST machine

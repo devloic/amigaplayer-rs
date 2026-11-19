@@ -150,6 +150,7 @@ pub mod seanconnolly;
 pub mod seanconran;
 pub mod soundplayer;
 pub mod sndh;
+pub mod ym;
 pub mod custommade;
 pub mod ronklaren;
 pub mod scumm;

@@ -113,6 +113,12 @@ impl Paula {
         let mut ch: [Channel; 4] = Default::default();
         for c in &mut ch {
             c.per = 65535;
+            // One word at address 0 (zero), not LEN 0 = 65,536 words: a player that turns
+            // audio DMA on before setting a voice up (cust.Speedball_2 writes DMACON $800F
+            // first) would otherwise play 128 KB of low memory as a loud squeal for ~1.5 s,
+            // because a DMA off/on inside the pending 65535-clock period never stops the
+            // block. UADE's host parks each voice on a zero word (LEN 1) for the same reason.
+            c.len = 1;
             c.adk_mask = -1;
         }
         Paula {

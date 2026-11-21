@@ -838,7 +838,15 @@ fn smpl_names(file: &str) -> Vec<String> {
     let lower = file.to_ascii_lowercase();
     let bare = if lower.ends_with(".xz") || lower.ends_with(".gz") { &file[..file.len() - 3] } else { file };
     match prefixed(bare) {
-        Some(rest) => v.push(format!("smpl.{rest}")),
+        Some(rest) => {
+            v.push(format!("smpl.{rest}"));
+            // `.pp` (PowerPacker) is a storage suffix, and rippers did not always put it on
+            // both halves: aminet's tfmxtunes8 has `MDAT.BC-Kid_Title.pp` beside a plain
+            // `SMPL.BC-Kid_Title`. Tried last, so a `smpl.NAME.pp` that is there wins.
+            if let Some(n) = rest.len().checked_sub(3).filter(|&n| n > 0 && rest[n..].eq_ignore_ascii_case(".pp")) {
+                v.push(format!("smpl.{}", &rest[..n]));
+            }
+        }
         None => {
             if let Some((stem, _)) = bare.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) {
                 v.push(format!("{stem}.smpl"));
@@ -6697,6 +6705,10 @@ mod tests {
         assert_eq!(super::smpl_names("Tune.mdat.gz"), ["smpl.Tune.mdat.gz", "Tune.smpl", "Tune.sam"]);
         assert_eq!(super::smpl_names("tune"), ["smpl.tune"]);
         assert_eq!(super::smpl_names(".tfx"), ["smpl..tfx"]);
+        // a PowerPacked mdat beside an unpacked smpl (aminet tfmxtunes8, B.C.Kid)
+        assert_eq!(super::smpl_names("MDAT.BC-Kid_Title.pp"), ["smpl.BC-Kid_Title.pp", "smpl.BC-Kid_Title"]);
+        assert_eq!(super::smpl_names("mdat.tune.PP.xz"), ["smpl.tune.PP.xz", "smpl.tune.PP", "smpl.tune"]);
+        assert_eq!(super::smpl_names("mdat..pp"), ["smpl..pp"]);
     }
 
     #[test]

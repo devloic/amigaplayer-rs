@@ -104,7 +104,7 @@ fn xchecksum(buf: &[u8], c: usize, packed: usize) -> u32 {
     (sum ^ (sum >> 16)) & 0xffff
 }
 
-fn copy_data(io: &mut Io, dest: &mut [u8], dest_end: usize, mut d1: i32, data: &mut i32) -> i32 {
+fn copy_data(io: &mut Io, dest: &mut [u8], mut d1: i32, data: &mut i32) -> i32 {
     let copy_len_bits = |io: &mut Io| -> i32 {
         if io.get_bits(1) == 0 {
             io.get_bits(1) + 2
@@ -160,8 +160,16 @@ fn copy_data(io: &mut Io, dest: &mut [u8], dest_end: usize, mut d1: i32, data: &
     }
     let copy_src = io.dest as i64 + dest_offset - r as i64 - 1;
 
-    // Sanity check
-    if copy_src < 0 || copy_src + copy_len as i64 >= dest_end as i64 {
+    // Sanity check: the source must be bytes already written. libxmp also refuses a copy
+    // whose END passes the block's end (`copy_src + copy_len >= dest_end`), but the
+    // packer emits exactly that for a block's last match: Bert Jahn's decruncher writes
+    // the match whole and stops once `dest >= dest_end`, so the overrun is either
+    // overwritten by the next block or cut off by the final length. Refusing it lost 3
+    // of the archive's 117 SQSH modules (`The Last Call.mod`, `A Common Threat.mod`,
+    // `Aphex 401_Fix.med`), each failing 1-4 bytes before the end. Writes are still
+    // bounded, by the `dest.len()` check below (`dest` carries 100 bytes of slack).
+    // With this, all 117 unpack byte-identical to au-depacker (LibAncient's port).
+    if copy_src < 0 || copy_src >= io.dest as i64 {
         return -1;
     }
     let mut s = copy_src as usize;
@@ -202,7 +210,7 @@ fn unsqsh_block(io: &mut Io, dest: &mut [u8], dest_end: usize) -> bool {
         let (mut count, unpack_len);
         if d1 < 8 {
             if r != 0 {
-                d1 = copy_data(io, dest, dest_end, d1, &mut data);
+                d1 = copy_data(io, dest, d1, &mut data);
                 if d1 < 0 {
                     return false;
                 }
@@ -234,7 +242,7 @@ fn unsqsh_block(io: &mut Io, dest: &mut [u8], dest_end: usize) -> bool {
                 return false;
             }
             if r == 0 {
-                d1 = copy_data(io, dest, dest_end, d1, &mut data);
+                d1 = copy_data(io, dest, d1, &mut data);
                 if d1 < 0 {
                     return false;
                 }
@@ -389,12 +397,16 @@ pub fn depack(data: &[u8]) -> Option<Vec<u8>> {
     }
     let be = |o: usize| u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as i32;
     let srclen = be(4);
-    // Sanity check
-    if srclen <= 8 || srclen > 0x100000 {
+    // Sanity check. libxmp caps both lengths at 1 MiB, which is a tracker-module bound,
+    // not an XPK one: OctaMED SoundStudio songs carry their samples and run past it
+    // (`1Tro Phunkee Cut LoopMix.med` unpacks to 2.9 MB, `Antigue Dream.med` to 2.2 MB),
+    // and 4 of the archive's 117 SQSH files were refused for size alone. 32 MiB is
+    // `MAX_RAW_OUT`, the bound the other raw-output depackers here use.
+    if srclen <= 8 || srclen as usize > super::MAX_RAW_OUT {
         return None;
     }
     let destlen = be(12);
-    if destlen <= 0 || destlen > 0x100000 {
+    if destlen <= 0 || destlen as usize > super::MAX_RAW_OUT {
         return None;
     }
     let need = srclen as usize - 8;

@@ -31,7 +31,7 @@ pub const INTF_AUD0: u16 = 0x0080;
 pub const INTENA_OS: u16 = 0x602C;
 
 /// One channel: the programmer-visible registers and the state machine.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Channel {
     pub lc: u32,
     pub len: u16,
@@ -49,6 +49,52 @@ pub struct Channel {
     wlen: u32,
     current_sample: i32,
     nextdat: u16,
+    /// AUDxLC has not been written since power-on: the location is a private zero word
+    /// that the guest cannot overwrite, not address 0 of its RAM.
+    parked: bool,
+    /// The block being played started from the parked location (`pt` came from it).
+    pt_parked: bool,
+}
+
+impl Default for Channel {
+    /// The power-on state: period 65535 and one parked zero word (LEN 1), not LEN 0 =
+    /// 65,536 words. A player that turns audio DMA on before setting a voice up
+    /// (cust.Speedball_2 writes DMACON $800F first) would otherwise play 128 KB of low
+    /// memory as a loud squeal for ~1.5 s, because a DMA off/on inside the pending
+    /// 65535-clock period never stops the block. UADE's host parks each voice on a zero
+    /// word (LEN 1) for the same reason.
+    fn default() -> Self {
+        Channel {
+            lc: 0,
+            len: 1,
+            per: 65535,
+            vol: 0,
+            dat: 0,
+            adk_mask: -1,
+            evtime: 0,
+            dmaen: false,
+            intreq2: false,
+            data_written: 0,
+            pt: 0,
+            state: 0,
+            wlen: 0,
+            current_sample: 0,
+            nextdat: 0,
+            parked: true,
+            pt_parked: true,
+        }
+    }
+}
+
+impl Channel {
+    /// The DMA word at `pt`: zero while the block comes from the parked location.
+    fn fetch(&self, mem: &mut impl FnMut(u32) -> u16) -> u16 {
+        if self.pt_parked { 0 } else { mem(self.pt) }
+    }
+    fn restart_block(&mut self) {
+        self.pt = self.lc;
+        self.pt_parked = self.parked;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,17 +156,7 @@ impl Paula {
     }
 
     pub fn with_output(rate: u32, filter: Filter) -> Self {
-        let mut ch: [Channel; 4] = Default::default();
-        for c in &mut ch {
-            c.per = 65535;
-            // One word at address 0 (zero), not LEN 0 = 65,536 words: a player that turns
-            // audio DMA on before setting a voice up (cust.Speedball_2 writes DMACON $800F
-            // first) would otherwise play 128 KB of low memory as a loud squeal for ~1.5 s,
-            // because a DMA off/on inside the pending 65535-clock period never stops the
-            // block. UADE's host parks each voice on a zero word (LEN 1) for the same reason.
-            c.len = 1;
-            c.adk_mask = -1;
-        }
+        let ch: [Channel; 4] = Default::default();
         Paula {
             ch,
             dmacon: DMAF_MASTER,
@@ -232,7 +268,7 @@ impl Paula {
                 if c.state == 0 {
                     // DMA starts at the next line
                     c.state = 1;
-                    c.pt = c.lc;
+                    c.restart_block();
                     c.wlen = c.len as u32;
                     c.data_written = 2;
                     c.evtime = to_line;
@@ -269,8 +305,8 @@ impl Paula {
         let uade = self.quirks == Quirks::Uade;
         let c = &mut self.ch[n];
         match reg & 0xF {
-            0x0 => c.lc = (c.lc & 0xFFFF) | (v as u32) << 16,
-            0x2 => c.lc = (c.lc & !0xFFFF) | (v & 0xFFFE) as u32,
+            0x0 => (c.lc, c.parked) = ((c.lc & 0xFFFF) | (v as u32) << 16, false),
+            0x2 => (c.lc, c.parked) = ((c.lc & !0xFFFF) | (v & 0xFFFE) as u32, false),
             0x4 => c.len = v,
             0x6 => c.per = if v == 0 { 65535 } else if uade { v.max(16) } else { v },
             0x8 => c.vol = if v & 64 != 0 { if uade { 63 } else { 64 } } else { (v & 63) as u8 },
@@ -296,7 +332,7 @@ impl Paula {
                 continue;
             }
             c.data_written = 0;
-            c.nextdat = mem(c.pt);
+            c.nextdat = c.fetch(mem);
             if let Some(l) = &mut self.dma_log {
                 l.push((line, i as u8, c.pt, c.nextdat));
             }
@@ -305,7 +341,7 @@ impl Paula {
             }
             if c.state == 2 || c.state == 3 {
                 if c.wlen == 1 {
-                    c.pt = c.lc;
+                    c.restart_block();
                     c.wlen = c.len as u32;
                     c.intreq2 = true;
                 } else {
@@ -372,7 +408,7 @@ impl Paula {
                 if c.wlen != 1 {
                     c.wlen = c.wlen.wrapping_sub(1) & 0xFFFF;
                 }
-                c.nextdat = mem(c.pt);
+                c.nextdat = c.fetch(mem);
             }
             5 => {
                 // the second line after DMA was turned on
@@ -461,6 +497,31 @@ impl Default for Paula {
 mod tests {
     use super::*;
 
+    /// Audio DMA turned on before any voice is set up plays the parked zero word, not
+    /// RAM: here every byte of RAM, address 0 included, is $7F. Writing AUDxLC (even
+    /// to address 0) leaves the parked word, and the voice plays RAM from then on.
+    #[test]
+    fn power_on_voices_play_a_parked_zero_word() {
+        let mut mem = |_a: u32| 0x7F7Fu16;
+        let mut p = Paula::new();
+        for c in &p.ch {
+            assert_eq!((c.len, c.per, c.adk_mask), (1, 65535, -1));
+        }
+        p.write_at(0, 0x96, 0x820F, &mut mem);
+        for ch in [0x00u32, 0x10, 0x20, 0x30] {
+            p.write_at(0, 0xA6 + ch, 124, &mut mem);
+            p.write_at(0, 0xA8 + ch, 64, &mut mem);
+        }
+        p.sync_with(20 * LINE, &mut mem, false);
+        assert!(p.ch.iter().all(|c| c.state != 0), "all four voices running");
+        assert!(p.ch.iter().all(|c| c.current_sample == 0), "parked voices are silent");
+        for ch in [0x00u32, 0x10, 0x20, 0x30] {
+            p.write_at(20 * LINE, 0xA2 + ch, 0, &mut mem);
+        }
+        p.sync_with(40 * LINE, &mut mem, false);
+        assert!(p.ch.iter().all(|c| c.current_sample == 0x7F), "AUDxLC written: RAM plays");
+    }
+
     /// A channel started on a two-word sample: interrupt at the first line,
     /// output from the second, and the sample loops.
     #[test]
@@ -468,6 +529,7 @@ mod tests {
         let ram = [0x40u8, 0xC0, 0x20, 0xE0];
         let mut mem = |a: u32| u16::from_be_bytes([ram[(a & 3) as usize], ram[(a & 3 | 1) as usize]]);
         let mut p = Paula::new();
+        p.write_at(10, 0xA2, 0, &mut mem);
         p.write_at(10, 0xA4, 2, &mut mem);
         p.write_at(10, 0xA6, 124, &mut mem);
         p.write_at(10, 0xA8, 64, &mut mem);
@@ -491,6 +553,7 @@ mod tests {
         let mut run = |boundary: bool| {
             let mut p = Paula::new();
             for ch in [0x00u32, 0x10] {
+                p.write_at(0, 0xA2 + ch, 0, &mut mem);
                 p.write_at(0, 0xA4 + ch, 4, &mut mem);
                 p.write_at(0, 0xA6 + ch, 124, &mut mem);
                 p.write_at(0, 0xA8 + ch, 64, &mut mem);
@@ -530,6 +593,7 @@ mod tests {
         let mut mem = |a: u32| u16::from_be_bytes([ram[(a & 3) as usize], ram[(a & 3 | 1) as usize]]);
         let mut onset = |pre: u64, dma_first: bool| {
             let mut p = Paula::new();
+            p.write_at(0, 0xA2, 0, &mut mem);
             p.write_at(0, 0xA4, 2, &mut mem);
             p.write_at(0, 0xA6, 124, &mut mem);
             p.write_at(0, 0xA8, 64, &mut mem);
@@ -572,6 +636,7 @@ mod tests {
         let ram = [0x40u8, 0xC0];
         let mut mem = |a: u32| u16::from_be_bytes([ram[(a & 1) as usize], ram[(a & 1 | 1) as usize]]);
         let mut p = Paula::new();
+        p.write_at(0, 0xA2, 0, &mut mem);
         p.write_at(0, 0xA4, 1, &mut mem);
         p.write_at(0, 0xA6, 200, &mut mem);
         p.write_at(0, 0x96, 0x8201, &mut mem);

@@ -1026,15 +1026,18 @@ impl Engine {
         // a ProWizard conversion plays as its original, PTK-Prowiz, does: F00 does not end it
         pt.f00_ends = !self.prowizard_converted;
         pt.build = crate::protracker::build_for(self.prowizard_format);
+        if self.prowizard_format == Some("ChipTracker") {
+            // UADE plays these with its ChipTracker player, which counts subsongs its own way
+            pt.count_subsongs_as_chiptracker();
+        }
         pt.clear_loop_words(&mut self.m.bus.ram);
         self.m.bus.paula.reset();
         self.intena_seen = 0;
         self.next_timer = None;
         let name = if pt.title.is_empty() { file_name(path) } else { pt.title.clone() };
-        // PTK-Prowiz counts the subsongs of a conversion as of a plain module (UADE gives the
-        // same count for this conversion saved as a .mod), except for The Player 4.x, whose
-        // own conversion differs (p4x.unused 7 against 8 here, p4x.Ingame_21 1 against 3)
-        let sub_max = crate::protracker::subsong_count_for(self.prowizard_format, pt.subsongs()) as u16 - 1;
+        // PTK-Prowiz counts a conversion's subsongs as a plain module's (UADE gives the same count
+        // for the conversion saved as a .mod)
+        let sub_max = pt.subsongs() as u16 - 1;
         self.playing = Some(Playing {
             backend: Backend::Native(Box::new(pt)),
             module_name: name,

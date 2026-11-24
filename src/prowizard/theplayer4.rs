@@ -321,6 +321,11 @@ impl Format for ThePlayer4x {
                         }
                     }
                 }
+                // what an earlier voice holds below the row a later voice breaks at is never played:
+                // PTK-Prowiz's conversion drops it, and its subsong count (Ingame_21) does not see it
+                for row in max_rows..64 {
+                    pattern[row * 16..row * 16 + 16].fill(0);
+                }
                 push!(out, pattern, s);
             }
         }
@@ -411,5 +416,17 @@ mod tests {
             assert_eq!(f, name);
             assert_eq!(m, song.module(0x7f));
         }
+    }
+
+    #[test]
+    fn rows_an_earlier_voice_holds_below_a_later_voices_break_are_dropped() {
+        let mut song = Song::new(1);
+        song.patterns[0][10][1] = (0, 0, 0xd, 0);
+        song.patterns[0][40][0] = (1, 856, 0xb, 4);
+        song.patterns[0][5][0] = (1, 856, 0, 0);
+        let (_, m) = convert_any(&pack(&song, b"P41A")).expect("converts");
+        let row = |r: usize| &m[1084 + r * 16..1084 + r * 16 + 4];
+        assert_ne!(row(5), [0; 4]);
+        assert_eq!(row(40), [0; 4]);
     }
 }

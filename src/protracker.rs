@@ -341,16 +341,6 @@ pub fn build_for(packed: Option<&str>) -> Build {
     }
 }
 
-/// How many subsongs a module converted from the packed format `packed` has when `counted` are
-/// found in its (converted) patterns. PTK-Prowiz converts The Player 4.x modules in its own way
-/// (the corpus's 66 other than p4x.unused have one subsong there), so those keep one.
-pub fn subsong_count_for(packed: Option<&str>, counted: usize) -> usize {
-    match packed {
-        Some(n) if n.starts_with("The Player 4") => 1,
-        _ => counted,
-    }
-}
-
 /// Whose replay code the writes of a module are timed as.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Build {
@@ -399,6 +389,22 @@ fn subsong_starts(orders: &[u8; 128], song_len: usize, patterns: &[u32]) -> Vec<
     // the last event starts nothing
     for &p in events.iter().take(events.len().saturating_sub(1)) {
         starts.push(p as u8 + 1);
+    }
+    starts
+}
+
+/// The first position of each subsong as UADE's own ChipTracker player counts them (measured
+/// black box on the 49 corpus modules, uade123's counts all agree): a position whose pattern
+/// holds a position jump (Bxx, any row and voice, to wherever) ends a subsong, and the position
+/// after it starts the next unless the song is over there.
+fn chiptracker_starts(orders: &[u8; 128], song_len: usize, patterns: &[u32]) -> Vec<u8> {
+    let mut starts = vec![0u8];
+    for p in 0..song_len.min(128) {
+        let pat = orders[p] as usize;
+        let jumps = patterns.get(pat * 256..pat * 256 + 256).unwrap_or(&[]).iter().any(|&l| pos_jump_of(l).is_some());
+        if jumps && p + 1 < song_len {
+            starts.push(p as u8 + 1);
+        }
     }
     starts
 }
@@ -617,6 +623,13 @@ impl ProTracker {
         self.low_mask = 0xFF;
         self.visited.clear();
         self.songend = false;
+    }
+
+    /// Counts the subsongs as UADE's ChipTracker player does, for a ChipTracker module converted
+    /// to this one (`chiptracker_starts`).
+    pub fn count_subsongs_as_chiptracker(&mut self) {
+        self.starts = chiptracker_starts(&self.orders, self.song_len, &self.patterns);
+        self.start_subsong(0);
     }
 
     /// How many subsongs the module has (`subsong_starts`).
@@ -1665,10 +1678,20 @@ mod tests {
     }
 
     #[test]
-    fn a_converted_module_counts_its_subsongs_but_the_player_4s() {
-        assert_eq!(subsong_count_for(None, 3), 3);
-        assert_eq!(subsong_count_for(Some("NoisePacker 2"), 4), 4);
-        assert_eq!(subsong_count_for(Some("The Player 4.1A"), 8), 1);
+    fn chiptracker_subsongs_start_after_every_jump_but_at_the_end() {
+        let starts = |orders: &[u8], jumps: &[(usize, usize, u8)]| {
+            let mut o = [0u8; 128];
+            o[..orders.len()].copy_from_slice(orders);
+            let mut pats = vec![0u32; (*orders.iter().max().unwrap() as usize + 1) * 256];
+            for &(p, r, t) in jumps {
+                pats[p * 256 + r] = 0x0B00 | t as u32;
+            }
+            chiptracker_starts(&o, orders.len(), &pats)
+        };
+        // Premiere End Level 1 (3 subsongs), a jump forward counts; one in the last position does not
+        assert_eq!(starts(&[0, 1, 2, 3], &[(1, 10, 0), (2, 10, 3), (3, 10, 3)]), [0, 2, 3]);
+        assert_eq!(starts(&[0, 1, 2], &[(2, 10, 0)]), [0]);
+        assert_eq!(starts(&[0, 1, 2], &[(1, 10, 0)]), [0, 2]);
     }
 
     #[test]

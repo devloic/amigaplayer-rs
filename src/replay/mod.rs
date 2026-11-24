@@ -38,6 +38,7 @@ pub mod digitalsoundcreations;
 pub mod digitalsoundstudio;
 pub mod dynamicsynthesizer;
 pub mod dsc;
+pub mod embedded68k;
 pub mod ems;
 pub mod ems6;
 mod ems6_hi;
@@ -505,6 +506,9 @@ pub const REPLAYERS: &[Open] = &[
     nesa::OPEN,
     // a header rule only (four words that must agree, no magic): after every format with a stricter check
     powertracker::OPEN,
+    // the fallback for Sound Programming Language and Beathoven Synthesizer builds the two ports above were not fitted to:
+    // the hunk's own code plays them (header and tags exact, so no order dependence beyond the ports)
+    embedded68k::OPEN,
     // last: its content check takes anything (the file name is checked in `new`)
     adpcmmono::OPEN,
 ];

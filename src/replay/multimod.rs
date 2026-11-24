@@ -16,6 +16,14 @@
 //! source is used; the tags and channel counts are the documented ones. `4CHN` and the
 //! four-channel tags stay with the built-in ProTracker.
 //!
+//! Subsongs (FastTracker/TakeTracker tags `2CHN`, `6CHN`, `8CHN` and the even `xxCH` only):
+//! the song positions where a new tune starts are found as the ft2play backend of the
+//! audacious-uade player does (`get_subsongs` of `player_ft2play.cc`, SPDX LGPL-2.1-or-later,
+//! Copyright (C) 2024-2025 Matti Tiainen, compatible with this crate's GPL-2.0-or-later): a walk
+//! over the positions, following only Bxx and Dxx, that notes where a jump goes back to a
+//! position already visited and starts the next tune at the first unvisited one. See
+//! [`ft2play_subsongs`].
+//!
 //! Where this differs from NostalgicPlayer's worker (each a plain bug there or a
 //! thing the amplifier cannot do):
 //! - a slide that would take the period below zero stops at the limit (the worker's
@@ -96,6 +104,109 @@ pub fn kind_of(d: &[u8]) -> Option<(usize, Kind)> {
         return None;
     }
     Some((n, kind))
+}
+
+/// Whether ft2play knows the module's tag (`2CHN`, `6CHN`, `8CHN`, `10CH`..`32CH` even), the
+/// modules whose subsongs are counted by [`ft2play_subsongs`]; `M.K.` and the four-channel tags
+/// belong to the ProTracker player, the odd counts and Octalyser's and Digital Tracker's tags
+/// are not read by ft2play.
+fn ft2play_tag(d: &[u8]) -> bool {
+    match &d[1080..1084] {
+        b"2CHN" | b"6CHN" | b"8CHN" => true,
+        [a @ b'1'..=b'3', c @ b'0'..=b'9', b'C', b'H'] => {
+            let n = (a - b'0') as usize * 10 + (c - b'0') as usize;
+            (10..=32).contains(&n) && n % 2 == 0
+        }
+        _ => false,
+    }
+}
+
+/// The song positions where each subsong starts, as the ft2play backend of the audacious-uade
+/// player finds them (`get_subsongs` of `player_ft2play.cc`, LGPL-2.1-or-later, Matti Tiainen):
+/// a walk from position 0 that follows Position Jump (B) and Pattern Break (D) only (the first
+/// of each in a row, over the channels), and where a jump lands on a position already seen (or a
+/// pattern ends) starts a new subsong at the lowest position not seen yet. Pattern length is
+/// 64 for a MOD. `patterns[pattern][row * n + channel]`; `n` the channel count.
+fn ft2play_subsongs(positions: &[u8; 128], song_len: usize, patterns: &[Vec<Cell>], n: usize) -> Vec<usize> {
+    const LEN: i32 = 64;
+    let song_len = song_len as i32;
+    let ant_ptn = positions.iter().copied().max().unwrap_or(0) as i32 + 1;
+    let patt = |pos: i32| positions[pos as usize] as i32;
+    let mut subsongs = vec![0usize];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut notseen: std::collections::BTreeSet<i32> = (0..song_len).filter(|&i| patt(i) <= ant_ptn).collect();
+    let mut prev_jump = (0i32, 0i32);
+    let (mut patt_pos, mut song_pos) = (0i32, 0i32);
+    let mut jump = false;
+    loop {
+        if jump && seen.contains(&song_pos) && !notseen.is_empty() {
+            song_pos = *notseen.iter().next().unwrap();
+            patt_pos = 0;
+            let nr = patt(song_pos);
+            if nr > ant_ptn {
+                seen.insert(song_pos);
+                notseen.remove(&song_pos);
+                song_pos += 1;
+                if song_pos >= song_len {
+                    break;
+                }
+                continue;
+            }
+            subsongs.push(song_pos as usize);
+        }
+        jump = false;
+        seen.insert(song_pos);
+        notseen.remove(&song_pos);
+        if notseen.is_empty() {
+            break;
+        }
+        let nr = patt(song_pos);
+        let (mut eff_b, mut eff_d) = (-1i32, -1i32);
+        if let Some(p) = patterns.get(nr as usize) {
+            let mut c = 0;
+            while c < n && (eff_b == -1 || eff_d == -1) {
+                let cell = p[patt_pos as usize * n + c];
+                if cell.eff == 0xB {
+                    eff_b = cell.arg as i32;
+                } else if cell.eff == 0xD {
+                    eff_d = (cell.arg >> 4) as i32 * 10 + (cell.arg & 15) as i32;
+                }
+                c += 1;
+            }
+        }
+        let pj = (eff_b, eff_d);
+        if eff_b >= 0 || eff_d >= 0 {
+            let (old_pos, old_patt) = (song_pos, patt_pos);
+            song_pos = if eff_b == -1 { song_pos + 1 } else { eff_b };
+            if song_pos >= song_len {
+                break;
+            } else if pj == prev_jump && eff_b >= 0 {
+                seen.insert(song_pos);
+                jump = true;
+            }
+            patt_pos = if eff_d == -1 { 0 } else { eff_d };
+            if patt_pos >= LEN {
+                patt_pos = 0;
+            }
+            if old_pos == song_pos && old_patt == patt_pos {
+                break;
+            } else if old_pos != song_pos || (old_patt != patt_pos && patt_pos == 0) {
+                jump = true;
+            }
+            prev_jump = pj;
+        } else {
+            patt_pos += 1;
+            if patt_pos >= LEN {
+                song_pos += 1;
+                patt_pos = 0;
+                jump = true;
+                if song_pos >= song_len {
+                    break;
+                }
+            }
+        }
+    }
+    subsongs
 }
 
 #[derive(Clone, Copy, Default)]
@@ -232,6 +343,9 @@ pub struct MultiMod {
     end_reached: bool,
     restart_song: bool,
     songend: bool,
+    /// Where each subsong starts (song positions), and the one playing.
+    starts: Vec<usize>,
+    sub: u16,
 }
 
 fn new(d: &[u8], base: u32, m: &mut Machine, want: Kind) -> Option<Box<dyn Replayer>> {
@@ -363,7 +477,12 @@ fn new(d: &[u8], base: u32, m: &mut Machine, want: Kind) -> Option<Box<dyn Repla
         end_reached: false,
         restart_song: false,
         songend: false,
+        starts: vec![0],
+        sub: 0,
     };
+    if kind == Kind::Pt && ft2play_tag(d) && d.len() >= 1084 + npat * pat_bytes {
+        s.starts = ft2play_subsongs(&s.positions, s.song_len, &s.patterns, n);
+    }
     s.visited[0] = true;
     Some(Box::new(s))
 }
@@ -382,6 +501,40 @@ impl Replayer for MultiMod {
 
     fn pc_music(&self) -> bool {
         self.pc
+    }
+
+    fn subsongs(&self) -> (u16, u16, u16) {
+        (0, self.starts.len() as u16 - 1, self.sub)
+    }
+
+    /// Starts over at the subsong's first position, as ft2play's `setPos` after a fresh load.
+    fn set_subsong(&mut self, n: u16, _hw: &mut Hw) {
+        let Some(&at) = self.starts.get(n as usize) else { return };
+        self.sub = n;
+        self.ch = vec![Ch::default(); self.n];
+        self.first_tick = true;
+        self.speed = 6;
+        self.counter = 0;
+        self.bpm = 125;
+        self.bpm_set = false;
+        self.song_pos = at;
+        self.old_song_pos = 0;
+        self.pat_pos = 0;
+        self.break_pos = 0;
+        self.pos_jump = false;
+        self.break_flag = false;
+        self.got_break = false;
+        self.got_pos_jump = false;
+        self.last_break_arg = -1;
+        self.last_jump_arg = -1;
+        self.low_mask = 0xff;
+        self.patt_delay = 0;
+        self.patt_delay2 = 0;
+        self.visited = [false; 128];
+        self.visited[at] = true;
+        self.end_reached = false;
+        self.restart_song = false;
+        self.songend = false;
     }
 
     fn songend(&self) -> bool {
@@ -1077,6 +1230,55 @@ mod tests {
 
     fn reg(log: &[(u32, u16)], voice: usize, r: u32) -> Vec<u16> {
         log.iter().filter(|w| w.0 == ((voice as u32) << 4 | r)).map(|w| w.1).collect()
+    }
+
+    /// Positions `songtab` (one pattern each, patterns 0..), the cells of pattern `p` at
+    /// (row, channel).
+    fn subsongs_of(n: usize, songtab: &[u8], cells: &[(usize, usize, usize, [u8; 4])]) -> Vec<usize> {
+        let mut positions = [0u8; 128];
+        positions[..songtab.len()].copy_from_slice(songtab);
+        let npat = *songtab.iter().max().unwrap() as usize + 1;
+        let mut pats = vec![vec![Cell::default(); 64 * n]; npat];
+        for &(p, row, ch, c) in cells {
+            pats[p][row * n + ch] = Cell { eff: c[2] & 15, arg: c[3], ..Cell::default() };
+        }
+        ft2play_subsongs(&positions, songtab.len(), &pats, n)
+    }
+
+    #[test]
+    fn ft2play_scan_finds_the_second_tune() {
+        let jb = |a: u8| cell(0, 0, 0xb, a);
+        // a plain song: one tune
+        assert_eq!(subsongs_of(8, &[0, 1, 2], &[]), vec![0]);
+        // position 1 jumps back to 0: the tune loops, 2 and 3 are another tune
+        let c = [(1, 63, 3, jb(0))];
+        assert_eq!(subsongs_of(8, &[0, 1, 2, 2], &c), vec![0, 2]);
+        // a jump forward over a position leaves it for a subsong
+        let c = [(0, 10, 0, jb(2)), (2, 63, 0, jb(2))];
+        assert_eq!(subsongs_of(6, &[0, 1, 2], &c).first(), Some(&0));
+    }
+
+    #[test]
+    fn ft2play_tags() {
+        for (tag, yes) in [(b"6CHN", true), (b"8CHN", true), (b"2CHN", true), (b"10CH", true), (b"32CH", true), (b"11CH", false), (b"7CHN", false), (b"CD81", false), (b"OCTA", false)] {
+            assert_eq!(ft2play_tag(&module(tag, 8, &[])), yes, "{}", String::from_utf8_lossy(tag));
+        }
+    }
+
+    #[test]
+    fn subsong_restarts_at_its_position() {
+        // pattern 0 jumps back to its start at row 5; pattern 1 is a second tune playing a note
+        let mut d = module(b"8CHN", 8, &[(5, 0, cell(0, 0, 0xb, 0))]);
+        d[950] = 2;
+        d[953] = 1;
+        let mut pat = vec![0u8; 256 * 8];
+        pat[..4].copy_from_slice(&cell(428, 1, 0, 0));
+        let at = 1084 + 256 * 8;
+        d.splice(at..at, pat);
+        let mut e = Engine::new(48000.0);
+        e.open_replayers = true;
+        e.play_data(Path::new("test.mod"), d).unwrap();
+        assert_eq!(e.playing.as_ref().unwrap().sub_max, 1);
     }
 
     #[test]

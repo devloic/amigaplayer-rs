@@ -2,7 +2,7 @@
 //!
 //! This module is re-exported at the crate root; see the crate documentation.
 
-use crate::engine::{Backend, Playing};
+use crate::engine::{Backend, ModEngine, Playing};
 use crate::open;
 use crate::paulaout::{Filter, Resampler};
 use std::fmt;
@@ -202,13 +202,14 @@ pub struct Options {
     filter: Filter,
     resampler: Resampler,
     separation_milli: u16,
+    mod_engine: ModEngine,
 }
 
 impl Default for Options {
     /// Open replayers only; the output stage of the audacious-uade plugin: the A1200 filter
     /// model, UADE's Sinc resampler, separation 0.3 (see [`Options::filter`]).
     fn default() -> Options {
-        Options { custom: false, filter: Filter::A1200, resampler: Resampler::Sinc, separation_milli: 300 }
+        Options { custom: false, filter: Filter::A1200, resampler: Resampler::Sinc, separation_milli: 300, mod_engine: ModEngine::Default }
     }
 }
 
@@ -242,6 +243,15 @@ impl Options {
         self
     }
 
+    /// The player for the multichannel MODs (`2CHN`, `6CHN`, `8CHN`, `10CH`..`32CH`):
+    /// [`ModEngine::Default`] (the open replayer on the emulated amplifier) or
+    /// [`ModEngine::Ft2play`] (ft2play's port of FastTracker 2's replayer and mixer, as the
+    /// audacious-uade plugin renders them; no Amiga filter or resampler applies).
+    pub fn mod_engine(mut self, e: ModEngine) -> Options {
+        self.mod_engine = e;
+        self
+    }
+
     pub(crate) fn settings(&self) -> crate::engine::Settings {
         let mut s = crate::engine::Settings::default();
         match self.filter {
@@ -251,6 +261,7 @@ impl Options {
         }
         s.resampler = self.resampler;
         s.separation = self.separation_milli as f32 / 1000.0;
+        s.mod_engine = self.mod_engine;
         s
     }
 

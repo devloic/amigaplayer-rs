@@ -44,6 +44,7 @@ struct Args {
     mono: bool,
     interp: Interp,
     xmp_filter: bool,
+    mod_engine: engine::ModEngine,
     volume: Option<f32>,
     archive_entry: Option<String>,
     files: Vec<PathBuf>,
@@ -66,7 +67,7 @@ fn usage() -> ! {
 const USAGE_HEAD: &str = "usage: amigaplayer-rs [--wav OUT.wav [--rate HZ] [--seconds N] [--subsong N] [--volume V]]\n\
          \x20                 [--filter a500|a1200|none|auto|auto-a500] [--led auto|on|off|force]\n\
          \x20                 [--separation 0..1] [--resampler default|sinc] [--mono] [--interp nearest|linear|spline]\n\
-         \x20                 [--xmp-filter on|off] [--archive-entry NAME]\n\
+         \x20                 [--xmp-filter on|off] [--mod-engine default|ft2play] [--archive-entry NAME]\n\
          \x20                 [FILES/DIRS...]\n\
          \n\
          Without --wav the SDL3 player window opens with FILES as the module list.\n\
@@ -104,7 +105,10 @@ const USAGE_TAIL: &str = "--led off renders with the LED filter\n\
          tables do the filtering; default is UADE's older averaging one with RC filters.\n\
          --separation (default 0.3 = plugin panning 0.7; 1 = hard Amiga panning) and\n\
          --mono shape the Paula mix.\n\
-         --interp and --xmp-filter are libxmp's mixer's (linear, on). --volume V\n\
+         --interp and --xmp-filter are libxmp's mixer's (linear, on). --mod-engine ft2play plays the\n\
+         multichannel MODs (2CHN, 6CHN, 8CHN, 10CH..32CH) on ft2play's FastTracker 2 replayer and\n\
+         mixer, as the audacious-uade plugin does (no Amiga filter; default: the amplifier port).\n\
+         --volume V\n\
          sets the output volume (default 0.8; UADE's level is 1). --rate HZ is the\n\
          --wav render's sample rate (8000 to 192000, default 48000). With --wav the\n\
          stages in effect are printed on stderr (`output: ...`, `led-switched: ...`).\n\
@@ -131,7 +135,7 @@ fn parse_args() -> Args {
         only_player: None,
         #[cfg(feature = "host-68k")]
         open_replayers: true,
-        wav: None, rate: SAMPLE_RATE, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, auto_a500: None, separation: None, resampler: None, mono: false, interp: Interp::Linear, xmp_filter: true, volume: None, archive_entry: None, files: Vec::new() };
+        wav: None, rate: SAMPLE_RATE, seconds: 60.0, subsong: 0, led: true, led_force: false, filter: None, auto_a500: None, separation: None, resampler: None, mono: false, interp: Interp::Linear, xmp_filter: true, mod_engine: engine::ModEngine::Default, volume: None, archive_entry: None, files: Vec::new() };
     // (a file name need not be UTF-8: options are read as text, file names as given)
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut it = raw.iter().map(|o| o.to_string_lossy().into_owned());
@@ -220,6 +224,13 @@ fn parse_args() -> Args {
                     _ => usage(),
                 }
             }
+            "--mod-engine" => {
+                a.mod_engine = match it.next().as_deref() {
+                    Some("default") => engine::ModEngine::Default,
+                    Some("ft2play") => engine::ModEngine::Ft2play,
+                    _ => usage(),
+                }
+            }
             "--volume" => a.volume = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
             "--archive-entry" => a.archive_entry = Some(it.next().unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
@@ -267,6 +278,7 @@ fn apply_settings(args: &Args, s: &mut Settings) {
     s.mono = args.mono;
     s.interp = args.interp;
     s.xmp_filter = args.xmp_filter;
+    s.mod_engine = args.mod_engine;
     if let Some(v) = args.volume {
         s.volume = v;
     }

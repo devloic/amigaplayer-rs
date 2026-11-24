@@ -194,6 +194,9 @@ pub mod sid;
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod c67;
+#[doc(hidden)]
+#[allow(missing_docs)]
+pub mod ft2play;
 pub mod dmf;
 #[doc(hidden)]
 #[allow(missing_docs)]

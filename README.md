@@ -502,6 +502,7 @@ on at start)`).
 | Built-in NotePlayer renderer | its own one-pole 4.42 kHz low-pass and LED biquad (3.275 kHz) in software, outside Paula | used only with `--noteplayer builtin` or when no genie fits | `_note` players | follows `--filter`/`--led` (a500 and LED switches); printed as `builtin-voices=...` |
 | libxmp mixer (`src/xmp`) | libxmp 4.7.4's 16-bit stereo software mixer: volume ramps, anticlick, separation 100 | linear interpolation | the PC-tracker formats of the libxmp port; no Paula, no Amiga filters, no LED | `--interp nearest\|linear\|spline` |
 | libxmp resonant filter | the IT/LIQ/IMF lowpass (`QUIRK_FILTER`) | on (only modules that use it are affected) | libxmp backend | `--xmp-filter on\|off` |
+| ft2play mixer (`src/ft2play`) | 8bitbubsy's ft2play (BSD 3-Clause: `LICENSE-ft2play`), FastTracker 2.09's replayer and SB16 mixer, as the audacious-uade plugin's ft2play backend: amplification 8, no volume ramping, 16-bit stereo | linear interpolation | the multichannel MODs (`2CHN`, `6CHN`, `8CHN`, `10CH`..`32CH`) when chosen; no Paula, no Amiga filters; bit-exact to the plugin's samples | `--mod-engine default\|ft2play` (default: the amplifier port) |
 
 Other places: the wasm crate (`crates/amigaplayer-wasm`) renders through
 `open::Song`, so it has the engine's default settings (A1200 filter, Sinc

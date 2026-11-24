@@ -103,6 +103,19 @@ pub struct Settings {
     pub interp: crate::xmp::mixer::Interp,
     /// libxmp's resonant filter for the modules that use it (`--xmp-filter`).
     pub xmp_filter: bool,
+    /// Which player takes the multichannel MODs (`--mod-engine`).
+    pub mod_engine: ModEngine,
+}
+
+/// The player for the multichannel MODs (`2CHN`, `6CHN`, `8CHN`, `10CH`..`32CH`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ModEngine {
+    /// The open replayer on the emulated amplifier (the Multichannel MOD port).
+    #[default]
+    Default,
+    /// ft2play's port of FastTracker 2's replayer and mixer, as the audacious-uade plugin's
+    /// ft2play backend renders them (`crate::ft2play`).
+    Ft2play,
 }
 
 impl Default for Settings {
@@ -118,6 +131,7 @@ impl Default for Settings {
             led_force: false,
             interp: crate::xmp::mixer::Interp::Linear,
             xmp_filter: true,
+            mod_engine: ModEngine::Default,
         }
     }
 }
@@ -808,6 +822,15 @@ impl Engine {
         self.prowizard_format = converted;
         if data.is_empty() {
             bail!("empty file");
+        }
+        // multichannel MODs on ft2play's replayer and mixer, when chosen (`--mod-engine ft2play`)
+        if self.settings.mod_engine == ModEngine::Ft2play
+            && self.open_replayers
+            && self.only_player.is_none()
+            && crate::ft2play::detect(&data)
+        {
+            let x = crate::ft2play::player(&data, self.rate as u32).map_err(|e| anyhow!(e))?;
+            return self.start_pcm(Box::new(x), path);
         }
         // the 68k players are read when this module needs one, before it takes its place in
         // the heap (so they lie where they did when loaded at start-up)

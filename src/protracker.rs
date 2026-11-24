@@ -341,6 +341,16 @@ pub fn build_for(packed: Option<&str>) -> Build {
     }
 }
 
+/// How many subsongs a module converted from the packed format `packed` has when `counted` are
+/// found in its (converted) patterns. PTK-Prowiz converts The Player 4.x modules in its own way
+/// (the corpus's 66 other than p4x.unused have one subsong there), so those keep one.
+pub fn subsong_count_for(packed: Option<&str>, counted: usize) -> usize {
+    match packed {
+        Some(n) if n.starts_with("The Player 4") => 1,
+        _ => counted,
+    }
+}
+
 /// Whose replay code the writes of a module are timed as.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Build {
@@ -358,27 +368,36 @@ fn pos_jump_of(l: u32) -> Option<u8> {
 
 /// The first position of each subsong, as UADE's PTK-Prowiz ("Protracker and family") counts them
 /// (ProTracker 2.3D itself has none): measured black box, on synthetic modules and the subsong
-/// counts uade123 reports for the corpus's ProTracker modules (7,741 of 7,750 the same; the other
-/// 9 have 1 or 2 more there, from forward jumps it counts in a way not pinned down). A position of the song whose
+/// counts uade123 reports for the corpus's ProTracker modules and ProWizard conversions). A position of the song whose
 /// pattern holds a position jump (Bxx, any row, any voice, reached or not) to itself or back
 /// ends a subsong; each one that does starts a subsong at the next position, the first at
 /// position 0, and the position after the last such jump starts none (what follows it is no
-/// subsong: it never jumps back). Jumps forward (to a later position, or past the song's end)
-/// end none. A module whose patterns (all of them, up to the highest in the order table, as
+/// subsong: it never jumps back). A position whose pattern jumps only forward (to a later
+/// position, or past the song's end) ends none, unless two subsongs ended before it: then it
+/// ends one too (the 9 corpus modules the earlier rule missed, and di.billion_dollar_gameshow,
+/// agree). A module whose patterns (all of them, up to the highest in the order table, as
 /// mt_init counts them) hold 127 position jumps or more has one subsong only.
 fn subsong_starts(orders: &[u8; 128], song_len: usize, patterns: &[u32]) -> Vec<u8> {
     if patterns.iter().filter(|&&l| pos_jump_of(l).is_some()).count() >= 127 {
         return vec![0];
     }
     let mut starts = vec![0u8];
-    let ends: Vec<usize> = (0..song_len.min(128))
+    let mut ends = 0;
+    let events: Vec<usize> = (0..song_len.min(128))
         .filter(|&p| {
             let pat = orders[p] as usize;
-            patterns.get(pat * 256..pat * 256 + 256).unwrap_or(&[]).iter().any(|&l| pos_jump_of(l).is_some_and(|t| t as usize <= p))
+            let jumps: Vec<u8> = patterns.get(pat * 256..pat * 256 + 256).unwrap_or(&[]).iter().filter_map(|&l| pos_jump_of(l)).collect();
+            if jumps.iter().any(|&t| t as usize <= p) {
+                ends += 1;
+                true
+            } else {
+                // a forward jump counts once two subsongs have ended before it
+                !jumps.is_empty() && ends >= 2
+            }
         })
         .collect();
-    // the end of the last subsong starts nothing
-    for &p in ends.iter().take(ends.len().saturating_sub(1)) {
+    // the last event starts nothing
+    for &p in events.iter().take(events.len().saturating_sub(1)) {
         starts.push(p as u8 + 1);
     }
     starts
@@ -1630,8 +1649,10 @@ mod tests {
         assert_eq!(starts_of(&[0, 1, 2, 3], &[(1, 10, 0), (3, 5, 2)]), [0, 2]);
         assert_eq!(starts_of(&[0, 1, 2, 3], &[(1, 10, 1), (3, 10, 0)]), [0, 2]);
         assert_eq!(starts_of(&[0, 1, 2, 3, 4, 5], &[(1, 10, 0), (3, 10, 2), (5, 10, 4)]), [0, 2, 4]);
-        // forward jumps (also past the song's end) end nothing
+        // forward jumps (also past the song's end) end nothing, until two subsongs have ended
         assert_eq!(starts_of(&[0, 1, 2, 3, 4], &[(1, 10, 0), (2, 10, 4), (4, 10, 0)]), [0, 2]);
+        assert_eq!(starts_of(&[0, 1, 2, 3, 4], &[(0, 10, 0), (1, 10, 0), (2, 10, 4)]), [0, 1, 2]);
+        assert_eq!(starts_of(&[0, 1, 2, 3, 4], &[(0, 10, 0), (1, 10, 0), (2, 10, 4), (3, 10, 9)]), [0, 1, 2, 3]);
         assert_eq!(starts_of(&[0, 1, 2, 3], &[(1, 10, 0x7f), (3, 10, 0)]), [0]);
         // a jump nothing reaches still counts; a pattern counts at each position that plays it
         assert_eq!(starts_of(&[0, 1, 2, 3], &[(0, 20, 0), (3, 10, 2)]), [0, 1]);
@@ -1641,6 +1662,13 @@ mod tests {
         let many = |n3: usize| -> Vec<(usize, usize, u8)> { (0..64).map(|r| (1, r, 0)).chain((0..n3).map(|r| (3, r, 0))).collect() };
         assert_eq!(starts_of(&[0, 1, 2, 3], &many(62)), [0, 2]);
         assert_eq!(starts_of(&[0, 1, 2, 3], &many(63)), [0]);
+    }
+
+    #[test]
+    fn a_converted_module_counts_its_subsongs_but_the_player_4s() {
+        assert_eq!(subsong_count_for(None, 3), 3);
+        assert_eq!(subsong_count_for(Some("NoisePacker 2"), 4), 4);
+        assert_eq!(subsong_count_for(Some("The Player 4.1A"), 8), 1);
     }
 
     #[test]

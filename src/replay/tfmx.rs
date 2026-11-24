@@ -3105,9 +3105,11 @@ impl Replayer for Pro {
 pub const OPEN_15: Open = Open { name: "TFMX 1.5", detect: |d| detect_15(d) || detect_early_text(d), new: new_15 };
 
 /// CHECK5: "TFMX" not followed by "SONG" (the TFHD single file, which it also
-/// takes, is `tfhd.rs`'s).
+/// takes, is `tfhd.rs`'s). A raw Jochen Hippel ST module also starts with "TFMX", then the
+/// count of its pitch programs as a word below $200 (the ST replayer's own check); a TFMX
+/// song has a separator and "SONG" there, a word of $2000 and up. Those files are not TFMX.
 pub(super) fn detect_15(d: &[u8]) -> bool {
-    d.len() >= 0x800 && be32(d, 0) == 0x54464d58 && &d[5..9] != b"SONG"
+    d.len() >= 0x800 && be32(d, 0) == 0x54464d58 && &d[5..9] != b"SONG" && be16(d, 4) >= 0x200
 }
 
 // The global block ($11614).

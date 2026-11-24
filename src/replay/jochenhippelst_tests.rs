@@ -258,3 +258,39 @@ fn the_sample_table_is_counted_from_its_second_entry() {
     assert_eq!(Dig { data: t, base: 0, valid: true }.count(), 3);
     assert_eq!(Dig { data: Vec::new(), base: 0, valid: false }.count(), 0);
 }
+
+/// A raw `TFMX` module of the ST (one pitch program, one instrument, one pattern), padded past
+/// the 0x800 bytes TFMX 1.5's check wants.
+fn raw_st() -> Vec<u8> {
+    let mut d = vec![0u8; 0x800];
+    d[..4].copy_from_slice(b"TFMX");
+    put16(&mut d, 6, 0);
+    put16(&mut d, 12, 2);
+    put16(&mut d, 16, 1);
+    d[0x20] = 0xE2;
+    d[0x21] = 0x80;
+    d
+}
+
+#[test]
+fn a_raw_tfmx_tagged_st_module_is_not_taken_as_tfmx_1_5() {
+    let d = raw_st();
+    assert!(detect(&d));
+    assert!(!crate::replay::tfmx::detect_15(&d));
+    assert_eq!(crate::detect(&d).as_deref(), Some("Jochen Hippel ST"));
+}
+
+#[test]
+fn a_raw_st_header_the_replayer_refuses_is_still_not_tfmx_1_5() {
+    // the tables run past the file (the ST replayer's check fails: UADE cannot play it
+    // either), but the header is not a TFMX song's
+    let mut d = raw_st();
+    put16(&mut d, 10, 0x2000);
+    assert!(!detect(&d));
+    assert!(!crate::replay::tfmx::detect_15(&d));
+    // a TFMX song's separator and "SONG" there is TFMX's
+    d[4..9].copy_from_slice(b"-SONG");
+    assert!(!crate::replay::tfmx::detect_15(&d));
+    d[4..9].copy_from_slice(b"-xxxx");
+    assert!(crate::replay::tfmx::detect_15(&d));
+}

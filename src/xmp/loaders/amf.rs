@@ -2,16 +2,30 @@
 //!
 //! Ported from libxmp 4.7.4, MIT licence, Copyright (C) 1996-2026 Claudio Matsuoka
 //! and Hipolito Carraro Jr (see LICENSE-libxmp).
+//!
+//! Also loads the "DMF" compact variant of DSMI AMF found in Webfoot games (for
+//! example Tronic): no title, a 20-byte sample header without names and sample
+//! data stored as unsigned deltas. That variant is not in libxmp; it is ported
+//! from OpenMPT's `soundlib/Load_amf.cpp` (libopenmpt 0.8.7, BSD-3-Clause,
+//! Copyright (c) 2004-2025 OpenMPT Project Developers and Contributors, see
+//! LICENSE-openmpt): `AMFSampleHeaderCompact` and the `isDMF` paths.
 
 use crate::xmp::load::*;
 use crate::xmp::module::*;
 use crate::xmp::player::c2spd_to_note;
 
 pub fn test(d: &[u8]) -> bool {
-    if d.len() < 4 || &d[..3] != b"AMF" {
+    if d.len() < 4 {
         return false;
     }
     let ver = d[3];
+    if &d[..3] == b"DMF" {
+        // OpenMPT's IsValidDMF; every known file is version 14
+        return (0x0a..=0x0e).contains(&ver);
+    }
+    if &d[..3] != b"AMF" {
+        return false;
+    }
     !((ver != 0x01 && ver < 0x08) || ver > 0x0e)
 }
 
@@ -27,13 +41,18 @@ fn vslide(t3: u8) -> u8 {
 pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
     let mut buf = [0u8; 1024];
     f.read(&mut buf[..3]);
+    let is_dmf = &buf[..3] == b"DMF";
     let ver = f.read8();
 
-    if f.read(&mut buf[..32]) != 32 {
-        return Err(());
+    if is_dmf {
+        m.module.type_ = format!("DSMI {}.{} DMF (compact AMF)", ver / 10, ver % 10);
+    } else {
+        if f.read(&mut buf[..32]) != 32 {
+            return Err(());
+        }
+        m.module.name = cstr(&buf[..32]);
+        m.module.type_ = format!("DSMI {}.{} AMF", ver / 10, ver % 10);
     }
-    m.module.name = cstr(&buf[..32]);
-    m.module.type_ = format!("DSMI {}.{} AMF", ver / 10, ver % 10);
 
     m.module.ins = f.read8() as usize;
     m.module.len = f.read8() as usize;
@@ -97,7 +116,7 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
 
     // Probe for the 2-byte loop start 1.0 format (facing_n.amf, sweetdrm.amf)
     let mut no_loopend = false;
-    if ver == 0x0a {
+    if ver == 0x0a && !is_dmf {
         let ins = m.module.ins;
         let pos = f.tell();
         for _ in 0..ins {
@@ -136,7 +155,30 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
         f.seek(pos);
     }
 
-    for i in 0..m.module.ins {
+    if is_dmf {
+        for i in 0..m.module.ins {
+            let typ = f.read8();
+            f.read8(); // left-over first character of the sample name
+            f.read32l(); // sample index (the data is read in order)
+            let len = f.read32l() as i32;
+            let c2spd = f.read16l() as i32;
+            let (xpo, fin) = c2spd_to_note(c2spd);
+            let vol = f.read8() as i32;
+            let lps = f.read32l() as i32;
+            let lpe = (f.read16l() as i32) | ((f.read8() as i32) << 16);
+            let xxs = &mut m.module.xxs[i];
+            xxs.len = len;
+            xxs.lps = lps;
+            xxs.lpe = lpe;
+            // OpenMPT: looped when typed and the loop is over 2 frames long
+            xxs.flg = if typ != 0 && lpe > lps + 2 && lpe <= len { XMP_SAMPLE_LOOP } else { 0 };
+            let xxi = &mut m.module.xxi[i];
+            xxi.nsm = 1;
+            xxi.sub = vec![SubInstrument { sid: i as i32, pan: XMP_INST_NO_DEFAULT_PAN, xpo, fin, vol, ..Default::default() }];
+        }
+    }
+
+    for i in 0..if is_dmf { 0 } else { m.module.ins } {
         f.read8();
         f.read(&mut buf[..32]);
         let name = copy_adjust(&buf[..32], 31);
@@ -376,7 +418,9 @@ pub fn load(m: &mut ModuleData, f: &mut Hio) -> Result<(), ()> {
 
     // Samples
     for i in 0..m.module.ins {
-        load_sample(m, f, SAMPLE_FLAG_UNS, i, None)?;
+        // DMF: unsigned delta samples (accumulate, then flip the sign bit)
+        let flags = if is_dmf { SAMPLE_FLAG_DIFF | SAMPLE_FLAG_UNS } else { SAMPLE_FLAG_UNS };
+        load_sample(m, f, flags, i, None)?;
     }
 
     m.quirk |= QUIRK_FINEFX;
@@ -422,6 +466,57 @@ mod tests {
         d.extend([0xff, 0xff, 0xff]);
         d.extend([0x80, 0x00, 0x7f, 1]);
         d
+    }
+
+    /// A one-pattern compact DMF v14: no title, 20-byte sample header, delta samples.
+    fn synth_dmf() -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend(b"DMF");
+        d.push(0x0e);
+        d.push(1); // ins
+        d.push(1); // len
+        d.extend(1u16.to_le_bytes()); // trk
+        d.push(2); // chn
+        d.extend([0u8; 32]); // pan table
+        d.push(125);
+        d.push(6);
+        d.extend(64u16.to_le_bytes()); // rows
+        d.extend(1u16.to_le_bytes());
+        d.extend(0u16.to_le_bytes());
+        d.push(1); // type: looped
+        d.push(b'x');
+        d.extend(1u32.to_le_bytes()); // index
+        d.extend(8u32.to_le_bytes()); // len
+        d.extend(8363u16.to_le_bytes());
+        d.push(64);
+        d.extend(2u32.to_le_bytes()); // loop start
+        d.extend([8, 0, 0]); // loop end (24 bit)
+        d.extend(1u16.to_le_bytes()); // track map
+        d.extend(1u16.to_le_bytes());
+        d.push(0);
+        d.extend([0u8, 24, 0x20]);
+        d.extend([0xff, 0xff, 0xff]);
+        d.extend([0x80, 1, 1, 1, 1, 1, 1, 1]); // deltas: 0x80 then +1 each
+        d
+    }
+
+    #[test]
+    fn loads_synthetic_dmf() {
+        let d = synth_dmf();
+        assert!(test(&d));
+        assert!(!test(&d[..3]));
+        let mut bad = d.clone();
+        bad[3] = 9;
+        assert!(!test(&bad));
+        let mut m = ModuleData::default();
+        load(&mut m, &mut Hio::new(&d)).unwrap();
+        assert_eq!((m.module.chn, m.module.pat, m.module.spd, m.module.bpm), (2, 1, 6, 125));
+        assert_eq!(m.module.xxp[0].rows, 64);
+        let s = &m.module.xxs[0];
+        assert_eq!((s.len, s.lps, s.lpe), (8, 2, 8));
+        assert_eq!(s.flg & XMP_SAMPLE_LOOP, XMP_SAMPLE_LOOP);
+        let e = *m.module.event(0, 0, 0);
+        assert_eq!((e.note, e.vol), (25, 0x21));
     }
 
     #[test]

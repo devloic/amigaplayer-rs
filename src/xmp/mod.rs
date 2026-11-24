@@ -103,6 +103,9 @@ pub static LOADERS: &[Loader] = &[
     Loader { name: "Symphonie", test: crate::symmod::test, load: |_, _| Err(()) },
     // not a libxmp loader: X-Tracker plays on `crate::dmf` (XmpPlayer hands it there)
     Loader { name: "X-Tracker", test: crate::dmf::test, load: |_, _| Err(()) },
+    // not a libxmp loader: Composer 670 (CDFM, .c67) plays on `crate::c67` (XmpPlayer hands it there);
+    // last, as its test is a header check with no magic
+    Loader { name: "CDFM Composer 670", test: crate::c67::test, load: |_, _| Err(()) },
 ];
 
 /// libxmp's `mod_test` for a module whose magic is ".M.K" (Software Visions DMF).
@@ -149,6 +152,9 @@ pub fn format_of(data: &[u8]) -> Option<String> {
     if crate::dmf::test(data) {
         return crate::dmf::Dmf::new(data, 48000).map(|s| s.format().to_string());
     }
+    if crate::c67::test(data) {
+        return crate::c67::C67::new(data, 48000).map(|s| s.format().to_string());
+    }
     load_module(data).map(|c| c.m.module.type_)
 }
 
@@ -181,6 +187,7 @@ enum Core {
     Xmp(LibXmp),
     Sym(Box<crate::symmod::Symmod>),
     Dmf(Box<crate::dmf::Dmf>),
+    C67(Box<crate::c67::C67>),
 }
 
 impl XmpPlayer {
@@ -197,6 +204,9 @@ impl XmpPlayer {
         if crate::dmf::test(data) {
             return crate::dmf::Dmf::new(data, rate).map(|s| XmpPlayer(Core::Dmf(Box::new(s))));
         }
+        if crate::c67::test(data) {
+            return crate::c67::C67::new(data, rate).map(|s| XmpPlayer(Core::C67(Box::new(s))));
+        }
         LibXmp::open(data, rate, path).map(|x| XmpPlayer(Core::Xmp(x)))
     }
 
@@ -208,6 +218,7 @@ impl XmpPlayer {
             Core::Xmp(x) => x.set_mixer(interp, filter),
             Core::Sym(s) => s.set_nearest(matches!(interp, mixer::Interp::Nearest)),
             Core::Dmf(s) => s.set_nearest(matches!(interp, mixer::Interp::Nearest)),
+            Core::C67(s) => s.set_nearest(matches!(interp, mixer::Interp::Nearest)),
         }
     }
 
@@ -215,7 +226,7 @@ impl XmpPlayer {
     pub fn uses_resonant_filter(&self) -> bool {
         match &self.0 {
             Core::Xmp(x) => x.uses_resonant_filter(),
-            Core::Sym(_) | Core::Dmf(_) => false,
+            Core::Sym(_) | Core::Dmf(_) | Core::C67(_) => false,
         }
     }
 
@@ -225,6 +236,7 @@ impl XmpPlayer {
             Core::Xmp(x) => x.format(),
             Core::Sym(s) => s.format(),
             Core::Dmf(s) => s.format(),
+            Core::C67(s) => s.format(),
         }
     }
 
@@ -233,6 +245,7 @@ impl XmpPlayer {
             Core::Xmp(x) => x.title(),
             Core::Sym(s) => s.title(),
             Core::Dmf(s) => s.title(),
+            Core::C67(s) => s.title(),
         }
     }
 
@@ -240,14 +253,14 @@ impl XmpPlayer {
     pub fn subsongs(&self) -> usize {
         match &self.0 {
             Core::Xmp(x) => x.subsongs(),
-            Core::Sym(_) | Core::Dmf(_) => 1,
+            Core::Sym(_) | Core::Dmf(_) | Core::C67(_) => 1,
         }
     }
 
     pub fn subsong(&self) -> usize {
         match &self.0 {
             Core::Xmp(x) => x.subsong(),
-            Core::Sym(_) | Core::Dmf(_) => 0,
+            Core::Sym(_) | Core::Dmf(_) | Core::C67(_) => 0,
         }
     }
 
@@ -259,6 +272,8 @@ impl XmpPlayer {
             Core::Sym(_) => 0,
             Core::Dmf(s) if seq == 0 => s.duration_ms(),
             Core::Dmf(_) => 0,
+            Core::C67(s) if seq == 0 => s.duration_ms(),
+            Core::C67(_) => 0,
         }
     }
 
@@ -268,6 +283,7 @@ impl XmpPlayer {
             Core::Xmp(x) => x.start(seq),
             Core::Sym(s) => s.start(),
             Core::Dmf(s) => s.start(),
+            Core::C67(s) => s.restart(),
         }
     }
 
@@ -277,6 +293,7 @@ impl XmpPlayer {
             Core::Xmp(x) => x.ended(),
             Core::Sym(s) => s.ended(),
             Core::Dmf(s) => s.ended(),
+            Core::C67(s) => s.ended(),
         }
     }
 
@@ -287,6 +304,7 @@ impl XmpPlayer {
             Core::Xmp(x) => x.render(out),
             Core::Sym(s) => s.render(out),
             Core::Dmf(s) => s.render(out),
+            Core::C67(s) => s.render(out),
         }
     }
 
@@ -296,6 +314,7 @@ impl XmpPlayer {
             Core::Xmp(x) => x.position(),
             Core::Sym(s) => s.position(),
             Core::Dmf(s) => s.position(),
+            Core::C67(s) => s.position(),
         }
     }
 }

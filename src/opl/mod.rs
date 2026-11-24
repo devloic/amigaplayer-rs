@@ -181,6 +181,12 @@ impl Opl {
 
     /// Sets the voice's frequency (and key on, unless `key_off`).
     pub fn frequency(&mut self, c: usize, milli_hertz: u32, key_off: bool) {
+        self.frequency_beating(c, milli_hertz, key_off, false);
+    }
+
+    /// `frequency`, with OpenMPT's `beatingOscillators` (Composer 670): each note is
+    /// detuned by the pattern channel number modulo 4 F-number steps.
+    pub fn frequency_beating(&mut self, c: usize, milli_hertz: u32, key_off: bool, beating: bool) {
         let opl_ch = self.get_voice(c);
         if opl_ch == OPL_CHANNEL_INVALID {
             return;
@@ -200,7 +206,10 @@ impl Opl {
             };
             fnum = muldivr_unsigned(milli_hertz, 1 << (20 - block), (OPL_BASERATE * 1000) as u32) as u16;
         }
-        // (OpenMPT's Composer 670 "beating oscillators" hack is for CDFM only)
+        // Evil CDFM hack: Composer 670 slightly detunes each note by the channel number mod 4
+        if beating {
+            fnum = (fnum + (c & 3) as u16).min(1023);
+        }
         let fnum = fnum | ((block as u16) << 10);
         let channel = Self::channel_to_register(opl_ch);
         self.key_on_block[opl_ch as usize] = (if key_off { 0 } else { KEYON_BIT }) | (fnum >> 8) as u8;

@@ -193,6 +193,7 @@ pub mod replay;
 pub mod sid;
 #[doc(hidden)]
 #[allow(missing_docs)]
+pub mod c67;
 pub mod dmf;
 #[doc(hidden)]
 #[allow(missing_docs)]

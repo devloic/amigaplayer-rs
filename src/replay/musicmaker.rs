@@ -106,6 +106,11 @@ pub(crate) fn instruments(d: &[u8], base: u32, m: &mut Machine) -> Option<u32> {
     Some(a)
 }
 
+#[cfg(test)]
+pub(crate) fn decrunch_for_test(p: &[u8]) -> Option<Vec<u8>> {
+    decrunch(p)
+}
+
 /// `_getunpackedinstlen` and `_decrunchinstrs`: the instrument headers copied,
 /// the samples delta-decoded from `fibbits`-bit codes, the LFO data copied.
 fn decrunch(p: &[u8]) -> Option<Vec<u8>> {
@@ -150,8 +155,12 @@ fn decrunch(p: &[u8]) -> Option<Vec<u8>> {
             acc = acc.wrapping_add(fibtable[code]);
             out.push(acc);
         }
-        // the next sample starts at the next byte
-        let _ = have;
+        // the next sample starts at the next byte, and one past it when the
+        // codes ended on a byte boundary (the stream is read a byte ahead):
+        // every sample takes (len * fibbits) / 8 + 1 bytes
+        if have == 0 {
+            src += 1;
+        }
     }
     if out.len() & 1 != 0 {
         out.push(0);
@@ -989,6 +998,25 @@ pub(crate) mod tests {
         d.extend((body.len() as u32).to_be_bytes());
         d.extend(body);
         d
+    }
+
+    /// The `PINS` stream: a sample takes `len * fibbits / 8 + 1` bytes, so one
+    /// whose codes end on a byte boundary leaves a byte before the next
+    /// (observed on the PINS songs the original plays; checked against its
+    /// DMA fetches).
+    #[test]
+    fn pins_samples_skip_a_byte_after_an_exact_fit() {
+        let mut p = b"SEI1XX".to_vec();
+        p.extend(2u16.to_be_bytes());
+        p.extend([0, 4, 0, 0, 0, 0, 0, 0]); // 4 codes: 24 bits, 3 bytes exactly
+        p.extend([0, 2, 0, 0, 0, 0, 0, 0]); // 2 codes: 12 bits, 2 bytes
+        p.extend(6u16.to_be_bytes());
+        p.extend(0..64u8); // fibtable: the code is the delta
+        p.extend([0b000001_00, 0b0010_0000, 0b11_000100, 0xaa]); // 1 2 3 4, the skipped byte
+        p.extend([0b000101_00, 0b0110_0000]); // 5 6
+        p.extend([0; 30]);
+        let out = super::super::musicmaker::decrunch_for_test(&p).unwrap();
+        assert_eq!(&out[24 + 4..24 + 4 + 6], &[1, 3, 6, 10, 5, 11]);
     }
 
     #[test]
